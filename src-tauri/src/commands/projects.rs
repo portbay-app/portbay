@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 
 use tauri::State;
 
-use crate::commands::dto::{
-    AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch,
-};
+use crate::commands::dto::{AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch};
 use crate::error::{AppError, AppResult};
 use crate::process_compose::Process;
 use crate::registry::{store, Project, ProjectId, ProjectType, Readiness, Registry};
@@ -41,10 +39,7 @@ pub async fn list_projects(state: State<'_, AppState>) -> AppResult<Vec<ProjectV
 
 /// `get_project(id)` — single project with merged live state.
 #[tauri::command]
-pub async fn get_project(
-    state: State<'_, AppState>,
-    id: String,
-) -> AppResult<ProjectView> {
+pub async fn get_project(state: State<'_, AppState>, id: String) -> AppResult<ProjectView> {
     let registry = load_registry(&state)?;
     let project = registry
         .get_project(&ProjectId::new(id.clone()))
@@ -191,9 +186,7 @@ pub async fn detect_project(
     state: State<'_, AppState>,
     path: String,
 ) -> AppResult<DetectedProject> {
-    let p = PathBuf::from(&path)
-        .canonicalize()
-        .map_err(|e| AppError::BadInput(format!("path: {e}")))?;
+    let p = canonical_project_folder(&path)?;
 
     let dir_name = p
         .file_name()
@@ -215,6 +208,27 @@ pub async fn detect_project(
         suggested_port,
         suggested_start_command,
     })
+}
+
+/// `validate_project_folder(path)` — canonicalise a dropped path and reject files.
+#[tauri::command]
+pub async fn validate_project_folder(path: String) -> AppResult<String> {
+    Ok(canonical_project_folder(&path)?.display().to_string())
+}
+
+fn canonical_project_folder(path: &str) -> AppResult<PathBuf> {
+    let p = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| AppError::BadInput(format!("path: {e}")))?;
+    let meta = p
+        .metadata()
+        .map_err(|e| AppError::BadInput(format!("path: {e}")))?;
+    if !meta.is_dir() {
+        return Err(AppError::BadInput(
+            "Please drop a folder, not a file.".into(),
+        ));
+    }
+    Ok(p)
 }
 
 fn detect_kind(path: &Path) -> (ProjectType, u16, Option<String>) {
@@ -312,5 +326,21 @@ mod tests {
         assert_eq!(slugify("Tribal House CMS"), "tribal-house-cms");
         assert_eq!(slugify("__weird___name__"), "weird-name");
         assert_eq!(slugify("UPPER"), "upper");
+    }
+
+    #[test]
+    fn canonical_project_folder_accepts_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_project_folder(dir.path().to_str().unwrap()).unwrap();
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn canonical_project_folder_rejects_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("index.html");
+        std::fs::write(&file, "<h1>nope</h1>").unwrap();
+        let err = canonical_project_folder(file.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("folder"));
     }
 }

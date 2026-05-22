@@ -11,6 +11,9 @@
   while the panel stays open; closing discards.
 -->
 <script lang="ts">
+  import { onMount, untrack } from "svelte";
+  import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
+  import type { UnlistenFn } from "@tauri-apps/api/event";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
   import { CodeEditor, DashboardCard, Icon } from "$lib/components/atoms";
@@ -40,6 +43,9 @@
   let formError = $state<CommandError | null>(null);
   let rawConfigOpen = $state<boolean>(false);
   let rawDraft = $state<string>("");
+  let dropActive = $state<boolean>(false);
+  let dropHint = $state<string>("");
+  let dragUnlisten: UnlistenFn | null = null;
 
   function resetForm() {
     path = "";
@@ -53,6 +59,8 @@
     autoStart = false;
     rawConfigOpen = false;
     rawDraft = "";
+    dropActive = false;
+    dropHint = "";
     formError = null;
   }
 
@@ -94,6 +102,42 @@
       formError = e as CommandError;
     } finally {
       detecting = false;
+    }
+  }
+
+  async function handleDroppedPaths(paths: string[]) {
+    dropActive = false;
+    if (!addProjectWizard.isOpen) return;
+    if (paths.length === 0) return;
+    if (paths.length > 1) {
+      dropHint = "One project at a time. Using the first dropped path.";
+    } else {
+      dropHint = "";
+    }
+    try {
+      const folder = await safeInvoke<string>("validate_project_folder", {
+        path: paths[0],
+      });
+      await detect(folder);
+    } catch (e) {
+      formError = e as CommandError;
+      dropHint = "";
+    }
+  }
+
+  function onDragDropEvent(event: { payload: DragDropEvent }) {
+    if (!addProjectWizard.isOpen) return;
+    switch (event.payload.type) {
+      case "enter":
+      case "over":
+        dropActive = true;
+        break;
+      case "leave":
+        dropActive = false;
+        break;
+      case "drop":
+        void handleDroppedPaths(event.payload.paths);
+        break;
     }
   }
 
@@ -194,6 +238,18 @@
   $effect(() => {
     if (!rawConfigOpen) syncRawFromFields();
   });
+
+  onMount(() => {
+    void getCurrentWebview().onDragDropEvent(onDragDropEvent).then((unlisten) => {
+      dragUnlisten = unlisten;
+    });
+    return () => {
+      untrack(() => {
+        dragUnlisten?.();
+        dragUnlisten = null;
+      });
+    };
+  });
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -232,6 +288,20 @@
 
       <!-- L1: folder picker -->
       <DashboardCard title="Project folder" flush>
+        <div
+          class="mb-3 rounded-md border border-dashed px-4 py-5 text-center transition-colors
+                 {dropActive
+            ? 'border-accent bg-accent/10 text-fg'
+            : 'border-border bg-bg/50 text-fg-muted'}"
+        >
+          <div class="text-sm font-medium text-fg">Drop your project folder here</div>
+          <div class="mt-1 text-xs text-fg-subtle">
+            PortBay will validate the folder and run the same detection flow as Browse.
+          </div>
+          {#if dropHint}
+            <div class="mt-2 text-xs text-status-unhealthy">{dropHint}</div>
+          {/if}
+        </div>
         <div class="flex items-center gap-2">
           <input
             type="text"
