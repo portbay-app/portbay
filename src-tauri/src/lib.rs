@@ -206,6 +206,8 @@ pub fn run() {
             commands::lifecycle::restart_project,
             commands::lifecycle::stop_all,
             commands::lifecycle::open_project,
+            commands::integrations::installed_dev_tools,
+            commands::integrations::open_in_ide,
             commands::sidecars::sidecar_status,
             commands::sidecars::pc_alive,
             commands::sidecars::restart_pc,

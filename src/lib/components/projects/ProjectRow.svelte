@@ -7,11 +7,13 @@
   follow-up since `applyStatusEvent` only carries status, not lastError).
 -->
 <script lang="ts">
+  import { onMount } from "svelte";
   import Badge from "$lib/components/atoms/Badge.svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
+  import { devTools } from "$lib/stores/devTools.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
@@ -21,12 +23,16 @@
   }
   let { project }: Props = $props();
 
-  let busy = $state<"start" | "stop" | "restart" | null>(null);
+  let busy = $state<"start" | "stop" | "restart" | "ide" | null>(null);
 
   const isSelected = $derived(projects.selectedId === project.id);
   const isRunning = $derived(
     project.status === "running" || project.status === "starting",
   );
+
+  onMount(() => {
+    void devTools.start();
+  });
 
   async function run(op: "start" | "stop" | "restart") {
     if (busy) return;
@@ -55,6 +61,18 @@
       await safeInvoke("open_project", { id: project.id });
     } catch {
       // toast already pushed
+    }
+  }
+
+  async function openDevTool(ide: string) {
+    if (busy) return;
+    busy = "ide";
+    try {
+      await safeInvoke("open_in_ide", { id: project.id, ide });
+    } catch {
+      // safeInvoke already pushed the toast.
+    } finally {
+      busy = null;
     }
   }
 </script>
@@ -104,6 +122,51 @@
       >
         <Icon name="globe" size={14} />
       </button>
+      {#if devTools.value.length === 1}
+        <button
+          type="button"
+          onclick={(e) => {
+            e.stopPropagation();
+            void openDevTool(devTools.value[0].id);
+          }}
+          disabled={busy !== null}
+          title="Open in {devTools.value[0].label}"
+          aria-label="Open project in {devTools.value[0].label}"
+          class="p-1.5 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 disabled:opacity-50 transition-colors"
+        >
+          <Icon name="terminal" size={14} />
+        </button>
+      {:else if devTools.value.length > 1}
+        <select
+          aria-label="Open project in developer tool"
+          title="Open in developer tool"
+          disabled={busy !== null}
+          class="h-7 max-w-24 rounded-md border border-border bg-surface px-1.5 text-[11px] text-fg-muted hover:text-fg hover:border-border-strong focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+          onchange={(e) => {
+            e.stopPropagation();
+            const select = e.currentTarget;
+            const ide = select.value;
+            select.value = "";
+            if (ide) void openDevTool(ide);
+          }}
+          onclick={(e) => e.stopPropagation()}
+        >
+          <option value="">Open in…</option>
+          {#each devTools.value as tool (tool.id)}
+            <option value={tool.id}>{tool.label}</option>
+          {/each}
+        </select>
+      {:else}
+        <button
+          type="button"
+          disabled
+          title="No supported editor or agent app found"
+          aria-label="No supported editor or agent app found"
+          class="p-1.5 rounded-md text-fg-subtle opacity-50"
+        >
+          <Icon name="terminal" size={14} />
+        </button>
+      {/if}
       {#if isRunning}
         <button
           type="button"

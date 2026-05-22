@@ -14,6 +14,7 @@
 pub mod certs;
 pub mod dto;
 pub mod events;
+pub mod integrations;
 pub mod lifecycle;
 pub mod log_stream;
 pub mod metrics;
