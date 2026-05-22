@@ -14,6 +14,7 @@
   import { safeInvoke } from "$lib/ipc";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { devTools } from "$lib/stores/devTools.svelte";
+  import { density } from "$lib/stores/density.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
@@ -29,6 +30,8 @@
   const isRunning = $derived(
     project.status === "running" || project.status === "starting",
   );
+  const compact = $derived(density.value === "compact");
+  const cellClass = $derived(compact ? "py-1.5 px-3" : "py-2.5 px-4");
 
   onMount(() => {
     void devTools.start();
@@ -88,30 +91,34 @@
          data-[selected=true]:bg-accent/8"
 >
   <!-- Name + status dot -->
-  <td class="py-2.5 px-4">
+  <td class={cellClass}>
     <div class="flex items-center gap-2 min-w-0">
       <StatusDot status={project.status} size="md" />
-      <span class="font-medium text-fg truncate">{project.name}</span>
+      <span class="font-medium text-fg truncate" title={typeLabel[project.type]}>
+        {project.name}
+      </span>
     </div>
   </td>
 
   <!-- Domains -->
-  <td class="py-2.5 px-4 text-fg-muted">
+  <td class="{cellClass} text-fg-muted">
     <span class="truncate">{project.hostname}</span>
   </td>
 
   <!-- Type -->
-  <td class="py-2.5 px-4">
-    <Badge tone="neutral">{typeLabel[project.type]}</Badge>
-  </td>
+  {#if !compact}
+    <td class={cellClass}>
+      <Badge tone="neutral">{typeLabel[project.type]}</Badge>
+    </td>
+  {/if}
 
   <!-- Port -->
-  <td class="py-2.5 px-4 text-fg-muted font-mono text-xs tabular-nums">
+  <td class="{cellClass} text-fg-muted font-mono text-xs tabular-nums">
     {project.port ?? "—"}
   </td>
 
   <!-- Actions -->
-  <td class="py-2.5 px-4">
+  <td class={cellClass}>
     <div class="flex items-center gap-1 justify-end">
       <button
         type="button"

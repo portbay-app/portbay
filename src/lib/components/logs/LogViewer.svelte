@@ -17,16 +17,12 @@
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
+  import { formatLogLine } from "./ansi";
 
   /** Cap on rendered lines. Keeps DOM size bounded under chatty servers. */
   const MAX_LINES = 5_000;
   /** When trimming, drop this many from the front so we don't trim every line. */
   const TRIM_CHUNK = 1_000;
-  /** ANSI escape sequence stripper. We render plain text in v1; coloured
-   *  ANSI rendering is a follow-up. */
-  // eslint-disable-next-line no-control-regex
-  const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
-
   const project = $derived<ProjectView | null>(
     logViewer.id === null
       ? null
@@ -69,8 +65,7 @@
     const id = project.id;
     const ch = new Channel<string>();
     ch.onmessage = (line) => {
-      const clean = line.replace(ANSI_PATTERN, "");
-      lines = lines.concat(clean);
+      lines = lines.concat(line);
       // Trim the head when over cap so the DOM stays bounded.
       if (lines.length > MAX_LINES) {
         lines = lines.slice(TRIM_CHUNK);
@@ -322,7 +317,7 @@
   class="px-2 py-0.5 -mx-2 rounded
          {matches.includes(i) ? 'bg-accent/10 text-fg' : ''}
          {matches[matchIndex] === i ? 'ring-1 ring-accent' : ''}"
->{line || " "}</div>
+>{@html formatLogLine(line)}</div>
 {/each}
           </pre>
         {/if}

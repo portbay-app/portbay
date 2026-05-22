@@ -23,6 +23,8 @@
     },
   ];
 
+  const densityPreviewRows = ["PortBay smoke", "CMS", "API"];
+
   const themeOptions: { value: Theme; label: string; detail: string }[] = [
     {
       value: "dark",
@@ -95,6 +97,30 @@
           <div>
             <div class="text-sm font-medium text-fg">{opt.label}</div>
             <div class="text-xs text-fg-muted">{opt.detail}</div>
+            <div
+              class="mt-3 w-52 rounded-md border border-border bg-bg/70 overflow-hidden"
+              aria-hidden="true"
+            >
+              {#each densityPreviewRows as row, i (row)}
+                <div
+                  class="flex items-center gap-2 px-2 border-b border-border/60 last:border-b-0
+                         {opt.value === 'compact' ? 'h-7' : 'h-9'}"
+                >
+                  <span class="h-1.5 w-1.5 rounded-full bg-status-running"></span>
+                  <span class="min-w-0 flex-1 truncate text-[10px] text-fg-muted">
+                    {row}
+                  </span>
+                  {#if opt.value === "comfortable"}
+                    <span class="rounded border border-border px-1 text-[9px] text-fg-subtle">
+                      {i === 0 ? "Vite" : "PHP"}
+                    </span>
+                  {/if}
+                  <span class="font-mono text-[9px] text-fg-subtle">
+                    {i === 0 ? "5173" : "—"}
+                  </span>
+                </div>
+              {/each}
+            </div>
           </div>
         </label>
       {/each}

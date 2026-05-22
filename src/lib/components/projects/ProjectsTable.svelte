@@ -12,6 +12,7 @@
   import { DashboardCard } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
+  import { density } from "$lib/stores/density.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { search } from "$lib/stores/search.svelte";
   import EmptyState from "./EmptyState.svelte";
@@ -95,7 +96,9 @@
         <tr class="text-xs text-fg-muted text-left border-b border-border">
           <th class="py-2 px-4 font-medium">Name</th>
           <th class="py-2 px-4 font-medium">Domains</th>
-          <th class="py-2 px-4 font-medium">Type</th>
+          {#if density.value !== "compact"}
+            <th class="py-2 px-4 font-medium">Type</th>
+          {/if}
           <th class="py-2 px-4 font-medium">Port</th>
           <th class="py-2 px-4 font-medium text-right">Actions</th>
         </tr>
