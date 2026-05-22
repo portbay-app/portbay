@@ -4,10 +4,21 @@ version = "0.1.0"
 description = "PortBay — lightweight local development environment manager"
 authors = ["Tribal House"]
 edition = "2021"
+default-run = "portbay-app"
 
 [lib]
 name = "portbay_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Two bins: the Tauri GUI (loaded into PortBay.app) and the CLI shipped
+# alongside. mainBinaryName in tauri.conf.json points at portbay-app.
+[[bin]]
+name = "portbay-app"
+path = "src/main.rs"
+
+[[bin]]
+name = "portbay"
+path = "src/bin/portbay.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -18,12 +29,15 @@ tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "signal", "process"] }
 reqwest = { version = "0.12", features = ["json"] }
 once_cell = "1"
 dirs = "5"
 thiserror = "1"
 url = "2"
+clap = { version = "4", features = ["derive"] }
+which = "6"
+console = "0.15"
 
 [dev-dependencies]
 tempfile = "3"
