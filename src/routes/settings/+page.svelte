@@ -6,6 +6,7 @@
 <script lang="ts">
   import { DashboardCard } from "$lib/components/atoms";
   import { density, type Density } from "$lib/stores/density";
+  import { safeInvoke } from "$lib/ipc";
 
   const densityOptions: { value: Density; label: string; detail: string }[] = [
     {
@@ -20,6 +21,17 @@
         "Tighter rows, icon-only status, no right-rail. Optimized for power users.",
     },
   ];
+
+  async function triggerDemoError() {
+    // Calls a real command with input that's guaranteed to fail. The Rust
+    // side returns AppError::NotFound, which round-trips through the
+    // CommandError envelope and lands as a toast in the bottom-right.
+    try {
+      await safeInvoke("start_project", { id: "this-project-does-not-exist" });
+    } catch {
+      // safeInvoke already pushed the toast.
+    }
+  }
 </script>
 
 <div class="p-6 max-w-2xl space-y-4">
@@ -47,6 +59,21 @@
         </label>
       {/each}
     </div>
+  </DashboardCard>
+
+  <DashboardCard title="Diagnostics" flush>
+    <p class="text-xs text-fg-muted mb-3">
+      Smoke-test the error envelope round-trip — calls a command with a
+      bogus id; the toast should appear in the bottom-right with a
+      "system" error envelope.
+    </p>
+    <button
+      type="button"
+      onclick={triggerDemoError}
+      class="text-xs px-3 py-1.5 rounded-md border border-border text-fg-muted hover:text-fg hover:border-border-strong transition-colors"
+    >
+      Trigger demo error
+    </button>
   </DashboardCard>
 
   <DashboardCard title="About" flush>

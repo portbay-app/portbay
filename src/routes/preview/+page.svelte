@@ -13,8 +13,30 @@
     type BadgeTone,
     type IconName,
   } from "$lib/components/atoms";
+  import { ErrorEnvelope } from "$lib/components/errors";
   import { density } from "$lib/stores/density";
   import { ALL_STATUSES, statusLabel } from "$lib/types/status";
+  import type { CommandError } from "$lib/types/error";
+
+  const sampleSystemError: CommandError = {
+    code: "SIDECAR_DOWN",
+    whatHappened: "process-compose is not running",
+    whyItMatters: "Projects can't start until process-compose is running again.",
+    whoCausedIt: "system",
+    actions: [
+      { label: "Restart process-compose", command: "sidecars.restart_pc" },
+    ],
+  };
+
+  const sampleUserError: CommandError = {
+    code: "PROJECT_NOT_FOUND",
+    whatHappened: "project 'nour-beiruti' not found",
+    whyItMatters: "Nothing was changed.",
+    whoCausedIt: "user",
+    actions: [],
+    details:
+      "Looked up by id in registry.json (4 projects loaded).\nClosest match: tribal-house (distance 7).",
+  };
 
   const badgeTones: BadgeTone[] = [
     "neutral",
@@ -107,5 +129,13 @@
       Tone-as-card-accent demonstration. Critical → red left border. Used by
       the sidecar health row when a daemon is down.
     </p>
+  </DashboardCard>
+
+  <DashboardCard title="ErrorEnvelope — inline (system)" flush>
+    <ErrorEnvelope envelope={sampleSystemError} tone="inline" />
+  </DashboardCard>
+
+  <DashboardCard title="ErrorEnvelope — inline (user, with details)" flush>
+    <ErrorEnvelope envelope={sampleUserError} tone="inline" />
   </DashboardCard>
 </div>

@@ -12,12 +12,20 @@ export interface CommandError {
   whyItMatters: string;
   whoCausedIt: "user" | "system";
   actions: ErrorAction[];
+  /** Optional inner detail (stack trace, error chain) for the "Show details"
+      expander. Rust side may omit this. */
+  details?: string;
 }
 
 export interface ErrorAction {
   label: string;
-  /** Frontend command id the button invokes. Undefined means passive hint. */
+  /** Frontend command id the button invokes. */
   command?: string;
+  /** External URL the button opens via the shell. Takes precedence over
+      `command` when both are set. */
+  url?: string;
+  /** Optional argument object passed when invoking `command`. */
+  args?: Record<string, unknown>;
 }
 
 export function isCommandError(value: unknown): value is CommandError {

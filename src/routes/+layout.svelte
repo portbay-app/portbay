@@ -15,6 +15,7 @@
   import "../app.css";
   import type { Snippet } from "svelte";
   import { Sidebar, TopBar, RightRail } from "$lib/components/shell";
+  import { ToastHost } from "$lib/components/errors";
   import { density } from "$lib/stores/density";
 
   let { children }: { children: Snippet } = $props();
@@ -43,3 +44,5 @@
 
   <RightRail />
 </div>
+
+<ToastHost />
