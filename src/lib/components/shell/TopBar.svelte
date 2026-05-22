@@ -11,6 +11,7 @@
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import { search } from "$lib/stores/search";
   import StopAllButton from "./StopAllButton.svelte";
 
   // Map route paths to page titles. Falls back to a humanised path segment
@@ -65,6 +66,8 @@
         id="portbay-search"
         type="text"
         placeholder="Search projects (⌘K)"
+        value={search.value}
+        oninput={(e) => search.set((e.currentTarget as HTMLInputElement).value)}
         class="flex-1 bg-transparent text-sm pl-2 pr-3 outline-none text-fg placeholder-fg-subtle"
         aria-label="Search projects"
       />
