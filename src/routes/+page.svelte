@@ -1,166 +1,111 @@
+<!--
+  Demo route — a throwaway page exercising the atomic primitives in every
+  status state and both densities. Card #3 (App shell) replaces this with
+  the real Projects route.
+-->
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import {
+    Badge,
+    DashboardCard,
+    Icon,
+    StatusDot,
+    StatusPill,
+    type BadgeTone,
+    type IconName,
+  } from "$lib/components/atoms";
+  import { density } from "$lib/stores/density";
+  import { ALL_STATUSES, statusLabel } from "$lib/types/status";
 
-  type Proc = {
-    name: string;
-    namespace: string;
-    status: string;
-    is_running: boolean;
-    is_ready: string;
-    has_ready_probe: boolean;
-    pid: number;
-    exit_code: number;
-    restarts: number;
-    mem: number;
-    cpu: number;
-    age: number;
-  };
+  const badgeTones: BadgeTone[] = [
+    "neutral",
+    "info",
+    "success",
+    "warning",
+    "danger",
+  ];
 
-  let alive = $state<boolean | null>(null);
-  let procs = $state<Proc[]>([]);
-  let error = $state<string | null>(null);
-  let loading = $state(false);
-
-  async function refresh() {
-    loading = true;
-    error = null;
-    try {
-      alive = await invoke<boolean>("pc_alive");
-      if (alive) {
-        procs = await invoke<Proc[]>("pc_processes");
-      } else {
-        procs = [];
-      }
-    } catch (e) {
-      error = String(e);
-    } finally {
-      loading = false;
-    }
-  }
+  const iconShowcase: IconName[] = [
+    "play",
+    "stop-circle",
+    "rotate-cw",
+    "external-link",
+    "folder",
+    "pencil",
+    "globe",
+    "settings",
+    "search",
+    "plus",
+    "refresh-cw",
+    "terminal",
+  ];
 </script>
 
-<main class="container">
-  <header>
-    <h1>PortBay</h1>
-    <p class="subtitle">Tauri 2 + Rust core + Process Compose sidecar spike</p>
+<main class="min-h-screen bg-bg text-fg p-8 max-w-5xl mx-auto space-y-6">
+  <header class="flex items-baseline justify-between">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight">PortBay</h1>
+      <p class="text-sm text-fg-muted">
+        Phase 2 — atoms preview. Card #3 replaces this with the real shell.
+      </p>
+    </div>
+    <button
+      onclick={() => density.toggle()}
+      class="text-xs px-3 py-1.5 rounded-md border border-border text-fg-muted hover:text-fg hover:border-border-strong transition-colors"
+    >
+      Density: {density.value}
+    </button>
   </header>
 
-  <section class="actions">
-    <button onclick={refresh} disabled={loading}>
-      {loading ? "Loading…" : "Refresh"}
-    </button>
-    <span class="status" class:ok={alive === true} class:bad={alive === false}>
-      {#if alive === null}
-        not checked
-      {:else if alive}
-        daemon alive
-      {:else}
-        daemon down
-      {/if}
-    </span>
-  </section>
+  <DashboardCard title="StatusDot" flush>
+    <div class="flex flex-wrap items-center gap-6">
+      {#each ALL_STATUSES as status (status)}
+        <div class="flex items-center gap-2 text-xs text-fg-muted">
+          <StatusDot {status} size="md" />
+          <span>{statusLabel[status]}</span>
+        </div>
+      {/each}
+    </div>
+  </DashboardCard>
 
-  {#if error}
-    <pre class="error">{error}</pre>
-  {/if}
+  <DashboardCard title="StatusPill" flush>
+    <div class="flex flex-wrap items-center gap-2">
+      {#each ALL_STATUSES as status (status)}
+        <StatusPill {status} />
+      {/each}
+    </div>
+  </DashboardCard>
 
-  {#if procs.length === 0 && !error}
-    <p class="empty">No processes yet — click Refresh.</p>
-  {:else}
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Status</th>
-          <th>PID</th>
-          <th>Ready</th>
-          <th>Restarts</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each procs as p}
-          <tr>
-            <td>{p.name}</td>
-            <td class:running={p.is_running}>{p.status}</td>
-            <td>{p.pid ?? "—"}</td>
-            <td>{p.is_ready ?? "—"}</td>
-            <td>{p.restarts ?? 0}</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  {/if}
+  <DashboardCard title="Badge" flush>
+    <div class="flex flex-wrap items-center gap-2">
+      {#each badgeTones as tone (tone)}
+        <Badge {tone}>{tone}</Badge>
+      {/each}
+    </div>
+  </DashboardCard>
+
+  <DashboardCard title="Icon" flush>
+    <div class="flex flex-wrap items-center gap-3 text-fg-muted">
+      {#each iconShowcase as name (name)}
+        <div
+          class="flex items-center gap-1.5 px-2 py-1 border border-border rounded-md"
+        >
+          <Icon {name} />
+          <span class="text-xs">{name}</span>
+        </div>
+      {/each}
+    </div>
+  </DashboardCard>
+
+  <DashboardCard title="Process Compose" tone="critical">
+    {#snippet badge()}
+      <StatusPill status="crashed" />
+    {/snippet}
+    {#snippet footer()}
+      <span class="text-xs text-fg-muted">Exit code 1 · last run 12s ago</span>
+    {/snippet}
+    <p class="text-sm text-fg-muted">
+      Tone-as-card-accent demonstration. Critical → red left border. Used by
+      the sidecar health row when a daemon is down.
+    </p>
+  </DashboardCard>
 </main>
-
-<style>
-  :global(body) {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
-    background: #fafafa;
-    color: #1a1a1a;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(body) {
-      background: #1a1a1a;
-      color: #fafafa;
-    }
-  }
-
-  .container {
-    max-width: 960px;
-    margin: 0 auto;
-    padding: 2rem 1.5rem;
-  }
-  header h1 {
-    margin: 0 0 0.25rem 0;
-    font-size: 1.6rem;
-    font-weight: 600;
-  }
-  .subtitle {
-    margin: 0 0 1.5rem 0;
-    color: #888;
-    font-size: 0.85rem;
-  }
-  .actions {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  button {
-    padding: 0.4rem 0.9rem;
-    border-radius: 6px;
-    border: 1px solid #d0d0d0;
-    background: white;
-    cursor: pointer;
-    font-size: 0.85rem;
-  }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  @media (prefers-color-scheme: dark) {
-    button { background: #2a2a2a; border-color: #3a3a3a; color: inherit; }
-  }
-  .status {
-    font-size: 0.8rem;
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    background: #eee;
-  }
-  .status.ok { background: #d6f5dd; color: #1a6b2f; }
-  .status.bad { background: #f5d6d6; color: #8a1a1a; }
-  .error {
-    background: #f5d6d6;
-    color: #8a1a1a;
-    padding: 0.6rem;
-    border-radius: 6px;
-    font-size: 0.8rem;
-    overflow-x: auto;
-  }
-  .empty { color: #888; font-size: 0.9rem; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eaeaea; }
-  @media (prefers-color-scheme: dark) {
-    th, td { border-bottom-color: #2a2a2a; }
-  }
-  th { font-weight: 600; color: #666; }
-  td.running { color: #1a6b2f; font-weight: 500; }
-</style>

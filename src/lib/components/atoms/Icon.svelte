@@ -1,0 +1,120 @@
+<!--
+  Icon — thin wrapper over @lucide/svelte exposing a `name` prop.
+
+  Why a wrapper at all (lucide can be imported directly)? Two reasons:
+    1. Bundle discipline: every icon we ship is listed in `iconMap`, so
+       tree-shaking is honest — adding an icon is one explicit line, not a
+       reflexive import scattered across components.
+    2. A single place to enforce stroke width / size defaults consistent
+       with the design system. Lucide's defaults (24×24, stroke-width 2)
+       look heavy at PortBay's density.
+
+  Add a new icon by importing it from `@lucide/svelte` and adding it to
+  `iconMap`. Don't import lucide icons directly anywhere else.
+-->
+<script lang="ts" module>
+  export type IconName =
+    | "play"
+    | "stop-circle"
+    | "square"
+    | "rotate-cw"
+    | "external-link"
+    | "folder"
+    | "pencil"
+    | "globe"
+    | "settings"
+    | "search"
+    | "plus"
+    | "refresh-cw"
+    | "x"
+    | "check"
+    | "chevron-right"
+    | "chevron-down"
+    | "home"
+    | "server"
+    | "link"
+    | "file-text"
+    | "terminal"
+    | "circle-alert"
+    | "circle-check"
+    | "circle-stop"
+    | "info";
+</script>
+
+<script lang="ts">
+  import {
+    Play,
+    StopCircle,
+    Square,
+    RotateCw,
+    ExternalLink,
+    Folder,
+    Pencil,
+    Globe,
+    Settings,
+    Search,
+    Plus,
+    RefreshCw,
+    X,
+    Check,
+    ChevronRight,
+    ChevronDown,
+    Home,
+    Server,
+    Link as LinkIcon,
+    FileText,
+    Terminal,
+    CircleAlert,
+    CircleCheck,
+    CircleStop,
+    Info,
+    type Icon as LucideIconComponent,
+  } from "@lucide/svelte";
+
+  interface Props {
+    name: IconName;
+    /** Pixel size. Defaults to 16 — design-system standard for inline use. */
+    size?: number;
+    /** Stroke width override. Defaults to 1.75 — lucide's 2 reads heavy. */
+    strokeWidth?: number;
+    class?: string;
+  }
+  let {
+    name,
+    size = 16,
+    strokeWidth = 1.75,
+    class: cls = "",
+  }: Props = $props();
+
+  const iconMap: Record<IconName, typeof LucideIconComponent> = {
+    play: Play,
+    "stop-circle": StopCircle,
+    square: Square,
+    "rotate-cw": RotateCw,
+    "external-link": ExternalLink,
+    folder: Folder,
+    pencil: Pencil,
+    globe: Globe,
+    settings: Settings,
+    search: Search,
+    plus: Plus,
+    "refresh-cw": RefreshCw,
+    x: X,
+    check: Check,
+    "chevron-right": ChevronRight,
+    "chevron-down": ChevronDown,
+    home: Home,
+    server: Server,
+    link: LinkIcon,
+    "file-text": FileText,
+    terminal: Terminal,
+    "circle-alert": CircleAlert,
+    "circle-check": CircleCheck,
+    "circle-stop": CircleStop,
+    info: Info,
+  };
+
+  const Component = $derived(iconMap[name]);
+</script>
+
+<Component {size} {strokeWidth} class={cls} aria-hidden="true" />

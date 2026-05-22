@@ -1,12 +1,16 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
+import tailwindcss from "@tailwindcss/vite";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [sveltekit()],
+  // Tailwind 4's Vite plugin must come before sveltekit so it processes
+  // CSS imports during dev. Order matters — sveltekit() must be last among
+  // these two for proper HMR with .svelte files.
+  plugins: [tailwindcss(), sveltekit()],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

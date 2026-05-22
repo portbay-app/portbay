@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+@source "./**/*.{svelte,ts,js}";
+
+/* Class-based dark mode. We always apply `.dark` to <html> in app.html —
+   PortBay defaults to dark; light mode is not a Phase 2 deliverable
+   (docs/UX_DESIGN.md §6 "out of scope: custom themes"). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Surface */
+  --color-bg: #0b0f14;
+  --color-surface: #161b22;
+  --color-surface-2: #1c232c;
+  --color-border: #2a323d;
+  --color-border-strong: #3a4453;
+
+  /* Foreground */
+  --color-fg: #e6edf3;
+  --color-fg-muted: #8b949e;
+  --color-fg-subtle: #6e7681;
+
+  /* Accent — used for active nav state, primary actions */
+  --color-accent: #4d9cff;
+  --color-accent-hover: #6bb0ff;
+
+  /* Status taxonomy — keys match the Rust ProjectStatus enum exactly
+     (snake_case in JSON, kebab-case in Tailwind utility names).
+     See docs/UX_DESIGN.md §5.3. */
+  --color-status-stopped: #6e7681;
+  --color-status-starting: #3dc1f2;
+  --color-status-running: #2ee36b;
+  --color-status-unhealthy: #f5c04c;
+  --color-status-crashed: #ff3b5c;
+  --color-status-port-conflict: #ff8e3c;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Type stack — Inter first (loaded via app.html), then native */
+  --font-sans: Inter, ui-sans-serif, "SF Pro Text", system-ui, -apple-system,
+    sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Code",
+    monospace;
+}
+
+@layer base {
+  html {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    color-scheme: dark;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    overscroll-behavior: none;
+  }
+
+  /* Default border-color is currentColor in Tailwind 4. Use our token. */
+  *,
+  ::before,
+  ::after {
+    border-color: var(--color-border);
+  }
+
+  button {
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  /* Tabular numerals for any class that opts in (status counts, ports,
+     CPU/RAM stats). */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer base {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-border-strong);
+  }
+}
+
+/* Density-aware utility hooks. Components read `[data-density="compact"]` on
+   ancestors to tighten spacing. The density store sets this attribute on
+   <body>. */
+[data-density="compact"] {
+  --density-card-py: 0.5rem;
+  --density-card-px: 0.75rem;
+  --density-row-py: 0.375rem;
+}
+[data-density="comfortable"] {
+  --density-card-py: 0.875rem;
+  --density-card-px: 1rem;
+  --density-row-py: 0.625rem;
+}
