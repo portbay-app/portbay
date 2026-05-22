@@ -2,10 +2,10 @@
 
 @source "./**/*.{svelte,ts,js}";
 
-/* Class-based dark mode. We always apply `.dark` to <html> in app.html —
-   PortBay defaults to dark; light mode is not a Phase 2 deliverable
-   (docs/UX_DESIGN.md §6 "out of scope: custom themes"). */
+/* Class-based theme variants. PortBay defaults to dark; the theme store
+   toggles <html> classes and <body data-theme="…"> at runtime. */
 @custom-variant dark (&:where(.dark, .dark *));
+@custom-variant light (&:where(.light, .light *));
 
 @theme {
   /* Surface */
@@ -60,6 +60,36 @@
     margin: 0;
     min-height: 100vh;
     overscroll-behavior: none;
+    background: var(--color-bg);
+    color: var(--color-fg);
+  }
+
+  body[data-theme="light"] {
+    color-scheme: light;
+
+    /* Surface */
+    --color-bg: #f4f6f8;
+    --color-surface: #ffffff;
+    --color-surface-2: #eef2f6;
+    --color-border: #d7dee7;
+    --color-border-strong: #aeb9c7;
+
+    /* Foreground */
+    --color-fg: #111827;
+    --color-fg-muted: #526071;
+    --color-fg-subtle: #738093;
+
+    /* Accent */
+    --color-accent: #2563eb;
+    --color-accent-hover: #1d4ed8;
+
+    /* Status taxonomy */
+    --color-status-stopped: #6b7280;
+    --color-status-starting: #0284c7;
+    --color-status-running: #16a34a;
+    --color-status-unhealthy: #d97706;
+    --color-status-crashed: #dc2626;
+    --color-status-port-conflict: #ea580c;
   }
 
   /* Default border-color is currentColor in Tailwind 4. Use our token. */

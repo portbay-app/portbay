@@ -20,6 +20,7 @@
   import { ProjectDetailPanel } from "$lib/components/projects";
   import { LogViewer } from "$lib/components/logs";
   import { density } from "$lib/stores/density.svelte";
+  import { theme } from "$lib/stores/theme.svelte";
 
   let { children }: { children: Snippet } = $props();
 
@@ -30,11 +31,13 @@
   const gridCols = $derived(
     density.value === "compact" ? "180px 1fr 0px" : "220px 1fr 320px",
   );
+  const currentTheme = $derived(theme.value);
 </script>
 
 <div
   class="h-screen w-screen grid grid-rows-[1fr] overflow-hidden"
   style:grid-template-columns={gridCols}
+  data-theme-current={currentTheme}
 >
   <Sidebar />
 

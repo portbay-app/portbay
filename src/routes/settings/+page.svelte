@@ -6,6 +6,7 @@
 <script lang="ts">
   import { DashboardCard } from "$lib/components/atoms";
   import { density, type Density } from "$lib/stores/density.svelte";
+  import { theme, type Theme } from "$lib/stores/theme.svelte";
   import { safeInvoke } from "$lib/ipc";
 
   const densityOptions: { value: Density; label: string; detail: string }[] = [
@@ -22,6 +23,19 @@
     },
   ];
 
+  const themeOptions: { value: Theme; label: string; detail: string }[] = [
+    {
+      value: "dark",
+      label: "Dark",
+      detail: "Default PortBay theme for local-dev work sessions.",
+    },
+    {
+      value: "light",
+      label: "Light",
+      detail: "Higher ambient-light theme with the same status taxonomy.",
+    },
+  ];
+
   async function triggerDemoError() {
     // Calls a real command with input that's guaranteed to fail. The Rust
     // side returns AppError::NotFound, which round-trips through the
@@ -35,6 +49,32 @@
 </script>
 
 <div class="p-6 max-w-2xl space-y-4">
+  <DashboardCard title="Theme" flush>
+    <div class="space-y-3">
+      {#each themeOptions as opt (opt.value)}
+        <label
+          class="flex items-start gap-3 p-3 rounded-md border cursor-pointer transition-colors
+                 {theme.value === opt.value
+            ? 'border-accent/60 bg-accent/8'
+            : 'border-border hover:border-border-strong'}"
+        >
+          <input
+            type="radio"
+            name="theme"
+            value={opt.value}
+            checked={theme.value === opt.value}
+            onchange={() => theme.set(opt.value)}
+            class="mt-1 accent-accent"
+          />
+          <div>
+            <div class="text-sm font-medium text-fg">{opt.label}</div>
+            <div class="text-xs text-fg-muted">{opt.detail}</div>
+          </div>
+        </label>
+      {/each}
+    </div>
+  </DashboardCard>
+
   <DashboardCard title="Density" flush>
     <div class="space-y-3">
       {#each densityOptions as opt (opt.value)}
