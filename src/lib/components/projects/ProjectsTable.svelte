@@ -11,6 +11,7 @@
   import { onMount } from "svelte";
   import { DashboardCard } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
+  import { projectDetailPanel } from "$lib/stores/detailPanel";
   import { projects } from "$lib/stores/projects";
   import { search } from "$lib/stores/search";
   import EmptyState from "./EmptyState.svelte";
@@ -67,6 +68,8 @@
       void safeInvoke("stop_project", { id: sel });
     } else if (e.key === "r" || e.key === "R") {
       void safeInvoke("restart_project", { id: sel });
+    } else if (e.key === "Enter") {
+      projectDetailPanel.show(sel);
     }
   }
 </script>

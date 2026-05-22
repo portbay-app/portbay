@@ -11,6 +11,7 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
   import { safeInvoke } from "$lib/ipc";
+  import { projectDetailPanel } from "$lib/stores/detailPanel";
   import { projects } from "$lib/stores/projects";
   import type { ProjectView } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
@@ -59,7 +60,10 @@
 </script>
 
 <tr
-  onclick={() => projects.select(project.id)}
+  onclick={() => {
+    projects.select(project.id);
+    projectDetailPanel.show(project.id);
+  }}
   data-selected={isSelected}
   class="border-b border-border text-sm cursor-pointer transition-colors
          hover:bg-surface-2

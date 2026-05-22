@@ -17,6 +17,7 @@
   import { Sidebar, TopBar, RightRail } from "$lib/components/shell";
   import { ToastHost } from "$lib/components/errors";
   import { AddProjectWizard } from "$lib/components/wizard";
+  import { ProjectDetailPanel } from "$lib/components/projects";
   import { density } from "$lib/stores/density";
 
   let { children }: { children: Snippet } = $props();
@@ -47,4 +48,5 @@
 </div>
 
 <AddProjectWizard />
+<ProjectDetailPanel />
 <ToastHost />
