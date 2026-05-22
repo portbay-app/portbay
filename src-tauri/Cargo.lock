@@ -2448,6 +2448,8 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
+ "tempfile",
+ "thiserror 1.0.69",
  "tokio",
 ]
 

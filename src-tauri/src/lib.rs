@@ -2,6 +2,8 @@
 // Spike scaffold: spawns process-compose as a sidecar at startup,
 // exposes a Tauri command that queries its REST API.
 
+pub mod registry;
+
 use std::sync::Mutex;
 use tauri::{Manager, State};
 use tauri_plugin_shell::process::CommandChild;
