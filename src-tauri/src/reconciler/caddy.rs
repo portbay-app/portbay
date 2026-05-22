@@ -8,15 +8,15 @@
 //! a future optimisation card if measurement shows full-load latency
 //! becomes a problem (sub-100 ms in the spike at <50 routes).
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::caddy::{
     build_config, find_free_https_port, CaddyClient, CertPaths, DEFAULT_HTTPS_PORT,
 };
-use crate::registry::Registry;
 use crate::reconciler::report::StepOutcome;
+use crate::registry::Registry;
 use crate::state::AppState;
 
 #[derive(Debug, Default)]
@@ -44,7 +44,11 @@ pub(super) async fn reconcile(
         Err(e) => return StepOutcome::failed(format!("caddy client: {e}")),
     };
 
-    let admin_port = state.caddy.lock().expect("caddy mutex poisoned").admin_port();
+    let admin_port = state
+        .caddy
+        .lock()
+        .expect("caddy mutex poisoned")
+        .admin_port();
     let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
 
     let cfg = match build_config(reg, admin_port, https_port, |id| {

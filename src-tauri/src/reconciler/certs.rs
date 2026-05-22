@@ -13,14 +13,14 @@
 //! `Failed` for the step; Caddy will still POST /load without certs and
 //! the user sees a typed sidecar warning surface elsewhere.
 
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use crate::caddy::CertPaths;
 use crate::mkcert::Mkcert;
-use crate::registry::Registry;
 use crate::reconciler::report::StepOutcome;
+use crate::registry::Registry;
 
 #[derive(Debug, Default)]
 pub(super) struct CertsCache {
@@ -60,11 +60,7 @@ pub(super) fn reconcile(
         };
     }
 
-    let https_projects: Vec<_> = reg
-        .list_projects()
-        .iter()
-        .filter(|p| p.https)
-        .collect();
+    let https_projects: Vec<_> = reg.list_projects().iter().filter(|p| p.https).collect();
 
     // 1) Issue missing certs.
     let mut issued: Vec<String> = Vec::new();

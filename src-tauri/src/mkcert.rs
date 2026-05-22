@@ -152,7 +152,9 @@ impl Mkcert {
     /// hostnames simply rewrites the cert pair.
     pub fn issue_cert(&self, project_id: &str, hostnames: &[&str]) -> Result<CertPaths> {
         if !self.is_ca_installed() {
-            let root = self.ca_root().unwrap_or_else(|_| PathBuf::from("(unknown)"));
+            let root = self
+                .ca_root()
+                .unwrap_or_else(|_| PathBuf::from("(unknown)"));
             return Err(MkcertError::CaNotInstalled(root.join("rootCA.pem")));
         }
 

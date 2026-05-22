@@ -12,8 +12,8 @@ use std::hash::{Hash, Hasher};
 use std::net::Ipv4Addr;
 
 use crate::hosts::{HostsError, HostsManager};
-use crate::registry::Registry;
 use crate::reconciler::report::StepOutcome;
+use crate::registry::Registry;
 
 /// State kept across ticks. Lives inside `ReconcilerInner` (see `mod.rs`).
 #[derive(Debug, Default)]
@@ -144,7 +144,10 @@ mod tests {
         // Inserted in a different order.
         b.add_project(project("y", "y.test")).unwrap();
         b.add_project(project("x", "x.test")).unwrap();
-        assert_eq!(hash_pairs(&expected_pairs(&a)), hash_pairs(&expected_pairs(&b)));
+        assert_eq!(
+            hash_pairs(&expected_pairs(&a)),
+            hash_pairs(&expected_pairs(&b))
+        );
     }
 
     #[test]

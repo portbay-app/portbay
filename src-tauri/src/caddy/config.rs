@@ -56,9 +56,7 @@ pub fn bootstrap_config(admin_port: u16, https_port: u16) -> CaddyConfig {
                 servers,
             },
             tls: TlsApp {
-                certificates: TlsCertificates {
-                    load_files: vec![],
-                },
+                certificates: TlsCertificates { load_files: vec![] },
             },
         },
     }
@@ -355,6 +353,9 @@ mod tests {
         // The admin endpoint is what Caddy needs to come up; the rest is
         // empty scaffolding that POST /load can refill at any time.
         assert_eq!(v["admin"]["listen"], "localhost:2019");
-        assert_eq!(v["apps"]["http"]["servers"]["portbay"]["routes"], serde_json::json!([]));
+        assert_eq!(
+            v["apps"]["http"]["servers"]["portbay"]["routes"],
+            serde_json::json!([])
+        );
     }
 }

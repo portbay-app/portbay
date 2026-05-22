@@ -143,7 +143,6 @@ pub struct Project {
     pub tags: Vec<String>,
 
     // ----- PHP-specific (optional) --------------------------------------
-
     /// For `type: "php"` projects, the document root relative to `path`
     /// (commonly `"public"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,6 +237,9 @@ mod tests {
         assert_eq!(json["id"], "nour-beiruti");
         assert_eq!(json["type"], "next");
         assert_eq!(json["port"], 3010);
-        assert!(json.get("document_root").is_none(), "optional PHP fields should be omitted when empty");
+        assert!(
+            json.get("document_root").is_none(),
+            "optional PHP fields should be omitted when empty"
+        );
     }
 }

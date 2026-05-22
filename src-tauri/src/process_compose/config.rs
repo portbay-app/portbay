@@ -257,7 +257,10 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("nour-beiruti", 3010)).unwrap();
         let yaml = to_yaml(&r, Path::new("/tmp/logs")).unwrap();
-        assert!(yaml.contains("nour-beiruti"), "process name missing: {yaml}");
+        assert!(
+            yaml.contains("nour-beiruti"),
+            "process name missing: {yaml}"
+        );
         assert!(yaml.contains("pnpm dev"));
         assert!(yaml.contains("port: 3010"));
         assert!(yaml.contains("path: /"));

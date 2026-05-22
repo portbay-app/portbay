@@ -90,11 +90,7 @@ pub async fn cert_info(state: State<'_, AppState>, id: String) -> AppResult<Cert
 /// tick re-issues + re-POSTs `/load` (Caddy re-reads cert files on
 /// load even when the JSON config is byte-identical).
 #[tauri::command]
-pub async fn reissue_cert(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> AppResult<()> {
+pub async fn reissue_cert(app: AppHandle, state: State<'_, AppState>, id: String) -> AppResult<()> {
     // Validate the project exists in the registry before destructively
     // removing cert files.
     let registry = crate::commands::projects::load_registry(&state)?;
@@ -137,10 +133,7 @@ fn parse_cert_pem(
 
     let issued_at = iso_from_asn1(cert.validity().not_before);
     let expires_at = iso_from_asn1(cert.validity().not_after);
-    let days_until_expiry = cert
-        .validity()
-        .time_to_expiration()
-        .map(|d| d.whole_days());
+    let days_until_expiry = cert.validity().time_to_expiration().map(|d| d.whole_days());
 
     let mut sans: Vec<String> = Vec::new();
     if let Ok(Some(san_ext)) = cert.subject_alternative_name() {
@@ -210,14 +203,7 @@ mod tests {
         let cert = tmp.path().join("cert.pem");
         let key = tmp.path().join("key.pem");
         let out = Command::new("openssl")
-            .args([
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-nodes",
-                "-keyout",
-            ])
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout"])
             .arg(&key)
             .arg("-out")
             .arg(&cert)
@@ -244,7 +230,10 @@ mod tests {
         assert!(info.issued_at.is_some());
         assert!(info.expires_at.is_some());
         let expiry = info.days_until_expiry.unwrap();
-        assert!((25..=31).contains(&expiry), "expected ~30 days, got {expiry}");
+        assert!(
+            (25..=31).contains(&expiry),
+            "expected ~30 days, got {expiry}"
+        );
         assert!(info.sans.contains(&"portbay-test.test".to_string()));
         assert!(info.sans.contains(&"alt.test".to_string()));
     }

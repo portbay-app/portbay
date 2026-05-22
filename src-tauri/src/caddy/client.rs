@@ -81,19 +81,17 @@ impl CaddyClient {
     /// overlap. PortBay's design treats each project's `route_<id>` as
     /// unique, so position is mostly for cosmetic ordering.
     pub async fn prepend_route(&self, server: &str, route: &Route) -> Result<()> {
-        let url = self.url(&format!(
-            "/config/apps/http/servers/{server}/routes/0"
-        ));
-        let res = self
-            .http
-            .post(&url)
-            .json(route)
-            .send()
-            .await
-            .map_err(|e| CaddyError::Unreachable {
-                url: url.clone(),
-                source: e,
-            })?;
+        let url = self.url(&format!("/config/apps/http/servers/{server}/routes/0"));
+        let res =
+            self.http
+                .post(&url)
+                .json(route)
+                .send()
+                .await
+                .map_err(|e| CaddyError::Unreachable {
+                    url: url.clone(),
+                    source: e,
+                })?;
         ensure_success(&url, res).await?;
         Ok(())
     }

@@ -82,8 +82,7 @@ pub fn save_to(reg: &Registry, path: &Path) -> Result<()> {
             .map_err(|e| RegistryError::io(&tmp_path, e))?;
         f.write_all(&bytes)
             .map_err(|e| RegistryError::io(&tmp_path, e))?;
-        f.sync_all()
-            .map_err(|e| RegistryError::io(&tmp_path, e))?;
+        f.sync_all().map_err(|e| RegistryError::io(&tmp_path, e))?;
     } // file closed here
 
     fs::rename(&tmp_path, path).map_err(|e| RegistryError::io(path, e))?;
@@ -194,7 +193,12 @@ mod tests {
     #[test]
     fn save_creates_parent_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("a").join("b").join("c").join("registry.json");
+        let path = tmp
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("registry.json");
         let reg = Registry::new("test");
         save_to(&reg, &path).unwrap();
         assert!(path.exists());

@@ -112,7 +112,9 @@ impl PcClient {
                 source: e,
             })?;
         check_status(&url, res.status(), &res).await?;
-        res.json::<serde_json::Value>().await.map_err(PcError::BodyDecode)
+        res.json::<serde_json::Value>()
+            .await
+            .map_err(PcError::BodyDecode)
     }
 
     /// `GET /process/logs/{name}/{offset}/{limit}` — static log tail.
@@ -147,21 +149,25 @@ impl PcClient {
     }
 
     async fn send_mutating(&self, method: reqwest::Method, url: &str) -> Result<reqwest::Response> {
-        let res = self
-            .http
-            .request(method, url)
-            .send()
-            .await
-            .map_err(|e| PcError::Unreachable {
-                url: url.to_owned(),
-                source: e,
-            })?;
+        let res =
+            self.http
+                .request(method, url)
+                .send()
+                .await
+                .map_err(|e| PcError::Unreachable {
+                    url: url.to_owned(),
+                    source: e,
+                })?;
         check_status(url, res.status(), &res).await?;
         Ok(res)
     }
 }
 
-async fn check_status(_url: &str, status: reqwest::StatusCode, _res: &reqwest::Response) -> Result<()> {
+async fn check_status(
+    _url: &str,
+    status: reqwest::StatusCode,
+    _res: &reqwest::Response,
+) -> Result<()> {
     // We can't consume the body here without taking ownership, so we accept
     // any 2xx and let downstream parsers surface decode errors. Real HTTP
     // errors (4xx/5xx) are mapped to PcError::HttpStatus by the caller via

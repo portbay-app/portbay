@@ -15,9 +15,7 @@ pub enum RegistryError {
     #[error("registry file is malformed: {0}")]
     Malformed(#[from] serde_json::Error),
 
-    #[error(
-        "registry version {found} is unsupported (this build supports up to v{supported})"
-    )]
+    #[error("registry version {found} is unsupported (this build supports up to v{supported})")]
     UnsupportedVersion { found: u32, supported: u32 },
 
     #[error("project id `{0}` not found")]

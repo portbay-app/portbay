@@ -88,11 +88,7 @@ pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
 /// CLI's `std::process::Command::new("open")` — capabilities make this
 /// auditable and portable to Linux/Windows when those targets land.
 #[tauri::command]
-pub async fn open_project(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> AppResult<()> {
+pub async fn open_project(app: AppHandle, state: State<'_, AppState>, id: String) -> AppResult<()> {
     let registry = load_registry(&state)?;
     let project = registry
         .get_project(&ProjectId::new(id.clone()))

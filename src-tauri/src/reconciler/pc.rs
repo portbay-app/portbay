@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 
 use crate::process_compose;
-use crate::registry::Registry;
 use crate::reconciler::report::StepOutcome;
+use crate::registry::Registry;
 use crate::state::AppState;
 
 #[derive(Debug, Default)]

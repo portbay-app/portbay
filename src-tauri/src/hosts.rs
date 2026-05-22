@@ -482,7 +482,13 @@ mod tests {
     fn render_keeps_single_trailing_newline() {
         let out = render("a\nb\n", &[]);
         assert_eq!(out, "a\nb\n");
-        let out2 = render("a\nb\n", &[HostsEntry { ip: loopback(), hostname: "x.test".into() }]);
+        let out2 = render(
+            "a\nb\n",
+            &[HostsEntry {
+                ip: loopback(),
+                hostname: "x.test".into(),
+            }],
+        );
         // Should end in a single newline after the END marker.
         assert!(out2.ends_with("# END PortBay\n"));
         assert!(!out2.ends_with("\n\n"));

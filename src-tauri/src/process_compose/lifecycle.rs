@@ -64,8 +64,9 @@ impl SidecarManager {
             return Ok(PcClient::new(self.port));
         }
 
-        let port = find_free_port(DEFAULT_PORT, PORT_SCAN_RANGE)
-            .ok_or(PcError::NoFreePort { start: DEFAULT_PORT })?;
+        let port = find_free_port(DEFAULT_PORT, PORT_SCAN_RANGE).ok_or(PcError::NoFreePort {
+            start: DEFAULT_PORT,
+        })?;
         self.port = port;
 
         let port_str = port.to_string();

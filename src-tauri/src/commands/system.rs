@@ -35,7 +35,11 @@ pub async fn doctor(state: State<'_, AppState>) -> AppResult<DoctorReport> {
     }
 
     // PC daemon
-    let pc_client = state.pc_client.lock().expect("pc_client mutex poisoned").clone();
+    let pc_client = state
+        .pc_client
+        .lock()
+        .expect("pc_client mutex poisoned")
+        .clone();
     let pc_finding = match pc_client {
         None => DoctorFinding {
             check: "process-compose".into(),
@@ -63,7 +67,11 @@ pub async fn doctor(state: State<'_, AppState>) -> AppResult<DoctorReport> {
     findings.push(pc_finding);
 
     // Caddy daemon
-    let caddy_client = state.caddy_client.lock().expect("caddy_client mutex poisoned").clone();
+    let caddy_client = state
+        .caddy_client
+        .lock()
+        .expect("caddy_client mutex poisoned")
+        .clone();
     let caddy_finding = match caddy_client {
         None => DoctorFinding {
             check: "caddy".into(),
@@ -110,8 +118,11 @@ pub async fn doctor(state: State<'_, AppState>) -> AppResult<DoctorReport> {
     match (HostsManager::system().list_managed(), load_registry(&state)) {
         (Ok(entries), Ok(reg)) => {
             use std::collections::HashSet;
-            let expected: HashSet<String> =
-                reg.list_projects().iter().map(|p| p.hostname.clone()).collect();
+            let expected: HashSet<String> = reg
+                .list_projects()
+                .iter()
+                .map(|p| p.hostname.clone())
+                .collect();
             let present: HashSet<String> = entries.iter().map(|e| e.hostname.clone()).collect();
             let missing = expected.difference(&present).count();
             let orphan = present.difference(&expected).count();
