@@ -19,7 +19,7 @@
   import { AddProjectWizard } from "$lib/components/wizard";
   import { ProjectDetailPanel } from "$lib/components/projects";
   import { LogViewer } from "$lib/components/logs";
-  import { density } from "$lib/stores/density";
+  import { density } from "$lib/stores/density.svelte";
 
   let { children }: { children: Snippet } = $props();
 

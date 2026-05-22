@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
-  import { sidecars } from "$lib/stores/sidecars";
+  import { sidecars } from "$lib/stores/sidecars.svelte";
   import type { PortbayStatus } from "$lib/types/status";
   import type { SidecarState } from "$lib/types/sidecars";
   import { SIDECAR_ORDER } from "$lib/types/sidecars";

@@ -9,7 +9,7 @@
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
   import type { IconName } from "$lib/components/atoms/Icon.svelte";
   import { safeInvoke } from "$lib/ipc";
-  import { sidecars } from "$lib/stores/sidecars";
+  import { sidecars } from "$lib/stores/sidecars.svelte";
   import type {
     PortbayStatus,
   } from "$lib/types/status";

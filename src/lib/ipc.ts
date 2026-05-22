@@ -18,7 +18,7 @@
  */
 import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
 
-import { errorBus } from "$lib/stores/errors";
+import { errorBus } from "$lib/stores/errors.svelte";
 import { isCommandError, type CommandError } from "$lib/types/error";
 
 export async function safeInvoke<T>(

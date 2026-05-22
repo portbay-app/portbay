@@ -11,8 +11,8 @@
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import Icon from "$lib/components/atoms/Icon.svelte";
-  import { search } from "$lib/stores/search";
-  import { addProjectWizard } from "$lib/stores/wizard";
+  import { search } from "$lib/stores/search.svelte";
+  import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import StopAllButton from "./StopAllButton.svelte";
 
   // Map route paths to page titles. Falls back to a humanised path segment

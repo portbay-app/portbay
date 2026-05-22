@@ -5,7 +5,7 @@
 -->
 <script lang="ts">
   import { DashboardCard } from "$lib/components/atoms";
-  import { density, type Density } from "$lib/stores/density";
+  import { density, type Density } from "$lib/stores/density.svelte";
   import { safeInvoke } from "$lib/ipc";
 
   const densityOptions: { value: Density; label: string; detail: string }[] = [

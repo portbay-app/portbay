@@ -3,7 +3,7 @@
 -->
 <script lang="ts">
   import { DashboardCard } from "$lib/components/atoms";
-  import { metrics } from "$lib/stores/metrics";
+  import { metrics } from "$lib/stores/metrics.svelte";
 
   const mem = $derived(metrics.value?.memory);
   const used = $derived(mem?.usedBytes ?? 0);

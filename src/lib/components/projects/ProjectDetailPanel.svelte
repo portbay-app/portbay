@@ -12,10 +12,10 @@
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
-  import { errorBus } from "$lib/stores/errors";
-  import { projectDetailPanel } from "$lib/stores/detailPanel";
-  import { logViewer } from "$lib/stores/logViewer";
-  import { projects } from "$lib/stores/projects";
+  import { errorBus } from "$lib/stores/errors.svelte";
+  import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
+  import { logViewer } from "$lib/stores/logViewer.svelte";
+  import { projects } from "$lib/stores/projects.svelte";
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView, ProjectType } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";

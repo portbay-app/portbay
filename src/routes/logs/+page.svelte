@@ -5,8 +5,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { DashboardCard, Icon, StatusDot } from "$lib/components/atoms";
-  import { logViewer } from "$lib/stores/logViewer";
-  import { projects } from "$lib/stores/projects";
+  import { logViewer } from "$lib/stores/logViewer.svelte";
+  import { projects } from "$lib/stores/projects.svelte";
 </script>
 
 <div class="p-6 space-y-4">

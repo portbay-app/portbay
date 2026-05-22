@@ -13,7 +13,7 @@
   import SidebarItem from "./SidebarItem.svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { SidecarPill } from "$lib/components/sidecars";
-  import { sidecars } from "$lib/stores/sidecars";
+  import { sidecars } from "$lib/stores/sidecars.svelte";
 
   async function refresh() {
     await sidecars.refresh();

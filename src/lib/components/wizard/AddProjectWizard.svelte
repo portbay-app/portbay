@@ -16,9 +16,9 @@
   import { DashboardCard, Icon } from "$lib/components/atoms";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
-  import { errorBus } from "$lib/stores/errors";
-  import { projects } from "$lib/stores/projects";
-  import { addProjectWizard } from "$lib/stores/wizard";
+  import { errorBus } from "$lib/stores/errors.svelte";
+  import { projects } from "$lib/stores/projects.svelte";
+  import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import type { CommandError } from "$lib/types/error";
   import type { ProjectType, ProjectView } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";

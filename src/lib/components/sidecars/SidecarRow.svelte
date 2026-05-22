@@ -8,7 +8,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { sidecars } from "$lib/stores/sidecars";
+  import { sidecars } from "$lib/stores/sidecars.svelte";
   import { SIDECAR_ORDER } from "$lib/types/sidecars";
   import SidecarCard from "./SidecarCard.svelte";
 

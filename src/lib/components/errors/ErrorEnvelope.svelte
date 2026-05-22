@@ -18,7 +18,7 @@
 <script lang="ts">
   import type { CommandError, ErrorAction } from "$lib/types/error";
   import Icon from "$lib/components/atoms/Icon.svelte";
-  import { density } from "$lib/stores/density";
+  import { density } from "$lib/stores/density.svelte";
 
   interface Props {
     envelope: CommandError;

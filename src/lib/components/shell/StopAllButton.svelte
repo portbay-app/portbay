@@ -13,9 +13,9 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { errorBus } from "$lib/stores/errors";
+  import { errorBus } from "$lib/stores/errors.svelte";
   import { safeInvoke } from "$lib/ipc";
-  import { projects } from "$lib/stores/projects";
+  import { projects } from "$lib/stores/projects.svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import type { StopAllReport } from "$lib/types/stopAll";
 

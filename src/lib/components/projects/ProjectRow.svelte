@@ -11,8 +11,8 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
   import { safeInvoke } from "$lib/ipc";
-  import { projectDetailPanel } from "$lib/stores/detailPanel";
-  import { projects } from "$lib/stores/projects";
+  import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
+  import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
 

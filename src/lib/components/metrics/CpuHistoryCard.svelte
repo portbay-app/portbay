@@ -3,7 +3,7 @@
 -->
 <script lang="ts">
   import { DashboardCard } from "$lib/components/atoms";
-  import { metrics } from "$lib/stores/metrics";
+  import { metrics } from "$lib/stores/metrics.svelte";
 
   const points = $derived.by(() => {
     const data = metrics.cpuHistory;

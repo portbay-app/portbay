@@ -11,9 +11,9 @@
   import { onMount } from "svelte";
   import { DashboardCard } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
-  import { projectDetailPanel } from "$lib/stores/detailPanel";
-  import { projects } from "$lib/stores/projects";
-  import { search } from "$lib/stores/search";
+  import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
+  import { projects } from "$lib/stores/projects.svelte";
+  import { search } from "$lib/stores/search.svelte";
   import EmptyState from "./EmptyState.svelte";
   import ProjectRow from "./ProjectRow.svelte";
 

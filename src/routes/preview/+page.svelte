@@ -14,7 +14,7 @@
     type IconName,
   } from "$lib/components/atoms";
   import { ErrorEnvelope } from "$lib/components/errors";
-  import { density } from "$lib/stores/density";
+  import { density } from "$lib/stores/density.svelte";
   import { ALL_STATUSES, statusLabel } from "$lib/types/status";
   import type { CommandError } from "$lib/types/error";
 

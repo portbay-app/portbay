@@ -12,9 +12,9 @@
 
   import { Icon, StatusPill } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
-  import { errorBus } from "$lib/stores/errors";
-  import { logViewer } from "$lib/stores/logViewer";
-  import { projects } from "$lib/stores/projects";
+  import { errorBus } from "$lib/stores/errors.svelte";
+  import { logViewer } from "$lib/stores/logViewer.svelte";
+  import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
 
   const project = $derived<ProjectView | null>(

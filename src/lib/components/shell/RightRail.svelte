@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import { MetricsRail } from "$lib/components/metrics";
-  import { density } from "$lib/stores/density";
+  import { density } from "$lib/stores/density.svelte";
   import type { Snippet } from "svelte";
 
   let { children }: { children?: Snippet } = $props();

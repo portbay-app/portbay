@@ -8,7 +8,7 @@
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
-  import { addProjectWizard } from "$lib/stores/wizard";
+  import { addProjectWizard } from "$lib/stores/wizard.svelte";
 
   interface Props {
     variant: "registry-empty" | "filtered";

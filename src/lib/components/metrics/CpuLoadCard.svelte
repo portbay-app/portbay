@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { DashboardCard } from "$lib/components/atoms";
-  import { metrics } from "$lib/stores/metrics";
+  import { metrics } from "$lib/stores/metrics.svelte";
 
   const cpu = $derived(metrics.value?.cpu.total ?? 0);
   // The needle's angle: 0% → -90° (left), 100% → +90° (right).

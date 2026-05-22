@@ -14,7 +14,7 @@
 <script lang="ts">
   import { openUrl } from "@tauri-apps/plugin-opener";
 
-  import { errorBus } from "$lib/stores/errors";
+  import { errorBus } from "$lib/stores/errors.svelte";
   import { safeInvoke } from "$lib/ipc";
   import type { ErrorAction } from "$lib/types/error";
   import ErrorEnvelope from "./ErrorEnvelope.svelte";

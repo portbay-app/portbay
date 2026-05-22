@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { metrics } from "$lib/stores/metrics";
+  import { metrics } from "$lib/stores/metrics.svelte";
   import CpuHistoryCard from "./CpuHistoryCard.svelte";
   import CpuLoadCard from "./CpuLoadCard.svelte";
   import MemoryCard from "./MemoryCard.svelte";
