@@ -7,15 +7,17 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::State;
 
-use crate::commands::dto::{AddProjectInput, ProjectView, UpdateProjectPatch};
+use crate::commands::dto::{
+    AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch,
+};
 use crate::error::{AppError, AppResult};
 use crate::hosts::HostsManager;
 use crate::process_compose::Process;
-use crate::registry::{store, Project, ProjectId, Readiness, Registry};
+use crate::registry::{store, Project, ProjectId, ProjectType, Readiness, Registry};
 use crate::state::AppState;
 
 /// `list_projects()` — registry merged with live PC status.
@@ -175,6 +177,72 @@ pub async fn update_project(
     let pc_state = fetch_pc_state(&state).await;
     let proc = pc_state.as_ref().and_then(|m| m.get(id.as_str()));
     Ok(ProjectView::from_project(&snapshot, proc))
+}
+
+/// `detect_project(path)` — quick framework + suggested-defaults probe.
+///
+/// Heuristic, not exhaustive. The Add Project wizard's L1 → L2 flow
+/// fills its standard fields from this; the user edits before commit.
+/// Match order matters — Next.js / Vite tests come before generic Node
+/// so they win when a `package.json` references both.
+#[tauri::command]
+pub async fn detect_project(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<DetectedProject> {
+    let p = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| AppError::BadInput(format!("path: {e}")))?;
+
+    let dir_name = p
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("project")
+        .to_string();
+    let id = slugify(&dir_name);
+
+    let registry = load_registry(&state)?;
+    let suggested_hostname = format!("{id}.{}", registry.domain_suffix);
+
+    let (kind, suggested_port, suggested_start_command) = detect_kind(&p);
+
+    Ok(DetectedProject {
+        kind,
+        suggested_id: id,
+        suggested_name: dir_name,
+        suggested_hostname,
+        suggested_port,
+        suggested_start_command,
+    })
+}
+
+fn detect_kind(path: &Path) -> (ProjectType, u16, Option<String>) {
+    let pkg = path.join("package.json");
+    if pkg.exists() {
+        let body = std::fs::read_to_string(&pkg).unwrap_or_default();
+        // Cheap string match — full JSON parse isn't worth the cycles.
+        if body.contains("\"next\"") {
+            return (ProjectType::Next, 3000, Some("pnpm dev".into()));
+        }
+        if body.contains("\"vite\"") {
+            return (ProjectType::Vite, 5173, Some("pnpm dev".into()));
+        }
+        return (ProjectType::Node, 3000, Some("pnpm dev".into()));
+    }
+
+    if path.join("composer.json").exists() || has_php_index(path) {
+        return (ProjectType::Php, 8000, None);
+    }
+
+    if path.join("index.html").exists() {
+        return (ProjectType::Static, 8000, None);
+    }
+
+    (ProjectType::Custom, 3000, None)
+}
+
+fn has_php_index(path: &Path) -> bool {
+    path.join("index.php").exists() || path.join("public").join("index.php").exists()
 }
 
 /// `remove_project(id)` — full cleanup. Registry → cert dir → hosts entry.

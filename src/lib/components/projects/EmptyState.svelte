@@ -8,6 +8,7 @@
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import { addProjectWizard } from "$lib/stores/wizard";
 
   interface Props {
     variant: "registry-empty" | "filtered";
@@ -16,8 +17,7 @@
   let { variant, query }: Props = $props();
 
   function openAddProject() {
-    // Wired in card #8 (Add Project wizard).
-    console.info("[add-project] stub — wired in card #8");
+    addProjectWizard.show();
   }
 </script>
 

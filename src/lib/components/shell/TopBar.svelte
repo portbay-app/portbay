@@ -12,6 +12,7 @@
   import { goto } from "$app/navigation";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { search } from "$lib/stores/search";
+  import { addProjectWizard } from "$lib/stores/wizard";
   import StopAllButton from "./StopAllButton.svelte";
 
   // Map route paths to page titles. Falls back to a humanised path segment
@@ -34,8 +35,7 @@
   });
 
   function openAddProject() {
-    // Card #8 wires this to the wizard slide-over.
-    console.info("[add-project] stub — wired in card #8");
+    addProjectWizard.show();
   }
 
   function focusSearch() {

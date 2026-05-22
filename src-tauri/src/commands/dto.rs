@@ -224,6 +224,20 @@ fn default_https() -> bool {
     true
 }
 
+/// Output of `detect_project` — what the Add Project wizard's L1 step
+/// fills the L2 fields with. Heuristics live in
+/// `src-tauri/src/commands/projects.rs::detect`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedProject {
+    pub kind: ProjectType,
+    pub suggested_id: String,
+    pub suggested_name: String,
+    pub suggested_hostname: String,
+    pub suggested_port: u16,
+    pub suggested_start_command: Option<String>,
+}
+
 /// Input for `update_project` — partial patch over the registry entry.
 /// Unset fields are left unchanged. `id` is the lookup key and isn't
 /// itself mutable from this surface.

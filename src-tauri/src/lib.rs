@@ -23,6 +23,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Resolve the registry location once; commands read it from state.
             let registry_path = store::default_path().map_err(|e| -> Box<dyn std::error::Error> {
@@ -55,6 +56,7 @@ pub fn run() {
             commands::projects::add_project,
             commands::projects::update_project,
             commands::projects::remove_project,
+            commands::projects::detect_project,
             commands::lifecycle::start_project,
             commands::lifecycle::stop_project,
             commands::lifecycle::restart_project,
