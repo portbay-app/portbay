@@ -5,6 +5,7 @@ pub mod commands;
 pub mod dnsmasq;
 pub mod error;
 pub mod hosts;
+pub mod import;
 pub mod mailpit;
 pub mod mkcert;
 pub mod process_compose;
@@ -243,6 +244,9 @@ pub fn run() {
             commands::system::doctor,
             commands::system::tail_logs,
             commands::log_stream::subscribe_logs,
+            commands::import::detect_sources,
+            commands::import::preview_import,
+            commands::import::import_projects,
             commands::metrics::system_metrics,
         ])
         .run(tauri::generate_context!())
