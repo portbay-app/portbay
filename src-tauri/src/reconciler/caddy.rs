@@ -24,6 +24,15 @@ pub(super) struct CaddyCache {
     last_applied: Option<u64>,
 }
 
+impl CaddyCache {
+    /// Forget the cached hash so the next reconcile tick re-POSTs `/load`.
+    /// Used after `reissue_cert` rewrites cert files in place (the config
+    /// JSON itself didn't change, but the certs on disk did).
+    pub(super) fn invalidate(&mut self) {
+        self.last_applied = None;
+    }
+}
+
 pub(super) async fn reconcile(
     reg: &Registry,
     cert_lookup: &HashMap<String, CertPaths>,

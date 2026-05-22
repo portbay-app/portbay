@@ -16,6 +16,7 @@
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import type { CertInfo } from "$lib/types/certs";
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView, ProjectType } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
@@ -42,6 +43,11 @@
   let logTail = $state<string[]>([]);
   let logLoading = $state<boolean>(false);
 
+  let certInfo = $state<CertInfo | null>(null);
+  let certLoading = $state<boolean>(false);
+  let certError = $state<string | null>(null);
+  let reissuing = $state<boolean>(false);
+
   let rawConfigOpen = $state<boolean>(false);
   let rawDraft = $state<string>("");
 
@@ -64,6 +70,7 @@
       rawConfigOpen = false;
       syncRawFromFields();
       void loadLogs();
+      void loadCert();
     });
   });
 
@@ -168,6 +175,61 @@
       logTail = [];
     } finally {
       logLoading = false;
+    }
+  }
+
+  async function loadCert() {
+    if (!project || !project.https) {
+      certInfo = null;
+      certError = null;
+      return;
+    }
+    certLoading = true;
+    certError = null;
+    try {
+      certInfo = await safeInvoke<CertInfo>("cert_info", { id: project.id });
+    } catch (e) {
+      certInfo = null;
+      const err = e as CommandError | undefined;
+      // PROJECT_NOT_FOUND from cert_info means "no cert issued yet" —
+      // that's the empty state, not a hard error.
+      certError = err && err.code !== "PROJECT_NOT_FOUND"
+        ? err.whatHappened
+        : null;
+    } finally {
+      certLoading = false;
+    }
+  }
+
+  async function reissue() {
+    if (!project) return;
+    reissuing = true;
+    try {
+      await safeInvoke("reissue_cert", { id: project.id });
+      // Reconcile tick issued the cert; give it a beat then refresh.
+      await new Promise((r) => setTimeout(r, 400));
+      await loadCert();
+      errorBus.push({
+        code: "REISSUE_OK",
+        whatHappened: `Cert reissued for ${project.name}.`,
+        whyItMatters: "Caddy reloaded the cert; refresh your browser tab.",
+        whoCausedIt: "system",
+        actions: [],
+      });
+    } catch {
+      /* toast already pushed */
+    } finally {
+      reissuing = false;
+    }
+  }
+
+  async function revealCertFolder() {
+    if (!certInfo) return;
+    const dir = certInfo.certificatePath.replace(/\/cert\.pem$/, "");
+    try {
+      await openUrl(`file://${dir}`);
+    } catch {
+      /* opener pushes its own toast */
     }
   }
 
@@ -409,6 +471,93 @@
             <dt class="text-fg-muted font-sans">Exit code</dt>
             <dd class="text-fg">{project.runtime.exitCode}</dd>
           </dl>
+        </DashboardCard>
+      {/if}
+
+      <!-- Certificates (HTTPS projects only) -->
+      {#if project.https}
+        <DashboardCard title="Certificates" flush>
+          {#snippet badge()}
+            <div class="flex items-center gap-1">
+              {#if certInfo}
+                <button
+                  type="button"
+                  onclick={revealCertFolder}
+                  title="Reveal cert folder in Finder"
+                  class="text-[11px] text-fg-muted hover:text-fg px-1.5 py-0.5"
+                >
+                  Reveal
+                </button>
+              {/if}
+              <button
+                type="button"
+                onclick={reissue}
+                disabled={reissuing}
+                title="Reissue cert"
+                class="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent-hover px-1.5 py-0.5 disabled:opacity-50"
+              >
+                {#if reissuing}
+                  <Icon name="refresh-cw" size={10} class="animate-spin" />
+                  Reissuing…
+                {:else}
+                  Reissue
+                {/if}
+              </button>
+            </div>
+          {/snippet}
+
+          {#if certError}
+            <p class="text-xs text-status-crashed">{certError}</p>
+          {:else if certLoading && !certInfo}
+            <p class="text-xs text-fg-subtle">Loading…</p>
+          {:else if !certInfo}
+            <p class="text-xs text-fg-subtle">
+              No certificate yet. The reconciler issues one within ~30 s on
+              first reconcile, or click <span class="text-accent">Reissue</span>
+              to force it now.
+            </p>
+          {:else}
+            <dl class="grid grid-cols-[100px,1fr] gap-x-4 gap-y-2 text-xs">
+              <dt class="text-fg-muted">Issued</dt>
+              <dd class="text-fg font-mono">{certInfo.issuedAt ?? "—"}</dd>
+
+              <dt class="text-fg-muted">Expires</dt>
+              <dd class="text-fg font-mono">
+                {certInfo.expiresAt ?? "—"}
+                {#if certInfo.daysUntilExpiry !== null}
+                  <span
+                    class={certInfo.daysUntilExpiry < 30
+                      ? "ml-2 text-status-unhealthy"
+                      : "ml-2 text-fg-subtle"}
+                  >
+                    ({certInfo.daysUntilExpiry} day{certInfo.daysUntilExpiry === 1 ? "" : "s"})
+                  </span>
+                {/if}
+              </dd>
+
+              <dt class="text-fg-muted">SANs</dt>
+              <dd class="text-fg font-mono">
+                {#if certInfo.sans.length === 0}
+                  <span class="text-fg-subtle">—</span>
+                {:else}
+                  {certInfo.sans.join(", ")}
+                {/if}
+              </dd>
+
+              <dt class="text-fg-muted">Path</dt>
+              <dd class="flex items-center gap-2 min-w-0">
+                <span class="text-fg font-mono text-[11px] truncate">{certInfo.certificatePath}</span>
+                <button
+                  type="button"
+                  onclick={() => copyToClipboard(certInfo!.certificatePath, "Cert path")}
+                  title="Copy path"
+                  class="p-0.5 rounded text-fg-subtle hover:text-fg"
+                >
+                  <Icon name="link" size={11} />
+                </button>
+              </dd>
+            </dl>
+          {/if}
         </DashboardCard>
       {/if}
 

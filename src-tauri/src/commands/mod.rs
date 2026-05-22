@@ -11,6 +11,7 @@
 //! `AppError` serialises into the §5.4 envelope shape. See
 //! `src/error.rs` for the exact wire format.
 
+pub mod certs;
 pub mod dto;
 pub mod events;
 pub mod lifecycle;

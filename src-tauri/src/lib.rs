@@ -135,12 +135,13 @@ pub fn run() {
                 .as_ref()
                 .and_then(|p| Mkcert::default_in_data_dir(p.clone()));
 
-            let reconciler = Reconciler::new(logs_dir.clone(), yaml_path.clone(), mkcert);
+            let reconciler = Reconciler::new(logs_dir.clone(), yaml_path.clone());
 
             app.manage(AppState::new(
                 registry_path,
                 DEFAULT_DOMAIN_SUFFIX,
                 logs_dir,
+                mkcert,
                 reconciler,
             ));
             app.manage(commands::metrics::MetricsState::new());
@@ -210,6 +211,9 @@ pub fn run() {
             commands::sidecars::restart_pc,
             commands::sidecars::restart_caddy,
             commands::sidecars::reconcile_hosts,
+            commands::certs::install_mkcert_ca,
+            commands::certs::cert_info,
+            commands::certs::reissue_cert,
             commands::system::doctor,
             commands::system::tail_logs,
             commands::metrics::system_metrics,

@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio::sync::{Mutex, Notify};
 
-use crate::mkcert::Mkcert;
 use crate::registry::{store, Registry};
 use crate::state::AppState;
 
@@ -52,7 +51,6 @@ pub struct Reconciler {
 struct Inner {
     logs_dir: PathBuf,
     yaml_path: PathBuf,
-    mkcert: Option<Mkcert>,
     pc_cache: pc::PcCache,
     caddy_cache: caddy::CaddyCache,
     hosts_cache: hosts::HostsCache,
@@ -60,12 +58,11 @@ struct Inner {
 }
 
 impl Reconciler {
-    pub fn new(logs_dir: PathBuf, yaml_path: PathBuf, mkcert: Option<Mkcert>) -> Self {
+    pub fn new(logs_dir: PathBuf, yaml_path: PathBuf) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 logs_dir,
                 yaml_path,
-                mkcert,
                 pc_cache: pc::PcCache::default(),
                 caddy_cache: caddy::CaddyCache::default(),
                 hosts_cache: hosts::HostsCache::default(),
@@ -89,6 +86,15 @@ impl Reconciler {
     pub async fn prime_pc_cache_from_yaml(&self, yaml: &str) {
         let mut inner = self.inner.lock().await;
         inner.pc_cache.prime(pc::hash_yaml(yaml));
+    }
+
+    /// Drop the Caddy sub-step's cached hash so the next tick re-POSTs
+    /// `/load`. Used by `reissue_cert` — the cert files on disk changed
+    /// but the config-JSON hash didn't (same paths), so Caddy wouldn't
+    /// otherwise re-read the certs.
+    pub async fn invalidate_caddy_cache(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.caddy_cache.invalidate();
     }
 
     /// Run one tick to completion. Folds per-step outcomes into a
@@ -125,14 +131,13 @@ impl Reconciler {
         let Inner {
             logs_dir,
             yaml_path,
-            mkcert,
             pc_cache,
             caddy_cache,
             hosts_cache,
             certs_cache,
         } = &mut *inner;
 
-        let certs_result = certs::reconcile(&reg, mkcert.as_ref(), certs_cache);
+        let certs_result = certs::reconcile(&reg, state.mkcert.as_ref(), certs_cache);
 
         let pc_outcome =
             pc::reconcile(&reg, logs_dir, yaml_path, &state, app, pc_cache).await;
@@ -220,7 +225,7 @@ mod tests {
 
     #[test]
     fn mark_dirty_does_not_panic_on_construction() {
-        let r = Reconciler::new(PathBuf::from("/tmp"), PathBuf::from("/tmp/x.yaml"), None);
+        let r = Reconciler::new(PathBuf::from("/tmp"), PathBuf::from("/tmp/x.yaml"));
         r.mark_dirty();
         r.mark_dirty();
         r.mark_dirty();
@@ -228,7 +233,7 @@ mod tests {
 
     #[tokio::test]
     async fn notify_coalesces_multiple_marks_into_one_wake() {
-        let r = Reconciler::new(PathBuf::from("/tmp"), PathBuf::from("/tmp/x.yaml"), None);
+        let r = Reconciler::new(PathBuf::from("/tmp"), PathBuf::from("/tmp/x.yaml"));
         let n = r.notify.clone();
 
         // Fire three marks before any waiter exists.

@@ -86,11 +86,29 @@
 
       case "mkcertCa":
         if (info.status === "not_installed") {
+          // Bundled binary missing entirely — point at upstream docs as
+          // a last-resort hint.
           return {
             label: "Install docs",
             icon: "external-link",
             tone: "warn",
             run: () => void openUrl("https://github.com/FiloSottile/mkcert"),
+          };
+        }
+        if (info.status === "stopped") {
+          // Binary present, CA not yet installed in system keychain.
+          return {
+            label: "Install local CA",
+            icon: "check",
+            tone: "accent",
+            run: async () => {
+              try {
+                await safeInvoke("install_mkcert_ca");
+                await sidecars.refresh();
+              } catch {
+                // safeInvoke already pushed the toast (likely user-cancelled).
+              }
+            },
           };
         }
         return null;

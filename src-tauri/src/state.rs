@@ -22,6 +22,7 @@ use crate::caddy::{
     bootstrap_config, find_free_https_port, find_free_port, CaddyClient, CaddyError, CaddySidecar,
     ADMIN_SCAN_RANGE, DEFAULT_ADMIN_PORT, DEFAULT_HTTPS_PORT,
 };
+use crate::mkcert::Mkcert;
 use crate::process_compose::{PcClient, SidecarManager};
 use crate::reconciler::Reconciler;
 
@@ -59,6 +60,11 @@ pub struct AppState {
     /// (or a `restart_caddy` invocation) has started the sidecar.
     pub caddy_client: Mutex<Option<CaddyClient>>,
 
+    /// Wrapper around the bundled mkcert binary. `None` if the binary
+    /// could not be resolved at setup (degrades to "no cert issuance",
+    /// surfaced via the mkcert sidecar slot).
+    pub mkcert: Option<Mkcert>,
+
     /// Convergence engine — owns hash caches for the four sub-steps and
     /// the dirty-notify primitive the background loop awaits.
     pub reconciler: Reconciler,
@@ -69,6 +75,7 @@ impl AppState {
         registry_path: PathBuf,
         domain_suffix: impl Into<String>,
         logs_dir: PathBuf,
+        mkcert: Option<Mkcert>,
         reconciler: Reconciler,
     ) -> Self {
         Self {
@@ -79,6 +86,7 @@ impl AppState {
             pc_client: Mutex::new(None),
             caddy: Mutex::new(CaddySidecar::new()),
             caddy_client: Mutex::new(None),
+            mkcert,
             reconciler,
         }
     }

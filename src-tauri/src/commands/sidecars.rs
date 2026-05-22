@@ -16,7 +16,7 @@ use crate::state::AppState;
 pub async fn sidecar_status(state: State<'_, AppState>) -> AppResult<SidecarHealth> {
     let process_compose = pc_status(&state).await;
     let caddy = caddy_status(&state).await;
-    let mkcert_ca = mkcert_status();
+    let mkcert_ca = mkcert_status(&state);
     let hosts_helper = hosts_status();
 
     Ok(SidecarHealth {
@@ -114,21 +114,30 @@ async fn caddy_status(state: &AppState) -> SidecarStatus {
     }
 }
 
-fn mkcert_status() -> SidecarStatus {
-    let installed = which::which("mkcert").is_ok();
-    SidecarStatus {
-        name: "mkcert",
-        status: if installed {
-            SidecarState::Running
-        } else {
-            SidecarState::NotInstalled
-        },
-        detail: if installed {
-            Some("found on PATH".into())
-        } else {
-            Some("not found — install with `brew install mkcert`".into())
-        },
-        last_error: None,
+fn mkcert_status(state: &AppState) -> SidecarStatus {
+    let Some(mkcert) = state.mkcert.as_ref() else {
+        return SidecarStatus {
+            name: "mkcert",
+            status: SidecarState::NotInstalled,
+            detail: Some("bundled binary not found".into()),
+            last_error: None,
+        };
+    };
+
+    if mkcert.is_ca_installed() {
+        SidecarStatus {
+            name: "mkcert",
+            status: SidecarState::Running,
+            detail: Some("CA installed in system keychain".into()),
+            last_error: None,
+        }
+    } else {
+        SidecarStatus {
+            name: "mkcert",
+            status: SidecarState::Stopped,
+            detail: Some("CA not installed — click Install local CA".into()),
+            last_error: None,
+        }
     }
 }
 
