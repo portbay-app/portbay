@@ -14,6 +14,7 @@
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors";
   import { projectDetailPanel } from "$lib/stores/detailPanel";
+  import { logViewer } from "$lib/stores/logViewer";
   import { projects } from "$lib/stores/projects";
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView, ProjectType } from "$lib/types/projects";
@@ -511,15 +512,25 @@
       <!-- Logs preview -->
       <DashboardCard title="Recent logs" flush>
         {#snippet badge()}
-          <button
-            type="button"
-            onclick={loadLogs}
-            title="Refresh logs"
-            class="p-1 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2 transition-colors"
-            class:animate-spin={logLoading}
-          >
-            <Icon name="refresh-cw" size={11} />
-          </button>
+          <div class="flex items-center gap-1">
+            <button
+              type="button"
+              onclick={() => project && logViewer.show(project.id)}
+              title="Open full log viewer"
+              class="text-[11px] text-accent hover:text-accent-hover px-1.5 py-0.5"
+            >
+              Open viewer
+            </button>
+            <button
+              type="button"
+              onclick={loadLogs}
+              title="Refresh logs"
+              class="p-1 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2 transition-colors"
+              class:animate-spin={logLoading}
+            >
+              <Icon name="refresh-cw" size={11} />
+            </button>
+          </div>
         {/snippet}
         {#if logTail.length === 0}
           <p class="text-xs text-fg-subtle">

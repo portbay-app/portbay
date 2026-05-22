@@ -18,6 +18,7 @@
   import { ToastHost } from "$lib/components/errors";
   import { AddProjectWizard } from "$lib/components/wizard";
   import { ProjectDetailPanel } from "$lib/components/projects";
+  import { LogViewer } from "$lib/components/logs";
   import { density } from "$lib/stores/density";
 
   let { children }: { children: Snippet } = $props();
@@ -49,4 +50,5 @@
 
 <AddProjectWizard />
 <ProjectDetailPanel />
+<LogViewer />
 <ToastHost />

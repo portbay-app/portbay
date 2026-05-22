@@ -1,0 +1,311 @@
+<!--
+  LogViewer — full-screen modal log tail for one project.
+
+  Phase 2 ships static-tail mode (snapshot from `tail_logs`). The
+  "Follow" toggle is wired to a 1.5s polling stub since the
+  Channel<T>-based WS stream is deferred to Phase 3 (per the card spec's
+  status: stubbed pattern). The UI is identical either way; only the
+  refresh cadence differs.
+-->
+<script lang="ts">
+  import { onMount, untrack } from "svelte";
+
+  import { Icon, StatusPill } from "$lib/components/atoms";
+  import { safeInvoke } from "$lib/ipc";
+  import { errorBus } from "$lib/stores/errors";
+  import { logViewer } from "$lib/stores/logViewer";
+  import { projects } from "$lib/stores/projects";
+  import type { ProjectView } from "$lib/types/projects";
+
+  const project = $derived<ProjectView | null>(
+    logViewer.id === null
+      ? null
+      : (projects.value.find((p) => p.id === logViewer.id) ?? null),
+  );
+
+  let lines = $state<string[]>([]);
+  let loading = $state<boolean>(false);
+  let follow = $state<boolean>(false);
+  let searchQuery = $state<string>("");
+  let matchIndex = $state<number>(0);
+  let autoScroll = $state<boolean>(true);
+  let scrollerEl: HTMLDivElement | undefined = $state();
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function reload() {
+    if (!project) return;
+    loading = true;
+    try {
+      lines = await safeInvoke<string[]>("tail_logs", {
+        id: project.id,
+        limit: 1000,
+      });
+    } catch {
+      lines = [];
+    } finally {
+      loading = false;
+      if (autoScroll) requestAnimationFrame(scrollToBottom);
+    }
+  }
+
+  function scrollToBottom() {
+    if (!scrollerEl) return;
+    scrollerEl.scrollTop = scrollerEl.scrollHeight;
+  }
+
+  function startFollow() {
+    if (pollTimer !== null) return;
+    pollTimer = setInterval(() => void reload(), 1_500);
+  }
+
+  function stopFollow() {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  // Re-init when the viewer opens for a different project.
+  $effect(() => {
+    const p = project;
+    if (!p) {
+      stopFollow();
+      return;
+    }
+    untrack(() => {
+      lines = [];
+      searchQuery = "";
+      matchIndex = 0;
+      autoScroll = true;
+      follow = false;
+      void reload();
+    });
+  });
+
+  // Follow toggle wires up / tears down the poll.
+  $effect(() => {
+    if (follow) startFollow();
+    else stopFollow();
+  });
+
+  // ----- search -----
+  const matches = $derived.by(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [] as number[];
+    const found: number[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].toLowerCase().includes(q)) found.push(i);
+    }
+    return found;
+  });
+
+  function jumpToMatch(direction: 1 | -1) {
+    if (matches.length === 0) return;
+    matchIndex =
+      (matchIndex + direction + matches.length) % matches.length;
+    scrollToLine(matches[matchIndex]);
+  }
+
+  function scrollToLine(idx: number) {
+    if (!scrollerEl) return;
+    const lineEl = scrollerEl.querySelector(
+      `[data-line="${idx}"]`,
+    ) as HTMLElement | null;
+    if (lineEl) {
+      lineEl.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
+  async function copyAll() {
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      errorBus.push({
+        code: "COPIED",
+        whatHappened: "Log copied.",
+        whyItMatters: "Paste anywhere.",
+        whoCausedIt: "system",
+        actions: [],
+      });
+    } catch {
+      /* silently fail */
+    }
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if (logViewer.id === null) return;
+    if (e.key === "Escape") {
+      logViewer.hide();
+      return;
+    }
+    // `/` focuses search (only when not already in an input).
+    if (
+      e.key === "/" &&
+      !(e.target instanceof HTMLInputElement)
+    ) {
+      e.preventDefault();
+      (document.getElementById("logviewer-search") as HTMLInputElement)?.focus();
+      return;
+    }
+    if (e.target instanceof HTMLInputElement) return;
+    if (e.key === "n") jumpToMatch(1);
+    else if (e.key === "N") jumpToMatch(-1);
+  }
+
+  onMount(() => () => stopFollow());
+
+  // Detect manual scroll-up; turn off autoScroll when not at bottom.
+  function onScroll() {
+    if (!scrollerEl) return;
+    const atBottom =
+      scrollerEl.scrollHeight - scrollerEl.scrollTop - scrollerEl.clientHeight < 40;
+    autoScroll = atBottom;
+  }
+</script>
+
+<svelte:window onkeydown={onKeydown} />
+
+{#if project}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="fixed inset-0 z-50 bg-bg/70 backdrop-blur-sm flex items-center justify-center p-6"
+    onclick={() => logViewer.hide()}
+  >
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      onclick={(e) => e.stopPropagation()}
+      class="w-[1100px] max-w-[95vw] h-[85vh] bg-surface border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
+      role="dialog"
+      aria-label="Log viewer"
+      aria-modal="true"
+      tabindex="-1"
+    >
+      <!-- Header -->
+      <header
+        class="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-border"
+      >
+        <Icon name="terminal" size={16} class="text-fg-muted" />
+        <h2 class="text-sm font-semibold text-fg">{project.name}</h2>
+        <StatusPill status={project.status} />
+
+        <!-- Follow toggle -->
+        <label
+          class="ml-auto flex items-center gap-1.5 text-xs text-fg-muted cursor-pointer"
+        >
+          <input
+            type="checkbox"
+            bind:checked={follow}
+            class="accent-accent"
+          />
+          Follow
+        </label>
+
+        <!-- Search -->
+        <div
+          class="flex items-center w-56 h-7 rounded-md bg-bg border border-border focus-within:border-accent/60 transition-colors"
+        >
+          <span class="pl-2 text-fg-subtle">
+            <Icon name="search" size={12} />
+          </span>
+          <input
+            id="logviewer-search"
+            type="text"
+            bind:value={searchQuery}
+            oninput={() => (matchIndex = 0)}
+            placeholder="Search (/)"
+            class="flex-1 bg-transparent text-xs pl-2 pr-2 outline-none text-fg placeholder-fg-subtle"
+          />
+          {#if matches.length > 0}
+            <span class="px-2 text-[11px] text-fg-subtle tabular-nums">
+              {matchIndex + 1}/{matches.length}
+            </span>
+          {/if}
+        </div>
+
+        {#if matches.length > 0}
+          <button
+            type="button"
+            onclick={() => jumpToMatch(-1)}
+            title="Previous match (N)"
+            class="p-1 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+          >
+            <Icon name="chevron-down" size={12} class="rotate-180" />
+          </button>
+          <button
+            type="button"
+            onclick={() => jumpToMatch(1)}
+            title="Next match (n)"
+            class="p-1 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+          >
+            <Icon name="chevron-down" size={12} />
+          </button>
+        {/if}
+
+        <button
+          type="button"
+          onclick={() => void reload()}
+          title="Reload"
+          class="p-1 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+          class:animate-spin={loading}
+        >
+          <Icon name="refresh-cw" size={12} />
+        </button>
+        <button
+          type="button"
+          onclick={copyAll}
+          title="Copy entire log"
+          class="p-1 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+        >
+          <Icon name="link" size={12} />
+        </button>
+        <button
+          type="button"
+          onclick={() => logViewer.hide()}
+          title="Close"
+          aria-label="Close log viewer"
+          class="p-1 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+        >
+          <Icon name="x" size={14} />
+        </button>
+      </header>
+
+      <!-- Body -->
+      <div
+        bind:this={scrollerEl}
+        onscroll={onScroll}
+        class="flex-1 min-h-0 overflow-y-auto bg-bg p-3"
+      >
+        {#if lines.length === 0}
+          <p class="text-xs text-fg-subtle italic px-2 py-4">
+            {loading ? "Loading log…" : "No log output yet."}
+          </p>
+        {:else}
+          <pre class="text-[12px] font-mono leading-relaxed text-fg-muted">
+{#each lines as line, i (i)}
+<div
+  data-line={i}
+  class="px-2 py-0.5 -mx-2 rounded
+         {matches.includes(i) ? 'bg-accent/10 text-fg' : ''}
+         {matches[matchIndex] === i ? 'ring-1 ring-accent' : ''}"
+>{line || " "}</div>
+{/each}
+          </pre>
+        {/if}
+      </div>
+
+      <!-- Footer hint -->
+      <footer
+        class="shrink-0 px-4 py-2 border-t border-border flex items-center gap-3 text-[11px] text-fg-subtle"
+      >
+        <span>{lines.length} lines</span>
+        {#if follow}
+          <span class="text-status-running">● following (1.5s poll)</span>
+        {/if}
+        <span class="ml-auto">
+          ESC close · / search · n / N next / prev · click outside to close
+        </span>
+      </footer>
+    </div>
+  </div>
+{/if}
