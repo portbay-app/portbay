@@ -139,11 +139,9 @@ impl Reconciler {
 
         let certs_result = certs::reconcile(&reg, state.mkcert.as_ref(), certs_cache);
 
-        let pc_outcome =
-            pc::reconcile(&reg, logs_dir, yaml_path, &state, app, pc_cache).await;
+        let pc_outcome = pc::reconcile(&reg, logs_dir, yaml_path, &state, app, pc_cache).await;
 
-        let caddy_outcome =
-            caddy::reconcile(&reg, &certs_result.lookup, &state, caddy_cache).await;
+        let caddy_outcome = caddy::reconcile(&reg, &certs_result.lookup, &state, caddy_cache).await;
 
         let hosts_outcome = hosts::reconcile(&reg, hosts_cache);
 

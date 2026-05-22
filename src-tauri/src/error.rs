@@ -20,7 +20,9 @@
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 
 use crate::caddy::CaddyError;
+use crate::dnsmasq::DnsmasqError;
 use crate::hosts::HostsError;
+use crate::mailpit::MailpitError;
 use crate::process_compose::PcError;
 use crate::registry::RegistryError;
 
@@ -55,6 +57,12 @@ pub enum AppError {
     Caddy(#[from] CaddyError),
 
     #[error("{0}")]
+    Dnsmasq(#[from] DnsmasqError),
+
+    #[error("{0}")]
+    Mailpit(#[from] MailpitError),
+
+    #[error("{0}")]
     Hosts(#[from] HostsError),
 
     #[error("io: {0}")]
@@ -83,6 +91,8 @@ impl AppError {
             Self::Registry(_) => "REGISTRY_FAILURE",
             Self::Pc(_) => "PROCESS_COMPOSE_FAILURE",
             Self::Caddy(_) => "CADDY_FAILURE",
+            Self::Dnsmasq(_) => "DNSMASQ_FAILURE",
+            Self::Mailpit(_) => "MAILPIT_FAILURE",
             Self::Hosts(_) => "HOSTS_FAILURE",
             Self::Io(_) => "IO_FAILURE",
             Self::SidecarDown(_) => "SIDECAR_DOWN",
@@ -104,6 +114,13 @@ impl AppError {
             Self::Registry(_) => "PortBay can't read or write its project list.".into(),
             Self::Pc(_) => "The action didn't reach the daemon.".into(),
             Self::Caddy(_) => "Caddy didn't apply the change — routes may be out of sync.".into(),
+            Self::Dnsmasq(_) => {
+                "dnsmasq didn't start — wildcard DNS for .test won't resolve until it's running."
+                    .into()
+            }
+            Self::Mailpit(_) => {
+                "Mailpit didn't start — outgoing mail from local projects won't be caught.".into()
+            }
             Self::BadInput(_) => "Fix the input and try again.".into(),
             Self::Hosts(_) | Self::Io(_) | Self::Internal(_) => {
                 "The action did not complete.".into()

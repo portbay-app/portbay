@@ -38,7 +38,8 @@
     "externalBin": [
       "binaries/process-compose",
       "binaries/caddy",
-      "binaries/mkcert"
+      "binaries/mkcert",
+      "binaries/mailpit"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"

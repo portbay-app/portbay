@@ -72,7 +72,9 @@ impl ProjectView {
             tags: project.tags.clone(),
             document_root: project.document_root.clone(),
             php_version: project.php_version.clone(),
-            status: proc.map(|p| p.portbay_status()).unwrap_or(ProjectStatus::Stopped),
+            status: proc
+                .map(|p| p.portbay_status())
+                .unwrap_or(ProjectStatus::Stopped),
             runtime: proc.map(RuntimeInfo::from_process),
         }
     }
@@ -170,6 +172,8 @@ pub struct SidecarHealth {
     pub process_compose: SidecarStatus,
     pub caddy: SidecarStatus,
     pub mkcert_ca: SidecarStatus,
+    pub dnsmasq: SidecarStatus,
+    pub mailpit: SidecarStatus,
     pub hosts_helper: SidecarStatus,
 }
 

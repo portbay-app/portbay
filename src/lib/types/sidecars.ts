@@ -7,6 +7,8 @@ export type SidecarKey =
   | "processCompose"
   | "caddy"
   | "mkcertCa"
+  | "dnsmasq"
+  | "mailpit"
   | "hostsHelper";
 
 export type SidecarState =
@@ -26,6 +28,8 @@ export interface SidecarHealth {
   processCompose: SidecarStatus;
   caddy: SidecarStatus;
   mkcertCa: SidecarStatus;
+  dnsmasq: SidecarStatus;
+  mailpit: SidecarStatus;
   hostsHelper: SidecarStatus;
 }
 
@@ -34,6 +38,8 @@ export const sidecarTitle: Record<SidecarKey, string> = {
   processCompose: "Process Compose",
   caddy: "Caddy",
   mkcertCa: "mkcert CA",
+  dnsmasq: "dnsmasq",
+  mailpit: "Mailpit",
   hostsHelper: "/etc/hosts",
 };
 
@@ -42,5 +48,7 @@ export const SIDECAR_ORDER: SidecarKey[] = [
   "processCompose",
   "caddy",
   "mkcertCa",
+  "dnsmasq",
+  "mailpit",
   "hostsHelper",
 ];

@@ -113,6 +113,27 @@
         }
         return null;
 
+      case "dnsmasq":
+        // The resolver-file install flow is a separate card. Until it
+        // lands, the dnsmasq card is read-only: it shows whether the
+        // sidecar is running and on which port, but offers no actions.
+        return null;
+
+      case "mailpit":
+        if (info.status === "running") {
+          // Extract the UI port from `smtp :1025 · ui :8025` so the
+          // button knows where to point.
+          const m = info.detail?.match(/ui :(\d+)/);
+          const uiPort = m ? Number(m[1]) : 8025;
+          return {
+            label: "Open inbox",
+            icon: "external-link",
+            tone: "accent",
+            run: () => void openUrl(`http://127.0.0.1:${uiPort}`),
+          };
+        }
+        return null;
+
       case "hostsHelper":
         return {
           label: "Reconcile",

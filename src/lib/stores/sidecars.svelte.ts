@@ -24,6 +24,8 @@ const INITIAL: SidecarHealth = {
   processCompose: { ...PLACEHOLDER, name: "process-compose" },
   caddy: { ...PLACEHOLDER, name: "caddy" },
   mkcertCa: { ...PLACEHOLDER, name: "mkcert" },
+  dnsmasq: { ...PLACEHOLDER, name: "dnsmasq" },
+  mailpit: { ...PLACEHOLDER, name: "mailpit" },
   hostsHelper: { ...PLACEHOLDER, name: "hosts" },
 };
 

@@ -17,12 +17,16 @@ pub async fn sidecar_status(state: State<'_, AppState>) -> AppResult<SidecarHeal
     let process_compose = pc_status(&state).await;
     let caddy = caddy_status(&state).await;
     let mkcert_ca = mkcert_status(&state);
+    let dnsmasq = dnsmasq_status(&state);
+    let mailpit = mailpit_status(&state);
     let hosts_helper = hosts_status();
 
     Ok(SidecarHealth {
         process_compose,
         caddy,
         mkcert_ca,
+        dnsmasq,
+        mailpit,
         hosts_helper,
     })
 }
@@ -75,7 +79,11 @@ pub async fn reconcile_hosts(app: AppHandle, state: State<'_, AppState>) -> AppR
 }
 
 async fn pc_status(state: &AppState) -> SidecarStatus {
-    let client = state.pc_client.lock().expect("pc_client mutex poisoned").clone();
+    let client = state
+        .pc_client
+        .lock()
+        .expect("pc_client mutex poisoned")
+        .clone();
     let (status, detail) = match client {
         None => (SidecarState::Stopped, Some("not started".into())),
         Some(c) => match c.live().await {
@@ -136,6 +144,70 @@ fn mkcert_status(state: &AppState) -> SidecarStatus {
             name: "mkcert",
             status: SidecarState::Stopped,
             detail: Some("CA not installed — click Install local CA".into()),
+            last_error: None,
+        }
+    }
+}
+
+fn dnsmasq_status(state: &AppState) -> SidecarStatus {
+    let (running, port) = {
+        let guard = state.dnsmasq.lock().expect("dnsmasq mutex poisoned");
+        (guard.is_running(), guard.port())
+    };
+    if running {
+        return SidecarStatus {
+            name: "dnsmasq",
+            status: SidecarState::Running,
+            detail: Some(format!("listening on 127.0.0.1:{port}")),
+            last_error: None,
+        };
+    }
+
+    // Not running. Distinguish "binary missing" (NotInstalled) from
+    // "binary present but didn't start" (Stopped) so the GUI can hint
+    // appropriately.
+    if which::which("dnsmasq").is_ok() {
+        SidecarStatus {
+            name: "dnsmasq",
+            status: SidecarState::Stopped,
+            detail: Some("binary present, not started".into()),
+            last_error: None,
+        }
+    } else {
+        SidecarStatus {
+            name: "dnsmasq",
+            status: SidecarState::NotInstalled,
+            detail: Some("install via `brew install dnsmasq` or bundle a sidecar".into()),
+            last_error: None,
+        }
+    }
+}
+
+fn mailpit_status(state: &AppState) -> SidecarStatus {
+    let (running, smtp, ui) = {
+        let guard = state.mailpit.lock().expect("mailpit mutex poisoned");
+        (guard.is_running(), guard.smtp_port(), guard.ui_port())
+    };
+    if running {
+        return SidecarStatus {
+            name: "mailpit",
+            status: SidecarState::Running,
+            detail: Some(format!("smtp :{smtp} · ui :{ui}")),
+            last_error: None,
+        };
+    }
+    if which::which("mailpit").is_ok() {
+        SidecarStatus {
+            name: "mailpit",
+            status: SidecarState::Stopped,
+            detail: Some("binary present, not started".into()),
+            last_error: None,
+        }
+    } else {
+        SidecarStatus {
+            name: "mailpit",
+            status: SidecarState::NotInstalled,
+            detail: Some("install via `brew install mailpit` or bundle a sidecar".into()),
             last_error: None,
         }
     }

@@ -22,6 +22,14 @@ use crate::caddy::{
     bootstrap_config, find_free_https_port, find_free_port, CaddyClient, CaddyError, CaddySidecar,
     ADMIN_SCAN_RANGE, DEFAULT_ADMIN_PORT, DEFAULT_HTTPS_PORT,
 };
+use crate::dnsmasq::{
+    self, DnsmasqSidecar, DEFAULT_PORT as DNSMASQ_DEFAULT_PORT,
+    PORT_SCAN_RANGE as DNSMASQ_PORT_SCAN_RANGE,
+};
+use crate::mailpit::{
+    self, MailpitSidecar, DEFAULT_SMTP_PORT, DEFAULT_UI_PORT,
+    PORT_SCAN_RANGE as MAILPIT_PORT_SCAN_RANGE,
+};
 use crate::mkcert::Mkcert;
 use crate::process_compose::{PcClient, SidecarManager};
 use crate::reconciler::Reconciler;
@@ -65,6 +73,15 @@ pub struct AppState {
     /// surfaced via the mkcert sidecar slot).
     pub mkcert: Option<Mkcert>,
 
+    /// The bundled dnsmasq sidecar manager. May not be running if no
+    /// binary is available; the sidecar status row surfaces that state.
+    pub dnsmasq: Mutex<DnsmasqSidecar>,
+
+    /// The bundled Mailpit sidecar manager. Catches outgoing SMTP from
+    /// local projects on the configured loopback port; status row
+    /// surfaces the listening ports.
+    pub mailpit: Mutex<MailpitSidecar>,
+
     /// Convergence engine — owns hash caches for the four sub-steps and
     /// the dirty-notify primitive the background loop awaits.
     pub reconciler: Reconciler,
@@ -87,6 +104,8 @@ impl AppState {
             caddy: Mutex::new(CaddySidecar::new()),
             caddy_client: Mutex::new(None),
             mkcert,
+            dnsmasq: Mutex::new(DnsmasqSidecar::new()),
+            mailpit: Mutex::new(MailpitSidecar::new()),
             reconciler,
         }
     }
@@ -149,20 +168,22 @@ impl AppState {
     ///   is left running so the next `restart_caddy` can retry cleanly
     ///   without the lifecycle thinking the slot is free.
     pub async fn boot_caddy(&self, app: &AppHandle) -> Result<(), crate::error::AppError> {
-        let admin_port = find_free_port(DEFAULT_ADMIN_PORT, ADMIN_SCAN_RANGE).ok_or(
-            CaddyError::NoFreePort {
+        let admin_port =
+            find_free_port(DEFAULT_ADMIN_PORT, ADMIN_SCAN_RANGE).ok_or(CaddyError::NoFreePort {
                 start: DEFAULT_ADMIN_PORT,
-            },
-        )?;
+            })?;
         let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
         let config_path = write_caddy_bootstrap_config(admin_port, https_port)?;
 
-        let client = self
-            .caddy
+        let client = self.caddy.lock().expect("caddy mutex poisoned").start(
+            app,
+            &config_path,
+            admin_port,
+        )?;
+        *self
+            .caddy_client
             .lock()
-            .expect("caddy mutex poisoned")
-            .start(app, &config_path, admin_port)?;
-        *self.caddy_client.lock().expect("caddy_client mutex poisoned") = Some(client.clone());
+            .expect("caddy_client mutex poisoned") = Some(client.clone());
 
         // Poll admin endpoint until the daemon responds. The sidecar
         // command line was already accepted; the child may still be in
@@ -183,7 +204,67 @@ impl AppState {
     /// Stop the bundled Caddy sidecar and clear the cached client.
     pub fn shutdown_caddy(&self) {
         self.caddy.lock().expect("caddy mutex poisoned").stop();
-        *self.caddy_client.lock().expect("caddy_client mutex poisoned") = None;
+        *self
+            .caddy_client
+            .lock()
+            .expect("caddy_client mutex poisoned") = None;
+    }
+
+    /// Start the dnsmasq sidecar against the registry's domain suffix.
+    /// Best-effort: if the binary isn't available, this returns Ok and
+    /// the sidecar status surface flags it as NotInstalled. dnsmasq is
+    /// not yet on the critical path — until the resolver-file install
+    /// command lands, no production queries flow through it.
+    pub fn boot_dnsmasq(&self, app: &AppHandle) -> Result<(), crate::error::AppError> {
+        if !dnsmasq::binary_available(app) {
+            return Ok(());
+        }
+        let port = dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE).ok_or(
+            crate::dnsmasq::DnsmasqError::NoFreePort {
+                start: DNSMASQ_DEFAULT_PORT,
+            },
+        )?;
+        let config_path = dnsmasq::write_config(&self.domain_suffix, port)?;
+        self.dnsmasq
+            .lock()
+            .expect("dnsmasq mutex poisoned")
+            .start(app, &config_path, port)?;
+        Ok(())
+    }
+
+    /// Stop the dnsmasq sidecar. Idempotent.
+    pub fn shutdown_dnsmasq(&self) {
+        self.dnsmasq.lock().expect("dnsmasq mutex poisoned").stop();
+    }
+
+    /// Start the Mailpit sidecar with SMTP + web UI listeners on
+    /// loopback. Best-effort: missing binary returns Ok and the status
+    /// surface flags it as NotInstalled.
+    pub fn boot_mailpit(&self, app: &AppHandle) -> Result<(), crate::error::AppError> {
+        if !mailpit::binary_available(app) {
+            return Ok(());
+        }
+        let smtp = mailpit::find_free_port(DEFAULT_SMTP_PORT, MAILPIT_PORT_SCAN_RANGE).ok_or(
+            crate::mailpit::MailpitError::NoFreePort {
+                start: DEFAULT_SMTP_PORT,
+            },
+        )?;
+        let ui = mailpit::find_free_port(DEFAULT_UI_PORT, MAILPIT_PORT_SCAN_RANGE).ok_or(
+            crate::mailpit::MailpitError::NoFreePort {
+                start: DEFAULT_UI_PORT,
+            },
+        )?;
+        let db_path = mailpit::lifecycle::default_db_path()?;
+        self.mailpit
+            .lock()
+            .expect("mailpit mutex poisoned")
+            .start(app, smtp, ui, &db_path)?;
+        Ok(())
+    }
+
+    /// Stop the Mailpit sidecar. Idempotent.
+    pub fn shutdown_mailpit(&self) {
+        self.mailpit.lock().expect("mailpit mutex poisoned").stop();
     }
 }
 

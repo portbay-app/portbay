@@ -56,13 +56,16 @@ Process Compose is committed to the repo; Caddy is fetched per checkout
 because the binary is large and platform-specific:
 
 ```bash
-./scripts/fetch-caddy.sh    # writes src-tauri/binaries/caddy-<triple>
-./scripts/fetch-mkcert.sh   # writes src-tauri/binaries/mkcert-<triple>
+./scripts/fetch-caddy.sh     # writes src-tauri/binaries/caddy-<triple>
+./scripts/fetch-mkcert.sh    # writes src-tauri/binaries/mkcert-<triple>
+./scripts/fetch-mailpit.sh   # writes src-tauri/binaries/mailpit-<triple>
 ```
 
-Re-run after bumping `CADDY_VERSION` / `MKCERT_VERSION` inside the
-scripts. On a fresh clone the dev server (`pnpm tauri dev`) will fail to
-start until these binaries are in place.
+Re-run after bumping the version constant inside any script. On a fresh
+clone the dev server (`pnpm tauri dev`) will fail to start until these
+binaries are in place. The dnsmasq sidecar is currently resolved from
+PATH; an equivalent `fetch-dnsmasq.sh` will land once the resolver-file
+install flow needs production bundling.
 
 ## Contributing
 

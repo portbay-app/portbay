@@ -2,8 +2,10 @@
 
 pub mod caddy;
 pub mod commands;
+pub mod dnsmasq;
 pub mod error;
 pub mod hosts;
+pub mod mailpit;
 pub mod mkcert;
 pub mod process_compose;
 pub mod reconciler;
@@ -36,9 +38,8 @@ const RECONCILE_SAFETY_PERIOD: Duration = Duration::from_secs(30);
 /// per-tick reconcile log isn't drowned in dependency noise.
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_env("PORTBAY_LOG").unwrap_or_else(|_| {
-        EnvFilter::new("info,tauri_plugin_shell=warn,reqwest=warn,hyper=warn")
-    });
+    let filter = EnvFilter::try_from_env("PORTBAY_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("info,tauri_plugin_shell=warn,reqwest=warn,hyper=warn"));
     let _ = fmt().with_env_filter(filter).try_init();
 }
 
@@ -123,10 +124,10 @@ pub fn run() {
             // against the real config rather than the deleted bootstrap
             // placeholder. Empty registry → empty `processes: {}`, PC
             // starts and waits.
-            let initial_registry = store::load_or_default(&registry_path, DEFAULT_DOMAIN_SUFFIX)
-                .map_err(boxed)?;
-            let initial_yaml = reconciler::build_initial_yaml(&initial_registry, &logs_dir)
-                .map_err(boxed)?;
+            let initial_registry =
+                store::load_or_default(&registry_path, DEFAULT_DOMAIN_SUFFIX).map_err(boxed)?;
+            let initial_yaml =
+                reconciler::build_initial_yaml(&initial_registry, &logs_dir).map_err(boxed)?;
             std::fs::write(&yaml_path, &initial_yaml).map_err(boxed)?;
 
             // Resolve mkcert; None is a tolerable degraded state.
@@ -161,6 +162,23 @@ pub fn run() {
             })
             .map_err(boxed)?;
 
+            // Best-effort dnsmasq boot. Until the resolver-file install
+            // command lands, dnsmasq running is harmless background
+            // noise — no production queries route through it yet — so
+            // a binary-missing or spawn failure is logged but does
+            // not block startup.
+            if let Err(e) = state.boot_dnsmasq(&app.handle()) {
+                tracing::warn!(error = %e, "dnsmasq sidecar did not start");
+            }
+
+            // Best-effort Mailpit boot. Same degraded-mode story as
+            // dnsmasq: useful for catching outgoing SMTP from local
+            // projects, but not on the critical path of any other
+            // sidecar.
+            if let Err(e) = state.boot_mailpit(&app.handle()) {
+                tracing::warn!(error = %e, "mailpit sidecar did not start");
+            }
+
             // Prime the PC sub-cache with the hash of the YAML we just
             // wrote + booted against — without this, the first tick's
             // PC sub-reconciler re-restarts the daemon that boot_pc
@@ -171,7 +189,10 @@ pub fn run() {
             let yaml_for_prime = initial_yaml.clone();
             tauri::async_runtime::block_on(async {
                 let state: tauri::State<AppState> = app.state();
-                state.reconciler.prime_pc_cache_from_yaml(&yaml_for_prime).await;
+                state
+                    .reconciler
+                    .prime_pc_cache_from_yaml(&yaml_for_prime)
+                    .await;
             });
 
             // Spawn the reconcile loop. Kick an immediate first tick so
@@ -192,6 +213,8 @@ pub fn run() {
                 let state: tauri::State<AppState> = window.state();
                 state.shutdown_pc();
                 state.shutdown_caddy();
+                state.shutdown_dnsmasq();
+                state.shutdown_mailpit();
             }
         })
         .invoke_handler(tauri::generate_handler![
