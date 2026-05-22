@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window — allows running the bundled process-compose sidecar.",
+  "description": "Capability for the main window — allows running the bundled process-compose sidecar and opening project URLs.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "shell:allow-execute",
+    "opener:default",
     {
       "identifier": "shell:allow-spawn",
       "allow": [
