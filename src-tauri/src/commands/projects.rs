@@ -6,7 +6,6 @@
 //! (Caddy reconcile, hosts file write, cert issuance) in one place later.
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use tauri::State;
@@ -15,7 +14,6 @@ use crate::commands::dto::{
     AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch,
 };
 use crate::error::{AppError, AppResult};
-use crate::hosts::HostsManager;
 use crate::process_compose::Process;
 use crate::registry::{store, Project, ProjectId, ProjectType, Readiness, Registry};
 use crate::state::AppState;
@@ -119,8 +117,10 @@ pub async fn add_project(
     registry.add_project(project.clone())?;
     save_registry(&state, &registry)?;
 
-    // Best-effort hosts entry. The CLI does the same — see `cmd_add`.
-    let _ = HostsManager::system().add(&hostname, Ipv4Addr::LOCALHOST);
+    // Hand off side-effects (hosts, certs, Caddy routes, PC YAML) to
+    // the reconciler. The tick runs in the background; the user's
+    // toast returns immediately.
+    state.reconciler.mark_dirty();
 
     Ok(ProjectView::from_project(&project, None))
 }
@@ -172,6 +172,7 @@ pub async fn update_project(
 
     let snapshot = project.clone();
     save_registry(&state, &registry)?;
+    state.reconciler.mark_dirty();
 
     // Look up live runtime after save.
     let pc_state = fetch_pc_state(&state).await;
@@ -245,27 +246,17 @@ fn has_php_index(path: &Path) -> bool {
     path.join("index.php").exists() || path.join("public").join("index.php").exists()
 }
 
-/// `remove_project(id)` — full cleanup. Registry → cert dir → hosts entry.
+/// `remove_project(id)` — drop the entry from the registry. The
+/// reconciler handles cert-dir reaping, hosts removal, Caddy route
+/// deletion, and PC YAML regeneration on the next tick (kicked
+/// immediately via `mark_dirty`).
 #[tauri::command]
 pub async fn remove_project(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let mut registry = load_registry(&state)?;
     let pid = ProjectId::new(id.clone());
-    let removed = registry.remove_project(&pid)?;
+    let _removed = registry.remove_project(&pid)?;
     save_registry(&state, &registry)?;
-
-    // Best-effort cert dir cleanup — match the CLI's `cmd_remove`.
-    if let Some(mut certs_root) = dirs::data_dir() {
-        certs_root.push("PortBay");
-        certs_root.push("certs");
-        let dir = certs_root.join(removed.id.as_str());
-        if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-    }
-
-    // Best-effort hosts entry removal.
-    let _ = HostsManager::system().remove(&removed.hostname);
-
+    state.reconciler.mark_dirty();
     Ok(())
 }
 

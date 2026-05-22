@@ -2,15 +2,17 @@
 //!
 //! Held behind `std::sync::Mutex` per Tauri 2 guidance: a guard MUST be
 //! dropped before any `.await` in a command. `tokio::sync::Mutex` is only
-//! needed when a guard needs to live across an await point — which our
-//! design never does.
+//! needed when a guard needs to live across an await point — which most
+//! of this struct's fields never do. The exception is the `reconciler`,
+//! whose tick crosses await points and owns its own internal tokio
+//! mutex (see `reconciler::Reconciler`).
 //!
 //! The registry is *not* cached here — every command loads it from disk,
 //! mutates, saves. Registry is small (<10 KB typical), loads in <1 ms, and
 //! this matches the CLI's pattern so the two binaries can never drift.
 //! See `bin/portbay.rs`'s `CliContext` for the parallel.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -21,6 +23,7 @@ use crate::caddy::{
     ADMIN_SCAN_RANGE, DEFAULT_ADMIN_PORT, DEFAULT_HTTPS_PORT,
 };
 use crate::process_compose::{PcClient, SidecarManager};
+use crate::reconciler::Reconciler;
 
 /// How long `boot_caddy` polls the admin endpoint for readiness before
 /// giving up. Caddy comes up well under 1 s on a warm bundle; 5 s leaves
@@ -38,6 +41,10 @@ pub struct AppState {
     /// Domain suffix used when the registry doesn't exist yet (first run).
     pub domain_suffix: String,
 
+    /// Per-process log directory; passed to PC's YAML generator and
+    /// created on first use.
+    pub logs_dir: PathBuf,
+
     /// The bundled process-compose sidecar manager.
     pub pc: Mutex<SidecarManager>,
 
@@ -51,17 +58,28 @@ pub struct AppState {
     /// Cached client to the running Caddy daemon. `None` until `setup`
     /// (or a `restart_caddy` invocation) has started the sidecar.
     pub caddy_client: Mutex<Option<CaddyClient>>,
+
+    /// Convergence engine — owns hash caches for the four sub-steps and
+    /// the dirty-notify primitive the background loop awaits.
+    pub reconciler: Reconciler,
 }
 
 impl AppState {
-    pub fn new(registry_path: PathBuf, domain_suffix: impl Into<String>) -> Self {
+    pub fn new(
+        registry_path: PathBuf,
+        domain_suffix: impl Into<String>,
+        logs_dir: PathBuf,
+        reconciler: Reconciler,
+    ) -> Self {
         Self {
             registry_path,
             domain_suffix: domain_suffix.into(),
+            logs_dir,
             pc: Mutex::new(SidecarManager::new()),
             pc_client: Mutex::new(None),
             caddy: Mutex::new(CaddySidecar::new()),
             caddy_client: Mutex::new(None),
+            reconciler,
         }
     }
 
@@ -86,17 +104,21 @@ impl AppState {
             .ok_or(crate::error::AppError::SidecarDown("caddy"))
     }
 
-    /// Start (or restart) the bundled process-compose sidecar against the
-    /// bootstrap config. Used by both `lib::run`'s setup and the
-    /// `restart_pc` Tauri command — same code path either way so the
-    /// cached client never desyncs from the actual child process.
-    pub fn boot_pc(&self, app: &AppHandle) -> Result<(), crate::error::AppError> {
-        let config_path = write_bootstrap_config()?;
+    /// Start (or restart) the bundled process-compose sidecar against
+    /// the given config path. The reconciler is the canonical producer
+    /// of that path — `lib::run::setup` writes the initial registry-
+    /// derived YAML before this is first called, and the PC sub-
+    /// reconciler rewrites it on every YAML-hash change.
+    pub fn boot_pc(
+        &self,
+        app: &AppHandle,
+        config_path: &Path,
+    ) -> Result<(), crate::error::AppError> {
         let client = self
             .pc
             .lock()
             .expect("pc mutex poisoned")
-            .start(app, &config_path)?;
+            .start(app, config_path)?;
         *self.pc_client.lock().expect("pc_client mutex poisoned") = Some(client);
         Ok(())
     }
@@ -155,30 +177,6 @@ impl AppState {
         self.caddy.lock().expect("caddy mutex poisoned").stop();
         *self.caddy_client.lock().expect("caddy_client mutex poisoned") = None;
     }
-}
-
-/// Write a small placeholder PC config until the registry-driven generator
-/// is wired up.
-///
-/// TODO(phase-2-reconcile): replace with
-/// `process_compose::config::to_yaml(&registry, ...)` once the reconcile
-/// loop lands as its own follow-up card.
-pub fn write_bootstrap_config() -> std::io::Result<PathBuf> {
-    let mut dir = dirs::data_dir()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no data dir"))?;
-    dir.push("PortBay");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("process-compose.bootstrap.yaml");
-    let yaml = r#"version: "0.5"
-processes:
-  bootstrap:
-    description: "Bootstrap process — replaced once the registry reconciler lands"
-    command: "while true; do sleep 60; done"
-    availability:
-      restart: "no"
-"#;
-    std::fs::write(&path, yaml)?;
-    Ok(path)
 }
 
 /// Serialise the minimal admin-only Caddy config and write it to the

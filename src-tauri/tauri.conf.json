@@ -37,7 +37,8 @@
     ],
     "externalBin": [
       "binaries/process-compose",
-      "binaries/caddy"
+      "binaries/caddy",
+      "binaries/mkcert"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"

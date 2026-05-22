@@ -56,12 +56,13 @@ Process Compose is committed to the repo; Caddy is fetched per checkout
 because the binary is large and platform-specific:
 
 ```bash
-./scripts/fetch-caddy.sh   # writes src-tauri/binaries/caddy-<triple>
+./scripts/fetch-caddy.sh    # writes src-tauri/binaries/caddy-<triple>
+./scripts/fetch-mkcert.sh   # writes src-tauri/binaries/mkcert-<triple>
 ```
 
-Re-run after bumping `CADDY_VERSION` inside the script. On a fresh clone
-the dev server (`pnpm tauri dev`) will fail to start until this binary is
-in place.
+Re-run after bumping `CADDY_VERSION` / `MKCERT_VERSION` inside the
+scripts. On a fresh clone the dev server (`pnpm tauri dev`) will fail to
+start until these binaries are in place.
 
 ## Contributing
 

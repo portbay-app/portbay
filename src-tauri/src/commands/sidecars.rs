@@ -4,14 +4,12 @@
 //! footer pills. Polled by the frontend on a 3s cadence; also pushed
 //! via `portbay://status` events when the reconcile loop notices a change.
 
-use std::net::Ipv4Addr;
-
 use tauri::{AppHandle, State};
 
 use crate::commands::dto::{SidecarHealth, SidecarState, SidecarStatus};
-use crate::commands::projects::load_registry;
 use crate::error::{AppError, AppResult};
 use crate::hosts::HostsManager;
+use crate::reconciler::StepOutcome;
 use crate::state::AppState;
 
 #[tauri::command]
@@ -39,12 +37,13 @@ pub async fn pc_alive(state: State<'_, AppState>) -> AppResult<bool> {
 }
 
 /// `restart_pc()` — stop the bundled process-compose sidecar and start
-/// a fresh one against the current bootstrap config. The action button on
-/// the process-compose sidecar card maps to this command.
+/// a fresh one against the registry-derived YAML on disk. The action
+/// button on the process-compose sidecar card maps to this command.
 #[tauri::command]
 pub async fn restart_pc(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    let yaml_path = crate::reconciler::default_yaml_path().map_err(AppError::Io)?;
     state.shutdown_pc();
-    state.boot_pc(&app)
+    state.boot_pc(&app, &yaml_path)
 }
 
 /// `restart_caddy()` — stop the bundled Caddy sidecar and start a fresh
@@ -57,23 +56,22 @@ pub async fn restart_caddy(app: AppHandle, state: State<'_, AppState>) -> AppRes
     state.boot_caddy(&app).await
 }
 
-/// `reconcile_hosts()` — overwrite the PortBay-managed block in
-/// `/etc/hosts` with one entry per registered project. The hosts
-/// sidecar card's action button maps to this command. Requires sudo;
-/// surfaces a friendly envelope when permission is denied.
+/// `reconcile_hosts()` — force one immediate reconcile tick and return
+/// the count of hostnames the hosts step wrote (or would have written).
+/// Wired to the hosts sidecar card's action button. Replaces the older
+/// inline `HostsManager::replace_all` path so the GUI button uses the
+/// same code path as the periodic safety tick.
 #[tauri::command]
-pub async fn reconcile_hosts(state: State<'_, AppState>) -> AppResult<u32> {
-    let registry = load_registry(&state)?;
-    let pairs: Vec<(String, Ipv4Addr)> = registry
-        .list_projects()
-        .iter()
-        .map(|p| (p.hostname.clone(), Ipv4Addr::LOCALHOST))
-        .collect();
-    let count = pairs.len() as u32;
-    HostsManager::system()
-        .replace_all(pairs)
-        .map_err(AppError::Hosts)?;
-    Ok(count)
+pub async fn reconcile_hosts(app: AppHandle, state: State<'_, AppState>) -> AppResult<u32> {
+    let report = state.reconciler.tick(&app).await;
+    let hostname_count = HostsManager::system()
+        .list_managed()
+        .map(|v| v.len() as u32)
+        .unwrap_or(0);
+    match report.hosts {
+        StepOutcome::Failed { error } => Err(AppError::Internal(format!("hosts: {error}"))),
+        _ => Ok(hostname_count),
+    }
 }
 
 async fn pc_status(state: &AppState) -> SidecarStatus {

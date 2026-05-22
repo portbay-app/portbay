@@ -13,7 +13,8 @@
       "identifier": "shell:allow-spawn",
       "allow": [
         { "name": "binaries/process-compose", "sidecar": true, "args": true },
-        { "name": "binaries/caddy", "sidecar": true, "args": true }
+        { "name": "binaries/caddy", "sidecar": true, "args": true },
+        { "name": "binaries/mkcert", "sidecar": true, "args": true }
       ]
     }
   ]
