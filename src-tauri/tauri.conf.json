@@ -36,7 +36,8 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "binaries/process-compose"
+      "binaries/process-compose",
+      "binaries/caddy"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"

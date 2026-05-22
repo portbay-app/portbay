@@ -17,7 +17,7 @@ use crate::state::AppState;
 #[tauri::command]
 pub async fn sidecar_status(state: State<'_, AppState>) -> AppResult<SidecarHealth> {
     let process_compose = pc_status(&state).await;
-    let caddy = caddy_status();
+    let caddy = caddy_status(&state).await;
     let mkcert_ca = mkcert_status();
     let hosts_helper = hosts_status();
 
@@ -45,6 +45,16 @@ pub async fn pc_alive(state: State<'_, AppState>) -> AppResult<bool> {
 pub async fn restart_pc(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
     state.shutdown_pc();
     state.boot_pc(&app)
+}
+
+/// `restart_caddy()` — stop the bundled Caddy sidecar and start a fresh
+/// one against the bootstrap admin-only config. The action button on the
+/// Caddy sidecar card maps to this command. Waits for the admin endpoint
+/// to come back up before returning (same readiness gate as boot).
+#[tauri::command]
+pub async fn restart_caddy(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    state.shutdown_caddy();
+    state.boot_caddy(&app).await
 }
 
 /// `reconcile_hosts()` — overwrite the PortBay-managed block in
@@ -84,23 +94,24 @@ async fn pc_status(state: &AppState) -> SidecarStatus {
     }
 }
 
-fn caddy_status() -> SidecarStatus {
-    // Caddy sidecar isn't wired into the GUI's setup() yet — Phase 2
-    // sidecar wiring lands alongside card #5. For now we report `stopped`
-    // honestly rather than pretending it's running.
-    let installed = which::which("caddy").is_ok();
+async fn caddy_status(state: &AppState) -> SidecarStatus {
+    let client = state
+        .caddy_client
+        .lock()
+        .expect("caddy_client mutex poisoned")
+        .clone();
+    let (status, detail) = match client {
+        None => (SidecarState::Stopped, Some("not started".into())),
+        Some(c) => match c.is_alive().await {
+            Ok(true) => (SidecarState::Running, Some("alive".into())),
+            Ok(false) => (SidecarState::Unreachable, Some("unreachable".into())),
+            Err(e) => (SidecarState::Unreachable, Some(e.to_string())),
+        },
+    };
     SidecarStatus {
         name: "caddy",
-        status: if installed {
-            SidecarState::Stopped
-        } else {
-            SidecarState::NotInstalled
-        },
-        detail: if installed {
-            Some("not started yet (wired in card #5)".into())
-        } else {
-            Some("not found on PATH".into())
-        },
+        status,
+        detail,
         last_error: None,
     }
 }

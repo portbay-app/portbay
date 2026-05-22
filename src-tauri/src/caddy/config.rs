@@ -25,6 +25,45 @@ pub struct CertPaths {
     pub key: PathBuf,
 }
 
+/// Minimal admin-only config used to bring Caddy up at app start.
+///
+/// One server named `portbay` listens on `https_port` with no routes. The
+/// admin endpoint is bound to `localhost:<admin_port>` so the reconcile
+/// loop can push the real registry-derived config once projects exist.
+///
+/// Quirk-1 (see `claudedocs/spike-caddy.md`) is honoured: `http_port: 0`
+/// and `automatic_https.disable_redirects: true` keep Caddy off `:80`.
+pub fn bootstrap_config(admin_port: u16, https_port: u16) -> CaddyConfig {
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        "portbay".to_string(),
+        Server {
+            listen: vec![format!(":{https_port}")],
+            routes: vec![],
+            automatic_https: AutomaticHttps {
+                disable_redirects: true,
+            },
+        },
+    );
+
+    CaddyConfig {
+        admin: AdminConfig {
+            listen: format!("localhost:{admin_port}"),
+        },
+        apps: AppsConfig {
+            http: HttpApp {
+                http_port: 0,
+                servers,
+            },
+            tls: TlsApp {
+                certificates: TlsCertificates {
+                    load_files: vec![],
+                },
+            },
+        },
+    }
+}
+
 /// Build the full Caddy config document from a registry.
 ///
 /// `https_port` is the port the public-facing server listens on (default
@@ -295,5 +334,27 @@ mod tests {
         let r = project_to_route(&p);
         assert_eq!(r.id, "route_abc");
         assert!(r.terminal);
+    }
+
+    #[test]
+    fn bootstrap_config_has_admin_endpoint_and_no_routes() {
+        let c = bootstrap_config(2021, 8443);
+        assert_eq!(c.admin.listen, "localhost:2021");
+        assert_eq!(c.apps.http.http_port, 0);
+        let s = c.apps.http.servers.get("portbay").unwrap();
+        assert_eq!(s.listen, vec![":8443".to_string()]);
+        assert!(s.routes.is_empty());
+        assert!(s.automatic_https.disable_redirects);
+        assert!(c.apps.tls.certificates.load_files.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_config_serialises_to_admin_only_json() {
+        let c = bootstrap_config(2019, 443);
+        let v = serde_json::to_value(&c).unwrap();
+        // The admin endpoint is what Caddy needs to come up; the rest is
+        // empty scaffolding that POST /load can refill at any time.
+        assert_eq!(v["admin"]["listen"], "localhost:2019");
+        assert_eq!(v["apps"]["http"]["servers"]["portbay"]["routes"], serde_json::json!([]));
     }
 }

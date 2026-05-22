@@ -12,11 +12,24 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use tauri::AppHandle;
 
-use crate::caddy::lifecycle::CaddySidecar;
+use crate::caddy::{
+    bootstrap_config, find_free_https_port, find_free_port, CaddyClient, CaddyError, CaddySidecar,
+    ADMIN_SCAN_RANGE, DEFAULT_ADMIN_PORT, DEFAULT_HTTPS_PORT,
+};
 use crate::process_compose::{PcClient, SidecarManager};
+
+/// How long `boot_caddy` polls the admin endpoint for readiness before
+/// giving up. Caddy comes up well under 1 s on a warm bundle; 5 s leaves
+/// generous headroom for first-launch xattr work on macOS.
+const CADDY_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Poll interval inside the readiness window. 100 ms gives a snappy boot
+/// while staying nowhere near the daemon's startup cost.
+const CADDY_READINESS_POLL: Duration = Duration::from_millis(100);
 
 pub struct AppState {
     /// On-disk path to the registry JSON. Resolved once at setup.
@@ -32,9 +45,12 @@ pub struct AppState {
     /// successfully started the sidecar.
     pub pc_client: Mutex<Option<PcClient>>,
 
-    /// The bundled caddy sidecar manager (will be wired up alongside PC
-    /// once the caddy spawn lands in setup — currently dormant).
+    /// The bundled caddy sidecar manager.
     pub caddy: Mutex<CaddySidecar>,
+
+    /// Cached client to the running Caddy daemon. `None` until `setup`
+    /// (or a `restart_caddy` invocation) has started the sidecar.
+    pub caddy_client: Mutex<Option<CaddyClient>>,
 }
 
 impl AppState {
@@ -45,6 +61,7 @@ impl AppState {
             pc: Mutex::new(SidecarManager::new()),
             pc_client: Mutex::new(None),
             caddy: Mutex::new(CaddySidecar::new()),
+            caddy_client: Mutex::new(None),
         }
     }
 
@@ -56,6 +73,17 @@ impl AppState {
             .expect("pc_client mutex poisoned")
             .clone()
             .ok_or(crate::error::AppError::SidecarDown("process-compose"))
+    }
+
+    /// Borrow a cloned Caddy client. Returns `SidecarDown` when Caddy
+    /// hasn't been booted yet. Reqwest internally reference-counts so
+    /// cloning is essentially free.
+    pub fn caddy_client(&self) -> Result<CaddyClient, crate::error::AppError> {
+        self.caddy_client
+            .lock()
+            .expect("caddy_client mutex poisoned")
+            .clone()
+            .ok_or(crate::error::AppError::SidecarDown("caddy"))
     }
 
     /// Start (or restart) the bundled process-compose sidecar against the
@@ -77,6 +105,55 @@ impl AppState {
     pub fn shutdown_pc(&self) {
         self.pc.lock().expect("pc mutex poisoned").stop();
         *self.pc_client.lock().expect("pc_client mutex poisoned") = None;
+    }
+
+    /// Start (or restart) the bundled Caddy sidecar against the bootstrap
+    /// admin-only config, then poll `/config/` for readiness so the
+    /// caller knows the daemon is actually accepting admin pushes by the
+    /// time this returns. Used by both `lib::run`'s setup and the
+    /// `restart_caddy` Tauri command.
+    ///
+    /// Errors:
+    /// - `SidecarDown("caddy")` if the daemon doesn't accept admin
+    ///   requests within [`CADDY_READINESS_TIMEOUT`]. The child process
+    ///   is left running so the next `restart_caddy` can retry cleanly
+    ///   without the lifecycle thinking the slot is free.
+    pub async fn boot_caddy(&self, app: &AppHandle) -> Result<(), crate::error::AppError> {
+        let admin_port = find_free_port(DEFAULT_ADMIN_PORT, ADMIN_SCAN_RANGE).ok_or(
+            CaddyError::NoFreePort {
+                start: DEFAULT_ADMIN_PORT,
+            },
+        )?;
+        let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
+        let config_path = write_caddy_bootstrap_config(admin_port, https_port)?;
+
+        let client = self
+            .caddy
+            .lock()
+            .expect("caddy mutex poisoned")
+            .start(app, &config_path, admin_port)?;
+        *self.caddy_client.lock().expect("caddy_client mutex poisoned") = Some(client.clone());
+
+        // Poll admin endpoint until the daemon responds. The sidecar
+        // command line was already accepted; the child may still be in
+        // its tls-cert-prep or listener-bind phase. Without this wait,
+        // the first `POST /load` from the reconcile loop races and 500s.
+        let deadline = std::time::Instant::now() + CADDY_READINESS_TIMEOUT;
+        loop {
+            if let Ok(true) = client.is_alive().await {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(crate::error::AppError::SidecarDown("caddy"));
+            }
+            tokio::time::sleep(CADDY_READINESS_POLL).await;
+        }
+    }
+
+    /// Stop the bundled Caddy sidecar and clear the cached client.
+    pub fn shutdown_caddy(&self) {
+        self.caddy.lock().expect("caddy mutex poisoned").stop();
+        *self.caddy_client.lock().expect("caddy_client mutex poisoned") = None;
     }
 }
 
@@ -102,4 +179,36 @@ processes:
 "#;
     std::fs::write(&path, yaml)?;
     Ok(path)
+}
+
+/// Serialise the minimal admin-only Caddy config and write it to the
+/// PortBay app-data directory. The reconcile loop overwrites this via
+/// `POST /load` once projects exist; the file on disk is only relevant at
+/// boot.
+pub fn write_caddy_bootstrap_config(admin_port: u16, https_port: u16) -> std::io::Result<PathBuf> {
+    let mut dir = dirs::data_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no data dir"))?;
+    dir.push("PortBay");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("caddy.bootstrap.json");
+    let cfg = bootstrap_config(admin_port, https_port);
+    let json = serde_json::to_vec_pretty(&cfg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&path, json)?;
+    Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caddy_bootstrap_config_is_written_with_expected_ports() {
+        let path = write_caddy_bootstrap_config(2099, 18443).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["admin"]["listen"], "localhost:2099");
+        let listen = &v["apps"]["http"]["servers"]["portbay"]["listen"];
+        assert_eq!(listen[0], ":18443");
+    }
 }

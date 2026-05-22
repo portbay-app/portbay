@@ -48,6 +48,21 @@ Tracked publicly via GitHub Projects (link added once enabled). High-level phase
 4. **Phase 3** — UX polish, error handling, onboarding.
 5. **Phase 4** — open-source release readiness.
 
+## Development setup
+
+PortBay bundles two third-party sidecars — `process-compose` and `caddy` —
+that Tauri expects to find under `src-tauri/binaries/<name>-<target-triple>`.
+Process Compose is committed to the repo; Caddy is fetched per checkout
+because the binary is large and platform-specific:
+
+```bash
+./scripts/fetch-caddy.sh   # writes src-tauri/binaries/caddy-<triple>
+```
+
+Re-run after bumping `CADDY_VERSION` inside the script. On a fresh clone
+the dev server (`pnpm tauri dev`) will fail to start until this binary is
+in place.
+
 ## Contributing
 
 Not open to contributions yet — the project is in early validation. Once Phase 1 lands, `CONTRIBUTING.md` will go up. Star the repo if you want to be notified.

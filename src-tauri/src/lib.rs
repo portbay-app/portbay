@@ -33,11 +33,23 @@ pub fn run() {
             app.manage(AppState::new(registry_path, DEFAULT_DOMAIN_SUFFIX));
             app.manage(commands::metrics::MetricsState::new());
 
-            // Start the process-compose sidecar via the shared helper —
-            // same code path as the `restart_pc` Tauri command so the
-            // cached client never desyncs from the spawned child.
+            // Start the process-compose and caddy sidecars via the
+            // shared helpers — same code path as the `restart_*` Tauri
+            // commands so the cached clients never desync from the
+            // spawned children. `boot_caddy` is async (it polls the
+            // admin endpoint for readiness) so we drive it with a
+            // block_on; the wait is bounded by `CADDY_READINESS_TIMEOUT`.
             let state: tauri::State<AppState> = app.state();
             state.boot_pc(&app.handle()).map_err(|e| -> Box<dyn std::error::Error> {
+                Box::<dyn std::error::Error>::from(e.to_string())
+            })?;
+
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::block_on(async {
+                let state: tauri::State<AppState> = app_handle.state();
+                state.boot_caddy(&app_handle).await
+            })
+            .map_err(|e| -> Box<dyn std::error::Error> {
                 Box::<dyn std::error::Error>::from(e.to_string())
             })?;
 
@@ -51,6 +63,7 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 let state: tauri::State<AppState> = window.state();
                 state.shutdown_pc();
+                state.shutdown_caddy();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -68,6 +81,7 @@ pub fn run() {
             commands::sidecars::sidecar_status,
             commands::sidecars::pc_alive,
             commands::sidecars::restart_pc,
+            commands::sidecars::restart_caddy,
             commands::sidecars::reconcile_hosts,
             commands::system::doctor,
             commands::system::tail_logs,

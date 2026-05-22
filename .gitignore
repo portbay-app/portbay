@@ -42,3 +42,4 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 src-tauri/binaries/process-compose-*
+src-tauri/binaries/caddy-*

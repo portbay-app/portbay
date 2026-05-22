@@ -18,7 +18,7 @@ use crate::caddy::error::{CaddyError, Result};
 pub const DEFAULT_ADMIN_PORT: u16 = 2019;
 pub const DEFAULT_HTTPS_PORT: u16 = 8443;
 
-const ADMIN_SCAN_RANGE: u16 = 32;
+pub const ADMIN_SCAN_RANGE: u16 = 32;
 
 #[derive(Debug)]
 pub struct CaddySidecar {
@@ -50,26 +50,33 @@ impl CaddySidecar {
 
     /// Spawn the bundled `caddy` sidecar against an initial JSON config.
     ///
+    /// `admin_port` MUST match the `admin.listen` port baked into
+    /// `config_path` — the returned `CaddyClient` is wired to talk to that
+    /// exact port. Pre-scan for a free port via [`find_free_port`] before
+    /// calling, then write the config with that port using
+    /// [`super::config::bootstrap_config`].
+    ///
     /// The config file should contain at minimum the admin endpoint; the
     /// real apps config is loaded over the admin API once the daemon is
-    /// up. Callers usually want
-    /// [`super::config::build_config`] for that follow-up `POST /load`.
-    pub fn start(&mut self, app: &AppHandle, config_path: &Path) -> Result<CaddyClient> {
+    /// up. Callers usually want [`super::config::build_config`] for that
+    /// follow-up `POST /load`.
+    pub fn start(
+        &mut self,
+        app: &AppHandle,
+        config_path: &Path,
+        admin_port: u16,
+    ) -> Result<CaddyClient> {
         if self.child.is_some() {
             return Ok(CaddyClient::new(self.admin_port));
         }
 
-        let admin_port = find_free_port(DEFAULT_ADMIN_PORT, ADMIN_SCAN_RANGE)
-            .ok_or(CaddyError::NoFreePort {
-                start: DEFAULT_ADMIN_PORT,
-            })?;
         self.admin_port = admin_port;
 
         let config_str = config_path.to_string_lossy().into_owned();
 
-        // `caddy run --resume` over `caddy start` — Quirk 2 from the spike.
-        // --resume picks up autosave.json automatically; --config overrides
-        // when we want a clean boot.
+        // `caddy run --config ...` is the launch shape — Quirk 2 from the
+        // spike. `caddy start` has hanging-shell behaviour and forks into
+        // a backgrounded daemon that we can't manage as a child process.
         let cmd = app
             .shell()
             .sidecar("caddy")

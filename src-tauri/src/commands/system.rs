@@ -62,6 +62,34 @@ pub async fn doctor(state: State<'_, AppState>) -> AppResult<DoctorReport> {
     };
     findings.push(pc_finding);
 
+    // Caddy daemon
+    let caddy_client = state.caddy_client.lock().expect("caddy_client mutex poisoned").clone();
+    let caddy_finding = match caddy_client {
+        None => DoctorFinding {
+            check: "caddy".into(),
+            verdict: DoctorVerdict::Warn,
+            detail: "not started yet".into(),
+        },
+        Some(c) => match c.is_alive().await {
+            Ok(true) => DoctorFinding {
+                check: "caddy".into(),
+                verdict: DoctorVerdict::Ok,
+                detail: "alive".into(),
+            },
+            Ok(false) => DoctorFinding {
+                check: "caddy".into(),
+                verdict: DoctorVerdict::Warn,
+                detail: "not reachable".into(),
+            },
+            Err(e) => DoctorFinding {
+                check: "caddy".into(),
+                verdict: DoctorVerdict::Warn,
+                detail: e.to_string(),
+            },
+        },
+    };
+    findings.push(caddy_finding);
+
     // Tools on PATH
     for tool in ["mkcert", "caddy", "process-compose"] {
         match which::which(tool) {

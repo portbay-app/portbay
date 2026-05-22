@@ -22,10 +22,11 @@ pub mod lifecycle;
 pub mod types;
 
 pub use client::CaddyClient;
-pub use config::{build_config, project_to_route, CertPaths};
+pub use config::{bootstrap_config, build_config, project_to_route, CertPaths};
 pub use error::{CaddyError, Result};
 pub use lifecycle::{
-    find_free_https_port, find_free_port, CaddySidecar, DEFAULT_ADMIN_PORT, DEFAULT_HTTPS_PORT,
+    find_free_https_port, find_free_port, CaddySidecar, ADMIN_SCAN_RANGE, DEFAULT_ADMIN_PORT,
+    DEFAULT_HTTPS_PORT,
 };
 pub use types::{
     AdminConfig, AppsConfig, AutomaticHttps, CaddyConfig, HttpApp, MatchClause, Route, Server,
