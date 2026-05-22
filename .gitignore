@@ -44,3 +44,4 @@ Thumbs.db
 src-tauri/binaries/process-compose-*
 src-tauri/binaries/caddy-*
 src-tauri/binaries/mkcert-*
+.playwright-mcp/

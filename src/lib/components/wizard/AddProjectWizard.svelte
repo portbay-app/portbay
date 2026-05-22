@@ -13,7 +13,7 @@
 <script lang="ts">
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-  import { DashboardCard, Icon } from "$lib/components/atoms";
+  import { CodeEditor, DashboardCard, Icon } from "$lib/components/atoms";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
@@ -362,13 +362,15 @@
             Edits here override the fields above on blur. Press Tab out of the
             box to apply.
           </p>
-          <textarea
-            bind:value={rawDraft}
-            onblur={syncFieldsFromRaw}
-            rows="12"
-            spellcheck="false"
-            class="mt-2 w-full px-3 py-2 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-xs font-mono text-fg leading-relaxed"
-          ></textarea>
+          <div class="mt-2">
+            <CodeEditor
+              value={rawDraft}
+              language="json"
+              oninput={(value) => (rawDraft = value)}
+              onblur={syncFieldsFromRaw}
+              minHeight={240}
+            />
+          </div>
         {/if}
       </DashboardCard>
     </div>

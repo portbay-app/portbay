@@ -1,6 +1,7 @@
 export { default as StatusDot } from "./StatusDot.svelte";
 export { default as StatusPill } from "./StatusPill.svelte";
 export { default as Badge } from "./Badge.svelte";
+export { default as CodeEditor } from "./CodeEditor.svelte";
 export { default as Icon } from "./Icon.svelte";
 export { default as DashboardCard } from "./DashboardCard.svelte";
 
