@@ -38,7 +38,10 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use console::{style, Term};
+use std::net::Ipv4Addr;
+
 use portbay_lib::caddy::CertPaths;
+use portbay_lib::hosts::{HostsError, HostsManager};
 use portbay_lib::process_compose::{PcClient, Process, ProjectStatus, DEFAULT_PORT as PC_DEFAULT_PORT};
 use portbay_lib::registry::{self, store, Project, ProjectId, ProjectType, Readiness, Registry};
 
@@ -107,6 +110,30 @@ enum Cmd {
 
     /// Diagnose the runtime, ports, registry, and cert state.
     Doctor,
+
+    /// Manage /etc/hosts entries for PortBay projects.
+    #[command(subcommand)]
+    Hosts(HostsCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum HostsCmd {
+    /// List PortBay-managed entries in /etc/hosts.
+    List,
+    /// Add a hostname → IP mapping (default IP 127.0.0.1). Requires sudo.
+    Add {
+        hostname: String,
+        #[arg(long, default_value = "127.0.0.1")]
+        ip: Ipv4Addr,
+    },
+    /// Remove a hostname. Requires sudo. Missing entries are no-op.
+    Remove { hostname: String },
+    /// Remove every PortBay-managed entry. Requires sudo.
+    Clear,
+    /// Reconcile /etc/hosts against the registry — drop entries for
+    /// projects that no longer exist, add entries for projects that do.
+    /// Requires sudo.
+    Reconcile,
 }
 
 #[derive(Args, Debug)]
@@ -246,6 +273,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Logs(args) => cmd_logs(&ctx, args).await,
         Cmd::Open { id } => cmd_open(&ctx, &id).await,
         Cmd::Doctor => cmd_doctor(&ctx).await,
+        Cmd::Hosts(sub) => cmd_hosts(&ctx, sub).await,
     }
 }
 
@@ -462,8 +490,20 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
     reg.add_project(project.clone()).map_err(CliError::Registry)?;
     ctx.save_registry(&reg)?;
 
+    // Best-effort hosts write. Permission-denied is reported as a hint, not
+    // an error — the project is registered either way, and the user can
+    // catch up with `sudo portbay hosts add <hostname>`.
+    let hosts_outcome = HostsManager::system().add(&project.hostname, Ipv4Addr::LOCALHOST);
+
     if ctx.json {
-        println!("{}", serde_json::to_string_pretty(&project)?);
+        let warnings = hosts_warnings(&hosts_outcome);
+        println!(
+            "{}",
+            serde_json::json!({
+                "project": project,
+                "warnings": warnings,
+            })
+        );
     } else {
         ctx.term.write_line(&format!(
             "{} {} registered as {}",
@@ -479,6 +519,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
             ))
             .ok();
         }
+        emit_hosts_hint(&ctx.term, &project.hostname, &hosts_outcome, true);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -492,6 +533,8 @@ async fn cmd_remove(ctx: &CliContext, args: RemoveArgs) -> Result<ExitCode, CliE
     ctx.save_registry(&reg)?;
 
     let mut warnings: Vec<String> = Vec::new();
+    let mut hosts_outcome: Option<std::result::Result<(), HostsError>> = None;
+
     if !args.keep_artifacts {
         // Try to remove the cert directory. Failure is non-fatal.
         if let Some(certs_root) = certs_root() {
@@ -502,17 +545,25 @@ async fn cmd_remove(ctx: &CliContext, args: RemoveArgs) -> Result<ExitCode, CliE
                 }
             }
         }
-        // Note about live Caddy: we leave the route alone here. Once the
-        // daemon is restarted (or a reconcile is triggered), it will drop
-        // routes whose ids no longer have a matching project.
+
+        // Best-effort hosts entry removal — permission-denied reported as
+        // a hint, not an error. The registry change has already landed.
+        hosts_outcome = Some(HostsManager::system().remove(&removed.hostname));
+
+        // Live Caddy routes are left alone — the reconciler drops orphans
+        // on next daemon boot.
     }
 
     if ctx.json {
+        let mut all_warnings = warnings.clone();
+        if let Some(Err(e)) = &hosts_outcome {
+            all_warnings.push(format!("hosts: {e}"));
+        }
         println!(
             "{}",
             serde_json::json!({
                 "removed": removed.id.as_str(),
-                "warnings": warnings,
+                "warnings": all_warnings,
             })
         );
     } else {
@@ -524,6 +575,9 @@ async fn cmd_remove(ctx: &CliContext, args: RemoveArgs) -> Result<ExitCode, CliE
         .ok();
         for w in &warnings {
             ctx.term.write_line(&format!("  {} {w}", style("!").yellow())).ok();
+        }
+        if let Some(outcome) = &hosts_outcome {
+            emit_hosts_hint(&ctx.term, &removed.hostname, outcome, false);
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -706,14 +760,52 @@ async fn cmd_doctor(ctx: &CliContext) -> Result<ExitCode, CliError> {
 
     // certs root presence
     if let Some(root) = certs_root() {
+        let exists = root.exists();
         let count = std::fs::read_dir(&root)
             .map(|d| d.count())
             .unwrap_or(0);
+        let detail = if exists {
+            format!("{} ({} entries)", root.display(), count)
+        } else {
+            format!("{} (not created yet)", root.display())
+        };
         findings.push((
             "certs root".into(),
-            if root.exists() { Verdict::Ok } else { Verdict::Warn },
-            format!("{} ({} entries)", root.display(), count),
+            if exists { Verdict::Ok } else { Verdict::Warn },
+            detail,
         ));
+    }
+
+    // /etc/hosts managed entries
+    match HostsManager::system().list_managed() {
+        Ok(entries) => {
+            let reg = ctx.load_registry().ok();
+            let expected: std::collections::HashSet<String> = reg
+                .as_ref()
+                .map(|r| r.list_projects().iter().map(|p| p.hostname.clone()).collect())
+                .unwrap_or_default();
+            let present: std::collections::HashSet<String> =
+                entries.iter().map(|e| e.hostname.clone()).collect();
+            let missing: Vec<&String> = expected.difference(&present).collect();
+            let orphan: Vec<&String> = present.difference(&expected).collect();
+            let verdict = if missing.is_empty() && orphan.is_empty() {
+                Verdict::Ok
+            } else {
+                Verdict::Warn
+            };
+            let detail = if missing.is_empty() && orphan.is_empty() {
+                format!("{} entries, all match registry", entries.len())
+            } else {
+                format!(
+                    "{} entries (missing: {}, orphan: {}). Run `sudo portbay hosts reconcile` to fix.",
+                    entries.len(),
+                    missing.len(),
+                    orphan.len()
+                )
+            };
+            findings.push(("/etc/hosts".into(), verdict, detail));
+        }
+        Err(e) => findings.push(("/etc/hosts".into(), Verdict::Warn, e.to_string())),
     }
 
     if ctx.json {
@@ -751,6 +843,102 @@ async fn cmd_doctor(ctx: &CliContext) -> Result<ExitCode, CliError> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+async fn cmd_hosts(ctx: &CliContext, sub: HostsCmd) -> Result<ExitCode, CliError> {
+    let mgr = HostsManager::system();
+    match sub {
+        HostsCmd::List => {
+            let entries = mgr.list_managed().map_err(CliError::Hosts)?;
+            if ctx.json {
+                let out: Vec<_> = entries
+                    .iter()
+                    .map(|e| serde_json::json!({ "ip": e.ip.to_string(), "hostname": e.hostname }))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if entries.is_empty() {
+                ctx.term
+                    .write_line(&format!("{} No managed hosts entries.", style("·").dim()))
+                    .ok();
+            } else {
+                for e in &entries {
+                    ctx.term
+                        .write_line(&format!("  {}\t{}", style(e.ip).green(), e.hostname))
+                        .ok();
+                }
+            }
+        }
+        HostsCmd::Add { hostname, ip } => {
+            mgr.add(&hostname, ip).map_err(CliError::Hosts)?;
+            cli_say(ctx, &format!("added {hostname} → {ip}"));
+        }
+        HostsCmd::Remove { hostname } => {
+            mgr.remove(&hostname).map_err(CliError::Hosts)?;
+            cli_say(ctx, &format!("removed {hostname}"));
+        }
+        HostsCmd::Clear => {
+            mgr.clear().map_err(CliError::Hosts)?;
+            cli_say(ctx, "cleared all PortBay-managed hosts entries");
+        }
+        HostsCmd::Reconcile => {
+            let reg = ctx.load_registry()?;
+            let pairs: Vec<(String, Ipv4Addr)> = reg
+                .list_projects()
+                .iter()
+                .map(|p| (p.hostname.clone(), Ipv4Addr::LOCALHOST))
+                .collect();
+            let n = pairs.len();
+            mgr.replace_all(pairs).map_err(CliError::Hosts)?;
+            cli_say(ctx, &format!("reconciled {n} entry(ies) from registry"));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cli_say(ctx: &CliContext, msg: &str) {
+    if ctx.json {
+        println!("{}", serde_json::json!({ "ok": true, "message": msg }));
+    } else {
+        ctx.term
+            .write_line(&format!("{} {msg}", style("✓").green()))
+            .ok();
+    }
+}
+
+fn hosts_warnings(outcome: &std::result::Result<(), HostsError>) -> Vec<String> {
+    match outcome {
+        Ok(()) => vec![],
+        Err(e) => vec![format!("hosts: {e}")],
+    }
+}
+
+/// Print a friendly note explaining why /etc/hosts couldn't be updated and
+/// what the user should do — only when there's something to say.
+fn emit_hosts_hint(
+    term: &Term,
+    hostname: &str,
+    outcome: &std::result::Result<(), HostsError>,
+    is_add: bool,
+) {
+    match outcome {
+        Ok(()) => { /* silent — hosts is in sync */ }
+        Err(HostsError::PermissionDenied { .. }) => {
+            let cmd = if is_add { "add" } else { "remove" };
+            let _ = term.write_line(&format!(
+                "  {} couldn't update /etc/hosts (permission denied). Run: {}",
+                style("!").yellow(),
+                style(format!("sudo portbay hosts {cmd} {hostname}"))
+                    .cyan()
+                    .underlined()
+            ));
+        }
+        Err(other) => {
+            let _ = term.write_line(&format!(
+                "  {} hosts file update failed: {other}",
+                style("!").yellow()
+            ));
+        }
+    }
 }
 
 // =============================================================================
@@ -822,6 +1010,7 @@ fn _ensure_cert_paths_in_scope(_: CertPaths) {}
 enum CliError {
     Registry(registry::RegistryError),
     Pc(portbay_lib::process_compose::PcError),
+    Hosts(HostsError),
     ProjectNotFound(String),
     BadInput(String),
     Json(serde_json::Error),
@@ -833,7 +1022,8 @@ impl CliError {
         match self {
             CliError::ProjectNotFound(_) | CliError::BadInput(_) => 2,
             CliError::Pc(_) => 3,
-            CliError::Registry(_) | CliError::Json(_) | CliError::Other(_) => 1,
+            CliError::Hosts(HostsError::PermissionDenied { .. }) => 6,
+            CliError::Registry(_) | CliError::Json(_) | CliError::Other(_) | CliError::Hosts(_) => 1,
         }
     }
 }
@@ -849,6 +1039,7 @@ impl std::fmt::Display for CliError {
         match self {
             CliError::Registry(e) => write!(f, "registry: {e}"),
             CliError::Pc(e) => write!(f, "daemon: {e}"),
+            CliError::Hosts(e) => write!(f, "hosts: {e}"),
             CliError::ProjectNotFound(id) => write!(f, "project not found: {id}"),
             CliError::BadInput(s) => write!(f, "bad input: {s}"),
             CliError::Json(e) => write!(f, "json: {e}"),
@@ -860,11 +1051,20 @@ impl std::fmt::Display for CliError {
 fn print_error(e: &CliError) {
     let term = Term::stderr();
     let _ = term.write_line(&format!("{} {e}", style("✗").red()));
-    if let CliError::Pc(_) = e {
-        let _ = term.write_line(&format!(
-            "  {} The daemon may not be running. Start PortBay.app, or pass --pc-port if it's on a non-default port.",
-            style("hint:").dim()
-        ));
+    match e {
+        CliError::Pc(_) => {
+            let _ = term.write_line(&format!(
+                "  {} The daemon may not be running. Start PortBay.app, or pass --pc-port if it's on a non-default port.",
+                style("hint:").dim()
+            ));
+        }
+        CliError::Hosts(HostsError::PermissionDenied { .. }) => {
+            let _ = term.write_line(&format!(
+                "  {} Re-run with sudo. (Future PortBay versions will install a privileged helper so this prompt is one-time.)",
+                style("hint:").dim()
+            ));
+        }
+        _ => {}
     }
 }
 
