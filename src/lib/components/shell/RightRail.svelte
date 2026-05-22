@@ -6,6 +6,7 @@
   rail) populate this slot.
 -->
 <script lang="ts">
+  import { MetricsRail } from "$lib/components/metrics";
   import { density } from "$lib/stores/density";
   import type { Snippet } from "svelte";
 
@@ -20,8 +21,6 @@
   {#if children}
     {@render children()}
   {:else}
-    <div class="text-xs text-fg-subtle italic">
-      Sidecar health + system metrics land here in cards #5 and #11.
-    </div>
+    <MetricsRail />
   {/if}
 </aside>

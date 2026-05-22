@@ -14,6 +14,7 @@
 pub mod dto;
 pub mod events;
 pub mod lifecycle;
+pub mod metrics;
 pub mod projects;
 pub mod sidecars;
 pub mod system;

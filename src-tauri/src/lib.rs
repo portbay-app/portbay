@@ -31,6 +31,7 @@ pub fn run() {
             })?;
 
             app.manage(AppState::new(registry_path, DEFAULT_DOMAIN_SUFFIX));
+            app.manage(commands::metrics::MetricsState::new());
 
             // Start the process-compose sidecar via the shared helper —
             // same code path as the `restart_pc` Tauri command so the
@@ -40,8 +41,10 @@ pub fn run() {
                 Box::<dyn std::error::Error>::from(e.to_string())
             })?;
 
-            // Spawn the status poller. It runs for the lifetime of the app.
+            // Spawn the status poller + metrics poller. Both run for the
+            // lifetime of the app.
             commands::events::spawn_status_poller(app.handle().clone());
+            commands::metrics::spawn_metrics_poller(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -68,6 +71,7 @@ pub fn run() {
             commands::sidecars::reconcile_hosts,
             commands::system::doctor,
             commands::system::tail_logs,
+            commands::metrics::system_metrics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
