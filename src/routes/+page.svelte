@@ -3,11 +3,17 @@
 
   type Proc = {
     name: string;
+    namespace: string;
     status: string;
     is_running: boolean;
-    pid?: number;
-    is_ready?: string;
-    restarts?: number;
+    is_ready: string;
+    has_ready_probe: boolean;
+    pid: number;
+    exit_code: number;
+    restarts: number;
+    mem: number;
+    cpu: number;
+    age: number;
   };
 
   let alive = $state<boolean | null>(null);
@@ -21,8 +27,7 @@
     try {
       alive = await invoke<boolean>("pc_alive");
       if (alive) {
-        const res = await invoke<{ data: Proc[] }>("pc_processes");
-        procs = res.data ?? [];
+        procs = await invoke<Proc[]>("pc_processes");
       } else {
         procs = [];
       }
