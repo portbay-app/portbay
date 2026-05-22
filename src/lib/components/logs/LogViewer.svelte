@@ -9,6 +9,7 @@
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";
+  import { Channel, invoke } from "@tauri-apps/api/core";
 
   import { Icon, StatusPill } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
@@ -16,6 +17,15 @@
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
+
+  /** Cap on rendered lines. Keeps DOM size bounded under chatty servers. */
+  const MAX_LINES = 5_000;
+  /** When trimming, drop this many from the front so we don't trim every line. */
+  const TRIM_CHUNK = 1_000;
+  /** ANSI escape sequence stripper. We render plain text in v1; coloured
+   *  ANSI rendering is a follow-up. */
+  // eslint-disable-next-line no-control-regex
+  const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
 
   const project = $derived<ProjectView | null>(
     logViewer.id === null
@@ -30,7 +40,8 @@
   let matchIndex = $state<number>(0);
   let autoScroll = $state<boolean>(true);
   let scrollerEl: HTMLDivElement | undefined = $state();
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Active follow channel — null when not following. */
+  let followChannel: Channel<string> | null = null;
 
   async function reload() {
     if (!project) return;
@@ -54,14 +65,37 @@
   }
 
   function startFollow() {
-    if (pollTimer !== null) return;
-    pollTimer = setInterval(() => void reload(), 1_500);
+    if (followChannel !== null || !project) return;
+    const id = project.id;
+    const ch = new Channel<string>();
+    ch.onmessage = (line) => {
+      const clean = line.replace(ANSI_PATTERN, "");
+      lines = lines.concat(clean);
+      // Trim the head when over cap so the DOM stays bounded.
+      if (lines.length > MAX_LINES) {
+        lines = lines.slice(TRIM_CHUNK);
+      }
+      if (autoScroll) requestAnimationFrame(scrollToBottom);
+    };
+    followChannel = ch;
+    // Fire-and-forget; the backend task runs until the channel is
+    // dropped by stopFollow / unmount.
+    void invoke("subscribe_logs", { id, onLine: ch }).catch(() => {
+      // Backend refused (sidecar down, registry mismatch). Toast was
+      // already pushed by the safeInvoke wrapper if invoked through it;
+      // here we just unwind the follow toggle.
+      followChannel = null;
+      follow = false;
+    });
   }
 
   function stopFollow() {
-    if (pollTimer !== null) {
-      clearInterval(pollTimer);
-      pollTimer = null;
+    if (followChannel !== null) {
+      // Dropping the channel reference frees the Rust-side Channel<String>
+      // on next tick; the spawn_blocking tail loop sees send() fail and
+      // exits. There's no explicit close() on the Tauri Channel API.
+      followChannel.onmessage = () => {};
+      followChannel = null;
     }
   }
 
@@ -300,7 +334,7 @@
       >
         <span>{lines.length} lines</span>
         {#if follow}
-          <span class="text-status-running">● following (1.5s poll)</span>
+          <span class="text-status-running">● following (live stream)</span>
         {/if}
         <span class="ml-auto">
           ESC close · / search · n / N next / prev · click outside to close

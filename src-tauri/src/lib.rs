@@ -216,6 +216,7 @@ pub fn run() {
             commands::certs::reissue_cert,
             commands::system::doctor,
             commands::system::tail_logs,
+            commands::log_stream::subscribe_logs,
             commands::metrics::system_metrics,
         ])
         .run(tauri::generate_context!())
