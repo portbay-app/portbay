@@ -31,24 +31,13 @@ pub fn run() {
 
             app.manage(AppState::new(registry_path, DEFAULT_DOMAIN_SUFFIX));
 
-            // Start the process-compose sidecar against a bootstrap config.
-            // The reconcile loop (separate follow-up card) will overwrite
-            // this with a registry-driven config later.
-            let config_path = write_bootstrap_config().map_err(|e| -> Box<dyn std::error::Error> {
+            // Start the process-compose sidecar via the shared helper —
+            // same code path as the `restart_pc` Tauri command so the
+            // cached client never desyncs from the spawned child.
+            let state: tauri::State<AppState> = app.state();
+            state.boot_pc(&app.handle()).map_err(|e| -> Box<dyn std::error::Error> {
                 Box::<dyn std::error::Error>::from(e.to_string())
             })?;
-            {
-                let state: tauri::State<AppState> = app.state();
-                let client = state
-                    .pc
-                    .lock()
-                    .expect("pc mutex poisoned")
-                    .start(&app.handle(), &config_path)
-                    .map_err(|e| -> Box<dyn std::error::Error> {
-                        Box::<dyn std::error::Error>::from(e.to_string())
-                    })?;
-                *state.pc_client.lock().expect("pc_client mutex poisoned") = Some(client);
-            }
 
             // Spawn the status poller. It runs for the lifetime of the app.
             commands::events::spawn_status_poller(app.handle().clone());
@@ -57,8 +46,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let state: tauri::State<AppState> = window.state();
-                state.pc.lock().expect("pc mutex poisoned").stop();
-                *state.pc_client.lock().expect("pc_client mutex poisoned") = None;
+                state.shutdown_pc();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -74,6 +62,8 @@ pub fn run() {
             commands::lifecycle::open_project,
             commands::sidecars::sidecar_status,
             commands::sidecars::pc_alive,
+            commands::sidecars::restart_pc,
+            commands::sidecars::reconcile_hosts,
             commands::system::doctor,
             commands::system::tail_logs,
         ])
@@ -81,26 +71,3 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// Write a small placeholder PC config until the registry-driven generator
-/// from `process_compose::config` is wired up to the reconcile loop.
-///
-/// TODO(phase-2-reconcile): replace with
-/// `process_compose::config::to_yaml(&registry, ...)` once the reconcile
-/// loop lands as its own follow-up card.
-fn write_bootstrap_config() -> std::io::Result<std::path::PathBuf> {
-    let mut dir = dirs::data_dir()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no data dir"))?;
-    dir.push("PortBay");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("process-compose.bootstrap.yaml");
-    let yaml = r#"version: "0.5"
-processes:
-  bootstrap:
-    description: "Bootstrap process — replaced once the registry reconciler lands"
-    command: "while true; do sleep 60; done"
-    availability:
-      restart: "no"
-"#;
-    std::fs::write(&path, yaml)?;
-    Ok(path)
-}

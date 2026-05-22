@@ -12,10 +12,11 @@
 <script lang="ts">
   import SidebarItem from "./SidebarItem.svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import { SidecarPill } from "$lib/components/sidecars";
+  import { sidecars } from "$lib/stores/sidecars";
 
-  function noopRefresh() {
-    // Card #5 wires this to invoke('sidecar_status') refresh.
-    // Phase-2 placeholder so the shell looks complete.
+  async function refresh() {
+    await sidecars.refresh();
   }
 </script>
 
@@ -52,14 +53,14 @@
   <div
     class="shrink-0 border-t border-border px-3 py-2.5 flex items-center justify-between"
   >
-    <!-- Sidecars pill lands in card #5 -->
-    <span class="text-[11px] text-fg-subtle">ready</span>
+    <SidecarPill />
     <button
       type="button"
-      onclick={noopRefresh}
-      title="Refresh state"
-      aria-label="Refresh state"
+      onclick={refresh}
+      title="Refresh sidecar status"
+      aria-label="Refresh sidecar status"
       class="p-1 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2 transition-colors"
+      class:animate-spin={sidecars.loading}
     >
       <Icon name="refresh-cw" size={14} />
     </button>

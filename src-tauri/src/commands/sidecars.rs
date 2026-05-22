@@ -4,10 +4,13 @@
 //! footer pills. Polled by the frontend on a 3s cadence; also pushed
 //! via `portbay://status` events when the reconcile loop notices a change.
 
-use tauri::State;
+use std::net::Ipv4Addr;
+
+use tauri::{AppHandle, State};
 
 use crate::commands::dto::{SidecarHealth, SidecarState, SidecarStatus};
-use crate::error::AppResult;
+use crate::commands::projects::load_registry;
+use crate::error::{AppError, AppResult};
 use crate::hosts::HostsManager;
 use crate::state::AppState;
 
@@ -33,6 +36,34 @@ pub async fn pc_alive(state: State<'_, AppState>) -> AppResult<bool> {
         return Ok(false);
     };
     Ok(client.live().await?)
+}
+
+/// `restart_pc()` — stop the bundled process-compose sidecar and start
+/// a fresh one against the current bootstrap config. The action button on
+/// the process-compose sidecar card maps to this command.
+#[tauri::command]
+pub async fn restart_pc(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    state.shutdown_pc();
+    state.boot_pc(&app)
+}
+
+/// `reconcile_hosts()` — overwrite the PortBay-managed block in
+/// `/etc/hosts` with one entry per registered project. The hosts
+/// sidecar card's action button maps to this command. Requires sudo;
+/// surfaces a friendly envelope when permission is denied.
+#[tauri::command]
+pub async fn reconcile_hosts(state: State<'_, AppState>) -> AppResult<u32> {
+    let registry = load_registry(&state)?;
+    let pairs: Vec<(String, Ipv4Addr)> = registry
+        .list_projects()
+        .iter()
+        .map(|p| (p.hostname.clone(), Ipv4Addr::LOCALHOST))
+        .collect();
+    let count = pairs.len() as u32;
+    HostsManager::system()
+        .replace_all(pairs)
+        .map_err(AppError::Hosts)?;
+    Ok(count)
 }
 
 async fn pc_status(state: &AppState) -> SidecarStatus {

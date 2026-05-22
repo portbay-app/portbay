@@ -13,6 +13,8 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use tauri::AppHandle;
+
 use crate::caddy::lifecycle::CaddySidecar;
 use crate::process_compose::{PcClient, SidecarManager};
 
@@ -55,4 +57,49 @@ impl AppState {
             .clone()
             .ok_or(crate::error::AppError::SidecarDown("process-compose"))
     }
+
+    /// Start (or restart) the bundled process-compose sidecar against the
+    /// bootstrap config. Used by both `lib::run`'s setup and the
+    /// `restart_pc` Tauri command — same code path either way so the
+    /// cached client never desyncs from the actual child process.
+    pub fn boot_pc(&self, app: &AppHandle) -> Result<(), crate::error::AppError> {
+        let config_path = write_bootstrap_config()?;
+        let client = self
+            .pc
+            .lock()
+            .expect("pc mutex poisoned")
+            .start(app, &config_path)?;
+        *self.pc_client.lock().expect("pc_client mutex poisoned") = Some(client);
+        Ok(())
+    }
+
+    /// Stop the bundled process-compose sidecar and clear the cached client.
+    pub fn shutdown_pc(&self) {
+        self.pc.lock().expect("pc mutex poisoned").stop();
+        *self.pc_client.lock().expect("pc_client mutex poisoned") = None;
+    }
+}
+
+/// Write a small placeholder PC config until the registry-driven generator
+/// is wired up.
+///
+/// TODO(phase-2-reconcile): replace with
+/// `process_compose::config::to_yaml(&registry, ...)` once the reconcile
+/// loop lands as its own follow-up card.
+pub fn write_bootstrap_config() -> std::io::Result<PathBuf> {
+    let mut dir = dirs::data_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no data dir"))?;
+    dir.push("PortBay");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("process-compose.bootstrap.yaml");
+    let yaml = r#"version: "0.5"
+processes:
+  bootstrap:
+    description: "Bootstrap process — replaced once the registry reconciler lands"
+    command: "while true; do sleep 60; done"
+    availability:
+      restart: "no"
+"#;
+    std::fs::write(&path, yaml)?;
+    Ok(path)
 }
