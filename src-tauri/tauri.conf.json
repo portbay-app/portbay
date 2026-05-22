@@ -13,10 +13,12 @@
     "windows": [
       {
         "title": "PortBay",
-        "width": 1100,
-        "height": 720,
-        "minWidth": 720,
-        "minHeight": 480
+        "width": 1240,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 560,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
