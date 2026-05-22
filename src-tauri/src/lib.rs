@@ -1,5 +1,6 @@
 // PortBay — Tauri 2 + Rust core.
 
+pub mod caddy;
 pub mod process_compose;
 pub mod registry;
 
