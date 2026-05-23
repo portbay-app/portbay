@@ -56,3 +56,23 @@ export const statusLabel: Record<InstanceStatus, string> = {
   starting: "Starting",
   errored: "Error",
 };
+
+/**
+ * A database connection parsed from a project's on-disk `.env` (returned by
+ * `project_db_connections`). Distinct from {@link DatabaseInstanceView},
+ * which is a PortBay-provisioned server — this is just the connection a
+ * project's own config points at.
+ */
+export interface ProjectDbConnection {
+  /** "Default" for the primary `DB_*` set, else the prefix (e.g. "READ"). */
+  name: string;
+  /** Driver from `DB_CONNECTION` (e.g. "mysql", "pgsql"); empty if unset. */
+  driver: string;
+  host: string;
+  port: string;
+  database: string;
+  username: string;
+  password: string;
+  /** Scheme URL a DB client can open, or null when hostless (e.g. sqlite). */
+  url: string | null;
+}

@@ -13,6 +13,7 @@
 
 pub mod certs;
 pub mod databases;
+pub mod dbconn;
 pub mod dnsmasq;
 pub mod dto;
 pub mod events;
