@@ -23,6 +23,7 @@
   import { safeInvoke } from "$lib/ipc";
   import { groups } from "$lib/stores/groups.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { dns } from "$lib/stores/dns.svelte";
   import { density } from "$lib/stores/density.svelte";
 
   import type { CommandError } from "$lib/types/error";
@@ -76,6 +77,7 @@
     try {
       switch (op) {
         case "start":
+          await dns.ensureReady();
           await safeInvoke("start_project", { id: project.id });
           break;
         case "stop":

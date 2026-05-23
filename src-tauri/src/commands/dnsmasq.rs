@@ -6,12 +6,16 @@
 //! invokes this from the CLI), the daemon runs harmlessly on
 //! loopback and macOS never routes anything to it.
 
+use std::net::TcpStream;
+use std::time::Duration;
+
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::dnsmasq::resolver;
 use crate::error::{AppError, AppResult};
 use crate::hosts::HostsManager;
+use crate::hosts_helper::{self, HostsHelperClient};
 use crate::registry::{store, DnsmasqSettings};
 use crate::state::AppState;
 
@@ -37,7 +41,7 @@ pub struct ResolverStatus {
 
 #[tauri::command]
 pub async fn dnsmasq_resolver_status(state: State<'_, AppState>) -> AppResult<ResolverStatus> {
-    let suffix = state.domain_suffix.clone();
+    let suffix = current_suffix(&state);
     let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
     Ok(ResolverStatus {
         path: resolver::resolver_file_path(&suffix)
@@ -52,27 +56,49 @@ pub async fn dnsmasq_resolver_status(state: State<'_, AppState>) -> AppResult<Re
 
 #[tauri::command]
 pub async fn dnsmasq_install_resolver(state: State<'_, AppState>) -> AppResult<()> {
-    let suffix = state.domain_suffix.clone();
+    let suffix = current_suffix(&state);
     let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
 
-    // Run the osascript prompt off the async runtime — it blocks on
-    // the macOS auth dialog and can take seconds (or never resolve if
-    // the user walks away).
+    // Prefer PortBay's privileged helper (silent — no prompt). Only fall back
+    // to the per-action osascript prompt when the helper isn't installed.
+    let helper = HostsHelperClient::system();
+    if helper.is_available() {
+        return tokio::task::spawn_blocking(move || helper.install_resolver(&suffix, port))
+            .await
+            .map_err(|e| AppError::Internal(format!("install join: {e}")))?
+            .map_err(|e| AppError::Internal(e.to_string()));
+    }
+
     let result =
         tokio::task::spawn_blocking(move || resolver::install_via_osascript(&suffix, port))
             .await
             .map_err(|e| AppError::Internal(format!("install join: {e}")))?;
-
     result.map_err(AppError::from)
 }
 
 #[tauri::command]
 pub async fn dnsmasq_uninstall_resolver(state: State<'_, AppState>) -> AppResult<()> {
-    let suffix = state.domain_suffix.clone();
+    let suffix = current_suffix(&state);
+    let helper = HostsHelperClient::system();
+    if helper.is_available() {
+        return tokio::task::spawn_blocking(move || helper.remove_resolver(&suffix))
+            .await
+            .map_err(|e| AppError::Internal(format!("uninstall join: {e}")))?
+            .map_err(|e| AppError::Internal(e.to_string()));
+    }
+
     let result = tokio::task::spawn_blocking(move || resolver::uninstall_via_osascript(&suffix))
         .await
         .map_err(|e| AppError::Internal(format!("uninstall join: {e}")))?;
     result.map_err(AppError::from)
+}
+
+/// The active domain suffix — read from the registry (source of truth),
+/// falling back to the cached startup value.
+fn current_suffix(state: &AppState) -> String {
+    store::load_or_default(&state.registry_path, &state.domain_suffix)
+        .map(|r| r.domain_suffix)
+        .unwrap_or_else(|_| state.domain_suffix.clone())
 }
 
 /// `restart_dnsmasq()` — stop the bundled dnsmasq sidecar and start
@@ -191,4 +217,145 @@ pub async fn list_managed_hosts(_state: State<'_, AppState>) -> AppResult<Vec<Ma
             hostname: e.hostname,
         })
         .collect())
+}
+
+/// First-run readiness snapshot the UI uses to decide whether to offer
+/// "Set up local DNS" and to warn about a port conflict.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsPreflight {
+    pub suffix: String,
+    pub dnsmasq_port: u16,
+    /// PortBay's privileged helper LaunchDaemon is installed + reachable.
+    pub helper_installed: bool,
+    /// `/etc/resolver/<suffix>` points at the running dnsmasq.
+    pub resolver_installed: bool,
+    /// The bundled dnsmasq sidecar is running.
+    pub dnsmasq_running: bool,
+    /// Something is already listening on :80 / :443 (likely another local web
+    /// server such as ServBay) — PortBay can't serve clean URLs until it's freed.
+    pub port_80_in_use: bool,
+    pub port_443_in_use: bool,
+    /// True when routing is fully set up (helper or resolver in place + dnsmasq up).
+    pub ready: bool,
+}
+
+fn port_in_use(port: u16) -> bool {
+    TcpStream::connect_timeout(
+        &format!("127.0.0.1:{port}").parse().expect("valid addr"),
+        Duration::from_millis(200),
+    )
+    .is_ok()
+}
+
+/// Inspect the local routing setup so the UI can guide first-time users.
+#[tauri::command]
+pub async fn dns_preflight(state: State<'_, AppState>) -> AppResult<DnsPreflight> {
+    let suffix = current_suffix(&state);
+    let (port, dnsmasq_running) = {
+        let guard = state.dnsmasq.lock().expect("dnsmasq mutex poisoned");
+        (guard.port(), guard.is_running())
+    };
+    let helper_installed = HostsHelperClient::system().is_available();
+    let resolver_installed = resolver::is_installed(&suffix, port);
+    Ok(DnsPreflight {
+        ready: dnsmasq_running && resolver_installed,
+        suffix,
+        dnsmasq_port: port,
+        helper_installed,
+        resolver_installed,
+        dnsmasq_running,
+        port_80_in_use: port_in_use(80),
+        port_443_in_use: port_in_use(443),
+    })
+}
+
+/// Resolve the helper binary that ships next to the app executable (dev: the
+/// sibling in `target/debug`; production: inside the app bundle's MacOS dir).
+fn resolve_helper_bin() -> AppResult<std::path::PathBuf> {
+    let exe = std::env::current_exe()
+        .map_err(|e| AppError::Internal(format!("locate current exe: {e}")))?;
+    let candidate = exe
+        .parent()
+        .map(|p| p.join("portbay-hosts-helper"))
+        .ok_or_else(|| AppError::Internal("no parent dir for current exe".into()))?;
+    if candidate.exists() {
+        Ok(candidate)
+    } else {
+        Err(AppError::Internal(format!(
+            "helper binary not found next to the app at {}",
+            candidate.display()
+        )))
+    }
+}
+
+/// Install PortBay's privileged helper LaunchDaemon. One macOS auth prompt;
+/// afterwards the helper performs hosts + resolver writes with no further
+/// prompts. Polls for the helper socket so the caller knows it's live.
+#[tauri::command]
+pub async fn install_privileged_helper(_app: AppHandle) -> AppResult<()> {
+    if HostsHelperClient::system().is_available() {
+        return Ok(());
+    }
+    let helper_bin = resolve_helper_bin()?;
+    tokio::task::spawn_blocking(move || hosts_helper::install_daemon(&helper_bin))
+        .await
+        .map_err(|e| AppError::Internal(format!("helper install join: {e}")))?
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // The daemon is bootstrapped but may take a beat to bind its socket.
+    let client = HostsHelperClient::system();
+    for _ in 0..30 {
+        if client.is_available() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(AppError::Internal(
+        "helper installed but its socket did not appear — check Console for the daemon".into(),
+    ))
+}
+
+/// One-click first-run setup: ensure the privileged helper is installed (one
+/// prompt), then install the resolver for the active suffix through it (no
+/// extra prompt) and restart dnsmasq so its wildcard is live.
+#[tauri::command]
+pub async fn setup_local_dns(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    if !HostsHelperClient::system().is_available() {
+        let helper_bin = resolve_helper_bin()?;
+        tokio::task::spawn_blocking(move || hosts_helper::install_daemon(&helper_bin))
+            .await
+            .map_err(|e| AppError::Internal(format!("helper install join: {e}")))?
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let client = HostsHelperClient::system();
+        let mut up = false;
+        for _ in 0..30 {
+            if client.is_available() {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !up {
+            return Err(AppError::Internal(
+                "privileged helper did not come up after install".into(),
+            ));
+        }
+    }
+
+    // Make sure dnsmasq is up so the resolver points at a live port.
+    state.boot_dnsmasq(&app).ok();
+    let suffix = current_suffix(&state);
+    let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
+
+    let client = HostsHelperClient::system();
+    tokio::task::spawn_blocking(move || client.install_resolver(&suffix, port))
+        .await
+        .map_err(|e| AppError::Internal(format!("resolver install join: {e}")))?
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // Restart dnsmasq so the wildcard reflects the current suffix + settings.
+    state.shutdown_dnsmasq();
+    state.boot_dnsmasq(&app)?;
+    Ok(())
 }

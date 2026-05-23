@@ -12,6 +12,7 @@
   import { safeInvoke } from "$lib/ipc";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { dns } from "$lib/stores/dns.svelte";
   import { search } from "$lib/stores/search.svelte";
   import EmptyState from "./EmptyState.svelte";
   import ProjectRow from "./ProjectRow.svelte";
@@ -105,7 +106,10 @@
     if (!sel) return;
 
     if (e.key === "s" || e.key === "S") {
-      void safeInvoke("start_project", { id: sel });
+      void (async () => {
+        await dns.ensureReady();
+        await safeInvoke("start_project", { id: sel });
+      })();
     } else if (e.key === "x" || e.key === "X") {
       void safeInvoke("stop_project", { id: sel });
     } else if (e.key === "r" || e.key === "R") {
