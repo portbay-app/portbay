@@ -347,6 +347,27 @@
     </button>
   </DashboardCard>
 
+  <DashboardCard title="Onboarding" flush>
+    <div class="space-y-3">
+      <p class="text-xs text-fg-muted leading-relaxed">
+        Re-run the welcome flow to scaffold a new project from a template
+        or replay the system health check.
+      </p>
+      <button
+        type="button"
+        onclick={async () => {
+          await safeInvoke("reset_onboarding");
+          window.location.assign("/onboarding");
+        }}
+        class="px-3 py-1.5 text-xs rounded-md border border-border
+               text-fg-muted hover:text-fg hover:bg-surface-2
+               transition-colors inline-flex items-center gap-1.5"
+      >
+        Re-run setup
+      </button>
+    </div>
+  </DashboardCard>
+
   <DashboardCard title="About" flush>
     <dl class="grid grid-cols-[auto,1fr] gap-x-6 gap-y-2 text-xs">
       <dt class="text-fg-muted">Version</dt>

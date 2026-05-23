@@ -14,6 +14,8 @@
 <script lang="ts">
   import "../app.css";
   import type { Snippet } from "svelte";
+  import { goto } from "$app/navigation";
+  import { page } from "$app/state";
   import { Sidebar, TopBar, RightRail } from "$lib/components/shell";
   import { ToastHost } from "$lib/components/errors";
   import { AddProjectWizard } from "$lib/components/wizard";
@@ -24,13 +26,30 @@
   import { theme } from "$lib/stores/theme.svelte";
   import { onMount } from "svelte";
   import { tunnels } from "$lib/stores/tunnels.svelte";
+  import { onboarding } from "$lib/stores/onboarding.svelte";
 
   onMount(() => {
     tunnels.start();
+    // First-run detection: refresh onboarding state, redirect to
+    // /onboarding when the marker is missing AND the registry has no
+    // projects. Don't redirect when the user is already inside the
+    // onboarding flow (avoids a reload loop after they hit "Skip").
+    void (async () => {
+      await onboarding.refresh();
+      if (
+        onboarding.shouldOnboard &&
+        !page.url.pathname.startsWith("/onboarding")
+      ) {
+        await goto("/onboarding");
+      }
+    })();
     return () => tunnels.stop();
   });
 
   let { children }: { children: Snippet } = $props();
+
+  /** True when the current route owns the full window — hide the app shell. */
+  const isFullscreen = $derived(page.url.pathname.startsWith("/onboarding"));
 
   // grid-template-columns chosen for the screenshot's proportions:
   //   sidebar  220px (180px in compact)
@@ -42,22 +61,36 @@
   const currentTheme = $derived(theme.value);
 </script>
 
-<div
-  class="h-screen w-screen grid grid-rows-[1fr] overflow-hidden"
-  style:grid-template-columns={gridCols}
-  data-theme-current={currentTheme}
->
-  <Sidebar />
-
-  <div class="flex flex-col min-w-0 min-h-0">
-    <TopBar />
-    <main class="flex-1 min-h-0 overflow-y-auto bg-bg">
-      {@render children()}
-    </main>
+{#if isFullscreen}
+  <!--
+    Full-window takeover (used by /onboarding). Sidebar / top bar /
+    right rail are hidden so the onboarding flow owns the whole
+    surface, including the macOS traffic-light area.
+  -->
+  <div
+    class="h-screen w-screen overflow-hidden bg-bg"
+    data-theme-current={currentTheme}
+  >
+    {@render children()}
   </div>
+{:else}
+  <div
+    class="h-screen w-screen grid grid-rows-[1fr] overflow-hidden"
+    style:grid-template-columns={gridCols}
+    data-theme-current={currentTheme}
+  >
+    <Sidebar />
 
-  <RightRail />
-</div>
+    <div class="flex flex-col min-w-0 min-h-0">
+      <TopBar />
+      <main class="flex-1 min-h-0 overflow-y-auto bg-bg">
+        {@render children()}
+      </main>
+    </div>
+
+    <RightRail />
+  </div>
+{/if}
 
 <AddProjectWizard />
 <ProjectDetailPanel />

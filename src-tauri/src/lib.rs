@@ -268,6 +268,10 @@ pub fn run() {
             commands::tunnel::stop_tunnel,
             commands::tunnel::list_tunnels,
             commands::tunnel::tunnel_status,
+            commands::onboarding::onboarding_status,
+            commands::onboarding::mark_onboarded,
+            commands::onboarding::reset_onboarding,
+            commands::onboarding::scaffold_template,
             commands::metrics::system_metrics,
         ])
         .run(tauri::generate_context!())

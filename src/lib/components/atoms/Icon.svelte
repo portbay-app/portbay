@@ -38,7 +38,14 @@
     | "circle-alert"
     | "circle-check"
     | "circle-stop"
-    | "info";
+    | "info"
+    | "package"
+    | "zap"
+    | "star"
+    | "file-code"
+    | "rocket"
+    | "sparkles"
+    | "arrow-right";
 </script>
 
 <script lang="ts">
@@ -68,6 +75,13 @@
     CircleCheck,
     CircleStop,
     Info,
+    Package,
+    Zap,
+    Star,
+    FileCode,
+    Rocket,
+    Sparkles,
+    ArrowRight,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -112,6 +126,13 @@
     "circle-check": CircleCheck,
     "circle-stop": CircleStop,
     info: Info,
+    package: Package,
+    zap: Zap,
+    star: Star,
+    "file-code": FileCode,
+    rocket: Rocket,
+    sparkles: Sparkles,
+    "arrow-right": ArrowRight,
   };
 
   const Component = $derived(iconMap[name]);
