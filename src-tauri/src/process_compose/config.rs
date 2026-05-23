@@ -364,7 +364,7 @@ fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadiness
                 success_threshold: 1,
                 // Failure threshold expressed in probe periods, derived
                 // from the user's timeout. 75s / 2s ≈ 38 attempts.
-                failure_threshold: ((timeout_seconds / 2).max(5)).min(120),
+                failure_threshold: (timeout_seconds / 2).clamp(5, 120),
             })
         }
         Readiness::Tcp { timeout_seconds } => {
@@ -379,7 +379,7 @@ fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadiness
                 period_seconds: 2,
                 timeout_seconds: 5,
                 success_threshold: 1,
-                failure_threshold: ((timeout_seconds / 2).max(5)).min(120),
+                failure_threshold: (timeout_seconds / 2).clamp(5, 120),
             })
         }
         Readiness::Process => None,

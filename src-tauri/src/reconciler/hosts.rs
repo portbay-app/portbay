@@ -7,8 +7,6 @@
 //! system without the privileged helper installed, the 30 s safety tick
 //! does not spam sudo prompts forever.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::net::Ipv4Addr;
 
 use crate::hosts::{HostsError, HostsManager};
@@ -135,9 +133,16 @@ fn expected_pairs(reg: &Registry) -> Vec<(String, Ipv4Addr)> {
 }
 
 fn hash_pairs(pairs: &[(String, Ipv4Addr)]) -> u64 {
-    let mut h = DefaultHasher::new();
-    pairs.hash(&mut h);
-    h.finish()
+    // Canonical, order-preserving byte encoding so the cache key is stable
+    // across Rust toolchains (DefaultHasher's algorithm is not guaranteed to be).
+    let mut buf = String::new();
+    for (host, ip) in pairs {
+        buf.push_str(host);
+        buf.push('=');
+        buf.push_str(&ip.to_string());
+        buf.push('\n');
+    }
+    crate::util::stable_hash(buf.as_bytes())
 }
 
 #[cfg(test)]

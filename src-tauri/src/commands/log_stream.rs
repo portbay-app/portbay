@@ -25,7 +25,7 @@
 //!   the task exits cleanly and the pool thread is released.
 
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tauri::ipc::Channel;
@@ -160,7 +160,7 @@ fn tail_into(path: &PathBuf, on_line: &Channel<String>) {
 
 /// Block until the log file appears or `FILE_WAIT_TIMEOUT` elapses.
 /// Returns `false` on timeout (caller exits silently).
-fn wait_for_file(path: &PathBuf, on_line: &Channel<String>) -> bool {
+fn wait_for_file(path: &Path, on_line: &Channel<String>) -> bool {
     let deadline = std::time::Instant::now() + FILE_WAIT_TIMEOUT;
     while !path.exists() {
         if std::time::Instant::now() >= deadline {
