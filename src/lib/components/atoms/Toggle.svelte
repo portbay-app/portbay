@@ -48,6 +48,7 @@
 >
   <span
     class="inline-block w-4 h-4 rounded-full bg-white shadow
+           border border-border-strong/40
            transition-transform duration-200 ease-out
            {checked ? 'translate-x-[18px]' : 'translate-x-0.5'}"
     aria-hidden="true"

@@ -50,7 +50,7 @@
   const statusToneClass: Record<InstanceStatus, string> = {
     running: "bg-status-running/15 text-status-running",
     stopped: "bg-fg-subtle/15 text-fg-subtle",
-    starting: "bg-amber-500/15 text-amber-300",
+    starting: "bg-status-starting/15 text-status-starting",
     errored: "bg-status-crashed/15 text-status-crashed",
   };
 
