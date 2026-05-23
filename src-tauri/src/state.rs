@@ -31,8 +31,10 @@ use crate::mailpit::{
     PORT_SCAN_RANGE as MAILPIT_PORT_SCAN_RANGE,
 };
 use crate::mkcert::Mkcert;
+use crate::preferences::Preferences;
 use crate::process_compose::{PcClient, SidecarManager};
 use crate::reconciler::Reconciler;
+use crate::tray::TrayState;
 use crate::tunnel::TunnelManager;
 
 /// How long `boot_caddy` polls the admin endpoint for readiness before
@@ -91,6 +93,15 @@ pub struct AppState {
     /// Convergence engine — owns hash caches for the four sub-steps and
     /// the dirty-notify primitive the background loop awaits.
     pub reconciler: Reconciler,
+
+    /// User-visible behavioural toggles (tray visibility, close-to-menubar).
+    /// Held in a mutex so the close-window handler and the Tauri commands
+    /// can both read/write without crossing await points.
+    pub preferences: Mutex<Preferences>,
+
+    /// Menu-bar tray icon handle + change-gate metadata. `None` when the
+    /// user has disabled the tray via preferences.
+    pub tray: TrayState,
 }
 
 impl AppState {
@@ -114,7 +125,18 @@ impl AppState {
             mailpit: Mutex::new(MailpitSidecar::new()),
             tunnels: Mutex::new(TunnelManager::new()),
             reconciler,
+            preferences: Mutex::new(Preferences::load()),
+            tray: Mutex::new(Default::default()),
         }
+    }
+
+    /// Snapshot the current preferences. Returns by value so the lock
+    /// is released before the caller does anything async.
+    pub fn preferences_snapshot(&self) -> Preferences {
+        self.preferences
+            .lock()
+            .expect("preferences mutex poisoned")
+            .clone()
     }
 
     /// Borrow a cloned client. Returns `SidecarDown` when PC hasn't come up.

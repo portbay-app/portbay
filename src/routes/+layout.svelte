@@ -27,12 +27,47 @@
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
   import { onMount } from "svelte";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { tunnels } from "$lib/stores/tunnels.svelte";
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import { sidebar } from "$lib/stores/sidebar.svelte";
+  import { preferences } from "$lib/stores/preferences.svelte";
+  import { errorBus } from "$lib/stores/errors.svelte";
 
   onMount(() => {
     tunnels.start();
+    void preferences.load();
+
+    // Tray-driven nav: the menu-bar "Preferences…" item emits
+    // `portbay://nav` with the target route. Same channel can be used
+    // by any future tray item that should land on a specific page.
+    let unlistenNav: UnlistenFn | null = null;
+    let unlistenToast: UnlistenFn | null = null;
+    void (async () => {
+      unlistenNav = await listen<string>("portbay://nav", async ({ payload }) => {
+        if (typeof payload === "string" && payload.startsWith("/")) {
+          await goto(payload);
+        }
+      });
+
+      // First-run "still running" hint when the user closes the window
+      // while close-to-menu-bar is on. Fires at most once across the
+      // app's lifetime (the Rust side persists the seen flag).
+      unlistenToast = await listen("portbay://close-to-menubar-hint", () => {
+        if (preferences.value.closeToMenuBarToastSeen) return;
+        errorBus.push({
+          code: "TRAY_HINT",
+          whatHappened:
+            "PortBay is still running in the menu bar.",
+          whyItMatters:
+            "Quit from the tray icon (or ⌘Q with the window focused) to stop the background processes.",
+          whoCausedIt: "system",
+          actions: [],
+        });
+        void preferences.markCloseToastSeen();
+      });
+    })();
+
     // First-run detection: refresh onboarding state, redirect to
     // /onboarding when the marker is missing AND the registry has no
     // projects. Don't redirect when the user is already inside the
@@ -46,7 +81,11 @@
         await goto("/onboarding");
       }
     })();
-    return () => tunnels.stop();
+    return () => {
+      tunnels.stop();
+      unlistenNav?.();
+      unlistenToast?.();
+    };
   });
 
   let { children }: { children: Snippet } = $props();
