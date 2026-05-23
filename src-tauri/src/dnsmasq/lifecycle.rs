@@ -125,13 +125,18 @@ pub fn find_free_port(start: u16, range: u16) -> Option<u16> {
     None
 }
 
-/// True iff a `dnsmasq` binary can be found via the sidecar slot or PATH.
-/// Cheap; used by the sidecar-status command to flag NotInstalled.
-pub fn binary_available(_app: &AppHandle) -> bool {
-    // Sidecar resolution requires a live AppHandle; the shell plugin's
-    // sidecar lookup at startup is not stable enough to use cheaply
-    // here, so we lean on PATH only for the "is anything available?"
-    // status check. The actual `start` still tries sidecar first.
+/// True iff a `dnsmasq` binary can be found. Prefers the **bundled** sidecar
+/// — that's what `start` uses and what makes PortBay self-contained — and
+/// only falls back to a PATH lookup as a dev convenience.
+///
+/// The previous PATH-only check was wrong on two counts: a packaged GUI app's
+/// `PATH` usually omits Homebrew/ServBay dirs, so it returned `false` and the
+/// daemon never booted on a clean machine; and depending on a foreign
+/// `dnsmasq` on `PATH` (e.g. ServBay's) is exactly what we must not do.
+pub fn binary_available(app: &AppHandle) -> bool {
+    if app.shell().sidecar("dnsmasq").is_ok() {
+        return true;
+    }
     which::which("dnsmasq").is_ok()
 }
 

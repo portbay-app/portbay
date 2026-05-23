@@ -19,6 +19,7 @@
   import { Sidebar, TopBar, RightRail } from "$lib/components/shell";
   import { ToastHost } from "$lib/components/errors";
   import { AddProjectWizard } from "$lib/components/wizard";
+  import AddDatabaseWizard from "$lib/components/databases/AddDatabaseWizard.svelte";
   import { ProjectDetailPanel } from "$lib/components/projects";
   import { LogViewer } from "$lib/components/logs";
   import TunnelModal from "$lib/components/tunnels/TunnelModal.svelte";
@@ -118,14 +119,25 @@
   /** True when the current route owns the full window — hide the app shell. */
   const isFullscreen = $derived(page.url.pathname.startsWith("/onboarding"));
 
+  /**
+   * The right rail is project-detail surface only. It appears on the
+   * Projects dashboard, and only when the user has clicked a row.
+   * Other routes (Settings, Domains, Services, Logs, Groups, …) reclaim
+   * the horizontal space the rail would otherwise occupy.
+   */
+  const isDashboard = $derived(page.url.pathname === "/");
+  const showRail = $derived(
+    isDashboard && projects.selectedId !== null,
+  );
+
   // grid-template-columns:
   //   sidebar  user-resizable (160–360 px), or forced 180 in compact
   //   main     1fr (greedy)
-  //   rail     320px (collapses to 0 in compact)
+  //   rail     320px when a project is selected on the dashboard, else 0
   const gridCols = $derived(
     density.value === "compact"
       ? "180px 1fr 0px"
-      : `${sidebar.width}px 1fr 320px`,
+      : `${sidebar.width}px 1fr ${showRail ? "320px" : "0px"}`,
   );
   const currentTheme = $derived(theme.value);
 </script>
@@ -165,12 +177,15 @@
       </main>
     </div>
 
-    <RightRail />
+    {#if showRail}
+      <RightRail />
+    {/if}
   </div>
 {/if}
 
 {#if !isTrayPanel}
   <AddProjectWizard />
+  <AddDatabaseWizard />
   <ProjectDetailPanel />
   <LogViewer />
   <TunnelModal />

@@ -7,7 +7,7 @@
   Edit, Remove).
 -->
 <script lang="ts">
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { safeInvoke } from "$lib/ipc";
@@ -25,9 +25,23 @@
   let open = $state<boolean>(false);
   let menuEl: HTMLDivElement | undefined = $state();
   let buttonEl: HTMLButtonElement | undefined = $state();
+  // The menu is rendered with `position: fixed` so it can escape the
+  // table card's `overflow-hidden`. We anchor it to the trigger button's
+  // bounding rect and recompute on each open.
+  const MENU_WIDTH = 192; // matches w-48
+  let menuTop = $state<number>(0);
+  let menuLeft = $state<number>(0);
+
+  function recomputePosition() {
+    if (!buttonEl) return;
+    const r = buttonEl.getBoundingClientRect();
+    menuTop = r.bottom + 4;
+    menuLeft = Math.max(8, r.right - MENU_WIDTH);
+  }
 
   function toggle(e: MouseEvent) {
     e.stopPropagation();
+    if (!open) recomputePosition();
     open = !open;
   }
 
@@ -53,6 +67,12 @@
     if (open && e.key === "Escape") close();
   }
 
+  // Close on scroll/resize — the fixed-position menu wouldn't otherwise
+  // follow its anchor, and a stale floating menu is worse than a closed one.
+  function onScrollOrResize() {
+    if (open) close();
+  }
+
   async function openProjectUrl(e: MouseEvent) {
     e.stopPropagation();
     close();
@@ -67,7 +87,7 @@
     e.stopPropagation();
     close();
     try {
-      await openUrl(`file://${project.path}`);
+      await revealItemInDir(project.path);
     } catch {
       /* opener pushes its own toast */
     }
@@ -115,29 +135,36 @@
   }
 </script>
 
-<svelte:window onclick={onWindowClick} onkeydown={onWindowKey} />
+<svelte:window
+  onclick={onWindowClick}
+  onkeydown={onWindowKey}
+  onscroll={onScrollOrResize}
+  onresize={onScrollOrResize}
+/>
 
-<div class="relative inline-block">
-  <button
-    bind:this={buttonEl}
-    type="button"
-    onclick={toggle}
-    aria-haspopup="menu"
-    aria-expanded={open}
-    title="More actions"
-    aria-label="More actions for {project.name}"
-    class="inline-flex items-center justify-center w-7 h-7 rounded-md
-           text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
-  >
-    <Icon name="more-horizontal" size={14} />
-  </button>
+<button
+  bind:this={buttonEl}
+  type="button"
+  onclick={toggle}
+  aria-haspopup="menu"
+  aria-expanded={open}
+  title="More actions"
+  aria-label="More actions for {project.name}"
+  class="inline-flex items-center justify-center w-7 h-7 rounded-md
+         text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+>
+  <Icon name="more-horizontal" size={14} />
+</button>
 
-  {#if open}
+{#if open}
     <div
       bind:this={menuEl}
       role="menu"
-      class="absolute right-0 top-8 z-30 w-48 py-1
-             rounded-lg border border-border bg-surface shadow-2xl"
+      style:position="fixed"
+      style:top="{menuTop}px"
+      style:left="{menuLeft}px"
+      style:width="{MENU_WIDTH}px"
+      class="z-50 py-1 rounded-lg border border-border bg-surface shadow-2xl"
     >
       <button
         type="button"
@@ -195,5 +222,4 @@
         <Icon name="x" size={12} /> Remove
       </button>
     </div>
-  {/if}
-</div>
+{/if}

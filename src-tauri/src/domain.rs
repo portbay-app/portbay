@@ -18,10 +18,10 @@ pub enum DomainError {
     #[error("domain suffix is required")]
     Empty,
 
-    #[error("domain suffix `{0}` must be a single DNS label")]
+    #[error("domain suffix `{0}` has an invalid label (use letters, digits and hyphens)")]
     InvalidLabel(String),
 
-    #[error("domain suffix `{0}` is reserved for public DNS or OS routing")]
+    #[error("`{0}` is a public TLD — pick a local-only suffix like `test` or `portbay.test`")]
     Reserved(String),
 
     #[error("I/O error on {path}: {source}")]
@@ -40,22 +40,41 @@ const RESERVED_SUFFIXES: &[&str] = &[
 ];
 
 pub fn normalise_domain_suffix(input: &str) -> Result<String> {
-    let suffix = input.trim().trim_start_matches('.').to_ascii_lowercase();
+    let suffix = input
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     if suffix.is_empty() {
         return Err(DomainError::Empty);
     }
-    if suffix.contains('.') || suffix.len() > 63 {
+    if suffix.len() > 253 {
         return Err(DomainError::InvalidLabel(suffix));
     }
-    if !suffix
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        || suffix.starts_with('-')
-        || suffix.ends_with('-')
-    {
-        return Err(DomainError::InvalidLabel(suffix));
+
+    // Multi-label suffixes are allowed (e.g. `portbay.test`), so validate
+    // each dot-separated label independently. Each must be a well-formed DNS
+    // label: 1–63 chars of [a-z0-9-], no leading/trailing hyphen.
+    let labels: Vec<&str> = suffix.split('.').collect();
+    for label in &labels {
+        let ok = !label.is_empty()
+            && label.len() <= 63
+            && label
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-');
+        if !ok {
+            return Err(DomainError::InvalidLabel(suffix));
+        }
     }
-    if RESERVED_SUFFIXES.contains(&suffix.as_str()) {
+
+    // Guard only the *final* label against public TLDs. This keeps the
+    // "don't hijack real DNS" protection (`app.com` → rejected) while
+    // permitting local-safe two-label suffixes like `portbay.test`, whose
+    // final label `test` is RFC 6761-reserved for local use.
+    let final_label = *labels.last().expect("non-empty after split");
+    if RESERVED_SUFFIXES.contains(&final_label) {
         return Err(DomainError::Reserved(suffix));
     }
     Ok(suffix)
@@ -148,19 +167,63 @@ mod tests {
     }
 
     #[test]
+    fn normalise_accepts_multi_label_local_suffixes() {
+        // The branding suffix: two labels, final label `test` is local-safe.
+        assert_eq!(
+            normalise_domain_suffix("portbay.test").unwrap(),
+            "portbay.test"
+        );
+        assert_eq!(
+            normalise_domain_suffix(".PortBay.Test.").unwrap(),
+            "portbay.test"
+        );
+        assert_eq!(
+            normalise_domain_suffix("app.local.dev").unwrap(),
+            "app.local.dev"
+        );
+    }
+
+    #[test]
     fn normalise_rejects_public_or_malformed_suffixes() {
+        // Single public TLD.
         assert!(matches!(
             normalise_domain_suffix("com"),
             Err(DomainError::Reserved(_))
         ));
+        // Multi-label whose *final* label is a public TLD must still be
+        // rejected so we never shadow real DNS.
         assert!(matches!(
-            normalise_domain_suffix("example.test"),
-            Err(DomainError::InvalidLabel(_))
+            normalise_domain_suffix("portbay.com"),
+            Err(DomainError::Reserved(_))
         ));
         assert!(matches!(
             normalise_domain_suffix("-bad"),
             Err(DomainError::InvalidLabel(_))
         ));
+        // Empty labels (double dot) are malformed.
+        assert!(matches!(
+            normalise_domain_suffix("portbay..test"),
+            Err(DomainError::InvalidLabel(_))
+        ));
+        // Trailing-hyphen label is malformed.
+        assert!(matches!(
+            normalise_domain_suffix("bad-.test"),
+            Err(DomainError::InvalidLabel(_))
+        ));
+    }
+
+    #[test]
+    fn migration_rewrites_to_multi_label_suffix() {
+        // The rebrand path: an existing `.test` install migrates to
+        // `.portbay.test`, renaming every project hostname.
+        let mut reg = Registry::new("test");
+        reg.add_project(project("app", "app.test", false)).unwrap();
+        reg.add_project(project("api", "api.test", false)).unwrap();
+        let migration = migrate_registry_suffix(&mut reg, "portbay.test", None).unwrap();
+        assert_eq!(migration.changed_projects, 2);
+        assert_eq!(reg.domain_suffix, "portbay.test");
+        assert_eq!(reg.projects[0].hostname, "app.portbay.test");
+        assert_eq!(reg.projects[1].hostname, "api.portbay.test");
     }
 
     #[test]

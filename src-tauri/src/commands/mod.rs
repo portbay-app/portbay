@@ -12,6 +12,7 @@
 //! `src/error.rs` for the exact wire format.
 
 pub mod certs;
+pub mod databases;
 pub mod dnsmasq;
 pub mod dto;
 pub mod events;

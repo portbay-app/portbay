@@ -2,6 +2,7 @@
 
 pub mod caddy;
 pub mod commands;
+pub mod databases;
 pub mod dnsmasq;
 pub mod domain;
 pub mod error;
@@ -35,7 +36,9 @@ use crate::state::AppState;
 
 /// Domain suffix used when the registry doesn't yet exist on disk.
 /// Matches the CLI's default (`bin/portbay.rs::CliContext::load_registry`).
-const DEFAULT_DOMAIN_SUFFIX: &str = "test";
+/// Branded `portbay.test`, so a fresh install's projects resolve at
+/// `<project>.portbay.test`. `.test` is RFC 6761-reserved for local use.
+const DEFAULT_DOMAIN_SUFFIX: &str = "portbay.test";
 
 /// Cadence for the reconcile loop's safety tick. Most ticks fire on the
 /// dirty-notify channel from CRUD commands; this is the fallback that
@@ -160,7 +163,10 @@ pub fn run() {
 
             app.manage(AppState::new(
                 registry_path,
-                DEFAULT_DOMAIN_SUFFIX,
+                // Seed the first-run fallback from the registry we just
+                // loaded so `state.domain_suffix` reflects on-disk reality
+                // rather than the compiled-in default.
+                initial_registry.domain_suffix.clone(),
                 logs_dir,
                 mkcert,
                 reconciler,
@@ -336,6 +342,10 @@ pub fn run() {
             commands::dnsmasq::dnsmasq_install_resolver,
             commands::dnsmasq::dnsmasq_uninstall_resolver,
             commands::dnsmasq::restart_dnsmasq,
+            commands::dnsmasq::get_dnsmasq_settings,
+            commands::dnsmasq::set_dnsmasq_settings,
+            commands::dnsmasq::list_dns_records,
+            commands::dnsmasq::list_managed_hosts,
             commands::tunnel::start_tunnel,
             commands::tunnel::stop_tunnel,
             commands::tunnel::list_tunnels,
@@ -360,6 +370,18 @@ pub fn run() {
             commands::preferences::update_domain_suffix,
             commands::preferences::mark_close_toast_seen,
             commands::runtimes::list_runtimes,
+            commands::databases::list_database_engines,
+            commands::databases::install_database_engine,
+            commands::databases::list_database_instances,
+            commands::databases::create_database_instance,
+            commands::databases::remove_database_instance,
+            commands::databases::start_database_instance,
+            commands::databases::stop_database_instance,
+            commands::databases::restart_database_instance,
+            commands::databases::link_database_to_project,
+            commands::databases::unlink_database_from_project,
+            commands::databases::set_database_auto_start,
+            commands::databases::open_database_client,
             commands::telemetry::telemetry_settings,
             commands::telemetry::list_crash_reports,
             commands::telemetry::read_crash_report,

@@ -21,10 +21,11 @@
     - Footer link → opens the full edit modal.
 -->
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { untrack } from "svelte";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import OpenInButton from "./OpenInButton.svelte";
   import StatusPill from "$lib/components/atoms/StatusPill.svelte";
   import ProjectAvatar from "$lib/components/atoms/ProjectAvatar.svelte";
 
@@ -109,7 +110,7 @@
   async function revealInFinder() {
     if (!project) return;
     try {
-      await openUrl(`file://${project.path}`);
+      await revealItemInDir(project.path);
     } catch {
       /* opener pushes its own toast */
     }
@@ -118,27 +119,6 @@
   function viewLogs() {
     if (!project) return;
     logViewer.show(project.id);
-  }
-
-  async function openInTerminal() {
-    if (!project) return;
-    // No dedicated IPC for "open Terminal here" — punt to the file
-    // manager so the user is one keystroke away from `cd $(pwd)`.
-    // A follow-up command lands when we wire iTerm/Terminal/Warp.
-    try {
-      await openUrl(`file://${project.path}`);
-      errorBus.push({
-        code: "TERMINAL_FALLBACK",
-        whatHappened: "Opened the project folder.",
-        whyItMatters:
-          "PortBay doesn't have a terminal integration yet — opened Finder so you can drag it into your terminal.",
-        whoCausedIt: "system",
-        severity: "info",
-        actions: [],
-      });
-    } catch {
-      /* opener pushes its own toast */
-    }
   }
 
   function openEditor() {
@@ -296,15 +276,8 @@
         >
           <Icon name="globe" size={13} /> Open in Browser
         </button>
-        <button
-          type="button"
-          onclick={openInTerminal}
-          class="inline-flex items-center gap-2 px-3 py-2 rounded-md
-                 border border-border bg-surface hover:bg-surface-2
-                 text-[12px] text-fg-muted hover:text-fg transition-colors"
-        >
-          <Icon name="terminal" size={13} /> Open in Terminal
-        </button>
+        <OpenInButton projectId={project.id} />
+
         <button
           type="button"
           onclick={revealInFinder}

@@ -35,12 +35,18 @@
     palette.show();
   }
 
-  function toggleNotifications() {
+  function toggleNotifications(e: MouseEvent) {
+    // The panels listen on window-click to close on outside-click. Without
+    // stopping propagation here, opening the panel and closing it would
+    // race in the same click — the bell's click would bubble to the
+    // panel's just-attached window listener and immediately close it.
+    e.stopPropagation();
     notificationsOpen = !notificationsOpen;
     if (notificationsOpen) userMenuOpen = false;
   }
 
-  function toggleUserMenu() {
+  function toggleUserMenu(e: MouseEvent) {
+    e.stopPropagation();
     userMenuOpen = !userMenuOpen;
     if (userMenuOpen) notificationsOpen = false;
   }
