@@ -14,14 +14,7 @@
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { projects } from "$lib/stores/projects.svelte";
-
-  interface ResolverStatus {
-    suffix: string;
-    installed: boolean;
-    path: string;
-    currentContents: string | null;
-    currentPort: number;
-  }
+  import type { ResolverStatus } from "$lib/types/dns";
 
   let dnsStatus = $state<ResolverStatus | null>(null);
   let dnsBusy = $state<boolean>(false);
