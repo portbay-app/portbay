@@ -640,10 +640,12 @@
                 Link project
               </button>
               {#if linkPickerOpen}
-                <!-- svelte-ignore a11y_interactive_supports_focus -->
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <!-- Presentational popover; the buttons inside are the real
+                     controls (Tab-reachable). stopPropagation keeps the
+                     window click-away handler from closing it on an in-menu
+                     click such as the scrollbar. -->
                 <div
-                  role="menu"
+                  role="presentation"
                   onclick={(e) => e.stopPropagation()}
                   class="absolute right-0 top-8 z-30 w-56 max-h-64 overflow-y-auto
                          rounded-lg border border-border bg-surface shadow-2xl py-1"
@@ -651,7 +653,6 @@
                   {#each linkableProjects as p (p.id)}
                     <button
                       type="button"
-                      role="menuitem"
                       onclick={() => linkProject(p.id)}
                       class="w-full text-left px-3 py-1.5 text-[12px]
                              text-fg-muted hover:bg-surface-2 hover:text-fg
