@@ -60,11 +60,18 @@ pub fn subscribe_logs(
 ) -> AppResult<()> {
     let log_path = state.logs_dir.join(format!("{id}.log"));
 
-    // Wrap the tail loop in catch_unwind so a panic inside this
-    // blocking thread can't unwind into the tokio runtime and crash
-    // the whole app. Any panic is logged and the subscription ends
-    // cleanly — the frontend's `follow` toggle stays usable.
-    tokio::task::spawn_blocking(move || {
+    // Tauri runs sync commands on its own worker pool, *not* on the
+    // tokio runtime. Calling `tokio::task::spawn_blocking` from
+    // there panics with "no reactor running" — which is what crashed
+    // the app the first time the user clicked Follow. Use Tauri's
+    // own helper, which dispatches against the runtime Tauri
+    // manages internally for us.
+    //
+    // The catch_unwind below is defence-in-depth: it caught nothing
+    // before because the panic was in *this line*, not inside the
+    // closure. Now that the closure can actually start, the unwind
+    // armor protects everything tail_into does.
+    tauri::async_runtime::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tail_into(&log_path, &on_line);
         }));

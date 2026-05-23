@@ -25,10 +25,17 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// How long we'll wait for the user's login shell to print its PATH.
-/// 3 s is generous — even pathologically slow `.zshrc` files
-/// (NVM lazy-loaders, conda init) typically finish under 1 s. A
-/// timeout here only delays first detection, never blocks boot.
-const SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(3);
+/// Heavy `.zshrc` files (nvm, conda, Homebrew shellenv, oh-my-zsh
+/// theme loading) can easily push past 3 s on a cold cache. 8 s is
+/// the empirically-comfortable upper bound — long enough to absorb
+/// a real-world slow shell, short enough that the user doesn't
+/// notice a stall at app launch. When this still times out we fall
+/// back to a non-interactive shell probe (`-c`) which skips rc
+/// files but at least picks up the OS defaults.
+const SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(8);
+/// Fallback timeout for the non-interactive probe — should be fast
+/// since no rc files are sourced.
+const SHELL_PATH_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Resolve the user's login shell. Priority:
 ///   1. `$SHELL` (set by the OS when the user has a session)
@@ -86,13 +93,27 @@ pub fn login_shell() -> PathBuf {
 /// PATH. The caller decides whether to merge or replace the
 /// inherited PATH.
 ///
-/// We use `-i -l -c` so the shell sources both `.zshenv`/`.zprofile`
-/// (login) and `.zshrc` (interactive) — most users put their PATH
-/// edits in one or the other and it's not safe to assume which.
+/// Two-stage probe:
+///   1. `-i -l -c 'echo "$PATH"'` so the shell sources `.zshenv`,
+///      `.zprofile` (login), and `.zshrc` (interactive) — most users
+///      put their PATH edits in one or the other and it's not safe
+///      to assume which. Bounded by `SHELL_PATH_TIMEOUT`.
+///   2. On timeout, fall back to `-c` (no rc files) with a short
+///      timeout. This won't pick up user-added prefixes but at least
+///      captures the OS defaults the shell exposes — better than
+///      degrading to Tauri's minimal inherited PATH.
 fn shell_path() -> Option<String> {
     let shell = login_shell();
-    let mut cmd = Command::new(&shell);
-    cmd.args(["-ilc", "echo \"$PATH\""])
+    if let Some(p) = run_path_probe(&shell, &["-ilc", "echo \"$PATH\""], SHELL_PATH_TIMEOUT) {
+        return Some(p);
+    }
+    tracing::warn!(shell = %shell.display(), "login-shell PATH probe timed out; trying non-interactive fallback");
+    run_path_probe(&shell, &["-c", "echo \"$PATH\""], SHELL_PATH_FALLBACK_TIMEOUT)
+}
+
+fn run_path_probe(shell: &std::path::Path, args: &[&str], timeout: Duration) -> Option<String> {
+    let mut cmd = Command::new(shell);
+    cmd.args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null());
@@ -107,9 +128,8 @@ fn shell_path() -> Option<String> {
         if let Ok(Some(_status)) = child.try_wait() {
             break;
         }
-        if started.elapsed() > SHELL_PATH_TIMEOUT {
+        if started.elapsed() > timeout {
             let _ = child.kill();
-            tracing::warn!(shell = %shell.display(), "login-shell PATH probe timed out");
             return None;
         }
         std::thread::sleep(Duration::from_millis(50));
