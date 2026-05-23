@@ -12,9 +12,10 @@
 //! this matches the CLI's pattern so the two binaries can never drift.
 //! See `bin/portbay.rs`'s `CliContext` for the parallel.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::AppHandle;
 
@@ -102,7 +103,22 @@ pub struct AppState {
     /// Menu-bar tray icon handle + change-gate metadata. `None` when the
     /// user has disabled the tray via preferences.
     pub tray: TrayState,
+
+    /// Recently-requested explicit Stop operations, keyed by project id.
+    /// When the user clicks Stop, we record the timestamp here; the
+    /// status poller checks this map before classifying an exit as a
+    /// crash. Wrapping tools (npm, turbo) often translate SIGTERM into
+    /// `exit(1)`, which would otherwise paint a clean stop as a red
+    /// Crashed badge. Entries older than `STOP_INTENT_WINDOW` are
+    /// considered stale and ignored.
+    pub stop_intents: Mutex<HashMap<String, Instant>>,
 }
+
+/// How long after a Stop request a non-zero exit is still considered
+/// the result of that stop. Long enough for the child to fully wind
+/// down (npm post-hooks, file watchers), short enough that a genuine
+/// crash a minute later isn't misclassified as a clean stop.
+pub const STOP_INTENT_WINDOW: Duration = Duration::from_secs(15);
 
 impl AppState {
     pub fn new(
@@ -127,6 +143,7 @@ impl AppState {
             reconciler,
             preferences: Mutex::new(Preferences::load()),
             tray: Mutex::new(Default::default()),
+            stop_intents: Mutex::new(HashMap::new()),
         }
     }
 
@@ -137,6 +154,28 @@ impl AppState {
             .lock()
             .expect("preferences mutex poisoned")
             .clone()
+    }
+
+    /// Record that the user just asked PortBay to stop this project.
+    /// The status poller consults this map before classifying the next
+    /// exit as a crash, so a clean Stop never gets painted red even
+    /// when the child runtime exits with a non-zero code.
+    pub fn mark_stop_requested(&self, project_id: &str) {
+        let mut guard = self.stop_intents.lock().expect("stop_intents mutex poisoned");
+        guard.insert(project_id.to_string(), Instant::now());
+        // Garbage-collect entries older than the intent window so the
+        // map can't grow unboundedly in long-running sessions.
+        guard.retain(|_, ts| ts.elapsed() < STOP_INTENT_WINDOW);
+    }
+
+    /// True if Stop was requested for this project recently enough that
+    /// the next observed exit should still be attributed to that Stop.
+    pub fn recently_stop_requested(&self, project_id: &str) -> bool {
+        let guard = self.stop_intents.lock().expect("stop_intents mutex poisoned");
+        guard
+            .get(project_id)
+            .map(|ts| ts.elapsed() < STOP_INTENT_WINDOW)
+            .unwrap_or(false)
     }
 
     /// Borrow a cloned client. Returns `SidecarDown` when PC hasn't come up.
