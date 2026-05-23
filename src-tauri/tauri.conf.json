@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "PortBay",
         "width": 1240,
         "height": 800,
@@ -19,6 +20,21 @@
         "minHeight": 560,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
+      },
+      {
+        "label": "tray-panel",
+        "url": "/tray-panel",
+        "width": 360,
+        "height": 480,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "focus": false,
+        "acceptFirstMouse": true,
+        "shadow": true
       }
     ],
     "security": {

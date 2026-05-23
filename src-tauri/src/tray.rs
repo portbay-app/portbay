@@ -30,14 +30,25 @@
 
 use std::sync::Mutex;
 
-use tauri::menu::{Menu, MenuBuilder, MenuEvent, SubmenuBuilder};
+use tauri::menu::{Menu, MenuBuilder, MenuEvent};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{image::Image, AppHandle, Emitter, Manager};
-use tauri_plugin_opener::OpenerExt;
+use tauri::{image::Image, AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, Rect};
 
 use crate::process_compose::ProjectStatus;
 use crate::registry::Project;
 use crate::state::AppState;
+
+/// Label of the popover webview that owns the rich tray UI. Must match
+/// the `label` in `tauri.conf.json` `app.windows[]`.
+pub const PANEL_WINDOW_LABEL: &str = "tray-panel";
+
+/// Configured popover dimensions (must match tauri.conf.json).
+const PANEL_WIDTH: f64 = 360.0;
+const PANEL_HEIGHT: f64 = 480.0;
+/// Vertical gap between the menu-bar icon's bottom edge and the popover
+/// top edge — enough air so the popover doesn't overlap the menu bar
+/// shadow but tight enough to read as anchored to the icon.
+const PANEL_GAP: f64 = 6.0;
 
 /// Tray icon id — used to look the tray handle back up via
 /// `AppHandle::tray_by_id`, though we cache it in `AppState` for hot-path
@@ -49,16 +60,11 @@ const TRAY_ID: &str = "portbay-main";
 /// `portbay://status` channel — same URI convention.
 pub const CLOSE_TOAST_CHANNEL: &str = "portbay://close-to-menubar-hint";
 
-/// Menu item id prefix for per-project rows. The id encodes the action
-/// and the project id so the single `on_menu_event` callback can
-/// dispatch without an out-of-band lookup table.
-const PROJECT_PREFIX: &str = "project:";
-
-/// Global menu-item ids — kept as constants so the build site and the
-/// handler can't drift.
+/// Global menu-item ids on the fallback right-click menu. The rich
+/// surface lives in the popover webview; this menu is a thin
+/// accessibility hatch.
 const ID_SHOW_WINDOW: &str = "show-window";
 const ID_PREFERENCES: &str = "preferences";
-const ID_STOP_ALL: &str = "stop-all";
 const ID_QUIT: &str = "quit";
 
 /// Aggregate health used to pick the tray-icon colour. The variants
@@ -129,15 +135,15 @@ fn icon_for(status: AggregateStatus) -> Image<'static> {
     Image::from_bytes(bytes).expect("embedded tray icon PNG is malformed — rebuild from scripts/generate-tray-icons.sh")
 }
 
-/// Snapshot held in `AppState` so the poller can recompute the menu /
-/// icon in O(1) without re-reading state. `last_status` and `last_count`
-/// gate the rebuild — we only touch the tray when something changed,
-/// which keeps `tray.set_menu` from running 30× per minute for nothing.
+/// Snapshot held in `AppState` so the poller can recompute the icon
+/// colour in O(1) without re-reading state. `last_status` gates the
+/// icon swap — we only touch the tray when the aggregate changed,
+/// which keeps `tray.set_icon` from running every status tick for
+/// nothing.
 #[derive(Default)]
 pub struct TrayHandle {
     pub icon: Option<TrayIcon>,
     pub last_status: Option<AggregateStatus>,
-    pub last_signature: Option<String>,
 }
 
 /// Hold the tray inside a single mutex so the poller can read/swap
@@ -152,13 +158,17 @@ pub type TrayState = Mutex<TrayHandle>;
 /// Returns Ok on success. A None visible-tray failure is treated as a
 /// degraded mode — the dashboard keeps working — and is only logged.
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
-    let menu = build_menu(app, &[])?;
+    let menu = build_fallback_menu(app)?;
     let icon = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon_for(AggregateStatus::Idle))
         .icon_as_template(false) // we ship 4 distinct colours; let macOS keep them
         .tooltip("PortBay — idle")
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        // Left-click opens the popover webview (handled in
+        // `handle_tray_event`). Right / Ctrl-click drops to the native
+        // fallback menu — accessibility hatch + a path to Quit when
+        // the popover misbehaves.
+        .show_menu_on_left_click(false)
         .on_menu_event(handle_menu_event)
         .on_tray_icon_event(handle_tray_event)
         .build(app)?;
@@ -167,7 +177,6 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let mut tray = state.tray.lock().expect("tray mutex poisoned");
     tray.icon = Some(icon);
     tray.last_status = Some(AggregateStatus::Idle);
-    tray.last_signature = Some(String::new());
     Ok(())
 }
 
@@ -182,7 +191,6 @@ pub fn uninstall(app: &AppHandle) {
         let _ = icon.set_visible(false);
     }
     tray.last_status = None;
-    tray.last_signature = None;
     // Suppress unused warning when called from settings before install
     let _ = app;
 }
@@ -206,38 +214,23 @@ pub fn refresh(
             .iter()
             .map(|p| statuses.get(p.id.as_str()).copied().unwrap_or(ProjectStatus::Stopped)),
     );
-    let signature = build_signature(projects, statuses);
 
     // Lock just long enough to compare + decide; release before any
     // tray IPC. `TrayIcon` methods are documented as main-thread safe
     // so this re-entry into the platform layer is fine.
-    let (need_menu, need_icon, icon_clone) = {
+    let (need_icon, icon_clone) = {
         let mut tray = state.tray.lock().expect("tray mutex poisoned");
         let icon = match tray.icon.as_ref() {
             Some(i) => i.clone(),
             None => return, // tray disabled by preference
         };
-        let need_menu = tray.last_signature.as_deref() != Some(signature.as_str());
         let need_icon = tray.last_status != Some(aggregate);
-        if need_menu {
-            tray.last_signature = Some(signature);
-        }
         if need_icon {
             tray.last_status = Some(aggregate);
         }
-        (need_menu, need_icon, icon)
+        (need_icon, icon)
     };
 
-    if need_menu {
-        match build_menu(app, projects_with_statuses(projects, statuses).as_slice()) {
-            Ok(menu) => {
-                if let Err(e) = icon_clone.set_menu(Some(menu)) {
-                    tracing::warn!(error = %e, "tray.set_menu failed");
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "tray menu rebuild failed"),
-        }
-    }
     if need_icon {
         if let Err(e) = icon_clone.set_icon(Some(icon_for(aggregate))) {
             tracing::warn!(error = %e, "tray.set_icon failed");
@@ -252,100 +245,10 @@ pub fn refresh(
     }
 }
 
-/// Collapse the inputs into a fingerprint string. Used solely to gate
-/// the `set_menu` call — when nothing material changed (same projects
-/// in same order with same statuses), the menu rebuild is skipped.
-fn build_signature(
-    projects: &[Project],
-    statuses: &std::collections::HashMap<String, ProjectStatus>,
-) -> String {
-    let mut s = String::with_capacity(projects.len() * 24);
-    for p in projects {
-        let st = statuses
-            .get(p.id.as_str())
-            .copied()
-            .unwrap_or(ProjectStatus::Stopped);
-        s.push_str(p.id.as_str());
-        s.push(':');
-        s.push_str(p.name.as_str());
-        s.push(':');
-        s.push_str(status_glyph(st));
-        s.push('\n');
-    }
-    s
-}
-
-fn projects_with_statuses<'a>(
-    projects: &'a [Project],
-    statuses: &std::collections::HashMap<String, ProjectStatus>,
-) -> Vec<(&'a Project, ProjectStatus)> {
-    projects
-        .iter()
-        .map(|p| {
-            (
-                p,
-                statuses
-                    .get(p.id.as_str())
-                    .copied()
-                    .unwrap_or(ProjectStatus::Stopped),
-            )
-        })
-        .collect()
-}
-
-/// One-character status glyph prefixed to the project name in the
-/// tray menu. macOS native menus don't support coloured pills, so this
-/// is our visible status hint. Matches the dashboard's vocabulary at a
-/// glance.
-fn status_glyph(s: ProjectStatus) -> &'static str {
-    match s {
-        ProjectStatus::Running => "●",
-        ProjectStatus::Starting => "◐",
-        ProjectStatus::Unhealthy => "◑",
-        ProjectStatus::Crashed | ProjectStatus::PortConflict => "✕",
-        ProjectStatus::Stopped => "○",
-    }
-}
-
-/// Build the menu from the current project snapshot. Pulled out of
-/// `install` so the same code path serves the cold-boot menu and every
-/// subsequent rebuild.
-fn build_menu(
-    app: &AppHandle,
-    projects: &[(&Project, ProjectStatus)],
-) -> tauri::Result<Menu<tauri::Wry>> {
-    let mut builder = MenuBuilder::new(app)
-        .text("portbay-header", "PortBay")
-        .separator();
-
-    if projects.is_empty() {
-        builder = builder.text("no-projects", "No projects yet — add one from the dashboard");
-    } else {
-        for (project, status) in projects {
-            let label = format!("{}  {}", status_glyph(*status), project.name);
-            let id = project.id.as_str();
-            let is_running = matches!(
-                status,
-                ProjectStatus::Running | ProjectStatus::Starting | ProjectStatus::Unhealthy
-            );
-            let submenu = SubmenuBuilder::new(app, label)
-                .text(
-                    format!("{PROJECT_PREFIX}start:{id}"),
-                    if is_running { "Start (already running)" } else { "Start" },
-                )
-                .text(format!("{PROJECT_PREFIX}stop:{id}"), "Stop")
-                .text(format!("{PROJECT_PREFIX}restart:{id}"), "Restart")
-                .separator()
-                .text(format!("{PROJECT_PREFIX}open:{id}"), "Open in browser")
-                .text(format!("{PROJECT_PREFIX}reveal:{id}"), "Reveal in Finder")
-                .build()?;
-            builder = builder.item(&submenu);
-        }
-    }
-
-    builder
-        .separator()
-        .text(ID_STOP_ALL, "Stop all projects")
+/// Right-click fallback menu. Three items — the rich list lives in
+/// the popover webview.
+fn build_fallback_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    MenuBuilder::new(app)
         .text(ID_SHOW_WINDOW, "Show PortBay window")
         .text(ID_PREFERENCES, "Preferences…")
         .separator()
@@ -353,12 +256,16 @@ fn build_menu(
         .build()
 }
 
-/// Single menu-event dispatcher. Per-project ids are encoded as
-/// `project:<action>:<id>` so the parser is a single split.
+/// Dispatcher for the fallback menu. Per-project actions and Stop-all
+/// moved into the popover; the menu no longer carries any project ids.
 fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
-    let id = event.id.as_ref();
-    match id {
+    match event.id.as_ref() {
         ID_QUIT => {
+            // Hide the popover first so it doesn't flash on top of a
+            // disappearing main window during shutdown.
+            if let Some(panel) = app.get_webview_window(PANEL_WINDOW_LABEL) {
+                let _ = panel.hide();
+            }
             // app.exit destroys all windows, which fires our
             // `WindowEvent::Destroyed` shutdown sweep in lib.rs.
             app.exit(0);
@@ -371,111 +278,109 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
             // Frontend listens to `portbay://nav` to push routes.
             let _ = app.emit("portbay://nav", "/settings");
         }
-        ID_STOP_ALL => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let state: tauri::State<AppState> = handle.state();
-                let Ok(client) = state.pc_client() else { return };
-                if let Ok(processes) = client.processes().await {
-                    for p in processes {
-                        if p.is_running {
-                            let _ = client.stop(&p.name).await;
-                        }
-                    }
-                }
-            });
+        _ => {}
+    }
+}
+
+/// macOS tray click handler. Left-click toggles the popover anchored
+/// to the icon position; double-click also brings the main window
+/// forward (useful when the user has hidden the window with
+/// close-to-menu-bar). Right-click is delegated to the platform —
+/// the OS draws our fallback menu since `show_menu_on_left_click`
+/// is false.
+fn handle_tray_event(tray: &TrayIcon, event: TrayIconEvent) {
+    match event {
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            position,
+            rect,
+            ..
+        } => {
+            toggle_panel(tray.app_handle(), position, rect);
         }
-        other if other.starts_with(PROJECT_PREFIX) => {
-            // Strip the prefix and split into `<action>:<project_id>`.
-            let payload = &other[PROJECT_PREFIX.len()..];
-            let Some((action, project_id)) = payload.split_once(':') else {
-                return;
-            };
-            dispatch_project_action(app, action, project_id);
+        TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        } => {
+            // Bring the main window forward; the single-click already
+            // showed the popover, so this is the "give me the dashboard"
+            // escape hatch.
+            show_main_window(tray.app_handle());
         }
         _ => {}
     }
 }
 
-/// Project-level actions. Each spawns onto Tauri's async runtime so the
-/// menu handler returns immediately and the macOS UI thread isn't
-/// blocked by HTTP round-trips to PC.
-fn dispatch_project_action(app: &AppHandle, action: &str, project_id: &str) {
-    let project_id = project_id.to_string();
-    let action = action.to_string();
-    let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state: tauri::State<AppState> = handle.state();
-        match action.as_str() {
-            "start" => {
-                if let Ok(client) = state.pc_client() {
-                    let _ = client.start(&project_id).await;
-                }
-            }
-            "stop" => {
-                if let Ok(client) = state.pc_client() {
-                    let _ = client.stop(&project_id).await;
-                }
-            }
-            "restart" => {
-                if let Ok(client) = state.pc_client() {
-                    let _ = client.restart(&project_id).await;
-                }
-            }
-            "open" => {
-                // Resolve the project's URL from the registry and ask
-                // the system to open it. Mirrors `commands::lifecycle::open_project`.
-                if let Ok(registry) = crate::commands::projects::load_registry(&state) {
-                    if let Some(project) = registry
-                        .list_projects()
-                        .iter()
-                        .find(|p| p.id.as_str() == project_id)
-                    {
-                        let scheme = if project.https { "https" } else { "http" };
-                        let url = format!("{scheme}://{}", project.hostname);
-                        let _ = handle.opener().open_url(url, None::<&str>);
-                    }
-                }
-            }
-            "reveal" => {
-                if let Ok(registry) = crate::commands::projects::load_registry(&state) {
-                    if let Some(project) = registry
-                        .list_projects()
-                        .iter()
-                        .find(|p| p.id.as_str() == project_id)
-                    {
-                        let _ = handle.opener().open_path(
-                            project.path.to_string_lossy().to_string(),
-                            None::<&str>,
-                        );
-                    }
-                }
-            }
-            _ => {}
+/// Toggle the popover window's visibility, anchoring it under the
+/// menu-bar icon. If the panel is already visible, hide it
+/// (sticky-click-to-dismiss). Otherwise position + show + focus.
+///
+/// `click` and `rect` arrive in physical pixels from the platform; we
+/// convert to logical via the panel's scale factor so the 360×480
+/// window size stays consistent across Retina and non-Retina displays.
+fn toggle_panel(app: &AppHandle, click: PhysicalPosition<f64>, rect: Rect) {
+    let Some(panel) = app.get_webview_window(PANEL_WINDOW_LABEL) else {
+        tracing::warn!("tray-panel window not found — popover unavailable");
+        return;
+    };
+
+    // If visible, treat the click as dismiss. `is_visible` is a cheap
+    // call against the platform layer; no need to track state in Rust.
+    if matches!(panel.is_visible(), Ok(true)) {
+        let _ = panel.hide();
+        return;
+    }
+
+    let scale = panel.scale_factor().unwrap_or(1.0);
+    // Anchor: centre horizontally on the icon, drop the panel below
+    // it. macOS's coordinate origin is top-left, so "below" is
+    // `click.y + gap`. Rect.size is a Size enum that may be physical
+    // or logical depending on the platform — `to_logical` normalises.
+    let icon_size = rect.size.to_logical::<f64>(scale);
+    let logical_click_x = click.x / scale;
+    let logical_click_y = click.y / scale;
+
+    let mut target_x = logical_click_x + icon_size.width / 2.0 - PANEL_WIDTH / 2.0;
+    let target_y = logical_click_y + PANEL_GAP;
+
+    // Keep the panel on-screen if the menu-bar icon sits near a
+    // screen edge. Query the panel's current monitor for bounds.
+    if let Ok(Some(monitor)) = panel.current_monitor() {
+        let mon_pos = monitor.position();
+        let mon_size = monitor.size();
+        let mon_logical_x = mon_pos.x as f64 / scale;
+        let mon_logical_w = mon_size.width as f64 / scale;
+        let min_x = mon_logical_x + 4.0;
+        let max_x = mon_logical_x + mon_logical_w - PANEL_WIDTH - 4.0;
+        if target_x < min_x {
+            target_x = min_x;
         }
-    });
+        if target_x > max_x {
+            target_x = max_x;
+        }
+    }
+
+    let _ = panel.set_position(LogicalPosition::new(target_x, target_y));
+    let _ = panel.show();
+    let _ = panel.set_focus();
+
+    // The hidden window may have lost its 'always on top' flag in some
+    // window-manager edge cases. Re-assert so the popover floats over
+    // other apps even when the main window is in the background.
+    let _ = panel.set_always_on_top(true);
+
+    // Suppress unused warning — PANEL_HEIGHT is the contract with
+    // tauri.conf.json; we don't need to set it here, but exporting the
+    // constant keeps both surfaces in lockstep.
+    let _ = PANEL_HEIGHT;
 }
 
-/// macOS convention: right-click and left-click both reveal the menu
-/// (we set `show_menu_on_left_click(true)` so the platform handles
-/// that case). We additionally treat a *double* left-click as "bring
-/// the main window forward" — handy when the user has hidden the
-/// window via close-to-menu-bar.
-fn handle_tray_event(tray: &TrayIcon, event: TrayIconEvent) {
-    if let TrayIconEvent::DoubleClick {
-        button: MouseButton::Left,
-        ..
-    } = event
-    {
-        show_main_window(tray.app_handle());
-    } else if let TrayIconEvent::Click {
-        button: MouseButton::Left,
-        button_state: MouseButtonState::Up,
-        ..
-    } = event
-    {
-        // No-op: the platform displays the attached menu automatically.
-        // Kept here so the pattern is explicit when future actions land.
+/// Hide the popover. Wired into the `Focused(false)` event in lib.rs
+/// so a click outside the panel closes it.
+pub fn hide_panel(app: &AppHandle) {
+    if let Some(panel) = app.get_webview_window(PANEL_WINDOW_LABEL) {
+        let _ = panel.hide();
     }
 }
 
@@ -540,38 +445,4 @@ mod tests {
         assert_eq!(AggregateStatus::from_iter(s), AggregateStatus::Running);
     }
 
-    #[test]
-    fn signature_changes_when_status_glyph_changes() {
-        use crate::registry::{Project, ProjectId, ProjectType};
-        use std::collections::HashMap;
-        use std::collections::BTreeMap;
-        use std::path::PathBuf;
-
-        let project = Project {
-            id: ProjectId::new("p1"),
-            name: "demo".into(),
-            path: PathBuf::from("/tmp/demo"),
-            kind: ProjectType::Node,
-            start_command: None,
-            port: None,
-            extra_ports: vec![],
-            hostname: "demo.test".into(),
-            https: false,
-            services: vec![],
-            env: BTreeMap::new(),
-            readiness: None,
-            auto_start: false,
-            tags: vec![],
-            document_root: None,
-            php_version: None,
-        };
-        let mut s1 = HashMap::new();
-        s1.insert("p1".into(), ProjectStatus::Stopped);
-        let mut s2 = HashMap::new();
-        s2.insert("p1".into(), ProjectStatus::Running);
-
-        let sig1 = build_signature(std::slice::from_ref(&project), &s1);
-        let sig2 = build_signature(std::slice::from_ref(&project), &s2);
-        assert_ne!(sig1, sig2);
-    }
 }
