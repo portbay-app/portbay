@@ -49,7 +49,10 @@
       case "stopped":
         return "idle";
       case "not_installed":
-        return "missing tools";
+        // Surfaces when a sidecar binary isn't bundled / on PATH.
+        // Friendly wording — "missing tools" reads as a hard error
+        // even when it's just a one-click setup away.
+        return "setup needed";
       case "unreachable":
         return "daemon down";
     }

@@ -16,7 +16,8 @@
 </script>
 
 <script lang="ts">
-  import type { CommandError, ErrorAction } from "$lib/types/error";
+  import type { CommandError, ErrorAction, Severity } from "$lib/types/error";
+  import type { IconName } from "$lib/components/atoms/Icon.svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { density } from "$lib/stores/density.svelte";
 
@@ -37,12 +38,51 @@
 
   const isCompact = $derived(density.value === "compact");
 
-  // Iconography per "who" — user errors get a softer color than system.
-  const accentClass = $derived(
-    envelope.whoCausedIt === "user"
-      ? "text-status-unhealthy border-status-unhealthy/40"
-      : "text-status-crashed border-status-crashed/40",
+  /**
+   * Pick a severity for this envelope. The Rust side (and informational
+   * frontend pushes like DNS_INSTALLED / COPIED) can set `severity`
+   * explicitly; otherwise we fall back to the `whoCausedIt` mapping the
+   * envelope used before — user input mistakes are warnings, system
+   * failures are errors. This keeps existing call sites unchanged while
+   * giving us a clean path for success / info notifications.
+   */
+  const severity = $derived<Severity>(
+    envelope.severity ??
+      (envelope.whoCausedIt === "user" ? "warning" : "error"),
   );
+
+  /**
+   * Tailwind tokens per severity. We lean on the existing `--color-status-*`
+   * palette so the toast colours match the row dots, tray icon, and
+   * status pills users already learned to read.
+   */
+  const SEVERITY_STYLE: Record<
+    Severity,
+    { text: string; border: string; icon: IconName }
+  > = {
+    success: {
+      text: "text-status-running",
+      border: "border-status-running/40",
+      icon: "circle-check",
+    },
+    info: {
+      text: "text-status-starting",
+      border: "border-status-starting/40",
+      icon: "info",
+    },
+    warning: {
+      text: "text-status-unhealthy",
+      border: "border-status-unhealthy/40",
+      icon: "circle-alert",
+    },
+    error: {
+      text: "text-status-crashed",
+      border: "border-status-crashed/40",
+      icon: "circle-alert",
+    },
+  };
+  const style = $derived(SEVERITY_STYLE[severity]);
+  const accentClass = $derived(`${style.text} ${style.border}`);
 
   // Container shape per tone.
   const containerClass = $derived.by(() => {
@@ -72,7 +112,7 @@
 >
   <div class="flex items-start gap-2.5">
     <span class="shrink-0 mt-0.5 {accentClass} border-0">
-      <Icon name="circle-alert" size={16} />
+      <Icon name={style.icon} size={16} />
     </span>
 
     <div class="flex-1 min-w-0 space-y-1">

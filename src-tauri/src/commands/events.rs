@@ -25,8 +25,11 @@ use crate::tray;
 pub const STATUS_CHANNEL: &str = "portbay://status";
 
 /// Cadence at which the poller wakes to check PC. Diffs are computed every
-/// tick; events are emitted only on transitions, not every tick.
-const POLL_INTERVAL: Duration = Duration::from_millis(1500);
+/// tick; events are emitted only on transitions, not every tick. 750 ms
+/// keeps the perceived UI lag against tools like ServBay (which polls
+/// roughly every second) competitive without saturating PC's REST API
+/// (each tick costs one /processes round-trip, sub-100 ms).
+const POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone, PartialEq)]
 struct ObservedState {
