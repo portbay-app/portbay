@@ -14,6 +14,7 @@
 
   import { safeInvoke } from "$lib/ipc";
   import { projects } from "$lib/stores/projects.svelte";
+  import { dns } from "$lib/stores/dns.svelte";
 
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView } from "$lib/types/projects";
@@ -38,6 +39,7 @@
     if (busy) return;
     busy = op;
     try {
+      if (op === "start") await dns.ensureReady();
       await safeInvoke(op === "start" ? "start_project" : "stop_project", {
         id: project.id,
       });

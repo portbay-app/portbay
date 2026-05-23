@@ -18,6 +18,7 @@
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { dns } from "$lib/stores/dns.svelte";
   import type { CertInfo } from "$lib/types/certs";
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView, ProjectType } from "$lib/types/projects";
@@ -257,6 +258,7 @@
     try {
       switch (op) {
         case "start":
+          await dns.ensureReady();
           await safeInvoke("start_project", { id: project.id });
           break;
         case "stop":

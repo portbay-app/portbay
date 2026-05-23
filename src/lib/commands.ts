@@ -18,6 +18,7 @@ import { groupEditor } from "$lib/stores/groupEditor.svelte";
 import { groups } from "$lib/stores/groups.svelte";
 import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
 import { projects } from "$lib/stores/projects.svelte";
+import { dns } from "$lib/stores/dns.svelte";
 import { sidecars } from "$lib/stores/sidecars.svelte";
 import { theme } from "$lib/stores/theme.svelte";
 import { tunnels } from "$lib/stores/tunnels.svelte";
@@ -134,6 +135,7 @@ export function collectCommands(): PaletteCommand[] {
         keywords: [...baseKw, "run", "boot"],
         run: async () => {
           try {
+            await dns.ensureReady();
             await safeInvoke("start_project", { id: p.id });
           } catch {
             /* toast pushed */

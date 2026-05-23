@@ -38,6 +38,18 @@ export interface ManagedHostsEntry {
   hostname: string;
 }
 
+/** Result of `dns_preflight` — first-run readiness for local DNS routing. */
+export interface DnsPreflight {
+  suffix: string;
+  dnsmasqPort: number;
+  helperInstalled: boolean;
+  resolverInstalled: boolean;
+  dnsmasqRunning: boolean;
+  port80InUse: boolean;
+  port443InUse: boolean;
+  ready: boolean;
+}
+
 /** Result of `update_domain_suffix`. */
 export interface DomainMigration {
   oldSuffix: string;
