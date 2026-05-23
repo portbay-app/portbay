@@ -14,6 +14,7 @@ pub mod preferences;
 pub mod process_compose;
 pub mod reconciler;
 pub mod registry;
+pub mod runtimes;
 pub mod state;
 pub mod tray;
 pub mod tunnel;
@@ -341,6 +342,7 @@ pub fn run() {
             commands::preferences::get_preferences,
             commands::preferences::set_preferences,
             commands::preferences::mark_close_toast_seen,
+            commands::runtimes::list_runtimes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
