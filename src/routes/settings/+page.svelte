@@ -1,10 +1,11 @@
 <!--
-  Settings — Phase 2 deliverable is intentionally minimal: density toggle
-  and the version line. Full settings (registry path override, sidecar
-  versions, log location, etc.) come in Phase 3.
+  Settings — operational toggles + diagnostics. Density + theme,
+  DNS resolver install/uninstall, Mail catcher status, migration
+  import, onboarding reset, and version metadata.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getVersion, getTauriVersion } from "@tauri-apps/api/app";
 
   import { DashboardCard } from "$lib/components/atoms";
   import ImportSection from "$lib/components/imports/ImportSection.svelte";
@@ -107,9 +108,21 @@
     await openUrl(`http://127.0.0.1:${mailInfo.uiPort}`);
   }
 
+  let appVersion = $state<string>("…");
+  let tauriVersion = $state<string>("…");
+
   onMount(() => {
     void refreshDnsStatus();
     void refreshMailStatus();
+    void (async () => {
+      try {
+        appVersion = await getVersion();
+        tauriVersion = await getTauriVersion();
+      } catch {
+        appVersion = "unknown";
+        tauriVersion = "unknown";
+      }
+    })();
   });
 
   const densityOptions: { value: Density; label: string; detail: string }[] = [
@@ -370,10 +383,10 @@
 
   <DashboardCard title="About" flush>
     <dl class="grid grid-cols-[auto,1fr] gap-x-6 gap-y-2 text-xs">
-      <dt class="text-fg-muted">Version</dt>
-      <dd class="text-fg font-mono">0.1.0</dd>
-      <dt class="text-fg-muted">Phase</dt>
-      <dd class="text-fg">2 (GUI MVP, in progress)</dd>
+      <dt class="text-fg-muted">App version</dt>
+      <dd class="text-fg font-mono">{appVersion}</dd>
+      <dt class="text-fg-muted">Tauri runtime</dt>
+      <dd class="text-fg font-mono">{tauriVersion}</dd>
       <dt class="text-fg-muted">Source</dt>
       <dd>
         <a

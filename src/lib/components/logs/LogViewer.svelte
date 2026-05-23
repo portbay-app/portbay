@@ -1,11 +1,12 @@
 <!--
   LogViewer — full-screen modal log tail for one project.
 
-  Phase 2 ships static-tail mode (snapshot from `tail_logs`). The
-  "Follow" toggle is wired to a 1.5s polling stub since the
-  Channel<T>-based WS stream is deferred to Phase 3 (per the card spec's
-  status: stubbed pattern). The UI is identical either way; only the
-  refresh cadence differs.
+  Two modes:
+    - Static tail (default): one-shot snapshot from `tail_logs`.
+      Refresh button re-fetches.
+    - Follow: a Channel<string> from `subscribe_logs` streams new
+      lines as they're written. The channel is dropped on
+      unmount / toggle-off so the Rust task exits cleanly.
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";

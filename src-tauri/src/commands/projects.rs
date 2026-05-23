@@ -143,6 +143,9 @@ pub async fn update_project(
     if let Some(port) = patch.port {
         project.port = Some(port);
     }
+    if let Some(extras) = patch.extra_ports {
+        project.extra_ports = extras;
+    }
     if let Some(cmd) = patch.start_command {
         project.start_command = Some(cmd);
     }
@@ -154,6 +157,9 @@ pub async fn update_project(
     }
     if let Some(tags) = patch.tags {
         project.tags = tags;
+    }
+    if let Some(services) = patch.services {
+        project.services = services;
     }
     if let Some(env) = patch.env {
         project.env = env;

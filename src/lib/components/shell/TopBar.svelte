@@ -41,8 +41,8 @@
   }
 
   function focusSearch() {
-    // Card #3 ships a placeholder pill; card-out-of-scope command palette
-    // (Phase 3) is the real target.
+    // Live-filter the projects table; the command palette (⌘K) is
+    // a separate surface tracked by its own kanban card.
     document.getElementById("portbay-search")?.focus();
   }
 </script>
@@ -55,7 +55,7 @@
     {currentTitle}
   </h1>
 
-  <!-- Search — wired to a command palette in Phase 3 -->
+  <!-- Search — live filter for the projects table. -->
   <div class="ml-auto flex items-center">
     <div
       class="relative flex items-center w-64 h-8 rounded-md bg-surface border border-border

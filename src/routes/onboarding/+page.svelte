@@ -156,6 +156,34 @@
   const healthIsGreen = $derived(
     doctor !== null && verdictCount.warn === 0 && verdictCount.fail === 0,
   );
+
+  /** Findings that need user action (warn or fail) get a remediation
+   *  hint mapped from the check name. Returning null means no hint —
+   *  the pill itself is informational. */
+  function remediation(check: string): string | null {
+    if (check === "registry") {
+      return "PortBay couldn't read your registry. Restart the app, or remove ~/Library/Application Support/PortBay/registry.json and add a project to recreate it.";
+    }
+    if (check === "process-compose" || check === "caddy") {
+      return `Open Settings → Diagnostics and click the restart action for ${check}. The bundled sidecar should come back up within a few seconds.`;
+    }
+    if (check === "tool: mkcert") {
+      return "PortBay bundles mkcert — this only matters for CLI standalone use. Install via Homebrew: brew install mkcert.";
+    }
+    if (check === "tool: caddy" || check === "tool: process-compose") {
+      return `PortBay bundles ${check.replace("tool: ", "")} — this finding only affects the CLI binary, not the .app. Safe to ignore for GUI-only use.`;
+    }
+    if (check === "/etc/hosts") {
+      return "Open Settings → DNS routing and install the resolver file, or run `sudo portbay hosts reconcile` from a terminal.";
+    }
+    return null;
+  }
+
+  const actionable = $derived(
+    (doctor?.findings ?? []).filter(
+      (f) => f.verdict !== "ok" && remediation(f.check) !== null,
+    ),
+  );
 </script>
 
 <div class="h-full w-full flex flex-col">
@@ -312,6 +340,26 @@
               <span class="text-xs text-fg-subtle">collecting findings…</span>
             {/if}
           </div>
+          {#if actionable.length > 0}
+            <div class="mt-4 pt-4 border-t border-border space-y-2">
+              <div class="text-[11px] uppercase tracking-wide text-fg-subtle">
+                How to fix
+              </div>
+              {#each actionable as f (f.check)}
+                <div class="flex items-start gap-2 text-xs">
+                  <StatusDot
+                    status={f.verdict === "fail" ? "crashed" : "unhealthy"}
+                  />
+                  <div class="flex-1 min-w-0">
+                    <div class="font-mono text-fg-muted">{f.check}</div>
+                    <div class="text-fg-muted leading-relaxed">
+                      {remediation(f.check)}
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
         </section>
       {/if}
 

@@ -22,6 +22,7 @@
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
+  import { onboarding } from "$lib/stores/onboarding.svelte";
   import type { CommandError } from "$lib/types/error";
   import type { PortbayFile } from "$lib/types/portfile";
   import type { ProjectType, ProjectView } from "$lib/types/projects";
@@ -283,6 +284,11 @@
       }
       // Refresh table to pick up the new row.
       await projects.refresh();
+      // First successful add of any kind counts as completing
+      // onboarding — write the marker so the user isn't bounced
+      // back to /onboarding on next launch. Fire-and-forget; a
+      // failed marker write doesn't undo a successful add.
+      void onboarding.markOnboarded();
       errorBus.push({
         code: portfile ? "IMPORT_OK" : "ADD_OK",
         whatHappened: `${name || id} ${portfile ? "imported from .portbay.json" : "added"}.`,

@@ -1,9 +1,18 @@
 <!--
-  Atoms preview — keeps the card-#2 demo content reachable for visual QA
-  while the shell takes over the home route. Not linked from the sidebar
-  on purpose; navigate manually via /preview when verifying atoms.
+  Atoms preview — design-system QA route. Available only in dev builds;
+  production navigation here redirects to /. Not linked from the sidebar.
 -->
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { goto } from "$app/navigation";
+
+  // Vite exposes the build mode at compile time; tree-shaken in prod.
+  const DEV = import.meta.env.DEV;
+
+  onMount(() => {
+    if (!DEV) void goto("/");
+  });
+
   import {
     Badge,
     DashboardCard,

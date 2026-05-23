@@ -5,9 +5,9 @@
   Top padding (`pt-9`) reserves space for the macOS traffic lights when
   the window uses `titleBarStyle: "Overlay"` (set in tauri.conf.json).
 
-  Footer holds a refresh button (no-op stub until the reconcile loop
-  card lands) and a small status pill reading from the sidecars store
-  (added in card #5).
+  Footer holds a sidecar-status pill (reads from the sidecars store)
+  and a refresh button that polls all sidecar status in one shot.
+  A 4 px resize handle on the right edge lives in SidebarResizeHandle.
 -->
 <script lang="ts">
   import SidebarItem from "./SidebarItem.svelte";

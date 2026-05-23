@@ -11,6 +11,7 @@
 
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
   import EnvEditor from "./EnvEditor.svelte";
+  import AdvancedFields from "./AdvancedFields.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
@@ -687,6 +688,11 @@
       <!-- Environment -->
       <DashboardCard title="Environment" flush>
         <EnvEditor {project} />
+      </DashboardCard>
+
+      <!-- Advanced — tags / extra ports / services / PHP -->
+      <DashboardCard title="Advanced" flush>
+        <AdvancedFields {project} />
       </DashboardCard>
 
       <!-- Logs preview -->

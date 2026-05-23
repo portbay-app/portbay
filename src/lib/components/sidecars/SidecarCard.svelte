@@ -43,9 +43,9 @@
     return "default";
   });
 
-  // Action button shape per (sidecar × state). For Phase 2 only
-  // process-compose's restart and the hosts reconcile are real backend
-  // calls. The rest are stubs that surface a hint via the error envelope.
+  // Action button shape per (sidecar × state). Each sidecar has a
+  // status-aware action (Start when stopped, Restart when running,
+  // Open inbox for Mailpit, Install CA for mkcert, etc.).
   interface CardAction {
     label: string;
     icon: IconName;
@@ -73,14 +73,32 @@
         };
 
       case "caddy":
+        if (info.status === "running") {
+          return {
+            label: "Restart",
+            icon: "rotate-cw",
+            tone: "neutral",
+            run: async () => {
+              try {
+                await safeInvoke("restart_caddy");
+                await sidecars.refresh();
+              } catch {
+                /* toast pushed */
+              }
+            },
+          };
+        }
         return {
-          label: "Wire in card #5b",
-          icon: "info",
-          tone: "neutral",
-          run: () => {
-            // Caddy sidecar startup is a separate follow-up; this card
-            // wires the visual surface but Caddy's setup is in another card.
-            console.info("[caddy] startup wired in a follow-up card");
+          label: "Start",
+          icon: "play",
+          tone: "accent",
+          run: async () => {
+            try {
+              await safeInvoke("restart_caddy");
+              await sidecars.refresh();
+            } catch {
+              /* toast pushed */
+            }
           },
         };
 
