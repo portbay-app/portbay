@@ -33,6 +33,7 @@ use crate::mailpit::{
 use crate::mkcert::Mkcert;
 use crate::process_compose::{PcClient, SidecarManager};
 use crate::reconciler::Reconciler;
+use crate::tunnel::TunnelManager;
 
 /// How long `boot_caddy` polls the admin endpoint for readiness before
 /// giving up. Caddy comes up well under 1 s on a warm bundle; 5 s leaves
@@ -82,6 +83,11 @@ pub struct AppState {
     /// surfaces the listening ports.
     pub mailpit: Mutex<MailpitSidecar>,
 
+    /// Per-app Cloudflare Tunnel manager. Holds one cloudflared child
+    /// per active project; replacing the manager on window-destroy
+    /// kills any leaked children via `Drop`.
+    pub tunnels: Mutex<TunnelManager>,
+
     /// Convergence engine — owns hash caches for the four sub-steps and
     /// the dirty-notify primitive the background loop awaits.
     pub reconciler: Reconciler,
@@ -106,6 +112,7 @@ impl AppState {
             mkcert,
             dnsmasq: Mutex::new(DnsmasqSidecar::new()),
             mailpit: Mutex::new(MailpitSidecar::new()),
+            tunnels: Mutex::new(TunnelManager::new()),
             reconciler,
         }
     }

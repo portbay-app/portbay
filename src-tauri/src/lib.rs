@@ -12,6 +12,7 @@ pub mod process_compose;
 pub mod reconciler;
 pub mod registry;
 pub mod state;
+pub mod tunnel;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -216,6 +217,13 @@ pub fn run() {
                 state.shutdown_caddy();
                 state.shutdown_dnsmasq();
                 state.shutdown_mailpit();
+                // Drop every live tunnel so cloudflared children
+                // don't outlive the window. The Drop impl on
+                // TunnelManager handles the kill loop.
+                {
+                    let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned");
+                    *tunnels = crate::tunnel::TunnelManager::new();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -251,6 +259,10 @@ pub fn run() {
             commands::dnsmasq::dnsmasq_install_resolver,
             commands::dnsmasq::dnsmasq_uninstall_resolver,
             commands::dnsmasq::restart_dnsmasq,
+            commands::tunnel::start_tunnel,
+            commands::tunnel::stop_tunnel,
+            commands::tunnel::list_tunnels,
+            commands::tunnel::tunnel_status,
             commands::metrics::system_metrics,
         ])
         .run(tauri::generate_context!())

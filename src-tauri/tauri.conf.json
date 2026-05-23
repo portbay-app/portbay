@@ -39,7 +39,8 @@
       "binaries/process-compose",
       "binaries/caddy",
       "binaries/mkcert",
-      "binaries/mailpit"
+      "binaries/mailpit",
+      "binaries/cloudflared"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"

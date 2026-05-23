@@ -19,8 +19,16 @@
   import { AddProjectWizard } from "$lib/components/wizard";
   import { ProjectDetailPanel } from "$lib/components/projects";
   import { LogViewer } from "$lib/components/logs";
+  import TunnelModal from "$lib/components/tunnels/TunnelModal.svelte";
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
+  import { onMount } from "svelte";
+  import { tunnels } from "$lib/stores/tunnels.svelte";
+
+  onMount(() => {
+    tunnels.start();
+    return () => tunnels.stop();
+  });
 
   let { children }: { children: Snippet } = $props();
 
@@ -54,4 +62,5 @@
 <AddProjectWizard />
 <ProjectDetailPanel />
 <LogViewer />
+<TunnelModal />
 <ToastHost />

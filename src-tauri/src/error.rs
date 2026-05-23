@@ -25,6 +25,7 @@ use crate::hosts::HostsError;
 use crate::mailpit::MailpitError;
 use crate::process_compose::PcError;
 use crate::registry::RegistryError;
+use crate::tunnel::TunnelError;
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +64,9 @@ pub enum AppError {
     Mailpit(#[from] MailpitError),
 
     #[error("{0}")]
+    Tunnel(#[from] TunnelError),
+
+    #[error("{0}")]
     Hosts(#[from] HostsError),
 
     #[error("io: {0}")]
@@ -93,6 +97,7 @@ impl AppError {
             Self::Caddy(_) => "CADDY_FAILURE",
             Self::Dnsmasq(_) => "DNSMASQ_FAILURE",
             Self::Mailpit(_) => "MAILPIT_FAILURE",
+            Self::Tunnel(_) => "TUNNEL_FAILURE",
             Self::Hosts(_) => "HOSTS_FAILURE",
             Self::Io(_) => "IO_FAILURE",
             Self::SidecarDown(_) => "SIDECAR_DOWN",
@@ -120,6 +125,9 @@ impl AppError {
             }
             Self::Mailpit(_) => {
                 "Mailpit didn't start — outgoing mail from local projects won't be caught.".into()
+            }
+            Self::Tunnel(_) => {
+                "The Cloudflare tunnel didn't come up — the project isn't reachable from the public URL.".into()
             }
             Self::BadInput(_) => "Fix the input and try again.".into(),
             Self::Hosts(_) | Self::Io(_) | Self::Internal(_) => {

@@ -23,3 +23,4 @@ pub mod metrics;
 pub mod projects;
 pub mod sidecars;
 pub mod system;
+pub mod tunnel;

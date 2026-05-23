@@ -13,6 +13,8 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { search } from "$lib/stores/search.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
+  import { tunnels } from "$lib/stores/tunnels.svelte";
+  import { tunnelModal } from "$lib/stores/tunnelModal.svelte";
   import StopAllButton from "./StopAllButton.svelte";
 
   // Map route paths to page titles. Falls back to a humanised path segment
@@ -76,6 +78,26 @@
 
   <!-- Action cluster: Add Project, Stop-All, Settings -->
   <div class="flex items-center gap-2">
+    {#if tunnels.count > 0}
+      <button
+        type="button"
+        onclick={() => {
+          // Single tunnel → jump straight to it. Multiple → open the
+          // first one and rely on the user to navigate from there;
+          // a dedicated "All tunnels" list is a follow-up.
+          const first = tunnels.value[0];
+          if (first) tunnelModal.show(first.projectId);
+        }}
+        title="{tunnels.count} active public tunnel{tunnels.count === 1 ? '' : 's'}"
+        aria-label="View active tunnels"
+        class="inline-flex items-center gap-1.5 h-8 px-2 rounded-md
+               text-accent border border-accent/40 hover:bg-accent/10
+               transition-colors text-xs font-medium"
+      >
+        <Icon name="globe" size={13} />
+        <span class="tabular-nums">{tunnels.count}</span>
+      </button>
+    {/if}
     <button
       type="button"
       onclick={openAddProject}

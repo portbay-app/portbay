@@ -45,4 +45,5 @@ src-tauri/binaries/process-compose-*
 src-tauri/binaries/caddy-*
 src-tauri/binaries/mkcert-*
 src-tauri/binaries/mailpit-*
+src-tauri/binaries/cloudflared-*
 .playwright-mcp/
