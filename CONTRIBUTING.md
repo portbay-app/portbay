@@ -1,6 +1,6 @@
 # Contributing to PortBay
 
-PortBay is a native local-development manager built with Tauri 2, Rust, and Svelte 5. Contributions should be small, traceable, and tied to an accepted issue or kanban card.
+PortBay is a native local-development manager built with Tauri 2, Rust, and Svelte 5. Contributions should be small, traceable, and tied to an accepted issue.
 
 ## Local Setup
 
@@ -19,7 +19,7 @@ Sidecar binaries are stored under `src-tauri/binaries/` and are ignored by git.
 
 ## Workflow
 
-- Use one branch per card or issue.
+- Use one branch per issue.
 - Keep commits atomic and conventional, for example `feat(hosts): add helper client`.
 - Link the issue or kanban card in the pull request.
 - Keep unrelated refactors out of feature commits.
