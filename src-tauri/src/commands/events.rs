@@ -83,11 +83,24 @@ pub fn spawn_status_poller(app: AppHandle) {
                     None => true, // first observation == emit
                 };
                 if changed {
+                    let last_error = match observed.status {
+                        ProjectStatus::Crashed if p.exit_code != 0 => {
+                            Some(format!("Process exited with code {}.", p.exit_code))
+                        }
+                        ProjectStatus::Crashed => Some("Process crashed unexpectedly.".into()),
+                        ProjectStatus::PortConflict => Some(
+                            "Port conflict — another process is using the assigned port.".into(),
+                        ),
+                        ProjectStatus::Unhealthy => {
+                            Some("Process is running but not passing its readiness probe.".into())
+                        }
+                        _ => None,
+                    };
                     let event = ProjectStatusEvent {
                         id: p.name.clone(),
                         status: observed.status,
                         runtime: Some(RuntimeInfo::from_process(p)),
-                        last_error: None,
+                        last_error,
                         ts: now,
                     };
                     let _ = app.emit(STATUS_CHANNEL, event);

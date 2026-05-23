@@ -2,20 +2,22 @@
   ProjectRow — one row of the projects table.
 
   Action buttons map to the Tauri command surface from card #1. Failed
-  actions surface via the toast bus from card #4 (safeInvoke already
-  pushes the envelope); no inline error row in Phase 2 (deferred to a
-  follow-up since `applyStatusEvent` only carries status, not lastError).
+  actions surface via both the toast bus (safeInvoke) AND an inline error
+  envelope directly beneath the row (P3 — Inline error rows). The
+  envelope auto-clears when the project recovers to "running".
 -->
 <script lang="ts">
   import { onMount } from "svelte";
   import Badge from "$lib/components/atoms/Badge.svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
+  import ErrorEnvelope from "$lib/components/errors/ErrorEnvelope.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { devTools } from "$lib/stores/devTools.svelte";
   import { density } from "$lib/stores/density.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import type { CommandError } from "$lib/types/error";
   import type { ProjectView } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
 
@@ -32,6 +34,10 @@
   );
   const compact = $derived(density.value === "compact");
   const cellClass = $derived(compact ? "py-1.5 px-3" : "py-2.5 px-4");
+  /** Number of visible columns — Type column hides in compact mode. */
+  const colCount = $derived(compact ? 4 : 5);
+
+  const inlineError = $derived(projects.lastErrors[project.id] ?? null);
 
   onMount(() => {
     void devTools.start();
@@ -52,8 +58,11 @@
           await safeInvoke("restart_project", { id: project.id });
           break;
       }
-    } catch {
-      // safeInvoke already pushed the toast.
+      // Command succeeded — clear any stale inline error.
+      projects.clearError(project.id);
+    } catch (err) {
+      // safeInvoke already pushed the toast; also persist as inline error.
+      projects.setError(project.id, err as CommandError);
     } finally {
       busy = null;
     }
@@ -210,3 +219,28 @@
     </div>
   </td>
 </tr>
+
+<!-- Inline error row — shows beneath the project row when an error is active. -->
+{#if inlineError}
+  <tr
+    class="bg-surface-2/50"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <td colspan={colCount} class="px-4 py-2">
+      <div class="flex items-start gap-2">
+        <div class="flex-1 min-w-0">
+          <ErrorEnvelope envelope={inlineError} tone="inline" />
+        </div>
+        <button
+          type="button"
+          onclick={() => projects.clearError(project.id)}
+          title="Dismiss error"
+          aria-label="Dismiss inline error"
+          class="shrink-0 mt-1 p-1 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2 transition-colors"
+        >
+          <Icon name="x" size={14} />
+        </button>
+      </div>
+    </td>
+  </tr>
+{/if}
