@@ -247,6 +247,10 @@ pub fn run() {
             commands::import::detect_sources,
             commands::import::preview_import,
             commands::import::import_projects,
+            commands::dnsmasq::dnsmasq_resolver_status,
+            commands::dnsmasq::dnsmasq_install_resolver,
+            commands::dnsmasq::dnsmasq_uninstall_resolver,
+            commands::dnsmasq::restart_dnsmasq,
             commands::metrics::system_metrics,
         ])
         .run(tauri::generate_context!())

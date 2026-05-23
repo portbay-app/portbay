@@ -143,7 +143,15 @@ impl Reconciler {
 
         let caddy_outcome = caddy::reconcile(&reg, &certs_result.lookup, &state, caddy_cache).await;
 
-        let hosts_outcome = hosts::reconcile(&reg, hosts_cache);
+        // When dnsmasq's `/etc/resolver/<suffix>` is in place and
+        // points at the running daemon, hostname → loopback routing
+        // is handled by DNS and `/etc/hosts` becomes redundant. Let
+        // the hosts sub-step Skip in that case.
+        let dns_routing_active = {
+            let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
+            crate::dnsmasq::resolver::is_installed(&state.domain_suffix, port)
+        };
+        let hosts_outcome = hosts::reconcile(&reg, hosts_cache, dns_routing_active);
 
         let report = ReconcileReport {
             started_at_ms,
