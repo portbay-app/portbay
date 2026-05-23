@@ -1,0 +1,126 @@
+# PortBay release — fires on `vX.Y.Z` tags.
+#
+# Builds a signed + notarised .app, attaches the .dmg + tarball to a
+# GitHub Release, and emits the `latest.json` updater manifest the
+# Tauri Updater plugin reads.
+#
+# **Gated on the Developer ID Application cert + notarytool credentials
+# being present in repo secrets.** Until that card lands, this workflow
+# is skipped automatically (see the `if:` guard on every job) and the
+# release process stays manual on the maintainer's laptop. Once the
+# secrets are populated, remove the guard.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  CARGO_TERM_COLOR: "always"
+  CLICOLOR_FORCE: "1"
+  RUST_TOOLCHAIN: "stable"
+  NODE_VERSION: "20"
+  PNPM_VERSION: "10"
+
+jobs:
+  build-and-sign:
+    name: build · sign · notarise (macOS arm64)
+    runs-on: macos-14
+    # Skip the entire job until the signing credentials exist.
+    # Replace this guard with `if: github.repository == 'portbay-app/portbay'`
+    # (or similar) once `APPLE_CERTIFICATE` is populated in repo
+    # secrets via the Developer ID cert card.
+    if: vars.RELEASE_SIGNING_ENABLED == 'true'
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch sidecar binaries
+        run: |
+          ./scripts/fetch-caddy.sh
+          ./scripts/fetch-mkcert.sh
+          ./scripts/fetch-mailpit.sh
+          ./scripts/fetch-cloudflared.sh
+
+      - name: Build signed app
+        env:
+          # Developer ID Application cert (base64-encoded .p12), unwrapped
+          # into a temporary keychain by the Tauri action.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # notarytool credentials.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri Updater plugin signature.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build --target aarch64-apple-darwin
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: portbay-macos-arm64
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+          retention-days: 14
+          if-no-files-found: warn
+
+  publish-release:
+    name: publish · GitHub Release + updater manifest
+    needs: [build-and-sign]
+    runs-on: ubuntu-latest
+    if: vars.RELEASE_SIGNING_ENABLED == 'true'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: portbay-macos-arm64
+          path: artifacts/
+
+      - name: Create release + emit latest.json
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/dmg/*.dmg
+            artifacts/macos/*.app.tar.gz
+            artifacts/macos/*.app.tar.gz.sig
+          draft: true
+          generate_release_notes: true
+
+      # `latest.json` (the updater manifest) is assembled here once the
+      # tauri-action signature artifacts are present. Body shape:
+      # { version, notes, pub_date, platforms: { "darwin-aarch64": { url, signature } } }
+      # The Updater integration card writes the consumer side; this
+      # workflow writes the producer side.

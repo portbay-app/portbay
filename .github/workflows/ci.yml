@@ -1,0 +1,170 @@
+# PortBay CI — runs on every push to main and every PR.
+#
+# Three gates merge has to pass:
+#   1. Rust: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
+#   2. Frontend: `pnpm check` (svelte-kit + svelte-check, 0 errors required).
+#   3. Bundle smoke: `cargo tauri build --debug` so we catch packaging
+#      regressions before they reach a release tag.
+#
+# Targets macos-14 (Apple Silicon) only. Intel + Linux matrix arrives
+# when those targets are officially supported by PortBay.
+#
+# Sidecar binaries are fetched at the top of every job so the build
+# doesn't depend on cached state from outside the repo. The fetch
+# scripts in `scripts/` are the canonical install path; CI exercises
+# them on every run.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Avoid running multiple workflows for the same PR head — newer pushes
+# cancel older ones. Saves runner time and keeps the queue moving.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Speeds up cargo by skipping the incremental-compile cache, which
+  # GitHub-hosted runners can't benefit from anyway (each job is a
+  # clean VM).
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  # Force colour in cargo / pnpm output so CI logs stay readable.
+  CARGO_TERM_COLOR: "always"
+  CLICOLOR_FORCE: "1"
+  # Versions pinned here so CI is reproducible. Bump when bumping
+  # locally too.
+  RUST_TOOLCHAIN: "stable"
+  NODE_VERSION: "20"
+  PNPM_VERSION: "10"
+
+jobs:
+  rust:
+    name: rust · fmt + clippy + test
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Fetch sidecar binaries
+        run: |
+          ./scripts/fetch-caddy.sh
+          ./scripts/fetch-mkcert.sh
+          ./scripts/fetch-mailpit.sh
+          ./scripts/fetch-cloudflared.sh
+
+      - name: cargo fmt --check
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -- -D warnings
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+      - name: cargo test --no-default-features
+        working-directory: src-tauri
+        # `--no-default-features` mirrors the Tauri default-dev flag the
+        # Tauri CLI passes so test runs see the same feature set as
+        # `pnpm tauri dev`.
+        run: cargo test --no-default-features
+
+  frontend:
+    name: frontend · pnpm check + build
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm check (svelte-check)
+        run: pnpm check
+
+      - name: pnpm build
+        run: pnpm build
+
+  bundle-smoke:
+    name: bundle · debug build
+    needs: [rust, frontend]
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch sidecar binaries
+        run: |
+          ./scripts/fetch-caddy.sh
+          ./scripts/fetch-mkcert.sh
+          ./scripts/fetch-mailpit.sh
+          ./scripts/fetch-cloudflared.sh
+
+      - name: cargo tauri build --debug
+        # Skips notarisation + signing; verifies the bundle layout is
+        # still valid. Catches missing capabilities entries, broken
+        # externalBin paths, etc., before a release tag does.
+        run: pnpm tauri build --debug --no-bundle
