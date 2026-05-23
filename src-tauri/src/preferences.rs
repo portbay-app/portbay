@@ -45,6 +45,11 @@ pub struct Preferences {
     /// from firing more than once.
     #[serde(default)]
     pub close_to_menu_bar_toast_seen: bool,
+
+    /// Explicit opt-in. When false, PortBay never sends usage telemetry
+    /// or crash reports over the network.
+    #[serde(default)]
+    pub telemetry_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -57,6 +62,7 @@ impl Default for Preferences {
             show_tray_icon: true,
             close_to_menu_bar: true,
             close_to_menu_bar_toast_seen: false,
+            telemetry_enabled: false,
         }
     }
 }
@@ -121,6 +127,7 @@ mod tests {
         assert!(p.show_tray_icon);
         assert!(p.close_to_menu_bar);
         assert!(!p.close_to_menu_bar_toast_seen);
+        assert!(!p.telemetry_enabled);
     }
 
     #[test]
@@ -132,6 +139,7 @@ mod tests {
         assert!(!p.show_tray_icon);
         assert!(p.close_to_menu_bar);
         assert!(!p.close_to_menu_bar_toast_seen);
+        assert!(!p.telemetry_enabled);
     }
 
     #[test]
@@ -140,11 +148,13 @@ mod tests {
             show_tray_icon: false,
             close_to_menu_bar: true,
             close_to_menu_bar_toast_seen: true,
+            telemetry_enabled: true,
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"showTrayIcon\":false"));
         assert!(json.contains("\"closeToMenuBar\":true"));
         assert!(json.contains("\"closeToMenuBarToastSeen\":true"));
+        assert!(json.contains("\"telemetryEnabled\":true"));
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
     }

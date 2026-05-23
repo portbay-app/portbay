@@ -18,6 +18,7 @@ pub mod reconciler;
 pub mod registry;
 pub mod runtimes;
 pub mod state;
+pub mod telemetry;
 pub mod tray;
 pub mod tunnel;
 
@@ -113,6 +114,7 @@ fn resolve_logs_dir() -> std::io::Result<PathBuf> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
+    telemetry::install_panic_hook(env!("CARGO_PKG_VERSION"));
 
     // Merge the user's login-shell PATH into the process environment
     // before *anything* else spawns. GUI launches on macOS inherit a
@@ -355,6 +357,13 @@ pub fn run() {
             commands::preferences::update_domain_suffix,
             commands::preferences::mark_close_toast_seen,
             commands::runtimes::list_runtimes,
+            commands::telemetry::telemetry_settings,
+            commands::telemetry::list_crash_reports,
+            commands::telemetry::read_crash_report,
+            commands::telemetry::discard_crash_report,
+            commands::telemetry::send_crash_report,
+            commands::telemetry::record_js_error,
+            commands::telemetry::record_telemetry_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -29,4 +29,5 @@ pub mod runtimes;
 pub mod projects;
 pub mod sidecars;
 pub mod system;
+pub mod telemetry;
 pub mod tunnel;

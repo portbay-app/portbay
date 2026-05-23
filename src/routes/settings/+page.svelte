@@ -49,6 +49,60 @@
   }
   let mailInfo = $state<MailStatusInfo>({ running: false, smtpPort: null, uiPort: null });
 
+  interface CrashSummary {
+    id: string;
+    kind: "rust_panic" | "js_error" | "js_unhandled_rejection";
+    message: string;
+    createdAt: number;
+  }
+
+  interface TelemetrySettings {
+    enabled: boolean;
+    crashReportCount: number;
+    endpointConfigured: boolean;
+  }
+
+  let telemetryInfo = $state<TelemetrySettings>({
+    enabled: false,
+    crashReportCount: 0,
+    endpointConfigured: false,
+  });
+  let crashReports = $state<CrashSummary[]>([]);
+  let telemetryBusy = $state<boolean>(false);
+
+  async function refreshTelemetry() {
+    try {
+      telemetryInfo = await safeInvoke<TelemetrySettings>("telemetry_settings");
+      crashReports = await safeInvoke<CrashSummary[]>("list_crash_reports");
+    } catch {
+      crashReports = [];
+    }
+  }
+
+  async function sendCrash(id: string) {
+    telemetryBusy = true;
+    try {
+      await safeInvoke("send_crash_report", { id });
+      await refreshTelemetry();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      telemetryBusy = false;
+    }
+  }
+
+  async function discardCrash(id: string) {
+    telemetryBusy = true;
+    try {
+      await safeInvoke("discard_crash_report", { id });
+      await refreshTelemetry();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      telemetryBusy = false;
+    }
+  }
+
   async function refreshMailStatus() {
     try {
       const health = await safeInvoke<{ mailpit: { status: string; detail?: string } }>(
@@ -166,6 +220,7 @@
     void refreshDomainSettings();
     void refreshDnsStatus();
     void refreshMailStatus();
+    void refreshTelemetry();
     void (async () => {
       try {
         appVersion = await getVersion();
@@ -503,6 +558,94 @@
         bundled binary, then restart from the dashboard's Mailpit card.
       </p>
     {/if}
+  </DashboardCard>
+
+  <DashboardCard title="Crash reporting" flush>
+    <div class="space-y-3">
+      <label
+        class="flex items-start gap-3 p-3 rounded-md border cursor-pointer transition-colors border-border hover:border-border-strong"
+      >
+        <input
+          type="checkbox"
+          checked={preferences.value.telemetryEnabled}
+          onchange={async (e) => {
+            await preferences.update({
+              telemetryEnabled: (e.currentTarget as HTMLInputElement).checked,
+            });
+            await refreshTelemetry();
+          }}
+          class="mt-1 accent-accent"
+          disabled={!preferences.loaded}
+        />
+        <div>
+          <div class="text-sm font-medium text-fg">
+            Send anonymous diagnostics
+          </div>
+          <div class="text-xs text-fg-muted">
+            Off by default. When enabled, PortBay may send OS, app
+            version, command name, and success/failure. Crash reports
+            include panic message and sanitized backtrace only.
+          </div>
+        </div>
+      </label>
+
+      <details class="rounded-md border border-border bg-bg/50 p-3">
+        <summary class="text-xs text-fg cursor-pointer">What we collect</summary>
+        <ul class="mt-2 space-y-1 text-[11px] text-fg-muted leading-relaxed">
+          <li>Telemetry: OS, architecture, app version, command name, success/failure.</li>
+          <li>Crashes: panic or JS error message, sanitized backtrace, OS, architecture, app version.</li>
+          <li>Never collected: project paths, hostnames, environment variables, registry contents, or log contents.</li>
+        </ul>
+      </details>
+
+      <div class="text-[11px] text-fg-muted">
+        Endpoint:
+        {#if telemetryInfo.endpointConfigured}
+          <span class="text-status-running">configured</span>
+        {:else}
+          <span class="text-fg-subtle">not configured for this build</span>
+        {/if}
+      </div>
+
+      {#if crashReports.length > 0}
+        <div class="space-y-2">
+          {#each crashReports as report (report.id)}
+            <div class="rounded-md border border-border bg-bg/60 p-3">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-xs text-fg font-medium">
+                    {report.kind.replaceAll("_", " ")}
+                  </div>
+                  <div class="mt-1 text-[11px] text-fg-muted break-words">
+                    {report.message}
+                  </div>
+                </div>
+                <div class="flex shrink-0 gap-1.5">
+                  <button
+                    type="button"
+                    onclick={() => sendCrash(report.id)}
+                    disabled={telemetryBusy || !preferences.value.telemetryEnabled}
+                    class="px-2 py-1 text-[11px] rounded border border-accent/40 text-accent disabled:opacity-50"
+                  >
+                    Send
+                  </button>
+                  <button
+                    type="button"
+                    onclick={() => discardCrash(report.id)}
+                    disabled={telemetryBusy}
+                    class="px-2 py-1 text-[11px] rounded border border-border text-fg-muted disabled:opacity-50"
+                  >
+                    Discard
+                  </button>
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <p class="text-xs text-fg-subtle">No pending crash reports.</p>
+      {/if}
+    </div>
   </DashboardCard>
 
   <ImportSection />
