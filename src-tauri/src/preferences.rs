@@ -50,10 +50,107 @@ pub struct Preferences {
     /// or crash reports over the network.
     #[serde(default)]
     pub telemetry_enabled: bool,
+
+    // -------- General --------
+    /// Register a LaunchAgent so PortBay starts at login. Off by
+    /// default; the agent is provisioned the first time this flips on.
+    #[serde(default)]
+    pub launch_at_login: bool,
+
+    /// On launch, re-start every project that was running when the app
+    /// last quit. Off by default — the conservative choice for a tool
+    /// that orchestrates real listeners on real ports.
+    #[serde(default)]
+    pub reopen_previous_projects: bool,
+
+    /// Drives the StopAll button's confirm step. On by default — the
+    /// universal kill switch is too easy to fat-finger otherwise.
+    #[serde(default = "default_true")]
+    pub confirm_before_stop_all: bool,
+
+    /// macOS Notification Center toasts (separate from the in-app
+    /// toast bus). Off by default.
+    #[serde(default)]
+    pub desktop_notifications: bool,
+
+    // -------- Appearance --------
+    /// Named accent colour. Drives `--color-accent`; the swatch grid
+    /// in /settings is the canonical writer.
+    #[serde(default = "default_accent_color")]
+    pub accent_color: String,
+
+    // -------- Workspace --------
+    /// Path the Add Project wizard pre-fills with. Empty string means
+    /// "let the OS suggest" (typically `~`).
+    #[serde(default)]
+    pub default_workspace_folder: String,
+
+    /// Periodically scan `default_workspace_folder` for new project
+    /// folders and prompt to register them. Off by default; opt-in
+    /// because the scan is surprising the first time it triggers.
+    #[serde(default)]
+    pub auto_detect_projects: bool,
+
+    /// Initial sort key for the projects table on cold launch.
+    /// "name-asc" | "name-desc" | "status" | "port".
+    #[serde(default = "default_sort")]
+    pub default_sort: String,
+
+    /// Whether newly-added projects auto-start by default.
+    /// "manual" | "auto".
+    #[serde(default = "default_start_behavior")]
+    pub default_start_behavior: String,
+
+    // -------- Domains & HTTPS --------
+    /// Permit PortBay to write managed entries to /etc/hosts. On by
+    /// default for new installs; turning this off pins the user to a
+    /// dnsmasq-only setup.
+    #[serde(default = "default_true")]
+    pub manage_hosts_automatically: bool,
+
+    /// Auto-reissue local TLS certs before they expire. On by default.
+    #[serde(default = "default_true")]
+    pub auto_renew_certificates: bool,
+
+    // -------- Advanced --------
+    /// Persist project stdout/stderr to disk. On by default; turning
+    /// off saves disk space but loses post-mortem debugging.
+    #[serde(default = "default_true")]
+    pub store_logs_locally: bool,
+
+    /// How many days of logs to keep before rolling. 0 means "never
+    /// auto-rotate"; the default trims aggressively.
+    #[serde(default = "default_log_retention_days")]
+    pub log_retention_days: u32,
+
+    /// Filesystem path the bundled CLI is symlinked to (or copied to,
+    /// when SIP forbids symlink). Exposed read-only with a copy button.
+    #[serde(default = "default_cli_path")]
+    pub cli_path: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_accent_color() -> String {
+    "blue".to_string()
+}
+
+fn default_sort() -> String {
+    "name-asc".to_string()
+}
+
+fn default_start_behavior() -> String {
+    "manual".to_string()
+}
+
+fn default_log_retention_days() -> u32 {
+    7
+}
+
+fn default_cli_path() -> String {
+    "/usr/local/bin/portbay".to_string()
 }
 
 impl Default for Preferences {
@@ -63,6 +160,20 @@ impl Default for Preferences {
             close_to_menu_bar: true,
             close_to_menu_bar_toast_seen: false,
             telemetry_enabled: false,
+            launch_at_login: false,
+            reopen_previous_projects: false,
+            confirm_before_stop_all: true,
+            desktop_notifications: false,
+            accent_color: default_accent_color(),
+            default_workspace_folder: String::new(),
+            auto_detect_projects: false,
+            default_sort: default_sort(),
+            default_start_behavior: default_start_behavior(),
+            manage_hosts_automatically: true,
+            auto_renew_certificates: true,
+            store_logs_locally: true,
+            log_retention_days: default_log_retention_days(),
+            cli_path: default_cli_path(),
         }
     }
 }
@@ -149,12 +260,27 @@ mod tests {
             close_to_menu_bar: true,
             close_to_menu_bar_toast_seen: true,
             telemetry_enabled: true,
+            launch_at_login: true,
+            reopen_previous_projects: true,
+            confirm_before_stop_all: false,
+            desktop_notifications: true,
+            accent_color: "purple".to_string(),
+            default_workspace_folder: "/Users/dev/Projects".to_string(),
+            auto_detect_projects: true,
+            default_sort: "status".to_string(),
+            default_start_behavior: "auto".to_string(),
+            manage_hosts_automatically: false,
+            auto_renew_certificates: false,
+            store_logs_locally: false,
+            log_retention_days: 30,
+            cli_path: "/opt/local/bin/portbay".to_string(),
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"showTrayIcon\":false"));
         assert!(json.contains("\"closeToMenuBar\":true"));
-        assert!(json.contains("\"closeToMenuBarToastSeen\":true"));
-        assert!(json.contains("\"telemetryEnabled\":true"));
+        assert!(json.contains("\"launchAtLogin\":true"));
+        assert!(json.contains("\"accentColor\":\"purple\""));
+        assert!(json.contains("\"logRetentionDays\":30"));
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
     }

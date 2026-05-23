@@ -11,6 +11,18 @@ import { browser } from "$app/environment";
 
 import { safeInvoke } from "$lib/ipc";
 
+export type AccentColor =
+  | "blue"
+  | "purple"
+  | "green"
+  | "orange"
+  | "red"
+  | "yellow"
+  | "gray";
+
+export type DefaultSort = "name-asc" | "name-desc" | "status" | "port";
+export type StartBehavior = "manual" | "auto";
+
 export interface Preferences {
   /** Install the menu-bar tray icon at launch. */
   showTrayIcon: boolean;
@@ -20,6 +32,30 @@ export interface Preferences {
   closeToMenuBarToastSeen: boolean;
   /** Explicit opt-in for usage telemetry and crash-report upload. */
   telemetryEnabled: boolean;
+
+  // General
+  launchAtLogin: boolean;
+  reopenPreviousProjects: boolean;
+  confirmBeforeStopAll: boolean;
+  desktopNotifications: boolean;
+
+  // Appearance
+  accentColor: AccentColor;
+
+  // Workspace
+  defaultWorkspaceFolder: string;
+  autoDetectProjects: boolean;
+  defaultSort: DefaultSort;
+  defaultStartBehavior: StartBehavior;
+
+  // Domains & HTTPS
+  manageHostsAutomatically: boolean;
+  autoRenewCertificates: boolean;
+
+  // Advanced
+  storeLogsLocally: boolean;
+  logRetentionDays: number;
+  cliPath: string;
 }
 
 const DEFAULTS: Preferences = {
@@ -27,7 +63,41 @@ const DEFAULTS: Preferences = {
   closeToMenuBar: true,
   closeToMenuBarToastSeen: false,
   telemetryEnabled: false,
+  launchAtLogin: false,
+  reopenPreviousProjects: false,
+  confirmBeforeStopAll: true,
+  desktopNotifications: false,
+  accentColor: "blue",
+  defaultWorkspaceFolder: "",
+  autoDetectProjects: false,
+  defaultSort: "name-asc",
+  defaultStartBehavior: "manual",
+  manageHostsAutomatically: true,
+  autoRenewCertificates: true,
+  storeLogsLocally: true,
+  logRetentionDays: 7,
+  cliPath: "/usr/local/bin/portbay",
 };
+
+// Per-accent CSS variable values. Keyed off `accentColor`, applied to
+// :root so every consumer of `var(--color-accent)` swaps without a
+// re-render. The hover value is one HSL step toward white.
+const ACCENT_PRESETS: Record<AccentColor, { base: string; hover: string }> = {
+  blue:   { base: "#4d9cff", hover: "#6bb0ff" },
+  purple: { base: "#a855f7", hover: "#c084fc" },
+  green:  { base: "#22c55e", hover: "#4ade80" },
+  orange: { base: "#f97316", hover: "#fb923c" },
+  red:    { base: "#ef4444", hover: "#f87171" },
+  yellow: { base: "#eab308", hover: "#facc15" },
+  gray:   { base: "#9ca3af", hover: "#d1d5db" },
+};
+
+function applyAccent(color: AccentColor): void {
+  if (!browser) return;
+  const preset = ACCENT_PRESETS[color] ?? ACCENT_PRESETS.blue;
+  document.documentElement.style.setProperty("--color-accent", preset.base);
+  document.documentElement.style.setProperty("--color-accent-hover", preset.hover);
+}
 
 function createPreferencesStore() {
   let value = $state<Preferences>({ ...DEFAULTS });
@@ -37,6 +107,7 @@ function createPreferencesStore() {
     if (!browser) return;
     try {
       value = await safeInvoke<Preferences>("get_preferences");
+      applyAccent(value.accentColor);
     } catch {
       // safeInvoke already showed the toast; keep defaults so the UI
       // stays interactive rather than blocked behind an opaque error.
@@ -51,6 +122,7 @@ function createPreferencesStore() {
       // The backend returns the persisted snapshot; trust it over the
       // optimistic patch in case server-side normalisation kicks in.
       value = await safeInvoke<Preferences>("set_preferences", { prefs: next });
+      applyAccent(value.accentColor);
     } catch {
       // safeInvoke already showed the toast; leave `value` untouched
       // so the UI rolls back automatically.

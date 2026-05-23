@@ -9,33 +9,67 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { DashboardCard } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
-  import { density } from "$lib/stores/density.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { search } from "$lib/stores/search.svelte";
   import EmptyState from "./EmptyState.svelte";
   import ProjectRow from "./ProjectRow.svelte";
+  import type { ProjectView } from "$lib/types/projects";
+
+  export type SortKey = "name-asc" | "name-desc" | "status" | "port";
+
+  interface Props {
+    sortKey?: SortKey;
+  }
+  let { sortKey = "name-asc" }: Props = $props();
 
   onMount(() => {
     // Store lifetime is owned by the root layout — calling start()
     // here is a no-op when the listener is already up. We deliberately
     // do *not* stop() on unmount: other routes (/domains, /services,
-    // /logs, /languages) share the same store and would lose their
-    // live data when the user navigates away from the dashboard.
+    // /logs) share the same store and would lose their live data when
+    // the user navigates away from the dashboard.
     void projects.start();
   });
 
+  const statusRank: Record<string, number> = {
+    running: 0,
+    starting: 1,
+    unhealthy: 2,
+    port_conflict: 3,
+    crashed: 4,
+    stopped: 5,
+  };
+
+  function compare(a: ProjectView, b: ProjectView): number {
+    switch (sortKey) {
+      case "name-asc":
+        return a.name.localeCompare(b.name);
+      case "name-desc":
+        return b.name.localeCompare(a.name);
+      case "port":
+        return (a.port ?? 0) - (b.port ?? 0);
+      case "status": {
+        const ra = statusRank[a.status] ?? 9;
+        const rb = statusRank[b.status] ?? 9;
+        if (ra !== rb) return ra - rb;
+        return a.name.localeCompare(b.name);
+      }
+    }
+  }
+
   const filtered = $derived.by(() => {
     const q = search.value.trim().toLowerCase();
-    if (!q) return projects.value;
-    return projects.value.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.hostname.toLowerCase().includes(q) ||
-        p.id.toLowerCase().includes(q),
-    );
+    const base = q
+      ? projects.value.filter(
+          (p) =>
+            p.name.toLowerCase().includes(q) ||
+            p.hostname.toLowerCase().includes(q) ||
+            p.id.toLowerCase().includes(q),
+        )
+      : projects.value;
+    return base.slice().sort(compare);
   });
 
   function isEditableTarget(el: EventTarget | null): boolean {
@@ -81,30 +115,30 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<DashboardCard title="Websites" flush>
-  {#snippet badge()}
-    <span class="text-xs text-fg-muted tabular-nums">
-      {projects.value.length} total
-    </span>
-  {/snippet}
-
+<div class="bg-surface border border-border rounded-2xl overflow-hidden">
   {#if projects.loading && projects.value.length === 0}
-    <p class="text-xs text-fg-subtle py-4">Loading projects…</p>
+    <p class="text-xs text-fg-subtle px-4 py-6">Loading projects…</p>
   {:else if projects.value.length === 0}
-    <EmptyState variant="registry-empty" />
+    <div class="px-4 py-6">
+      <EmptyState variant="registry-empty" />
+    </div>
   {:else if filtered.length === 0}
-    <EmptyState variant="filtered" query={search.value} />
+    <div class="px-4 py-6">
+      <EmptyState variant="filtered" query={search.value} />
+    </div>
   {:else}
     <table class="w-full">
       <thead>
-        <tr class="text-xs text-fg-muted text-left border-b border-border">
-          <th class="py-2 px-4 font-medium">Name</th>
-          <th class="py-2 px-4 font-medium">Domains</th>
-          {#if density.value !== "compact"}
-            <th class="py-2 px-4 font-medium">Type</th>
-          {/if}
-          <th class="py-2 px-4 font-medium">Port</th>
-          <th class="py-2 px-4 font-medium text-right">Actions</th>
+        <tr
+          class="text-[11px] uppercase tracking-wide text-fg-subtle text-left
+                 border-b border-border bg-surface-2/40"
+        >
+          <th class="py-2.5 px-4 font-medium">Project</th>
+          <th class="py-2.5 px-4 font-medium">Stack</th>
+          <th class="py-2.5 px-4 font-medium">URL</th>
+          <th class="py-2.5 px-4 font-medium">Port</th>
+          <th class="py-2.5 px-4 font-medium">Status</th>
+          <th class="py-2.5 px-4 font-medium text-right">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -114,4 +148,4 @@
       </tbody>
     </table>
   {/if}
-</DashboardCard>
+</div>

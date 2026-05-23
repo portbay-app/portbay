@@ -323,6 +323,7 @@ pub fn run() {
             commands::system::doctor,
             commands::system::tail_logs,
             commands::system::read_dotenv,
+            commands::system::quit_app,
             commands::log_stream::subscribe_logs,
             commands::import::detect_sources,
             commands::import::preview_import,

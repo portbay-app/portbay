@@ -13,7 +13,13 @@ export interface MemoryMetrics {
   totalBytes: number;
 }
 
+export interface DiskMetrics {
+  usedBytes: number;
+  totalBytes: number;
+}
+
 export interface SystemMetrics {
   cpu: CpuMetrics;
   memory: MemoryMetrics;
+  disk: DiskMetrics;
 }
