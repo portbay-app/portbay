@@ -1,10 +1,12 @@
 //! Translates a `Registry` into a Caddy admin-API config document.
 //!
-//! Only projects with `https: true` are wired in v1; the registry's
-//! `hostname` field is the routing key. Per-project cert paths come from
-//! the mkcert wrapper (kanban card P1 #4); for now the config generator
-//! accepts a `cert_lookup` callback so it can compose without depending
-//! on the mkcert module directly.
+//! Two servers are emitted: HTTPS-terminating projects (`https: true`) on
+//! the TLS port, and plain-HTTP projects (`https: false`) on `:80`. The
+//! registry's `hostname` field is the routing key for both; an https
+//! project additionally gets an http→https redirect on `:80`. Per-project
+//! cert paths come from the mkcert wrapper (kanban card P1 #4); the config
+//! generator accepts a `cert_lookup` callback so it can compose without
+//! depending on the mkcert module directly.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
