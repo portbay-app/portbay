@@ -60,6 +60,7 @@
     | "chevron-up"
     | "log-out"
     | "database"
+    | "cloud"
     | "eye";
 </script>
 
@@ -111,6 +112,7 @@
     ChevronUp,
     LogOut,
     Database,
+    Cloud,
     Eye,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
@@ -177,6 +179,7 @@
     "chevron-up": ChevronUp,
     "log-out": LogOut,
     database: Database,
+    cloud: Cloud,
     eye: Eye,
   };
 

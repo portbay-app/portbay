@@ -132,13 +132,6 @@
         </p>
         <StatusPill status={caddyPill} />
       </div>
-      <div class="w-20 h-8 shrink-0 text-accent">
-        <Sparkline
-          data={metrics.cpuHistory}
-          color="var(--color-accent)"
-          label="Caddy activity"
-        />
-      </div>
     </div>
   </div>
 
@@ -214,17 +207,6 @@
           {hostsEntries ?? "—"}
         </p>
         <StatusPill status={hostsPill} />
-      </div>
-      <div class="w-20 h-8 shrink-0 text-fg-muted flex items-end gap-0.5">
-        <!-- Bar-chart impression: faux histogram of the entry count
-             distributed into seven bars. Reads as data without
-             implying we actually meter time-series here. -->
-        {#each [0.35, 0.5, 0.4, 0.65, 0.55, 0.8, 0.6] as h, i (i)}
-          <span
-            class="flex-1 bg-fg-muted/40 rounded-sm"
-            style:height="{h * 100}%"
-          ></span>
-        {/each}
       </div>
     </div>
   </div>

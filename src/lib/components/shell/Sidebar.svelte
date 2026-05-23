@@ -17,6 +17,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { getVersion } from "@tauri-apps/api/app";
 
   import SidebarItem from "./SidebarItem.svelte";
   import SidebarResizeHandle from "./SidebarResizeHandle.svelte";
@@ -34,10 +35,9 @@
   import type { SidecarState } from "$lib/types/sidecars";
   import type { PortbayStatus } from "$lib/types/status";
 
-  // The version is wired off the package.json today; once Tauri's
-  // updater lands we'll prefer the runtime app handle. Either way the
-  // string flows through here so the footer stays single-sourced.
-  const APP_VERSION = "0.1.0";
+  // Read the version from the Tauri app handle so the footer always
+  // matches the running build — no hardcoded string to drift post-release.
+  let appVersion = $state<string>("");
 
   /** Hide the resize handle in compact density — the layout forces a
    *  fixed sidebar width there, so a drag handle wouldn't do anything. */
@@ -51,6 +51,9 @@
     // route the user is on. The store is idempotent — calling start
     // multiple times is fine.
     void metrics.start();
+    void getVersion()
+      .then((v) => (appVersion = v))
+      .catch(() => {});
   });
 
   /** Per-group derived state: how many members are currently running. */
@@ -255,6 +258,7 @@
         label="Databases"
         matchPrefix
       />
+      <SidebarItem href="/tunnels" icon="cloud" label="Tunnels" matchPrefix />
       <SidebarItem
         href="/settings"
         icon="settings"
@@ -353,7 +357,7 @@
       class="flex items-center justify-between gap-2 px-3 py-2 border-t border-border/60"
     >
       <span class="text-[10.5px] font-mono text-fg-subtle">
-        PortBay {APP_VERSION}
+        PortBay{appVersion ? ` ${appVersion}` : ""}
       </span>
       <button
         type="button"
