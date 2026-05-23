@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";
+  import { trapFocus } from "$lib/actions/trapFocus";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
@@ -354,14 +355,16 @@
 <svelte:window onkeydown={onKeydown} />
 
 {#if project}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- Backdrop is a mouse convenience; Escape (window handler) and the
+       header close button cover keyboard users. -->
   <div
     class="fixed inset-0 z-40 bg-bg/60 backdrop-blur-sm"
     onclick={() => !dirty && projectDetailPanel.hide()}
+    role="presentation"
   ></div>
 
   <aside
+    use:trapFocus
     class="fixed inset-y-0 right-0 z-50 w-[640px] max-w-[90vw] bg-surface border-l border-border shadow-2xl flex flex-col"
     aria-label="Project detail"
   >

@@ -10,6 +10,7 @@
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";
+  import { trapFocus } from "$lib/actions/trapFocus";
   import { Channel, invoke } from "@tauri-apps/api/core";
 
   import { Icon, StatusPill } from "$lib/components/atoms";
@@ -201,16 +202,18 @@
 <svelte:window onkeydown={onKeydown} />
 
 {#if project}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- Backdrop closes only on a direct click (target === backdrop), so a
+       click inside the dialog doesn't bubble out and dismiss it — no inner
+       stopPropagation needed. Escape (window handler) covers keyboard. -->
   <div
     class="fixed inset-0 z-50 bg-bg/70 backdrop-blur-sm flex items-center justify-center p-6"
-    onclick={() => logViewer.hide()}
+    onclick={(e) => {
+      if (e.target === e.currentTarget) logViewer.hide();
+    }}
+    role="presentation"
   >
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
-      onclick={(e) => e.stopPropagation()}
+      use:trapFocus
       class="w-[1100px] max-w-[95vw] h-[85vh] bg-surface border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
       role="dialog"
       aria-label="Log viewer"
