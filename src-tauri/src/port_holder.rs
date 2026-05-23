@@ -15,6 +15,13 @@
 
 use std::path::PathBuf;
 
+/// How many process-tree ancestors we'll walk up when searching for
+/// a PortBay-managed orphan. Three levels covers the typical chain:
+/// worker (`next-server`) → dev-server shell (`node /path/to/next dev`)
+/// → wrapper (`pnpm dev`). Bounded so a runaway parent chain can't
+/// lock us up.
+const MAX_ANCESTORS: usize = 4;
+
 #[derive(Debug, Clone)]
 pub struct PortHolder {
     pub pid: u32,
@@ -24,8 +31,22 @@ pub struct PortHolder {
     pub binary: Option<PathBuf>,
     /// Full `/proc`-style command line if we can find it; falls back
     /// to just the command name. Used to decide whether a holder is
-    /// a PortBay-managed orphan or an external (ServBay nginx, MAMP).
+    /// a PortBay-managed orphan or an external local-dev tool.
     pub command_line: Option<String>,
+    /// Walk from the immediate parent up to `MAX_ANCESTORS` levels.
+    /// Worker processes (e.g. Next.js's `next-server`) hide the
+    /// project path; the shell that spawned them
+    /// (`node /Volumes/…/project/.bin/next dev`) carries it. We need
+    /// the chain to attribute orphans correctly and to know which
+    /// PID to SIGTERM (always the topmost matching ancestor so the
+    /// wrapper propagates the signal to its worker).
+    pub ancestors: Vec<Ancestor>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Ancestor {
+    pub pid: u32,
+    pub command_line: String,
 }
 
 impl PortHolder {
@@ -42,13 +63,11 @@ impl PortHolder {
     }
 
     /// Heuristic: does this look like a process PortBay itself
-    /// spawned and lost track of? Two signals:
-    ///   1. The command line includes the project's hostname or
-    ///      working_dir prefix (a PortBay-aware dev server).
-    ///   2. The parent process is process-compose (the PID we
-    ///      already track in AppState).
-    /// Caller passes the hints it has; we never kill a process we
-    /// can't strongly identify.
+    /// spawned and lost track of? We match the holder's own command
+    /// line OR any ancestor's command line against the project's
+    /// working_dir (full path or the leaf folder name). Worker
+    /// processes hide the path; their parent dev-server shell carries
+    /// it — without walking the chain we miss every Next.js orphan.
     pub fn looks_like_portbay_orphan(&self, working_dir: &str) -> bool {
         let dir_token = std::path::Path::new(working_dir)
             .file_name()
@@ -57,8 +76,41 @@ impl PortHolder {
         if dir_token.is_empty() {
             return false;
         }
-        let cmd = self.command_line.as_deref().unwrap_or("");
-        cmd.contains(working_dir) || cmd.contains(dir_token)
+        let matches_cmd = |cmd: &str| cmd.contains(working_dir) || cmd.contains(dir_token);
+        if let Some(cmd) = &self.command_line {
+            if matches_cmd(cmd) {
+                return true;
+            }
+        }
+        self.ancestors.iter().any(|a| matches_cmd(&a.command_line))
+    }
+
+    /// PID to SIGTERM when we've decided to kill an orphan. Returns
+    /// the topmost ancestor that matches the project's working_dir —
+    /// kill the wrapper, the worker dies with it. Falls back to the
+    /// holder's own PID when no ancestor matches (defensive; we only
+    /// reach this code when `looks_like_portbay_orphan` returned true).
+    pub fn kill_target(&self, working_dir: &str) -> u32 {
+        let dir_token = std::path::Path::new(working_dir)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let matches_cmd = |cmd: &str| !dir_token.is_empty()
+            && (cmd.contains(working_dir) || cmd.contains(dir_token));
+        // Ancestors are ordered closest-to-holder first; the last one
+        // is the topmost. Walk in reverse so a matching parent wins
+        // over a matching worker.
+        for a in self.ancestors.iter().rev() {
+            if matches_cmd(&a.command_line) {
+                return a.pid;
+            }
+        }
+        if let Some(cmd) = &self.command_line {
+            if matches_cmd(cmd) {
+                return self.pid;
+            }
+        }
+        self.pid
     }
 }
 
@@ -99,9 +151,50 @@ fn parse_lsof_first(text: &str) -> Option<PortHolder> {
             command: command.clone(),
             binary: resolve_binary(pid),
             command_line: resolve_command_line(pid),
+            ancestors: walk_ancestors(pid),
         });
     }
     None
+}
+
+/// Walk from the holder's parent up to `MAX_ANCESTORS` levels.
+/// Returns the chain ordered closest-first (parent at [0], grandparent
+/// at [1], ...). Empty when the holder has no parent we can resolve
+/// (orphaned to PID 1, etc.).
+fn walk_ancestors(pid: u32) -> Vec<Ancestor> {
+    let mut out = Vec::new();
+    let mut current = pid;
+    for _ in 0..MAX_ANCESTORS {
+        let Some(parent) = resolve_parent_pid(current) else {
+            break;
+        };
+        if parent == 0 || parent == 1 {
+            // PID 1 (init/launchd) means the process is orphaned —
+            // there's nothing useful above it for attribution.
+            break;
+        }
+        let Some(cmd) = resolve_command_line(parent) else {
+            break;
+        };
+        out.push(Ancestor {
+            pid: parent,
+            command_line: cmd,
+        });
+        current = parent;
+    }
+    out
+}
+
+fn resolve_parent_pid(pid: u32) -> Option<u32> {
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "ppid="])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    s.parse::<u32>().ok()
 }
 
 /// macOS-friendly: ask `ps -o command=` for the full argv string.
@@ -207,11 +300,12 @@ node    99887 nour   22u  IPv4 0xdef       0t0  TCP *:3010 (LISTEN)
             command: "node".into(),
             binary: None,
             command_line: Some(
-                "node /Volumes/DevSSD/projects/Clients/nour-beiruti/node_modules/.bin/next dev".into(),
+                "node /Volumes/DevSSD/projects/Clients/test-project/node_modules/.bin/next dev".into(),
             ),
+            ancestors: vec![],
         };
         assert!(h.looks_like_portbay_orphan(
-            "/Volumes/DevSSD/projects/Clients/nour-beiruti",
+            "/Volumes/DevSSD/projects/Clients/test-project",
         ));
     }
 
@@ -221,10 +315,69 @@ node    99887 nour   22u  IPv4 0xdef       0t0  TCP *:3010 (LISTEN)
             pid: 123,
             command: "nginx".into(),
             binary: None,
-            command_line: Some("/Applications/ServBay/bin/nginx -c …".into()),
+            command_line: Some("/usr/local/sbin/nginx -c /opt/nginx.conf".into()),
+            ancestors: vec![],
         };
         assert!(!h.looks_like_portbay_orphan(
-            "/Volumes/DevSSD/projects/Clients/nour-beiruti",
+            "/Volumes/DevSSD/projects/Clients/test-project",
         ));
+    }
+
+    #[test]
+    fn looks_like_orphan_matches_via_parent_when_worker_hides_path() {
+        // The actual production case: next-server (the worker that
+        // binds the port) reports its name without any path. We need
+        // to look at its parent's command line to attribute it.
+        let h = PortHolder {
+            pid: 999,
+            command: "node".into(),
+            binary: None,
+            command_line: Some("next-server (v16.2.6)".into()),
+            ancestors: vec![
+                Ancestor {
+                    pid: 998,
+                    command_line:
+                        "node /Volumes/DevSSD/projects/Clients/test-project/node_modules/.bin/next dev --port 3010"
+                            .into(),
+                },
+                Ancestor {
+                    pid: 997,
+                    command_line: "pnpm dev".into(),
+                },
+            ],
+        };
+        assert!(h.looks_like_portbay_orphan(
+            "/Volumes/DevSSD/projects/Clients/test-project",
+        ));
+    }
+
+    #[test]
+    fn kill_target_picks_topmost_matching_ancestor() {
+        // We want to SIGTERM the wrapper (`pnpm dev` here is the most
+        // distant matching ancestor), not the worker, so the whole
+        // tree dies cleanly via signal propagation.
+        let h = PortHolder {
+            pid: 999,
+            command: "node".into(),
+            binary: None,
+            command_line: Some("next-server (v16.2.6)".into()),
+            ancestors: vec![
+                Ancestor {
+                    pid: 998,
+                    command_line:
+                        "node /Volumes/DevSSD/projects/Clients/test-project/.bin/next dev"
+                            .into(),
+                },
+                Ancestor {
+                    pid: 997,
+                    command_line:
+                        "pnpm /Volumes/DevSSD/projects/Clients/test-project run dev".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            h.kill_target("/Volumes/DevSSD/projects/Clients/test-project"),
+            997
+        );
     }
 }
