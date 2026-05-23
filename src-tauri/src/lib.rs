@@ -10,16 +10,18 @@ pub mod mailpit;
 pub mod mkcert;
 pub mod php;
 pub mod portfile;
+pub mod preferences;
 pub mod process_compose;
 pub mod reconciler;
 pub mod registry;
 pub mod state;
+pub mod tray;
 pub mod tunnel;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::mkcert::Mkcert;
 use crate::reconciler::Reconciler;
@@ -210,10 +212,46 @@ pub fn run() {
             // lifetime of the app.
             commands::events::spawn_status_poller(app.handle().clone());
             commands::metrics::spawn_metrics_poller(app.handle().clone());
+
+            // Install the menu-bar tray if the user hasn't disabled it.
+            // Failures degrade gracefully — the dashboard still works
+            // without a tray — so a tray-install error is warn-logged
+            // rather than treated as a setup failure.
+            let prefs = {
+                let state: tauri::State<AppState> = app.state();
+                state.preferences_snapshot()
+            };
+            if prefs.show_tray_icon {
+                if let Err(e) = crate::tray::install(&app.handle()) {
+                    tracing::warn!(error = %e, "menu-bar tray failed to initialise");
+                }
+            }
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                // "Close to menu bar" semantics: when the toggle is on
+                // and the tray is installed, intercept the window's
+                // close and hide it instead of letting Tauri tear it
+                // down. The tray stays the user's escape hatch — Quit
+                // from there fires `app.exit(0)` which destroys the
+                // window for real and triggers the shutdown sweep.
+                let state: tauri::State<AppState> = window.state();
+                let prefs = state.preferences_snapshot();
+                if prefs.close_to_menu_bar && prefs.show_tray_icon {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    // First-run hint: tell the user the app is still
+                    // alive in the menu bar. The frontend marks the
+                    // flag persistently once the toast is acknowledged.
+                    if !prefs.close_to_menu_bar_toast_seen {
+                        let _ = window
+                            .app_handle()
+                            .emit(crate::tray::CLOSE_TOAST_CHANNEL, ());
+                    }
+                }
+            }
+            tauri::WindowEvent::Destroyed => {
                 let state: tauri::State<AppState> = window.state();
                 state.shutdown_pc();
                 state.shutdown_caddy();
@@ -227,6 +265,7 @@ pub fn run() {
                     *tunnels = crate::tunnel::TunnelManager::new();
                 }
             }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::projects::list_projects,
@@ -284,6 +323,9 @@ pub fn run() {
             commands::php::list_php_installs,
             commands::php::set_xdebug_mode,
             commands::metrics::system_metrics,
+            commands::preferences::get_preferences,
+            commands::preferences::set_preferences,
+            commands::preferences::mark_close_toast_seen,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

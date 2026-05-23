@@ -18,7 +18,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::dto::{ProjectStatusEvent, RuntimeInfo};
 use crate::process_compose::{Process, ProjectStatus};
+use crate::registry::store;
 use crate::state::AppState;
+use crate::tray;
 
 pub const STATUS_CHANNEL: &str = "portbay://status";
 
@@ -120,6 +122,24 @@ pub fn spawn_status_poller(app: AppHandle) {
                     };
                     let _ = app.emit(STATUS_CHANNEL, event);
                 }
+            }
+
+            // Drive the menu-bar tray off the same observation that
+            // feeds the UI. Pulls the latest registry order (cheap —
+            // typically a single sub-10 KB JSON read) so the tray's
+            // project list survives add/remove/rename without needing
+            // a dedicated event channel.
+            let aggregate_input: HashMap<String, ProjectStatus> = next
+                .iter()
+                .map(|(id, observed)| (id.clone(), observed.status))
+                .collect();
+            let registry = store::load_or_default(
+                &state.registry_path,
+                state.domain_suffix.as_str(),
+            )
+            .ok();
+            if let Some(reg) = registry {
+                tray::refresh(&app, reg.list_projects(), &aggregate_input);
             }
 
             last = next;
