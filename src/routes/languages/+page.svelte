@@ -30,7 +30,7 @@
   let languages = $state<LanguageView[]>([]);
   let loading = $state<boolean>(true);
 
-  let selectedKey = $state<string | null>(null);
+  let selectedKey = $state<{ langId: string; version: string } | null>(null);
   let activeTab = $state<string | null>(null);
   let copiedHint = $state<string | null>(null);
   let collapsed = $state<Record<string, boolean>>({});
@@ -46,7 +46,10 @@
       if (!selectedKey) {
         for (const lang of languages) {
           if (lang.versions.length > 0) {
-            selectedKey = `${lang.id}:${lang.versions[0].install.version}`;
+            selectedKey = {
+              langId: lang.id,
+              version: lang.versions[0].install.version,
+            };
             activeTab = lang.versions[0].tabs[0]?.id ?? null;
             break;
           }
@@ -58,7 +61,7 @@
   }
 
   function selectVersion(langId: string, version: VersionView) {
-    selectedKey = `${langId}:${version.install.version}`;
+    selectedKey = { langId, version: version.install.version };
     activeTab = version.tabs[0]?.id ?? null;
   }
 
@@ -70,7 +73,7 @@
     | { lang: LanguageView; version: VersionView }
     | null {
     if (!selectedKey) return null;
-    const [langId, ver] = selectedKey.split(":");
+    const { langId, version: ver } = selectedKey;
     const lang = languages.find((l) => l.id === langId);
     if (!lang) return null;
     const version = lang.versions.find((v) => v.install.version === ver);
@@ -209,8 +212,9 @@
                   </button>
                 {:else}
                   {#each lang.versions as version (version.install.version)}
-                    {@const key = `${lang.id}:${version.install.version}`}
-                    {@const isActive = selectedKey === key}
+                    {@const isActive =
+                      selectedKey?.langId === lang.id &&
+                      selectedKey?.version === version.install.version}
                     <button
                       type="button"
                       onclick={() => selectVersion(lang.id, version)}

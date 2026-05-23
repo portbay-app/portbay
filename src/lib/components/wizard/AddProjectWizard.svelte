@@ -25,7 +25,7 @@
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import type { CommandError } from "$lib/types/error";
-  import type { PortbayFile } from "$lib/types/portfile";
+  import type { PortbayFile, PortfilePreview } from "$lib/types/portfile";
   import type { ProjectType, ProjectView } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
   import type { DetectedProject } from "$lib/types/wizard";
@@ -88,6 +88,8 @@
    */
   let portfile = $state<PortbayFile | null>(null);
   let portfileSecrets = $state<Record<string, string>>({});
+  /** True when the file's derived id already exists — surfaced before commit. */
+  let portfileIdCollision = $state<boolean>(false);
 
   function resetForm() {
     path = "";
@@ -105,6 +107,7 @@
     dropHint = "";
     portfile = null;
     portfileSecrets = {};
+    portfileIdCollision = false;
     formError = null;
   }
 
@@ -131,6 +134,7 @@
     formError = null;
     portfile = null;
     portfileSecrets = {};
+    portfileIdCollision = false;
     try {
       // Probe for a committed `.portbay.json` first. If present, the
       // file's values win over framework auto-detection.
@@ -155,6 +159,19 @@
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/^-+|-+$/g, "");
+        // Preview/confirm step: ask the backend whether this import would
+        // collide with an existing project id, and surface it before commit
+        // instead of letting the commit fail.
+        try {
+          const preview = await safeInvoke<PortfilePreview>(
+            "import_portfile_preview",
+            { path: folderPath },
+          );
+          portfileIdCollision = preview.idCollision;
+        } catch {
+          // Non-fatal — detection already succeeded; just skip the hint.
+          portfileIdCollision = false;
+        }
         syncRawFromFields();
         return;
       }
@@ -454,6 +471,20 @@
               Click Commit to register the project.
             {/if}
           </p>
+
+          {#if portfileIdCollision}
+            <div
+              class="mt-3 flex items-start gap-1.5 rounded-md border border-status-crashed/40 bg-status-crashed/10 px-3 py-2 text-[11px] text-status-crashed"
+              role="alert"
+            >
+              <Icon name="circle-alert" size={12} class="mt-0.5 shrink-0" />
+              <span>
+                A project with ID <span class="font-mono">{id}</span> already
+                exists. Change the ID below before importing, or the import will
+                be rejected.
+              </span>
+            </div>
+          {/if}
 
           {#if (portfile.secrets ?? []).length > 0}
             <div class="grid grid-cols-[140px,1fr] gap-x-4 gap-y-2 items-center text-sm mt-3">

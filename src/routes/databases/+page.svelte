@@ -3,7 +3,7 @@
 
   Left rail: the user's provisioned instances + an "Add Database" CTA that
   opens the wizard. Right pane: the selected instance's status, lifecycle
-  toolbar (Start/Stop/Restart/Logs/Client/Remove), connection details, paths,
+  toolbar (Start/Stop/Restart/Reveal data folder/Client/Remove), connection details, paths,
   and project links. All instances are PortBay-supervised through Process
   Compose; lifecycle hits real IPC and refreshes status.
 -->
@@ -94,11 +94,11 @@
     }
   }
 
-  function openLogs() {
+  function revealDataFolder() {
     if (!selected) return;
-    // PortBay writes each daemon's log to <logs>/db-<id>.log. Until the
-    // in-app log viewer is wired for daemons, reveal the data dir so the
-    // user can tail it; the dedicated viewer is a fast follow.
+    // Reveals the instance's data directory in Finder. (An in-app log viewer
+    // for daemons is a separate, future card; until then this is honest about
+    // what it does rather than mislabelling itself "Logs".)
     reveal(selected.dataDir);
   }
 
@@ -436,13 +436,13 @@
           </button>
           <button
             type="button"
-            onclick={openLogs}
+            onclick={revealDataFolder}
             class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md
                    border border-border bg-surface text-[12px] text-fg-muted
                    hover:bg-surface-2 hover:text-fg transition-colors"
           >
-            <Icon name="file-text" size={11} />
-            Logs
+            <Icon name="folder" size={11} />
+            Reveal data folder
           </button>
           <button
             type="button"
