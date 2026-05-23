@@ -35,6 +35,11 @@
   import { errorBus } from "$lib/stores/errors.svelte";
 
   onMount(() => {
+    // The tray popover renders in its own webview — it must not start
+    // tunnels, listen for nav, or redirect to onboarding. Those side
+    // effects belong to the main window's instance of this layout.
+    if (isTrayPanel) return;
+
     tunnels.start();
     void preferences.load();
 
@@ -90,6 +95,14 @@
 
   let { children }: { children: Snippet } = $props();
 
+  /**
+   * The tray-panel route runs in its own webview window. It must render
+   * without the app shell, without the onboarding redirect, and without
+   * subscribing to the tunnels / nav listeners — those live on the main
+   * window only. We detect it up front and short-circuit the layout.
+   */
+  const isTrayPanel = $derived(page.url.pathname.startsWith("/tray-panel"));
+
   /** True when the current route owns the full window — hide the app shell. */
   const isFullscreen = $derived(page.url.pathname.startsWith("/onboarding"));
 
@@ -105,7 +118,15 @@
   const currentTheme = $derived(theme.value);
 </script>
 
-{#if isFullscreen}
+{#if isTrayPanel}
+  <!--
+    Tray popover — owns the whole webview, no shell, no chrome, no
+    redirects. The route owns its own background (transparent).
+  -->
+  <div class="h-screen w-screen overflow-hidden" data-theme-current={currentTheme}>
+    {@render children()}
+  </div>
+{:else if isFullscreen}
   <!--
     Full-window takeover (used by /onboarding). Sidebar / top bar /
     right rail are hidden so the onboarding flow owns the whole
@@ -136,10 +157,12 @@
   </div>
 {/if}
 
-<AddProjectWizard />
-<ProjectDetailPanel />
-<LogViewer />
-<TunnelModal />
-<GroupEditorModal />
-<CommandPalette />
-<ToastHost />
+{#if !isTrayPanel}
+  <AddProjectWizard />
+  <ProjectDetailPanel />
+  <LogViewer />
+  <TunnelModal />
+  <GroupEditorModal />
+  <CommandPalette />
+  <ToastHost />
+{/if}
