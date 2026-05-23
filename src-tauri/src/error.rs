@@ -80,6 +80,13 @@ pub enum AppError {
     #[error("project '{0}' not found")]
     NotFound(String),
 
+    /// The project's port is already bound by another process and
+    /// PortBay didn't recognise it as something it could clean up
+    /// (i.e. it's an external app — ServBay, MAMP, a manually-started
+    /// dev server). Caller fills in the holder description.
+    #[error("port {port} is already in use by {holder}")]
+    PortConflict { port: u16, holder: String },
+
     /// User input was malformed (bad path, bad id, missing required field).
     #[error("bad input: {0}")]
     BadInput(String),
@@ -102,6 +109,7 @@ impl AppError {
             Self::Io(_) => "IO_FAILURE",
             Self::SidecarDown(_) => "SIDECAR_DOWN",
             Self::NotFound(_) => "PROJECT_NOT_FOUND",
+            Self::PortConflict { .. } => "PORT_CONFLICT",
             Self::BadInput(_) => "BAD_INPUT",
             Self::Internal(_) => "INTERNAL",
         }
@@ -129,6 +137,9 @@ impl AppError {
             Self::Tunnel(_) => {
                 "The Cloudflare tunnel didn't come up — the project isn't reachable from the public URL.".into()
             }
+            Self::PortConflict { holder, .. } => {
+                format!("Stop {holder} (or change this project's port in its detail panel) and try again.")
+            }
             Self::BadInput(_) => "Fix the input and try again.".into(),
             Self::Hosts(_) | Self::Io(_) | Self::Internal(_) => {
                 "The action did not complete.".into()
@@ -140,7 +151,7 @@ impl AppError {
     /// anything PortBay or the OS got wrong. Drives the UI's tone.
     fn who(&self) -> &'static str {
         match self {
-            Self::BadInput(_) | Self::NotFound(_) => "user",
+            Self::BadInput(_) | Self::NotFound(_) | Self::PortConflict { .. } => "user",
             _ => "system",
         }
     }

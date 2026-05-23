@@ -226,6 +226,11 @@ async fn fanout(
             });
             continue;
         }
+        // Mark stop intent so wrapper-translated SIGTERM exits don't
+        // surface as crashes in the dashboard for batched ops.
+        if matches!(op, GroupOp::Stop | GroupOp::Restart) {
+            state.mark_stop_requested(&id_str);
+        }
         let res = match op {
             GroupOp::Start => client.start(&id_str).await,
             GroupOp::Stop => client.stop(&id_str).await,
@@ -307,7 +312,7 @@ mod tests {
 
     #[test]
     fn slugify_lowercases_and_hyphenates() {
-        assert_eq!(slugify("Citizen Suite"), "citizen-suite");
+        assert_eq!(slugify("My App Suite"), "my-app-suite");
         assert_eq!(slugify("  Agency  Apps  "), "agency-apps");
         assert_eq!(slugify("WEIRD__chars!"), "weird-chars");
         assert_eq!(slugify(""), "");

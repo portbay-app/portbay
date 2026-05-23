@@ -140,15 +140,15 @@
           id="group-name"
           type="text"
           bind:value={name}
-          placeholder="Citizen Suite"
+          placeholder="Enter group name"
           spellcheck="false"
           class="w-full px-3 py-2 rounded-md bg-bg border border-border
                  focus:border-accent/60 outline-none text-fg"
         />
         {#if groupEditor.mode.kind === "create"}
           <p class="text-[11px] text-fg-subtle">
-            The group's id is derived from the name (e.g. "Citizen Suite" →
-            <code class="font-mono">citizen-suite</code>).
+            The group's id is derived from the name — spaces become hyphens
+            and uppercase becomes lowercase.
           </p>
         {/if}
       </section>

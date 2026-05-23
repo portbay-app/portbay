@@ -47,6 +47,35 @@
   let rawDraft = $state<string>("");
   let dropActive = $state<boolean>(false);
   let dropHint = $state<string>("");
+
+  /**
+   * Inline port-conflict warning. Backed by a debounced lsof probe so
+   * the user is told *while typing* if the port they're claiming is
+   * already bound (typically by ServBay, MAMP, or a stray dev server).
+   * Empty string when the port is free or unknown.
+   */
+  let portConflict = $state<string>("");
+  let portCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function schedulePortCheck(value: number | null) {
+    if (portCheckTimer) clearTimeout(portCheckTimer);
+    portConflict = "";
+    if (!value || value < 1 || value > 65535) return;
+    portCheckTimer = setTimeout(async () => {
+      try {
+        const holder = await safeInvoke<string | null>("preview_port_conflict", {
+          port: value,
+        });
+        // Only set if the port the user *currently* has typed is still
+        // the one we probed (they may have typed something else since).
+        if (holder && port === value) {
+          portConflict = holder;
+        }
+      } catch {
+        /* benign — leave inline state empty */
+      }
+    }, 350);
+  }
   let dragUnlisten: UnlistenFn | null = null;
 
   /**
@@ -139,6 +168,7 @@
       startCommand = det.suggestedStartCommand ?? "";
       kind = det.kind;
       syncRawFromFields();
+      schedulePortCheck(port);
     } catch (e) {
       // safeInvoke already toasted; surface inline too so the user knows
       // the form didn't autofill.
@@ -477,18 +507,36 @@
           />
 
           <label for="wizard-port" class="text-fg-muted">Port</label>
-          <input
-            id="wizard-port"
-            type="number"
-            min="1"
-            max="65535"
-            value={port ?? ""}
-            oninput={(e) => {
-              const v = (e.currentTarget as HTMLInputElement).value;
-              port = v ? Number(v) : null;
-            }}
-            class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg font-mono w-32"
-          />
+          <div class="min-w-0">
+            <input
+              id="wizard-port"
+              type="number"
+              min="1"
+              max="65535"
+              value={port ?? ""}
+              oninput={(e) => {
+                const v = (e.currentTarget as HTMLInputElement).value;
+                port = v ? Number(v) : null;
+                schedulePortCheck(port);
+              }}
+              class="px-2.5 py-1.5 rounded-md bg-bg border outline-none text-fg font-mono w-32
+                     {portConflict
+                ? 'border-status-crashed/60 focus:border-status-crashed'
+                : 'border-border focus:border-accent/60'}"
+            />
+            {#if portConflict}
+              <div
+                class="mt-1.5 flex items-start gap-1.5 text-[11px] text-status-crashed"
+                role="alert"
+              >
+                <Icon name="circle-alert" size={11} class="mt-0.5 shrink-0" />
+                <span class="break-all">
+                  Port {port} is in use by {portConflict}. Stop that process or
+                  pick a different port.
+                </span>
+              </div>
+            {/if}
+          </div>
 
           <label for="wizard-type" class="text-fg-muted">Type</label>
           <select

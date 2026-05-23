@@ -79,7 +79,19 @@ pub fn spawn_status_poller(app: AppHandle) {
             // Emit on transition; track for the next pass.
             let mut next: HashMap<String, ObservedState> = HashMap::with_capacity(processes.len());
             for p in &processes {
-                let observed = ObservedState::from_process(p);
+                let mut observed = ObservedState::from_process(p);
+
+                // If the user just asked PortBay to stop this project,
+                // a non-zero exit code is almost certainly the wrapper
+                // tool (npm, turbo, concurrently) translating SIGTERM
+                // into `exit(1)`. Downgrade to Stopped so the row
+                // doesn't paint red mid-shutdown.
+                if observed.status == ProjectStatus::Crashed
+                    && state.recently_stop_requested(&p.name)
+                {
+                    observed.status = ProjectStatus::Stopped;
+                }
+
                 let changed = match last.get(&p.name) {
                     Some(prev) => prev != &observed,
                     None => true, // first observation == emit
