@@ -132,6 +132,22 @@ impl Registry {
             .ok_or_else(|| RegistryError::GroupNotFound(id.to_owned()))?;
         Ok(self.groups.remove(idx))
     }
+
+    /// Replace an existing group (matched by id) with the given value.
+    /// Errors if no group with that id exists.
+    pub fn update_group(&mut self, group: Group) -> Result<()> {
+        let slot = self
+            .groups
+            .iter_mut()
+            .find(|g| g.id == group.id)
+            .ok_or_else(|| RegistryError::GroupNotFound(group.id.clone()))?;
+        *slot = group;
+        Ok(())
+    }
+
+    pub fn get_group(&self, id: &str) -> Option<&Group> {
+        self.groups.iter().find(|g| g.id == id)
+    }
 }
 
 // =============================================================================

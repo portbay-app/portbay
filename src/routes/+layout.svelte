@@ -22,6 +22,7 @@
   import { ProjectDetailPanel } from "$lib/components/projects";
   import { LogViewer } from "$lib/components/logs";
   import TunnelModal from "$lib/components/tunnels/TunnelModal.svelte";
+  import GroupEditorModal from "$lib/components/groups/GroupEditorModal.svelte";
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
   import { onMount } from "svelte";
@@ -99,4 +100,5 @@
 <ProjectDetailPanel />
 <LogViewer />
 <TunnelModal />
+<GroupEditorModal />
 <ToastHost />

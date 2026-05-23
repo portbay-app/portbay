@@ -15,6 +15,7 @@ pub mod certs;
 pub mod dnsmasq;
 pub mod dto;
 pub mod events;
+pub mod groups;
 pub mod import;
 pub mod integrations;
 pub mod lifecycle;

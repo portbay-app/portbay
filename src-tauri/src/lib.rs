@@ -273,6 +273,13 @@ pub fn run() {
             commands::onboarding::mark_onboarded,
             commands::onboarding::reset_onboarding,
             commands::onboarding::scaffold_template,
+            commands::groups::list_groups,
+            commands::groups::add_group,
+            commands::groups::update_group,
+            commands::groups::remove_group,
+            commands::groups::start_group,
+            commands::groups::stop_group,
+            commands::groups::restart_group,
             commands::metrics::system_metrics,
         ])
         .run(tauri::generate_context!())
