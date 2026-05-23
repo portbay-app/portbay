@@ -60,7 +60,33 @@ pub fn subscribe_logs(
 ) -> AppResult<()> {
     let log_path = state.logs_dir.join(format!("{id}.log"));
 
-    tokio::task::spawn_blocking(move || tail_into(&log_path, &on_line));
+    // Wrap the tail loop in catch_unwind so a panic inside this
+    // blocking thread can't unwind into the tokio runtime and crash
+    // the whole app. Any panic is logged and the subscription ends
+    // cleanly — the frontend's `follow` toggle stays usable.
+    tokio::task::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tail_into(&log_path, &on_line);
+        }));
+        if let Err(payload) = result {
+            // The panic payload is usually a &str or String. Pull the
+            // message out for the log entry; never re-panic.
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "(non-string panic payload)".to_string());
+            tracing::error!(
+                project_id = %id,
+                error = %msg,
+                "subscribe_logs tail thread panicked — subscription ended",
+            );
+            // Try to notify the frontend so the UI can clear its
+            // follow state, but ignore failure (the channel may
+            // already be torn down).
+            let _ = on_line.send(format!("--- log stream ended ({msg}) ---"));
+        }
+    });
 
     Ok(())
 }
