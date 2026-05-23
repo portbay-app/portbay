@@ -36,11 +36,15 @@ GUI (Tauri + Svelte)
 
 Full architecture lives in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md); UX principles in [`docs/UX_DESIGN.md`](./docs/UX_DESIGN.md).
 
-## What's not here yet
+## Documentation
 
-- Distribution channels (no Homebrew tap, no notarized builds). These come once there's demand.
-- A landing page. GitHub-only for now.
-- General-availability stability. Phase 3 polish is in flight.
+The public documentation site lives in [`docs-site/`](./docs-site) and is built with VitePress. It covers install, first run, project setup, guides, CLI reference, registry schema, architecture, troubleshooting, and migration placeholders.
+
+```bash
+pnpm docs:dev
+pnpm docs:build
+pnpm docs:preview
+```
 
 ## Roadmap
 
