@@ -112,7 +112,7 @@ pub struct Project {
     pub extra_ports: Vec<u16>,
 
     /// The local hostname Caddy routes to this project. Already includes
-    /// the domain suffix (e.g. `nour-beiruti.test`).
+    /// the domain suffix (e.g. `marketing-site.test`).
     pub hostname: String,
 
     /// Whether Caddy should terminate TLS for this hostname using a
@@ -168,9 +168,9 @@ mod tests {
 
     #[test]
     fn project_id_roundtrips_through_json_as_a_bare_string() {
-        let id = ProjectId::new("nour-beiruti");
+        let id = ProjectId::new("marketing-site");
         let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, "\"nour-beiruti\"");
+        assert_eq!(json, "\"marketing-site\"");
         let back: ProjectId = serde_json::from_str(&json).unwrap();
         assert_eq!(back, id);
     }
@@ -213,14 +213,14 @@ mod tests {
     fn project_serialises_in_assessment_doc_shape() {
         // Mirrors the Next.js example in ASSESSMENT_AND_PLAN.md §7.1.
         let p = Project {
-            id: ProjectId::new("nour-beiruti"),
-            name: "Nour Beiruti".into(),
-            path: PathBuf::from("/Volumes/DEVSSD/Projects/Clients/Nour Beiruti"),
+            id: ProjectId::new("marketing-site"),
+            name: "Marketing Site".into(),
+            path: PathBuf::from("/Volumes/DEVSSD/Projects/Clients/Marketing Site"),
             kind: ProjectType::Next,
             start_command: Some("pnpm dev".into()),
             port: Some(3010),
             extra_ports: vec![],
-            hostname: "nour-beiruti.test".into(),
+            hostname: "marketing-site.test".into(),
             https: true,
             services: vec!["caddy".into()],
             env: BTreeMap::new(),
@@ -234,7 +234,7 @@ mod tests {
             php_version: None,
         };
         let json = serde_json::to_value(&p).unwrap();
-        assert_eq!(json["id"], "nour-beiruti");
+        assert_eq!(json["id"], "marketing-site");
         assert_eq!(json["type"], "next");
         assert_eq!(json["port"], 3010);
         assert!(

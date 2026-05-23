@@ -263,10 +263,10 @@ mod tests {
     #[test]
     fn https_project_produces_route_and_cert_entry() {
         let mut r = Registry::new("test");
-        r.add_project(next_project("nour-beiruti", 3010, true))
+        r.add_project(next_project("marketing-site", 3010, true))
             .unwrap();
         let lookup = |id: &str| {
-            if id == "nour-beiruti" {
+            if id == "marketing-site" {
                 Some(CertPaths {
                     certificate: PathBuf::from("/c/cert.pem"),
                     key: PathBuf::from("/c/key.pem"),
@@ -278,15 +278,15 @@ mod tests {
         let c = build_config(&r, 2019, 8443, lookup).unwrap();
         let s = c.apps.http.servers.get("portbay").unwrap();
         assert_eq!(s.routes.len(), 1);
-        assert_eq!(s.routes[0].id, "route_nour-beiruti");
-        assert_eq!(s.routes[0].match_[0].host[0], "nour-beiruti.test");
+        assert_eq!(s.routes[0].id, "route_marketing-site");
+        assert_eq!(s.routes[0].match_[0].host[0], "marketing-site.test");
         let h = &s.routes[0].handle[0];
         assert_eq!(h["handler"], "reverse_proxy");
         assert_eq!(h["upstreams"][0]["dial"], "127.0.0.1:3010");
         let certs = &c.apps.tls.certificates.load_files;
         assert_eq!(certs.len(), 1);
         assert_eq!(certs[0].certificate, PathBuf::from("/c/cert.pem"));
-        assert_eq!(certs[0].tags, vec!["project:nour-beiruti"]);
+        assert_eq!(certs[0].tags, vec!["project:marketing-site"]);
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn php_project_uses_subroute_with_fastcgi() {
         let mut r = Registry::new("test");
-        r.add_project(php_project("tribal-house", "8.3")).unwrap();
+        r.add_project(php_project("api-gateway", "8.3")).unwrap();
         let c = build_config(&r, 2019, 8443, no_certs).unwrap();
         let s = c.apps.http.servers.get("portbay").unwrap();
         let h = &s.routes[0].handle[0];
@@ -322,7 +322,7 @@ mod tests {
         assert_eq!(sub_routes[1]["handle"][0]["handler"], "file_server");
         assert_eq!(
             sub_routes[1]["handle"][0]["root"],
-            "/tmp/tribal-house/public"
+            "/tmp/api-gateway/public"
         );
     }
 

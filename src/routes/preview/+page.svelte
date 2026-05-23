@@ -30,12 +30,12 @@
 
   const sampleUserError: CommandError = {
     code: "PROJECT_NOT_FOUND",
-    whatHappened: "project 'nour-beiruti' not found",
+    whatHappened: "project 'marketing-site' not found",
     whyItMatters: "Nothing was changed.",
     whoCausedIt: "user",
     actions: [],
     details:
-      "Looked up by id in registry.json (4 projects loaded).\nClosest match: tribal-house (distance 7).",
+      "Looked up by id in registry.json (4 projects loaded).\nClosest match: api-gateway (distance 7).",
   };
 
   const badgeTones: BadgeTone[] = [

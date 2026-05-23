@@ -168,8 +168,8 @@ mod tests {
     #[test]
     fn derive_id_lowercases_and_hyphenates() {
         assert_eq!(
-            derive_id_from_path(std::path::Path::new("/Users/x/Tribal House CMS")),
-            "tribal-house-cms"
+            derive_id_from_path(std::path::Path::new("/Users/x/API Gateway")),
+            "api-gateway"
         );
         assert_eq!(
             derive_id_from_path(std::path::Path::new("/Users/x/myapp")),

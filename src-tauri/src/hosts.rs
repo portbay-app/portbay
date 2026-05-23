@@ -357,11 +357,11 @@ mod tests {
     fn add_creates_block_when_missing() {
         let (_d, path) = tmpfile("127.0.0.1 localhost\n");
         let m = HostsManager::new(&path);
-        m.add("nour-beiruti.test", loopback()).unwrap();
+        m.add("marketing-site.test", loopback()).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains(BEGIN_MARKER));
         assert!(body.contains(END_MARKER));
-        assert!(body.contains("nour-beiruti.test"));
+        assert!(body.contains("marketing-site.test"));
         // Outside lines preserved verbatim.
         assert!(body.starts_with("127.0.0.1 localhost"));
     }

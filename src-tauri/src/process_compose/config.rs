@@ -293,17 +293,17 @@ mod tests {
     #[test]
     fn next_project_produces_process_with_http_probe() {
         let mut r = Registry::new("test");
-        r.add_project(next_project("nour-beiruti", 3010)).unwrap();
+        r.add_project(next_project("marketing-site", 3010)).unwrap();
         let yaml = to_yaml(&r, Path::new("/tmp/logs"), None).unwrap();
         assert!(
-            yaml.contains("nour-beiruti"),
+            yaml.contains("marketing-site"),
             "process name missing: {yaml}"
         );
         assert!(yaml.contains("pnpm dev"));
         assert!(yaml.contains("port: 3010"));
         assert!(yaml.contains("path: /"));
         assert!(yaml.contains("scheme: http"));
-        assert!(yaml.contains("/tmp/logs/nour-beiruti.log"));
+        assert!(yaml.contains("/tmp/logs/marketing-site.log"));
         // serde_yaml 0.9 emits bare `no` (a string in YAML 1.2); PC reads
         // it as the string "no", which is what its schema expects. Confirm
         // the field is present in any form.
@@ -318,11 +318,11 @@ mod tests {
     #[test]
     fn php_only_project_is_skipped() {
         let mut r = Registry::new("test");
-        r.add_project(php_project("tribal-house")).unwrap();
-        r.add_project(next_project("nour-beiruti", 3010)).unwrap();
+        r.add_project(php_project("api-gateway")).unwrap();
+        r.add_project(next_project("marketing-site", 3010)).unwrap();
         let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
-        assert!(!yaml.contains("tribal-house"));
-        assert!(yaml.contains("nour-beiruti"));
+        assert!(!yaml.contains("api-gateway"));
+        assert!(yaml.contains("marketing-site"));
     }
 
     #[test]

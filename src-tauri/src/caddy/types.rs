@@ -101,9 +101,9 @@ mod tests {
     #[test]
     fn route_serialises_with_at_id_field() {
         let r = Route {
-            id: "route_nour-beiruti".into(),
+            id: "route_marketing-site".into(),
             match_: vec![MatchClause {
-                host: vec!["nour-beiruti.test".into()],
+                host: vec!["marketing-site.test".into()],
             }],
             handle: vec![json!({
                 "handler": "reverse_proxy",
@@ -112,8 +112,8 @@ mod tests {
             terminal: true,
         };
         let v = serde_json::to_value(&r).unwrap();
-        assert_eq!(v["@id"], "route_nour-beiruti");
-        assert_eq!(v["match"][0]["host"][0], "nour-beiruti.test");
+        assert_eq!(v["@id"], "route_marketing-site");
+        assert_eq!(v["match"][0]["host"][0], "marketing-site.test");
         assert_eq!(v["handle"][0]["handler"], "reverse_proxy");
         assert_eq!(v["terminal"], true);
     }

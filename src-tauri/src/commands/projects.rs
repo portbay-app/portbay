@@ -322,8 +322,8 @@ mod tests {
 
     #[test]
     fn slugify_matches_cli_behaviour() {
-        assert_eq!(slugify("Nour Beiruti"), "nour-beiruti");
-        assert_eq!(slugify("Tribal House CMS"), "tribal-house-cms");
+        assert_eq!(slugify("Marketing Site"), "marketing-site");
+        assert_eq!(slugify("API Gateway"), "api-gateway");
         assert_eq!(slugify("__weird___name__"), "weird-name");
         assert_eq!(slugify("UPPER"), "upper");
     }

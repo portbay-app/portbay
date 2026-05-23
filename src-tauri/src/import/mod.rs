@@ -159,8 +159,8 @@ mod tests {
     #[test]
     fn derive_id_lowercases_and_hyphenates() {
         assert_eq!(
-            derive_id("/Users/x/Sites/Tribal House CMS"),
-            "tribal-house-cms"
+            derive_id("/Users/x/Sites/API Gateway"),
+            "api-gateway"
         );
         assert_eq!(derive_id("/Users/x/MyApp"), "myapp");
         assert_eq!(derive_id("/Users/x/__weird__"), "weird");

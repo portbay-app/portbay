@@ -176,18 +176,18 @@ mod tests {
     #[test]
     fn add_project_succeeds_then_listing_shows_it() {
         let mut r = Registry::new("test");
-        r.add_project(sample_project("nour-beiruti")).unwrap();
+        r.add_project(sample_project("marketing-site")).unwrap();
         assert_eq!(r.list_projects().len(), 1);
-        assert_eq!(r.list_projects()[0].name, "nour-beiruti");
+        assert_eq!(r.list_projects()[0].name, "marketing-site");
     }
 
     #[test]
     fn add_duplicate_project_errors() {
         let mut r = Registry::new("test");
-        r.add_project(sample_project("nour-beiruti")).unwrap();
-        match r.add_project(sample_project("nour-beiruti")) {
+        r.add_project(sample_project("marketing-site")).unwrap();
+        match r.add_project(sample_project("marketing-site")) {
             Err(RegistryError::DuplicateProjectId(id)) => {
-                assert_eq!(id.as_str(), "nour-beiruti");
+                assert_eq!(id.as_str(), "marketing-site");
             }
             other => panic!("expected DuplicateProjectId, got {other:?}"),
         }

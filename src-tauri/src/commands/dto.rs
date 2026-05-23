@@ -268,14 +268,14 @@ mod tests {
 
     fn sample_project() -> Project {
         Project {
-            id: ProjectId::new("nour-beiruti"),
-            name: "Nour Beiruti".into(),
-            path: PathBuf::from("/tmp/nour"),
+            id: ProjectId::new("marketing-site"),
+            name: "Marketing Site".into(),
+            path: PathBuf::from("/tmp/marketing-site"),
             kind: ProjectType::Next,
             start_command: Some("pnpm dev".into()),
             port: Some(3010),
             extra_ports: vec![],
-            hostname: "nour-beiruti.test".into(),
+            hostname: "marketing-site.test".into(),
             https: true,
             services: vec!["caddy".into()],
             env: BTreeMap::new(),
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn project_view_computes_https_url() {
         let v = ProjectView::from_project(&sample_project(), None);
-        assert_eq!(v.url, "https://nour-beiruti.test");
+        assert_eq!(v.url, "https://marketing-site.test");
     }
 
     #[test]
@@ -331,6 +331,6 @@ mod tests {
         let mut p = sample_project();
         p.https = false;
         let v = ProjectView::from_project(&p, None);
-        assert_eq!(v.url, "http://nour-beiruti.test");
+        assert_eq!(v.url, "http://marketing-site.test");
     }
 }

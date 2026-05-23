@@ -122,8 +122,8 @@ mod tests {
         let path = tmp.path().join("registry.json");
 
         let mut reg = Registry::new("test");
-        reg.add_project(sample_project("nour-beiruti")).unwrap();
-        reg.add_project(sample_project("tribal-house")).unwrap();
+        reg.add_project(sample_project("marketing-site")).unwrap();
+        reg.add_project(sample_project("api-gateway")).unwrap();
 
         save_to(&reg, &path).unwrap();
         let loaded = load_from(&path).unwrap();

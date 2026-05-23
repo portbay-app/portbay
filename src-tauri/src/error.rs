@@ -242,9 +242,9 @@ mod tests {
 
     #[test]
     fn what_happened_matches_display_impl() {
-        let err = AppError::NotFound("nour-beiruti".into());
+        let err = AppError::NotFound("marketing-site".into());
         let v = parse(&err);
         assert_eq!(v["whatHappened"], err.to_string());
-        assert_eq!(v["whatHappened"], "project 'nour-beiruti' not found");
+        assert_eq!(v["whatHappened"], "project 'marketing-site' not found");
     }
 }
