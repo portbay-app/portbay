@@ -26,6 +26,22 @@
   let dnsStatus = $state<ResolverStatus | null>(null);
   let dnsBusy = $state<boolean>(false);
 
+  interface DomainSettings {
+    domainSuffix: string;
+    projectCount: number;
+  }
+
+  interface DomainMigration {
+    oldSuffix: string;
+    newSuffix: string;
+    changedProjects: number;
+    certDirsRemoved: number;
+  }
+
+  let domainSettings = $state<DomainSettings | null>(null);
+  let domainDraft = $state<string>("test");
+  let domainBusy = $state<boolean>(false);
+
   interface MailStatusInfo {
     running: boolean;
     smtpPort: number | null;
@@ -60,6 +76,39 @@
       dnsStatus = await safeInvoke<ResolverStatus>("dnsmasq_resolver_status");
     } catch {
       dnsStatus = null;
+    }
+  }
+
+  async function refreshDomainSettings() {
+    try {
+      domainSettings = await safeInvoke<DomainSettings>("get_domain_settings");
+      domainDraft = domainSettings.domainSuffix;
+    } catch {
+      domainSettings = null;
+    }
+  }
+
+  async function saveDomainSuffix() {
+    const next = domainDraft.trim().replace(/^\./, "");
+    if (!next || next === domainSettings?.domainSuffix) return;
+    domainBusy = true;
+    try {
+      const migration = await safeInvoke<DomainMigration>("update_domain_suffix", {
+        domainSuffix: next,
+      });
+      errorBus.push({
+        code: "DOMAIN_SUFFIX_UPDATED",
+        whatHappened: `Domain suffix changed from .${migration.oldSuffix} to .${migration.newSuffix}.`,
+        whyItMatters: `${migration.changedProjects} project hostname(s) were migrated. PortBay will reconcile DNS, Caddy, and certificates in the background.`,
+        whoCausedIt: "system",
+        actions: [],
+      });
+      await refreshDomainSettings();
+      await refreshDnsStatus();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      domainBusy = false;
     }
   }
 
@@ -114,6 +163,7 @@
 
   onMount(() => {
     void preferences.load();
+    void refreshDomainSettings();
     void refreshDnsStatus();
     void refreshMailStatus();
     void (async () => {
@@ -303,6 +353,55 @@
           </div>
         </div>
       </label>
+    </div>
+  </DashboardCard>
+
+  <DashboardCard title="Domain suffix" flush>
+    <div class="space-y-3">
+      <p class="text-xs text-fg-muted leading-relaxed">
+        New projects default to <span class="font-mono">project.{domainSettings?.domainSuffix ?? "test"}</span>.
+        Changing this rewrites existing project hostnames, clears affected
+        HTTPS cert directories, and asks the reconciler to update DNS and Caddy.
+      </p>
+
+      <div class="grid grid-cols-[1fr_auto] gap-2">
+        <label class="sr-only" for="domain-suffix">Domain suffix</label>
+        <div class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-fg-subtle text-sm">.</span>
+          <input
+            id="domain-suffix"
+            value={domainDraft}
+            oninput={(e) => (domainDraft = (e.currentTarget as HTMLInputElement).value)}
+            onkeydown={(e) => {
+              if (e.key === "Enter") void saveDomainSuffix();
+            }}
+            class="w-full rounded-md bg-bg border border-border pl-6 pr-3 py-2 text-sm text-fg outline-none focus:border-accent/60 font-mono"
+            placeholder="test"
+            disabled={domainBusy}
+          />
+        </div>
+        <button
+          type="button"
+          onclick={saveDomainSuffix}
+          disabled={domainBusy || !domainDraft.trim() || domainDraft.trim().replace(/^\./, "") === domainSettings?.domainSuffix}
+          class="px-3 py-2 text-xs rounded-md text-accent border border-accent/40 hover:bg-accent/10 transition-colors disabled:opacity-50 disabled:hover:bg-transparent"
+        >
+          {domainBusy ? "Saving…" : "Apply"}
+        </button>
+      </div>
+
+      <div class="space-y-1 text-[11px] text-fg-muted leading-relaxed">
+        <p><span class="text-fg">.test</span> is recommended for local development and stays the default.</p>
+        <p><span class="text-fg">.local</span> can clash with mDNS on some networks.</p>
+        <p><span class="text-fg">.dev</span> is browser-HSTS enforced; keep HTTPS enabled.</p>
+        <p>Public suffixes such as <span class="font-mono">.com</span>, <span class="font-mono">.net</span>, and <span class="font-mono">.io</span> are rejected.</p>
+      </div>
+
+      {#if domainSettings}
+        <div class="text-[11px] text-fg-subtle">
+          {domainSettings.projectCount} project{domainSettings.projectCount === 1 ? "" : "s"} will be checked during migration.
+        </div>
+      {/if}
     </div>
   </DashboardCard>
 
