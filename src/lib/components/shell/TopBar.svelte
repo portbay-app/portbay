@@ -11,8 +11,8 @@
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import Icon from "$lib/components/atoms/Icon.svelte";
-  import { search } from "$lib/stores/search.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
+  import { palette } from "$lib/stores/palette.svelte";
   import { tunnels } from "$lib/stores/tunnels.svelte";
   import { tunnelModal } from "$lib/stores/tunnelModal.svelte";
   import StopAllButton from "./StopAllButton.svelte";
@@ -40,10 +40,8 @@
     addProjectWizard.show();
   }
 
-  function focusSearch() {
-    // Live-filter the projects table; the command palette (⌘K) is
-    // a separate surface tracked by its own kanban card.
-    document.getElementById("portbay-search")?.focus();
+  function openPalette() {
+    palette.show();
   }
 </script>
 
@@ -55,25 +53,25 @@
     {currentTitle}
   </h1>
 
-  <!-- Search — live filter for the projects table. -->
+  <!-- Search — opens the command palette. -->
   <div class="ml-auto flex items-center">
-    <div
-      class="relative flex items-center w-64 h-8 rounded-md bg-surface border border-border
-             focus-within:border-accent/60 transition-colors"
+    <button
+      type="button"
+      onclick={openPalette}
+      aria-label="Open command palette"
+      class="flex items-center gap-2 w-64 h-8 px-2.5 rounded-md
+             bg-surface border border-border hover:border-accent/60
+             text-fg-subtle hover:text-fg-muted transition-colors"
     >
-      <span class="pl-2.5 text-fg-subtle">
-        <Icon name="search" size={14} />
-      </span>
-      <input
-        id="portbay-search"
-        type="text"
-        placeholder="Search projects (⌘K)"
-        value={search.value}
-        oninput={(e) => search.set((e.currentTarget as HTMLInputElement).value)}
-        class="flex-1 bg-transparent text-sm pl-2 pr-3 outline-none text-fg placeholder-fg-subtle"
-        aria-label="Search projects"
-      />
-    </div>
+      <Icon name="search" size={14} />
+      <span class="flex-1 text-left text-sm">Search or run a command</span>
+      <kbd
+        class="text-[10px] font-mono px-1.5 py-0.5 rounded
+               border border-border text-fg-subtle"
+      >
+        ⌘K
+      </kbd>
+    </button>
   </div>
 
   <!-- Action cluster: Add Project, Stop-All, Settings -->
