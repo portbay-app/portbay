@@ -13,6 +13,7 @@
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
   import EnvEditor from "./EnvEditor.svelte";
   import AdvancedFields from "./AdvancedFields.svelte";
+  import ProjectDbConnections from "./ProjectDbConnections.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
@@ -678,6 +679,9 @@
       <DashboardCard title="Environment" flush>
         <EnvEditor {project} />
       </DashboardCard>
+
+      <!-- Database connection(s) parsed from the project's .env (if any) -->
+      <ProjectDbConnections {project} />
 
       <!-- Advanced — tags / extra ports / services / PHP -->
       <DashboardCard title="Advanced" flush>
