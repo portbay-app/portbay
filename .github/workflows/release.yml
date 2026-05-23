@@ -82,6 +82,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --target aarch64-apple-darwin
 
+      - name: Generate shell completions
+        run: pnpm completions:build
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -90,6 +93,7 @@ jobs:
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            dist/completions/*
           retention-days: 14
           if-no-files-found: warn
 
@@ -116,6 +120,7 @@ jobs:
             artifacts/dmg/*.dmg
             artifacts/macos/*.app.tar.gz
             artifacts/macos/*.app.tar.gz.sig
+            artifacts/completions/*
           draft: true
           generate_release_notes: true
 

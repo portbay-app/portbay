@@ -19,6 +19,25 @@ portbay stop marketing-site
 portbay stop --all
 ```
 
+## Shell Completions
+
+Generate completion scripts from the installed CLI:
+
+```bash
+portbay completions zsh > ~/.zsh/completions/_portbay
+portbay completions bash > ~/.local/share/bash-completion/completions/portbay
+portbay completions fish > ~/.config/fish/completions/portbay.fish
+```
+
+The generated scripts include dynamic project-id hooks:
+
+```bash
+portbay --complete-projects
+portbay --complete-running-projects
+```
+
+`start`, `restart`, `open`, `logs`, and `remove` complete registered project ids. `stop` can use the running-project helper in shell integrations that support custom dynamic sources.
+
 ## JSON Output
 
 Use `--json` for machine-readable output:
