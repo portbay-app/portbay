@@ -42,6 +42,7 @@ use std::net::Ipv4Addr;
 
 use portbay_lib::caddy::CertPaths;
 use portbay_lib::hosts::{HostsError, HostsManager};
+use portbay_lib::hosts_helper::HostsHelperClient;
 use portbay_lib::process_compose::{
     PcClient, Process, ProjectStatus, DEFAULT_PORT as PC_DEFAULT_PORT,
 };
@@ -516,7 +517,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
     // Best-effort hosts write. Permission-denied is reported as a hint, not
     // an error — the project is registered either way, and the user can
     // catch up with `sudo portbay hosts add <hostname>`.
-    let hosts_outcome = HostsManager::system().add(&project.hostname, Ipv4Addr::LOCALHOST);
+    let hosts_outcome = add_host_best_effort(&ctx, &project.hostname, Ipv4Addr::LOCALHOST);
 
     if ctx.json {
         let warnings = hosts_warnings(&hosts_outcome);
@@ -598,7 +599,7 @@ async fn cmd_add_from_portfile(
     ctx.save_registry(&reg)?;
 
     // Best-effort hosts add. Same UX as cmd_add's main path.
-    let hosts_outcome = HostsManager::system().add(&project.hostname, Ipv4Addr::LOCALHOST);
+    let hosts_outcome = add_host_best_effort(&ctx, &project.hostname, Ipv4Addr::LOCALHOST);
 
     if ctx.json {
         let warnings = hosts_warnings(&hosts_outcome);
@@ -707,7 +708,7 @@ async fn cmd_remove(ctx: &CliContext, args: RemoveArgs) -> Result<ExitCode, CliE
 
         // Best-effort hosts entry removal — permission-denied reported as
         // a hint, not an error. The registry change has already landed.
-        hosts_outcome = Some(HostsManager::system().remove(&removed.hostname));
+        hosts_outcome = Some(remove_host_best_effort(&ctx, &removed.hostname));
 
         // Live Caddy routes are left alone — the reconciler drops orphans
         // on next daemon boot.
@@ -1011,9 +1012,19 @@ async fn cmd_doctor(ctx: &CliContext) -> Result<ExitCode, CliError> {
 
 async fn cmd_hosts(ctx: &CliContext, sub: HostsCmd) -> Result<ExitCode, CliError> {
     let mgr = HostsManager::system();
+    let helper = HostsHelperClient::system();
     match sub {
         HostsCmd::List => {
-            let entries = mgr.list_managed().map_err(CliError::Hosts)?;
+            let entries = match helper.list() {
+                Ok(entries) => entries
+                    .into_iter()
+                    .map(|entry| portbay_lib::hosts::HostsEntry {
+                        ip: entry.ip,
+                        hostname: entry.hostname,
+                    })
+                    .collect(),
+                Err(_) => mgr.list_managed().map_err(CliError::Hosts)?,
+            };
             if ctx.json {
                 let out: Vec<_> = entries
                     .iter()
@@ -1033,15 +1044,18 @@ async fn cmd_hosts(ctx: &CliContext, sub: HostsCmd) -> Result<ExitCode, CliError
             }
         }
         HostsCmd::Add { hostname, ip } => {
-            mgr.add(&hostname, ip).map_err(CliError::Hosts)?;
+            add_host_best_effort(ctx, &hostname, ip).map_err(CliError::Hosts)?;
             cli_say(ctx, &format!("added {hostname} → {ip}"));
         }
         HostsCmd::Remove { hostname } => {
-            mgr.remove(&hostname).map_err(CliError::Hosts)?;
+            remove_host_best_effort(ctx, &hostname).map_err(CliError::Hosts)?;
             cli_say(ctx, &format!("removed {hostname}"));
         }
         HostsCmd::Clear => {
-            mgr.clear().map_err(CliError::Hosts)?;
+            match helper.clear() {
+                Ok(()) => {}
+                Err(_) => mgr.clear().map_err(CliError::Hosts)?,
+            }
             cli_say(ctx, "cleared all PortBay-managed hosts entries");
         }
         HostsCmd::Reconcile => {
@@ -1052,11 +1066,49 @@ async fn cmd_hosts(ctx: &CliContext, sub: HostsCmd) -> Result<ExitCode, CliError
                 .map(|p| (p.hostname.clone(), Ipv4Addr::LOCALHOST))
                 .collect();
             let n = pairs.len();
-            mgr.replace_all(pairs).map_err(CliError::Hosts)?;
+            match helper.replace_all(pairs.clone(), &reg.domain_suffix) {
+                Ok(()) => {}
+                Err(_) => mgr.replace_all(pairs).map_err(CliError::Hosts)?,
+            }
             cli_say(ctx, &format!("reconciled {n} entry(ies) from registry"));
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn add_host_best_effort(
+    ctx: &CliContext,
+    hostname: &str,
+    ip: Ipv4Addr,
+) -> std::result::Result<(), HostsError> {
+    let suffix = ctx
+        .load_registry()
+        .map(|reg| reg.domain_suffix)
+        .unwrap_or_else(|_| "test".into());
+    if HostsHelperClient::system()
+        .add(hostname, ip, &suffix)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    HostsManager::system().add(hostname, ip)
+}
+
+fn remove_host_best_effort(
+    ctx: &CliContext,
+    hostname: &str,
+) -> std::result::Result<(), HostsError> {
+    let suffix = ctx
+        .load_registry()
+        .map(|reg| reg.domain_suffix)
+        .unwrap_or_else(|_| "test".into());
+    if HostsHelperClient::system()
+        .remove(hostname, &suffix)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    HostsManager::system().remove(hostname)
 }
 
 fn cli_say(ctx: &CliContext, msg: &str) {

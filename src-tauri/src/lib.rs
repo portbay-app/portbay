@@ -5,6 +5,7 @@ pub mod commands;
 pub mod dnsmasq;
 pub mod error;
 pub mod hosts;
+pub mod hosts_helper;
 pub mod import;
 pub mod mailpit;
 pub mod mkcert;
