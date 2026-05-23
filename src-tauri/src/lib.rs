@@ -3,6 +3,7 @@
 pub mod caddy;
 pub mod commands;
 pub mod dnsmasq;
+pub mod domain;
 pub mod error;
 pub mod hosts;
 pub mod hosts_helper;
@@ -350,6 +351,8 @@ pub fn run() {
             commands::metrics::system_metrics,
             commands::preferences::get_preferences,
             commands::preferences::set_preferences,
+            commands::preferences::get_domain_settings,
+            commands::preferences::update_domain_suffix,
             commands::preferences::mark_close_toast_seen,
             commands::runtimes::list_runtimes,
         ])
