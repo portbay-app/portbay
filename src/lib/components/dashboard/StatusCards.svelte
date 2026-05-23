@@ -105,7 +105,12 @@
   // pulse is a faithful visual indicator that "the app is alive."
 </script>
 
-<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+<div
+  class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3"
+  role="status"
+  aria-live="polite"
+  aria-label="Service status"
+>
   <!-- Card 1: Caddy -->
   <div
     class="bg-surface border border-border rounded-2xl p-4

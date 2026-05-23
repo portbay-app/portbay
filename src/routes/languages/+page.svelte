@@ -320,7 +320,10 @@
             <button
               type="button"
               role="tab"
+              id="tab-{tab.id}"
+              aria-controls="tabpanel-{tab.id}"
               aria-selected={isActive}
+              tabindex={isActive ? 0 : -1}
               onclick={() => (activeTab = tab.id)}
               class="px-3 py-2.5 text-[12px] font-medium border-b-2
                      transition-colors -mb-px
@@ -336,7 +339,13 @@
         <!-- Active tab content -->
         {#each version.tabs as tab (tab.id)}
           {#if activeTab === tab.id}
-            <div class="px-8 py-6">
+            <div
+              class="px-8 py-6"
+              role="tabpanel"
+              id="tabpanel-{tab.id}"
+              aria-labelledby="tab-{tab.id}"
+              tabindex="0"
+            >
               {#if tab.rows.length === 0}
                 <p class="text-[12px] text-fg-subtle">No data in this tab.</p>
               {:else}

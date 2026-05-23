@@ -190,6 +190,8 @@
         <button
           type="button"
           onclick={() => (groupsOpen = !groupsOpen)}
+          aria-expanded={groupsOpen}
+          aria-controls="sidebar-groups-list"
           class="flex items-center gap-1.5 text-[11px] uppercase tracking-wide
                  text-fg-subtle hover:text-fg-muted transition-colors"
         >
@@ -214,6 +216,7 @@
       </div>
 
       {#if groupsOpen}
+        <div id="sidebar-groups-list">
         {#if groups.value.length === 0}
           <p class="px-2 py-1 text-[11px] text-fg-subtle">
             No groups yet. Cluster projects for one-click batch actions.
@@ -238,6 +241,7 @@
             </a>
           {/each}
         {/if}
+        </div>
       {/if}
     </div>
 

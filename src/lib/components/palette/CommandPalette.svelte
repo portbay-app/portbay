@@ -13,6 +13,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { trapFocus } from "$lib/actions/trapFocus";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { collectCommands, executeCommand } from "$lib/commands";
@@ -210,18 +211,19 @@
 {#if palette.isOpen}
   <div
     class="fixed inset-0 z-[60] flex items-start justify-center pt-[12vh] px-4 bg-black/40 backdrop-blur-sm"
-    onclick={() => palette.hide()}
+    onclick={(e) => {
+      if (e.target === e.currentTarget) palette.hide();
+    }}
     role="presentation"
   >
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div
+      use:trapFocus
       role="dialog"
       aria-label="Command palette"
       aria-modal="true"
       tabindex={-1}
       class="w-full max-w-[600px] bg-bg border border-border rounded-xl shadow-2xl
              overflow-hidden flex flex-col"
-      onclick={(e) => e.stopPropagation()}
     >
       <div class="flex items-center gap-2 px-4 py-3 border-b border-border">
         <Icon name="search" size={14} class="text-fg-subtle" />

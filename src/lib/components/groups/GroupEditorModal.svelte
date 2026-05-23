@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import { trapFocus } from "$lib/actions/trapFocus";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { groupEditor } from "$lib/stores/groupEditor.svelte";
@@ -108,6 +109,7 @@
     role="presentation"
   ></div>
   <aside
+    use:trapFocus
     class="fixed inset-y-0 right-0 z-50 w-[min(440px,100vw)] bg-bg
            border-l border-border shadow-2xl flex flex-col"
     aria-label={groupEditor.mode.kind === "edit" ? "Edit group" : "New group"}
