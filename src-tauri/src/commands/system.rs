@@ -158,6 +158,64 @@ pub async fn doctor(state: State<'_, AppState>) -> AppResult<DoctorReport> {
     Ok(DoctorReport { findings })
 }
 
+/// `read_dotenv(path)` — read a user-picked `.env`-style file and
+/// return its `KEY=value` pairs as a vector preserving file order.
+/// Comments (`#`) and blank lines are skipped; surrounding quotes
+/// on the value are stripped when matched on both ends.
+///
+/// We do the parse on the Rust side so the wire shape is already
+/// clean — the frontend just merges the result into its row state.
+/// Files larger than 256 KB are rejected to avoid hostile inputs.
+#[tauri::command]
+pub async fn read_dotenv(path: String) -> AppResult<Vec<(String, String)>> {
+    use std::fs;
+
+    const MAX_BYTES: u64 = 256 * 1024;
+    let meta =
+        fs::metadata(&path).map_err(|e| AppError::BadInput(format!("can't open {path}: {e}")))?;
+    if !meta.is_file() {
+        return Err(AppError::BadInput(format!("not a regular file: {path}")));
+    }
+    if meta.len() > MAX_BYTES {
+        return Err(AppError::BadInput(format!(
+            ".env file is too large ({} bytes); paste it instead",
+            meta.len()
+        )));
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|e| AppError::BadInput(format!("can't read {path}: {e}")))?;
+    Ok(parse_dotenv(&text))
+}
+
+/// Parser for [`read_dotenv`]. Exposed for unit tests.
+pub(crate) fn parse_dotenv(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Strip an optional `export ` prefix to be friendly to shell-
+        // sourced env files.
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
+        let key = line[..eq].trim();
+        if key.is_empty() {
+            continue;
+        }
+        let mut value = line[eq + 1..].trim().to_string();
+        if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
+            || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
+        {
+            value = value[1..value.len() - 1].to_string();
+        }
+        out.push((key.to_string(), value));
+    }
+    out
+}
+
 /// `tail_logs(id, limit, offset)` — static log tail from PC's buffer.
 ///
 /// For live streaming, see card #10's Channel<T>-based follow mode — this
@@ -175,4 +233,47 @@ pub async fn tail_logs(
         .await
         .map_err(AppError::Pc)?;
     Ok(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dotenv;
+
+    #[test]
+    fn parses_keys_strips_comments_and_blanks() {
+        let body = "\
+# top comment
+DATABASE_URL=postgres://localhost/foo
+
+API_KEY=abc123
+";
+        let kv = parse_dotenv(body);
+        assert_eq!(kv.len(), 2);
+        assert_eq!(
+            kv[0],
+            ("DATABASE_URL".into(), "postgres://localhost/foo".into())
+        );
+        assert_eq!(kv[1], ("API_KEY".into(), "abc123".into()));
+    }
+
+    #[test]
+    fn unwraps_matched_quotes_only() {
+        let kv = parse_dotenv("A=\"with spaces\"\nB='single'\nC=\"mismatch'");
+        assert_eq!(kv[0].1, "with spaces");
+        assert_eq!(kv[1].1, "single");
+        assert_eq!(kv[2].1, "\"mismatch'");
+    }
+
+    #[test]
+    fn strips_export_prefix() {
+        let kv = parse_dotenv("export FOO=bar\n");
+        assert_eq!(kv[0], ("FOO".into(), "bar".into()));
+    }
+
+    #[test]
+    fn ignores_lines_without_equals_or_empty_keys() {
+        let kv = parse_dotenv("notakv\n=missingkey\nGOOD=ok\n");
+        assert_eq!(kv.len(), 1);
+        assert_eq!(kv[0].0, "GOOD");
+    }
 }

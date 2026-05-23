@@ -252,6 +252,7 @@ pub fn run() {
             commands::certs::reissue_cert,
             commands::system::doctor,
             commands::system::tail_logs,
+            commands::system::read_dotenv,
             commands::log_stream::subscribe_logs,
             commands::import::detect_sources,
             commands::import::preview_import,

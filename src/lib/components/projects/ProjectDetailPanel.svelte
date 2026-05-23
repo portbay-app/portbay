@@ -10,6 +10,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
+  import EnvEditor from "./EnvEditor.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
@@ -681,6 +682,11 @@
             </button>
           </div>
         {/if}
+      </DashboardCard>
+
+      <!-- Environment -->
+      <DashboardCard title="Environment" flush>
+        <EnvEditor {project} />
       </DashboardCard>
 
       <!-- Logs preview -->
