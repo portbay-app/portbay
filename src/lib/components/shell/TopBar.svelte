@@ -13,11 +13,11 @@
       pill appears between Stop All and the cluster when active.
 -->
 <script lang="ts">
+  import { goto } from "$app/navigation";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import { palette } from "$lib/stores/palette.svelte";
   import { tunnels } from "$lib/stores/tunnels.svelte";
-  import { tunnelModal } from "$lib/stores/tunnelModal.svelte";
   import { theme } from "$lib/stores/theme.svelte";
   import { notifications } from "$lib/stores/notifications.svelte";
   import StopAllButton from "./StopAllButton.svelte";
@@ -100,17 +100,14 @@
     {#if tunnels.count > 0}
       <button
         type="button"
-        onclick={() => {
-          const first = tunnels.value[0];
-          if (first) tunnelModal.show(first.projectId);
-        }}
+        onclick={() => void goto("/tunnels")}
         title="{tunnels.count} active public tunnel{tunnels.count === 1 ? '' : 's'}"
         aria-label="View active tunnels"
         class="inline-flex items-center gap-1.5 h-9 px-2.5 rounded-lg
                text-accent bg-accent/10 hover:bg-accent/15
                text-[12px] font-medium tabular-nums transition-colors"
       >
-        <Icon name="globe" size={12} />
+        <Icon name="cloud" size={12} />
         {tunnels.count}
       </button>
     {/if}

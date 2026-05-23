@@ -22,7 +22,6 @@ import { dns } from "$lib/stores/dns.svelte";
 import { sidecars } from "$lib/stores/sidecars.svelte";
 import { theme } from "$lib/stores/theme.svelte";
 import { tunnels } from "$lib/stores/tunnels.svelte";
-import { tunnelModal } from "$lib/stores/tunnelModal.svelte";
 import type { PaletteCommand } from "$lib/types/palette";
 
 /**
@@ -332,17 +331,18 @@ export function collectCommands(): PaletteCommand[] {
   );
 
   // ────────── Tunnels ──────────
-  for (const t of tunnels.value) {
-    cmds.push({
-      id: `tunnel.open.${t.projectId}`,
-      label: `Open tunnel for ${t.projectId}`,
-      detail: t.publicUrl ?? "Pending URL…",
-      group: "Tunnels",
-      icon: "globe",
-      keywords: [t.projectId, "cloudflare"],
-      run: () => tunnelModal.show(t.projectId),
-    });
-  }
+  cmds.push({
+    id: "tunnel.manage",
+    label: "Manage public tunnels",
+    detail:
+      tunnels.count > 0
+        ? `${tunnels.count} active`
+        : "Share a project publicly",
+    group: "Tunnels",
+    icon: "cloud",
+    keywords: ["cloudflare", "share", "public", "tunnel"],
+    run: () => void goto("/tunnels"),
+  });
 
   return cmds;
 }
