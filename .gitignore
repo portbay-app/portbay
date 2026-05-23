@@ -40,6 +40,9 @@ npm-debug.log*
 *.swp
 *.swo
 
+# Agent / local tooling state (internal, not for the public repo)
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
