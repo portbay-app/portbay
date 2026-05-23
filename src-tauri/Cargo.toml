@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "portbay"
 path = "src/bin/portbay.rs"
 
+[[bin]]
+name = "portbay-hosts-helper"
+path = "src/bin/portbay-hosts-helper.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -44,6 +48,7 @@ sysinfo = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x509-parser = "0.16"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
