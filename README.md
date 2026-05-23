@@ -5,7 +5,7 @@
 
 **Status: pre-MVP, in active development. Not ready for general use.**
 
-PortBay is a small native app for macOS (Linux + Windows later) that replaces the parts of ServBay, MAMP, and Laravel Herd that developers actually use:
+PortBay is a small native app for macOS (Linux + Windows later) that gives developers a fast, predictable way to run multiple local projects side by side — without the weight of a container stack or the friction of hand-rolling proxy, DNS, and TLS configs for every project.
 
 - One-click Play and Stop per project (Next.js, Vite, PHP, Laravel, plain Node).
 - A universal Stop-All kill switch that always works.
@@ -13,11 +13,15 @@ PortBay is a small native app for macOS (Linux + Windows later) that replaces th
 - Reverse-proxy routing via [Caddy](https://caddyserver.com).
 - A registry-driven model — declare projects once in JSON; the daemon does the rest.
 
-## Why another one?
+## The problem we're solving
 
-ServBay is closed source with a paywall on essentials. Laravel Herd is PHP-only. FlyEnv and Lerd are good but heavy (Electron / container-based). PortBay sits in the gap: native, lightweight, project-launcher-first, and welcoming to both beginners using AI coding tools and senior engineers who want the CLI to be a first-class citizen.
+Modern local development is fragmented. Engineers juggle background processes (`pnpm dev`, `php-fpm`, `redis-server`, `vite`), competing ports, ad-hoc `/etc/hosts` edits, self-signed certs, and a reverse proxy or two — multiplied across every project they own. The result is forgotten background processes, port conflicts, expired certs, and "it worked yesterday" mornings.
 
-Target footprint: **under 80 MB idle RAM, installer under 30 MB.** Built with Tauri 2 + Rust + Svelte, with Process Compose handling lifecycle and Caddy handling routes.
+PortBay treats your machine like a tiny PaaS: each project is a declarative record with a hostname, a start command, and a port. The app handles the lifecycle, the routing, and the certificates. Stopping the app stops every project. Restarting one project doesn't disturb the others.
+
+The design constraint is to stay **native and small** — under 80 MB idle RAM, installer under 30 MB — so it fits alongside an editor, a browser, and a chat client without being noticed.
+
+Built with Tauri 2 + Rust + Svelte, with Process Compose handling lifecycle and Caddy handling routes.
 
 ## Architecture (planned)
 
@@ -30,17 +34,17 @@ GUI (Tauri + Svelte)
               └─ Hosts file       (privileged helper)
 ```
 
-Full assessment, architecture, and phased implementation plan live in [`docs/ASSESSMENT_AND_PLAN.md`](./docs/ASSESSMENT_AND_PLAN.md) once we land that doc here. (Currently in the planning workspace; will be ported into this repo before Phase 1.)
+Full architecture lives in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md); UX principles in [`docs/UX_DESIGN.md`](./docs/UX_DESIGN.md).
 
 ## What's not here yet
 
-- Any working code. Repo is the project home; first spike code lands when Phase 0 validation completes.
-- A landing page. We're GitHub-only for now.
-- Distribution channels (no Homebrew tap, no npm, no notarized builds). All of these come later — only when there's demand.
+- Distribution channels (no Homebrew tap, no notarized builds). These come once there's demand.
+- A landing page. GitHub-only for now.
+- General-availability stability. Phase 3 polish is in flight.
 
 ## Roadmap
 
-Tracked publicly via GitHub Projects (link added once enabled). High-level phases:
+High-level phases:
 
 1. **Phase 0** — validation spikes (Process Compose, Caddy admin API, Tauri sidecar).
 2. **Phase 1** — headless Rust core with CLI parity.
@@ -50,26 +54,28 @@ Tracked publicly via GitHub Projects (link added once enabled). High-level phase
 
 ## Development setup
 
-PortBay bundles two third-party sidecars — `process-compose` and `caddy` —
-that Tauri expects to find under `src-tauri/binaries/<name>-<target-triple>`.
-Process Compose is committed to the repo; Caddy is fetched per checkout
-because the binary is large and platform-specific:
+PortBay bundles third-party sidecars — `process-compose`, `caddy`, `mkcert`,
+`mailpit`, and `cloudflared` — that Tauri expects to find under
+`src-tauri/binaries/<name>-<target-triple>`. Process Compose is committed
+to the repo; the others are fetched per checkout because the binaries are
+large and platform-specific:
 
 ```bash
-./scripts/fetch-caddy.sh     # writes src-tauri/binaries/caddy-<triple>
-./scripts/fetch-mkcert.sh    # writes src-tauri/binaries/mkcert-<triple>
-./scripts/fetch-mailpit.sh   # writes src-tauri/binaries/mailpit-<triple>
+./scripts/fetch-caddy.sh        # writes src-tauri/binaries/caddy-<triple>
+./scripts/fetch-mkcert.sh       # writes src-tauri/binaries/mkcert-<triple>
+./scripts/fetch-mailpit.sh      # writes src-tauri/binaries/mailpit-<triple>
+./scripts/fetch-cloudflared.sh  # writes src-tauri/binaries/cloudflared-<triple>
 ```
 
 Re-run after bumping the version constant inside any script. On a fresh
 clone the dev server (`pnpm tauri dev`) will fail to start until these
-binaries are in place. The dnsmasq sidecar is currently resolved from
-PATH; an equivalent `fetch-dnsmasq.sh` will land once the resolver-file
-install flow needs production bundling.
+binaries are in place. The `dnsmasq` sidecar is currently resolved from
+PATH; an equivalent fetch script will land once the resolver-file install
+flow needs production bundling.
 
 ## Contributing
 
-Not open to contributions yet — the project is in early validation. Once Phase 1 lands, `CONTRIBUTING.md` will go up. Star the repo if you want to be notified.
+Not open to contributions yet — the project is in early validation. Once Phase 1 lands publicly, `CONTRIBUTING.md` will go up. Star the repo if you want to be notified.
 
 ## License
 

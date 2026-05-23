@@ -1,7 +1,6 @@
 # Architecture
 
 > Short architecture reference for PortBay. Companion to `UX_DESIGN.md`.
-> Reconstituted from the original assessment plan (`claudedocs/ASSESSMENT_AND_PLAN.md`).
 
 ---
 
@@ -10,7 +9,7 @@
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                  PortBay GUI (Tauri 2)                       │
-│       Svelte 5 + Tailwind 4 + atoms lifted from Lerd (MIT)   │
+│              Svelte 5 + Tailwind 4 (native atoms)            │
 └─────────────────┬────────────────────────────────────────────┘
                   │ Tauri IPC (invoke / events)
 ┌─────────────────▼────────────────────────────────────────────┐
@@ -43,7 +42,7 @@
 | Component | Choice | Why |
 |---|---|---|
 | Desktop shell | **Tauri 2** | <10 MB installer, ~30–50 MB RAM idle. Rust core. Cross-platform from day one. |
-| Frontend | **Svelte 5 + Tailwind 4** | Lerd uses the same stack; their atoms are dependency-light and liftable. FlyEnv's Vue is locked to Element Plus. |
+| Frontend | **Svelte 5 + Tailwind 4** | Compiler-first reactivity, zero runtime cost, small bundle. Pairs cleanly with Tauri's IPC model. |
 | Core language | **Rust 1.95+** | Single binary, no GC pauses during process supervision, Tauri-native. |
 | Process daemon | **Process Compose** (Apache 2.0, bundled sidecar) | Mature REST API, health checks, log streaming. Don't reinvent. |
 | Reverse proxy | **Caddy 2** (Apache 2.0, bundled sidecar) | Admin API for runtime config, automatic HTTPS, simpler than nginx. |
@@ -58,7 +57,6 @@
 
 Considered. Rejected:
 - Tauri's GUI story is Rust-native; CGO bridging adds friction.
-- Lerd already proves Go + Svelte works; we'd be reinventing without differentiation.
 - Rust + Tauri is where the developer-tools ecosystem is moving (1Password, Fig, Warp post-rewrite).
 
 ## Why not Electron?
@@ -103,11 +101,11 @@ The original `<30 MB` target from the planning phase was unreachable once we acc
 
 | Phase | Status |
 |---|---|
-| 0 — Validation spikes (PC, Caddy, Tauri sidecar, Lerd/FlyEnv UI audits) | Done |
+| 0 — Validation spikes (Process Compose, Caddy admin API, Tauri sidecar) | Done |
 | 1 — Headless core (registry, adapters, mkcert, hosts, CLI) | Done |
 | 2 — GUI MVP (in progress; see kanban) | In progress |
 | 3 — UX polish, error handling, signed builds | Planned |
 | 4 — Open-source release readiness | Planned |
 | 5 — Linux + Windows | Deferred |
 
-See the Obsidian kanban at `~/Documents/Obsidian/PortBay/!Tasks/` for live status.
+See `CHANGELOG.md` and open issues for current focus.

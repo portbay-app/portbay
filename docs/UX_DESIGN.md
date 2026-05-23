@@ -17,7 +17,7 @@ PortBay's hardest design constraint is serving two audiences without patronising
 
 ### Sam — the senior engineer
 - Has been hand-rolling nginx configs since 2014.
-- Escaping ServBay's free-tier paywall and Herd's PHP-only scope.
+- Frustrated by paywalled essentials and single-language scope in existing tools.
 - Wants the UI to *get out of the way* once they understand it.
 - Will abandon if you hide what's happening or make simple things require clicks.
 
@@ -38,13 +38,13 @@ PortBay's hardest design constraint is serving two audiences without patronising
 │ Sidebar         │  Main panel                                │
 │                 │                                            │
 │ ▸ Projects (4)  │  ┌──────────────────────────────────────┐  │
-│ ▸ Services      │  │ Nour Beiruti         ● Running       │  │
-│ ▸ Domains       │  │ next · :3010 · nour-beiruti.test     │  │
+│ ▸ Services      │  │ marketing-site       ● Running       │  │
+│ ▸ Domains       │  │ next · :3010 · marketing-site.test   │  │
 │ ▸ Logs          │  │              [▶]  [■]  [↻]  [↗]    │  │
 │                 │  └──────────────────────────────────────┘  │
 │ Footer:         │  ┌──────────────────────────────────────┐  │
-│ caddy ● dns  ● │  │ Tribal House CMS     ○ Stopped       │  │
-│ php-fpm ● mysql●│  │ php · tribal-house.test              │  │
+│ caddy ● dns  ● │  │ api-gateway          ○ Stopped       │  │
+│ php-fpm ● mysql●│  │ php · api-gateway.test               │  │
 │                 │  │              [▶]  [■]  [↻]  [↗]    │  │
 └─────────────────┴──────────────────────────────────────────┘
 ```
@@ -101,7 +101,7 @@ Every error follows the same shape:
 
 ```
 What happened:      Port 3010 is already in use.
-Why it matters:     Nour Beiruti can't start until the port is free.
+Why it matters:     marketing-site can't start until the port is free.
 Who's using it:     node (PID 12345), started 2h ago from another project.
 What you can do:    [Stop that process]   [Use port 3011 instead]   [Show details]
 ```
@@ -131,7 +131,7 @@ Every GUI action has a CLI equivalent (and vice-versa). The CLI binary is alread
 
 This serves three audiences:
 - Sam, who wants to script things.
-- Vince, who eventually graduates and discovers the CLI organically (via tooltips: "Tip: you can also run `portbay start nour-beiruti`").
+- Vince, who eventually graduates and discovers the CLI organically (via tooltips: "Tip: you can also run `portbay start marketing-site`").
 - Future automation (CI, hooks).
 
 ---
@@ -143,9 +143,6 @@ Study, do not lift:
 - **[Tilt](https://tilt.dev)** — "status at a glance, errors can't scroll off-screen."
 - **[Linear](https://linear.app)** — keyboard-first command palette (`Cmd-K`).
 - **[Raycast](https://raycast.com)** — native macOS feel.
-
-For visual lift (legally OK under their respective MIT licenses):
-- **Lerd (MIT)** — `internal/ui/web/src/components/` Svelte atoms: `StatusPill`, `StatusDot`, `Badge`, `Icon`, `DashboardCard`. Plus store templates: `theme`, `commandPalette`, `route`. See `research-lerd.md` for the full lift list (to be reconstituted).
 
 ---
 
@@ -162,7 +159,7 @@ For visual lift (legally OK under their respective MIT licenses):
 
 Components to ship, in order of dependency:
 
-1. **Atomic primitives** — `StatusPill`, `StatusDot`, `Badge`, `Icon`, `DashboardCard`. Lifted from Lerd under MIT.
+1. **Atomic primitives** — `StatusPill`, `StatusDot`, `Badge`, `Icon`, `DashboardCard`.
 2. **Project list** + per-project action row (Play / Stop / Restart / Open / Logs).
 3. **Top bar** with `[+] [⚙] [⊙]`. Universal Stop-All wired to the `stop_many` Tauri command.
 4. **Add Project wizard** with L1/L2/L3 progressive disclosure.
