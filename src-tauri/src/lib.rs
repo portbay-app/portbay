@@ -228,44 +228,59 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| match event {
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                // "Close to menu bar" semantics: when the toggle is on
-                // and the tray is installed, intercept the window's
-                // close and hide it instead of letting Tauri tear it
-                // down. The tray stays the user's escape hatch — Quit
-                // from there fires `app.exit(0)` which destroys the
-                // window for real and triggers the shutdown sweep.
-                let state: tauri::State<AppState> = window.state();
-                let prefs = state.preferences_snapshot();
-                if prefs.close_to_menu_bar && prefs.show_tray_icon {
-                    api.prevent_close();
+        .on_window_event(|window, event| {
+            let label = window.label();
+
+            // Tray popover: hide on blur so a click outside dismisses
+            // the panel (sticky-popover behaviour macOS users expect).
+            // Other events on this window are ignored — its close/quit
+            // semantics never reach the user (it's frameless + hidden).
+            if label == crate::tray::PANEL_WINDOW_LABEL {
+                if let tauri::WindowEvent::Focused(false) = event {
                     let _ = window.hide();
-                    // First-run hint: tell the user the app is still
-                    // alive in the menu bar. The frontend marks the
-                    // flag persistently once the toast is acknowledged.
-                    if !prefs.close_to_menu_bar_toast_seen {
-                        let _ = window
-                            .app_handle()
-                            .emit(crate::tray::CLOSE_TOAST_CHANNEL, ());
+                }
+                return;
+            }
+
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // "Close to menu bar" semantics: when the toggle is on
+                    // and the tray is installed, intercept the window's
+                    // close and hide it instead of letting Tauri tear it
+                    // down. The tray stays the user's escape hatch — Quit
+                    // from there fires `app.exit(0)` which destroys the
+                    // window for real and triggers the shutdown sweep.
+                    let state: tauri::State<AppState> = window.state();
+                    let prefs = state.preferences_snapshot();
+                    if prefs.close_to_menu_bar && prefs.show_tray_icon {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        // First-run hint: tell the user the app is still
+                        // alive in the menu bar. The frontend marks the
+                        // flag persistently once the toast is acknowledged.
+                        if !prefs.close_to_menu_bar_toast_seen {
+                            let _ = window
+                                .app_handle()
+                                .emit(crate::tray::CLOSE_TOAST_CHANNEL, ());
+                        }
                     }
                 }
-            }
-            tauri::WindowEvent::Destroyed => {
-                let state: tauri::State<AppState> = window.state();
-                state.shutdown_pc();
-                state.shutdown_caddy();
-                state.shutdown_dnsmasq();
-                state.shutdown_mailpit();
-                // Drop every live tunnel so cloudflared children
-                // don't outlive the window. The Drop impl on
-                // TunnelManager handles the kill loop.
-                {
-                    let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned");
-                    *tunnels = crate::tunnel::TunnelManager::new();
+                tauri::WindowEvent::Destroyed => {
+                    let state: tauri::State<AppState> = window.state();
+                    state.shutdown_pc();
+                    state.shutdown_caddy();
+                    state.shutdown_dnsmasq();
+                    state.shutdown_mailpit();
+                    // Drop every live tunnel so cloudflared children
+                    // don't outlive the window. The Drop impl on
+                    // TunnelManager handles the kill loop.
+                    {
+                        let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned");
+                        *tunnels = crate::tunnel::TunnelManager::new();
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::projects::list_projects,
