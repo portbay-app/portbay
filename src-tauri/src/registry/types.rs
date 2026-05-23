@@ -154,7 +154,7 @@ pub struct Project {
     pub php_version: Option<String>,
 }
 
-/// A named cluster of projects (e.g. "Citizen Suite") for batch operations.
+/// A named cluster of projects (e.g. "Marketing Stack") for batch operations.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub id: String,
