@@ -11,7 +11,8 @@ export type InstallSource =
   | "mise"
   | "nvm"
   | "pyenv"
-  | "system";
+  | "system"
+  | "manual";
 
 export interface RuntimeInstall {
   version: string;
@@ -43,6 +44,8 @@ export interface LanguageView {
   displayName: string;
   versions: VersionView[];
   installHint: string;
+  /** Version marked as this language's default, or null if none set. */
+  defaultVersion?: string | null;
 }
 
 /** Human label for the install-source pill. */
@@ -53,4 +56,5 @@ export const sourceLabel: Record<InstallSource, string> = {
   nvm: "nvm",
   pyenv: "pyenv",
   system: "System",
+  manual: "Manual",
 };
