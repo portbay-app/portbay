@@ -17,6 +17,7 @@
 
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
+  import { confirmDialog } from "$lib/stores/confirm.svelte";
   import { databases } from "$lib/stores/databases.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type {
@@ -115,9 +116,22 @@
 
   async function removeInstance() {
     if (!selected) return;
-    const deleteData = confirm(
-      `Remove "${selected.name}"?\n\nClick OK to also delete its data directory (irreversible), or Cancel to keep the data files and just deregister.`,
-    );
+    const choice = await confirmDialog.open({
+      title: `Remove "${selected.name}"?`,
+      message:
+        "Deregister only removes it from PortBay and leaves the data files in place — you can re-add it later.\n\nDelete data + deregister also erases its data directory. That is irreversible.",
+      destructive: true,
+      actions: [
+        { label: "Deregister only", value: "deregister" },
+        {
+          label: "Delete data + deregister",
+          value: "delete",
+          tone: "destructive",
+        },
+      ],
+    });
+    if (choice === null) return; // cancelled — touch nothing
+    const deleteData = choice === "delete";
     databases.setBusy(selected.id, "remove", true);
     try {
       await safeInvoke("remove_database_instance", {

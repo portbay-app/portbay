@@ -11,6 +11,7 @@ export { default as ProjectAvatar } from "./ProjectAvatar.svelte";
 export { default as Toggle } from "./Toggle.svelte";
 export { default as Segmented } from "./Segmented.svelte";
 export { default as ColorSwatchGroup } from "./ColorSwatchGroup.svelte";
+export { default as ConfirmDialog } from "./ConfirmDialog.svelte";
 
 export type { DotSize } from "./StatusDot.svelte";
 export type { BadgeTone } from "./Badge.svelte";
