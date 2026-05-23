@@ -1,15 +1,13 @@
-//! System metrics — CPU + RAM only.
+//! System metrics — CPU, RAM, and root-volume disk usage.
 //!
-//! Storage and network panels are explicitly out of scope per
-//! `docs/UX_DESIGN.md` and the card #11 outcome: they belong in Activity
-//! Monitor, not a dev-env tool. The right rail's spare vertical room is
-//! reserved for PortBay-specific telemetry later (e.g. ports-in-use,
-//! running-project count).
+//! Disk was added back in for the redesigned sidebar footer (CPU / Memory
+//! / Disk row, mirroring the design reference). It's sampled from the
+//! root mount only; per-volume detail still belongs in Activity Monitor.
 
 use std::sync::Mutex;
 
 use serde::Serialize;
-use sysinfo::System;
+use sysinfo::{Disks, System};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::error::AppResult;
@@ -22,6 +20,7 @@ pub const METRICS_CHANNEL: &str = "portbay://metrics";
 pub struct SystemMetrics {
     pub cpu: CpuMetrics,
     pub memory: MemoryMetrics,
+    pub disk: DiskMetrics,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,10 +37,21 @@ pub struct MemoryMetrics {
     pub total_bytes: u64,
 }
 
-/// Shared sysinfo `System` handle. Refreshing in place is cheaper than
-/// re-allocating the whole struct each tick.
+/// Root-volume usage. macOS reports per-mount totals; on systems with
+/// firmlinks (the standard "Data" + "System" split) the user-visible
+/// "/" is the right mount to surface.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskMetrics {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// Shared sysinfo handles. Refreshing in place is cheaper than
+/// re-allocating each tick.
 pub struct MetricsState {
     pub system: Mutex<System>,
+    pub disks: Mutex<Disks>,
 }
 
 impl MetricsState {
@@ -49,8 +59,10 @@ impl MetricsState {
         let mut system = System::new();
         system.refresh_cpu();
         system.refresh_memory();
+        let disks = Disks::new_with_refreshed_list();
         Self {
             system: Mutex::new(system),
+            disks: Mutex::new(disks),
         }
     }
 
@@ -63,11 +75,29 @@ impl MetricsState {
         let cpu_total = sys.global_cpu_info().cpu_usage();
         let used_bytes = sys.used_memory();
         let total_bytes = sys.total_memory();
+        drop(sys);
+
+        let mut disks = self.disks.lock().expect("disks mutex poisoned");
+        disks.refresh();
+        // Pick the mount with the largest total — on macOS that's the
+        // root "Data" firmlink. If we ever support multi-volume hosts
+        // formally, this turns into a per-volume DTO.
+        let root = disks
+            .iter()
+            .max_by_key(|d| d.total_space())
+            .map(|d| (d.total_space(), d.total_space().saturating_sub(d.available_space())))
+            .unwrap_or((0, 0));
+        drop(disks);
+
         SystemMetrics {
             cpu: CpuMetrics { total: cpu_total },
             memory: MemoryMetrics {
                 used_bytes,
                 total_bytes,
+            },
+            disk: DiskMetrics {
+                used_bytes: root.1,
+                total_bytes: root.0,
             },
         }
     }

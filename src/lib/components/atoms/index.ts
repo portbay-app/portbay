@@ -4,6 +4,13 @@ export { default as Badge } from "./Badge.svelte";
 export { default as CodeEditor } from "./CodeEditor.svelte";
 export { default as Icon } from "./Icon.svelte";
 export { default as DashboardCard } from "./DashboardCard.svelte";
+export { default as LighthouseLogo } from "./LighthouseLogo.svelte";
+export { default as Sparkline } from "./Sparkline.svelte";
+export { default as StackIcon } from "./StackIcon.svelte";
+export { default as ProjectAvatar } from "./ProjectAvatar.svelte";
+export { default as Toggle } from "./Toggle.svelte";
+export { default as Segmented } from "./Segmented.svelte";
+export { default as ColorSwatchGroup } from "./ColorSwatchGroup.svelte";
 
 export type { DotSize } from "./StatusDot.svelte";
 export type { BadgeTone } from "./Badge.svelte";

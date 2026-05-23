@@ -1,26 +1,36 @@
 <!--
   RightRail — slot container for the right column.
 
-  Hidden when the viewport is narrow AND the density is compact, per the
-  card #3 spec. Cards #5 (sidecar pills variant) and #11 (system metrics
-  rail) populate this slot.
+  Behaviour after the dashboard redesign:
+    - Default content is the ProjectDetailRail, which renders the
+      selected project's summary (avatar, status, URL, metadata,
+      quick actions, recent activity, checks) and shows an empty
+      placeholder when nothing is selected.
+    - The previous default (MetricsRail with CPU + Memory cards)
+      moved into the sidebar footer; the right rail is no longer
+      a system-stats surface.
+    - Hidden when density is `compact`, freeing horizontal space
+      for the project table.
+
+  Callers can still pass children — `/groups/[id]` overrides this
+  slot with its own batch-action panel.
 -->
 <script lang="ts">
-  import { MetricsRail } from "$lib/components/metrics";
-  import { density } from "$lib/stores/density.svelte";
   import type { Snippet } from "svelte";
+  import { ProjectDetailRail } from "$lib/components/projects";
+  import { density } from "$lib/stores/density.svelte";
 
   let { children }: { children?: Snippet } = $props();
 </script>
 
 <aside
-  class="h-full overflow-y-auto bg-bg border-l border-border p-4 space-y-4"
+  class="h-full overflow-y-auto bg-bg border-l border-border p-4"
   class:hidden={density.value === "compact"}
   aria-label="Status panel"
 >
   {#if children}
     {@render children()}
   {:else}
-    <MetricsRail />
+    <ProjectDetailRail />
   {/if}
 </aside>

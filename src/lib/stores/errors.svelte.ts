@@ -12,6 +12,7 @@
  * when a flaky operation retries internally and would otherwise stack.
  */
 import type { CommandError } from "$lib/types/error";
+import { notifications } from "./notifications.svelte";
 
 const AUTO_DISMISS_MS = 8_000;
 const DEDUP_WINDOW_MS = 2_000;
@@ -49,6 +50,11 @@ function createErrorBus() {
       (t) => fingerprint(t.envelope) === fp && now - t.pushedAt < DEDUP_WINDOW_MS,
     );
     if (existing) return existing.id;
+
+    // Mirror into the persistent history so the bell can surface this
+    // event after the toast has auto-dismissed. Dedupped pushes don't
+    // get a history entry because they didn't add a toast either.
+    notifications.push(envelope);
 
     const id = crypto.randomUUID();
     const entry: ToastEntry = {
