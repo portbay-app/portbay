@@ -1,0 +1,62 @@
+name: Bug report
+description: Report reproducible PortBay behavior.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: PortBay version
+      description: App version or commit SHA.
+      placeholder: "0.1.0 or 426c40c"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15.5 Apple Silicon"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Projects
+        - Sidecars
+        - DNS / hosts
+        - HTTPS / certificates
+        - Logs
+        - CLI
+        - Settings
+        - Installer / update
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include exact commands and clicks.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include CommandError code if shown.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Remove secrets, tokens, project-private paths, and env values before posting.
+      render: text
