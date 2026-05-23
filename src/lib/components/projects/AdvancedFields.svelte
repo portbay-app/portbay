@@ -9,10 +9,13 @@
   edit one thing without touching another.
 -->
 <script lang="ts">
+  import { onMount } from "svelte";
+
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
+  import { php } from "$lib/stores/php.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView } from "$lib/types/projects";
@@ -28,10 +31,14 @@
    *  reconcile loop learns to wire them. */
   const KNOWN_SERVICES = ["caddy", "mailpit", "mysql", "postgres", "redis"];
 
-  /** Common PHP versions Homebrew / shivammathur / asdf provide. The
-   *  Registry stores this as a free-string so the UI lists known
-   *  options + allows custom input. */
-  const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"];
+  /** Versions PortBay knows about (Homebrew formula coverage). The
+   *  picker marks any of these that aren't actually installed with a
+   *  warning dot so the user sees they need to brew-install first. */
+  const KNOWN_PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"];
+
+  onMount(() => {
+    void php.refresh();
+  });
 
   // ────────── Tags ──────────
   let tagsDraft = $state<string[]>([]);
@@ -357,19 +364,27 @@
         />
         <label for="advanced-php-ver" class="text-fg-muted">PHP version</label>
         <div class="flex flex-wrap gap-1.5 items-center">
-          {#each PHP_VERSIONS as v (v)}
+          {#each KNOWN_PHP_VERSIONS as v (v)}
             {@const on = phpVersionDraft === v}
+            {@const installed = php.isInstalled(v)}
             <button
               type="button"
               onclick={() => (phpVersionDraft = v)}
-              class="px-2 py-0.5 rounded-md text-xs border transition-colors"
+              title={installed
+                ? `PHP ${v} detected`
+                : `Not installed — run brew install php@${v}`}
+              class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border transition-colors"
               class:bg-accent={on}
               class:text-on-accent={on}
               class:border-accent={on}
               class:bg-surface-2={!on}
               class:text-fg-muted={!on}
               class:border-border={!on}
+              class:opacity-60={!installed && !on}
             >
+              {#if !installed}
+                <Icon name="info" size={10} />
+              {/if}
               {v}
             </button>
           {/each}
@@ -383,6 +398,14 @@
                    focus:border-accent/60 outline-none w-24 font-mono"
           />
         </div>
+        {#if phpVersionDraft && !php.isInstalled(phpVersionDraft)}
+          <span></span>
+          <p class="text-[11px] text-status-unhealthy">
+            PHP {phpVersionDraft} isn't installed. Run
+            <code class="font-mono">brew install php@{phpVersionDraft}</code>
+            then re-detect from the PHP panel.
+          </p>
+        {/if}
       </div>
       <p class="text-[10px] text-fg-subtle">
         Document root is the subfolder Caddy serves (typically

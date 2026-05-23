@@ -23,6 +23,7 @@
   import { groups } from "$lib/stores/groups.svelte";
   import { groupEditor } from "$lib/stores/groupEditor.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { php } from "$lib/stores/php.svelte";
 
   /** Hide the resize handle when density is `compact` — the layout
    *  forces sidebar width to its own clamp in that mode, so manual
@@ -33,7 +34,14 @@
 
   onMount(() => {
     void groups.refresh();
+    void php.refresh();
   });
+
+  /** Show /php in the sidebar only when at least one project actually
+   *  uses PHP — keeps the nav focused for Node-only users. */
+  const showPhp = $derived(
+    projects.value.some((p) => p.type === "php") || php.value.length > 0,
+  );
 
   /** Per-group derived state: how many members are currently running. */
   function runningCount(memberIds: string[]): number {
@@ -138,6 +146,9 @@
     <div class="pt-1 space-y-0.5">
       <SidebarItem href="/services" icon="server" label="Services" matchPrefix />
       <SidebarItem href="/domains" icon="link" label="Domains" matchPrefix />
+      {#if showPhp}
+        <SidebarItem href="/php" icon="file-code" label="PHP" matchPrefix />
+      {/if}
       <SidebarItem href="/logs" icon="file-text" label="Logs" matchPrefix />
       <SidebarItem
         href="/settings"

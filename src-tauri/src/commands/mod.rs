@@ -22,6 +22,7 @@ pub mod lifecycle;
 pub mod log_stream;
 pub mod metrics;
 pub mod onboarding;
+pub mod php;
 pub mod portfile;
 pub mod projects;
 pub mod sidecars;

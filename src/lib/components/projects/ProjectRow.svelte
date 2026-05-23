@@ -39,6 +39,31 @@
 
   const inlineError = $derived(projects.lastErrors[project.id] ?? null);
 
+  /** PHP projects get an inline Xdebug toggle. The state is derived
+   *  from XDEBUG_MODE in the project's env (off when absent). */
+  const isPhp = $derived(project.type === "php");
+  const xdebugOn = $derived(
+    Boolean(project.env?.XDEBUG_MODE && project.env.XDEBUG_MODE !== "off"),
+  );
+  let xdebugBusy = $state<boolean>(false);
+
+  async function toggleXdebug(e: MouseEvent) {
+    e.stopPropagation();
+    if (xdebugBusy) return;
+    xdebugBusy = true;
+    try {
+      await safeInvoke<ProjectView>("set_xdebug_mode", {
+        id: project.id,
+        mode: xdebugOn ? "off" : "develop,debug",
+      });
+      await projects.refresh();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      xdebugBusy = false;
+    }
+  }
+
   onMount(() => {
     void devTools.start();
   });
@@ -129,6 +154,26 @@
   <!-- Actions -->
   <td class={cellClass}>
     <div class="flex items-center gap-1 justify-end">
+      {#if isPhp}
+        <button
+          type="button"
+          onclick={toggleXdebug}
+          disabled={xdebugBusy}
+          title={xdebugOn
+            ? "Xdebug enabled (XDEBUG_MODE=develop,debug). Click to disable."
+            : "Xdebug disabled. Click to enable develop,debug mode."}
+          aria-label={xdebugOn ? "Disable Xdebug" : "Enable Xdebug"}
+          aria-pressed={xdebugOn}
+          class="p-1.5 rounded-md transition-colors disabled:opacity-50"
+          class:bg-accent={xdebugOn}
+          class:text-on-accent={xdebugOn}
+          class:text-fg-muted={!xdebugOn}
+          class:hover:bg-surface-2={!xdebugOn}
+          class:hover:text-fg={!xdebugOn}
+        >
+          <Icon name="circle-alert" size={14} />
+        </button>
+      {/if}
       <button
         type="button"
         onclick={(e) => { e.stopPropagation(); openUrl(); }}

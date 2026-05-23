@@ -8,6 +8,7 @@ pub mod hosts;
 pub mod import;
 pub mod mailpit;
 pub mod mkcert;
+pub mod php;
 pub mod portfile;
 pub mod process_compose;
 pub mod reconciler;
@@ -280,6 +281,8 @@ pub fn run() {
             commands::groups::start_group,
             commands::groups::stop_group,
             commands::groups::restart_group,
+            commands::php::list_php_installs,
+            commands::php::set_xdebug_mode,
             commands::metrics::system_metrics,
         ])
         .run(tauri::generate_context!())
