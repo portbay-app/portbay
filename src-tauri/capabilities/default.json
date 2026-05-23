@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window — allows running the bundled process-compose sidecar and opening project URLs.",
+  "description": "Main-window capability. shell:allow-spawn is scoped to the six bundled sidecars below. shell:allow-execute is required and intentionally unscoped: it backs (1) launching the user's chosen dev tools — `open`, VS Code/Cursor/etc. CLIs whose paths aren't known at build time (see commands/integrations.rs), and (2) the dnsmasq PATH fallback when the bundled sidecar slot isn't resolvable. Tauri's scope syntax can't express these runtime-dynamic commands, so it stays at the permission level.",
   "windows": ["main"],
   "permissions": [
     "core:default",
