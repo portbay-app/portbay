@@ -18,6 +18,7 @@
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
 
   import { dns } from "$lib/stores/dns.svelte";
+  import { confirmDialog } from "$lib/stores/confirm.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { MAX_DNS_CACHE_SIZE, MAX_DNS_LOCAL_TTL } from "$lib/types/dns";
@@ -128,15 +129,19 @@
     });
   }
 
-  function saveSuffix() {
+  async function saveSuffix() {
     const next = suffixInput.trim().replace(/^\.+|\.+$/g, "").toLowerCase();
     if (!next || next === dns.status?.suffix) return;
-    const ok = confirm(
-      `Change the domain suffix to ".${next}"?\n\n` +
-        `Every project hostname will be renamed to <project>.${next}, and any HTTPS certificates will be reissued on the next sync. ` +
+    const choice = await confirmDialog.open({
+      title: `Change the domain suffix to ".${next}"?`,
+      message:
+        `Every project hostname will be renamed to <project>.${next}, and any HTTPS certificates will be reissued on the next sync.\n\n` +
         `If you use DNS routing, you'll need to reinstall the resolver for the new suffix (one macOS prompt).`,
-    );
-    if (!ok) return;
+      actions: [
+        { label: `Change to .${next}`, value: "confirm", tone: "primary" },
+      ],
+    });
+    if (choice !== "confirm") return;
     void dns.setSuffix(next);
   }
 </script>

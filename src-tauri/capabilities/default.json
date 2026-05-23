@@ -17,7 +17,8 @@
         { "name": "binaries/caddy", "sidecar": true, "args": true },
         { "name": "binaries/mkcert", "sidecar": true, "args": true },
         { "name": "binaries/mailpit", "sidecar": true, "args": true },
-        { "name": "binaries/cloudflared", "sidecar": true, "args": true }
+        { "name": "binaries/cloudflared", "sidecar": true, "args": true },
+        { "name": "binaries/dnsmasq", "sidecar": true, "args": true }
       ]
     }
   ]

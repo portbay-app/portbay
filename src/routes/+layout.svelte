@@ -25,6 +25,7 @@
   import TunnelModal from "$lib/components/tunnels/TunnelModal.svelte";
   import GroupEditorModal from "$lib/components/groups/GroupEditorModal.svelte";
   import CommandPalette from "$lib/components/palette/CommandPalette.svelte";
+  import { ConfirmDialog } from "$lib/components/atoms";
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
   import { onMount } from "svelte";
@@ -191,5 +192,6 @@
   <TunnelModal />
   <GroupEditorModal />
   <CommandPalette />
+  <ConfirmDialog />
   <ToastHost />
 {/if}
