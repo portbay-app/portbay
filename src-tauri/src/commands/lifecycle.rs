@@ -16,7 +16,11 @@ use crate::registry::ProjectId;
 use crate::state::AppState;
 
 #[tauri::command]
-pub async fn start_project(state: State<'_, AppState>, id: String) -> AppResult<()> {
+pub async fn start_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<()> {
     // Port pre-flight. If the project pins a port and something else
     // is already bound to it, either clean up the orphan ourselves
     // (only when we can prove the holder is one of our stale dev
@@ -33,6 +37,17 @@ pub async fn start_project(state: State<'_, AppState>, id: String) -> AppResult<
 
     let client = state.pc_client()?;
     client.start(&id).await?;
+
+    // After the process is up, force a reconcile pass so the hosts file,
+    // dnsmasq, and Caddy all reflect the project's hostname *before* we
+    // hand control back to the UI. Without this, the user can press
+    // Play and click the URL before the background reconciler has had a
+    // chance to add a route — landing them on a DNS error instead of
+    // their freshly-started app. The tick is idempotent and runs all
+    // sub-reconcilers; on success the project URL is immediately
+    // resolvable.
+    let _ = state.reconciler.tick(&app).await;
+
     Ok(())
 }
 
@@ -111,7 +126,11 @@ pub async fn stop_project(state: State<'_, AppState>, id: String) -> AppResult<(
 }
 
 #[tauri::command]
-pub async fn restart_project(state: State<'_, AppState>, id: String) -> AppResult<()> {
+pub async fn restart_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<()> {
     // Restart kills the child too, so wrapper-translated SIGTERM exits
     // (npm → exit 1) shouldn't be flagged as crashes either.
     state.mark_stop_requested(&id);
@@ -125,6 +144,10 @@ pub async fn restart_project(state: State<'_, AppState>, id: String) -> AppResul
     if let Some((port, holder)) = preflight_port(&state, &id)? {
         return Err(AppError::PortConflict { port, holder });
     }
+
+    // Same rationale as start_project — guarantee routing is in sync
+    // before the user retries the URL.
+    let _ = state.reconciler.tick(&app).await;
     Ok(())
 }
 

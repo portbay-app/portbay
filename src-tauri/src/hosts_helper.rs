@@ -280,6 +280,24 @@ pub fn serve(socket_path: &Path, manager: HostsManager) -> Result<()> {
         std::fs::remove_file(socket_path).map_err(|e| HelperError::io(socket_path, e))?;
     }
     let listener = UnixListener::bind(socket_path).map_err(|e| HelperError::io(socket_path, e))?;
+
+    // The daemon runs as root, so the socket it creates is root-owned. The
+    // PortBay app connects as the logged-in user, which needs write access to
+    // the socket to open it. Loosen the mode to 0666 — the security boundary
+    // is `request_allowed`/`ensure_host_matches_suffix` (every mutation must
+    // target a hostname under the configured dev suffix), not socket
+    // ownership, so a world-connectable socket can still only touch PortBay's
+    // own `/etc/hosts` block under `*.<suffix>`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(socket_path)
+            .map_err(|e| HelperError::io(socket_path, e))?
+            .permissions();
+        perms.set_mode(0o666);
+        std::fs::set_permissions(socket_path, perms).map_err(|e| HelperError::io(socket_path, e))?;
+    }
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {

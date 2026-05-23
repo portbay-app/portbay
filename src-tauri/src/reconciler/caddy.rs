@@ -52,11 +52,14 @@ pub(super) async fn reconcile(
         .expect("caddy mutex poisoned")
         .admin_port();
     let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
+    // Plain-HTTP projects are served on the standard :80. PortBay must own it
+    // (no other local web server can be holding it).
+    let http_port = 80;
 
     // PHP FastCGI sockets live under `<data_dir>/php/<version>/...`.
     // The pc sub-reconciler writes the same path; both must agree.
     let php_socket_dir = logs_dir.parent().unwrap_or(logs_dir).join("php");
-    let cfg = match build_config(reg, admin_port, https_port, &php_socket_dir, |id| {
+    let cfg = match build_config(reg, admin_port, http_port, https_port, &php_socket_dir, |id| {
         cert_lookup.get(id).cloned()
     }) {
         Ok(c) => c,
@@ -118,7 +121,7 @@ mod tests {
     }
 
     fn hash_of(reg: &Registry, lookup: &HashMap<String, CertPaths>) -> u64 {
-        let cfg = build_config(reg, 2019, 8443, Path::new("/tmp/portbay-php"), |id| {
+        let cfg = build_config(reg, 2019, 80, 8443, Path::new("/tmp/portbay-php"), |id| {
             lookup.get(id).cloned()
         })
         .unwrap();

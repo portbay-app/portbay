@@ -42,6 +42,7 @@ dirs = "5"
 thiserror = "1"
 url = "2"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 which = "6"
 console = "0.15"
 sysinfo = "0.30"

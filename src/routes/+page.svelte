@@ -29,7 +29,7 @@
 
   <StatusCards />
 
-  <ProjectsTable {sortKey} />
+  <ProjectsTable {sortKey} {viewMode} />
 
   <!-- Table footer: count, sort, view toggle -->
   <footer
@@ -76,7 +76,7 @@
           type="button"
           onclick={() => (viewMode = "grid")}
           aria-pressed={viewMode === "grid"}
-          title="Grid view (coming soon)"
+          title="Grid view"
           class="inline-flex items-center justify-center w-6 h-6 rounded {viewMode ===
           'grid'
             ? 'bg-surface-2 text-fg'

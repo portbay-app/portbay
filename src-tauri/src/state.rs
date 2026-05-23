@@ -33,6 +33,7 @@ use crate::mailpit::{
 };
 use crate::mkcert::Mkcert;
 use crate::preferences::Preferences;
+use crate::registry::store;
 use crate::process_compose::{PcClient, SidecarManager};
 use crate::reconciler::Reconciler;
 use crate::tray::TrayState;
@@ -292,7 +293,12 @@ impl AppState {
                 start: DNSMASQ_DEFAULT_PORT,
             },
         )?;
-        let config_path = dnsmasq::write_config(&self.domain_suffix, port)?;
+        // The registry is the source of truth for both the wildcard suffix
+        // and the tunable dnsmasq settings; `self.domain_suffix` is only the
+        // first-run fallback. Reading it here means a suffix migration or a
+        // settings change is picked up on the next boot/restart.
+        let reg = store::load_or_default(&self.registry_path, &self.domain_suffix)?;
+        let config_path = dnsmasq::write_config(&reg.domain_suffix, port, &reg.dnsmasq)?;
         self.dnsmasq
             .lock()
             .expect("dnsmasq mutex poisoned")

@@ -14,7 +14,10 @@ pub mod store;
 pub mod types;
 
 pub use error::{RegistryError, Result};
-pub use types::{Group, Project, ProjectId, ProjectType, Readiness};
+pub use types::{
+    DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, Group, Project,
+    ProjectId, ProjectType, Readiness,
+};
 
 /// The registry-file schema version this build can read and write.
 ///
@@ -36,6 +39,16 @@ pub struct Registry {
 
     #[serde(default)]
     pub groups: Vec<Group>,
+
+    /// Database instances PortBay provisions and supervises. `#[serde(default)]`
+    /// keeps pre-databases registry files loading cleanly (no version bump).
+    #[serde(default)]
+    pub databases: Vec<DatabaseInstance>,
+
+    /// Tunable dnsmasq daemon settings. `#[serde(default)]` keeps
+    /// pre-DNS-settings registry files loading with sane defaults.
+    #[serde(default)]
+    pub dnsmasq: DnsmasqSettings,
 }
 
 impl Registry {
@@ -46,6 +59,8 @@ impl Registry {
             domain_suffix: domain_suffix.into(),
             projects: Vec::new(),
             groups: Vec::new(),
+            databases: Vec::new(),
+            dnsmasq: DnsmasqSettings::default(),
         }
     }
 
@@ -147,6 +162,61 @@ impl Registry {
 
     pub fn get_group(&self, id: &str) -> Option<&Group> {
         self.groups.iter().find(|g| g.id == id)
+    }
+
+    // ---- Database instance CRUD -------------------------------------------
+
+    pub fn list_databases(&self) -> &[DatabaseInstance] {
+        &self.databases
+    }
+
+    pub fn get_database(&self, id: &DatabaseInstanceId) -> Option<&DatabaseInstance> {
+        self.databases.iter().find(|d| &d.id == id)
+    }
+
+    pub fn get_database_mut(
+        &mut self,
+        id: &DatabaseInstanceId,
+    ) -> Option<&mut DatabaseInstance> {
+        self.databases.iter_mut().find(|d| &d.id == id)
+    }
+
+    /// Insert a new database instance. Errors if the id is already taken.
+    pub fn add_database(&mut self, instance: DatabaseInstance) -> Result<()> {
+        if self.get_database(&instance.id).is_some() {
+            return Err(RegistryError::DuplicateDatabaseId(instance.id));
+        }
+        self.databases.push(instance);
+        Ok(())
+    }
+
+    /// Remove a database instance by id, returning the removed entry.
+    pub fn remove_database(&mut self, id: &DatabaseInstanceId) -> Result<DatabaseInstance> {
+        let idx = self
+            .databases
+            .iter()
+            .position(|d| &d.id == id)
+            .ok_or_else(|| RegistryError::DatabaseNotFound(id.clone()))?;
+        Ok(self.databases.remove(idx))
+    }
+
+    /// Replace an existing database instance (matched by id).
+    pub fn update_database(&mut self, instance: DatabaseInstance) -> Result<()> {
+        let slot = self
+            .databases
+            .iter_mut()
+            .find(|d| d.id == instance.id)
+            .ok_or_else(|| RegistryError::DatabaseNotFound(instance.id.clone()))?;
+        *slot = instance;
+        Ok(())
+    }
+
+    /// Whether a port is already claimed by another database instance.
+    /// Used by the create flow's port allocator.
+    pub fn database_port_in_use(&self, port: u16, except: Option<&DatabaseInstanceId>) -> bool {
+        self.databases
+            .iter()
+            .any(|d| d.port == port && except != Some(&d.id))
     }
 }
 
@@ -278,6 +348,16 @@ mod tests {
             Err(RegistryError::DuplicateGroupId(_)) => {}
             other => panic!("expected DuplicateGroupId, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn registry_without_dnsmasq_field_loads_with_defaults() {
+        // A pre-DNS-settings registry blob must still deserialise, with the
+        // dnsmasq settings falling back to their defaults.
+        let json = r#"{ "version": 1, "domain_suffix": "test", "projects": [] }"#;
+        let reg: Registry = serde_json::from_str(json).unwrap();
+        assert_eq!(reg.dnsmasq, DnsmasqSettings::default());
+        assert_eq!(reg.dnsmasq.cache_size, 150);
     }
 
     #[test]

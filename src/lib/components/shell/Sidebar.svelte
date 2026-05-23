@@ -145,9 +145,10 @@
     return Math.round(metrics.value.disk.usedBytes / 1024 ** 3).toString();
   });
 
-  // Sidebar collapses the footer detail by default and expands on hover
-  // / focus so the meters don't dominate the rail in idle state.
-  let footerOpen = $state<boolean>(false);
+  // The CPU / Memory / Disk meters are useful at a glance, so the footer
+  // panel is expanded by default. Users can collapse it with the chevron
+  // when they want a quieter sidebar.
+  let footerOpen = $state<boolean>(true);
 
   function toggleFooter() {
     footerOpen = !footerOpen;
@@ -239,8 +240,21 @@
 
     <div class="pt-2 space-y-0.5">
       <SidebarItem href="/domains" icon="link" label="Domains" matchPrefix />
+      <SidebarItem href="/dns" icon="globe" label="DNS" matchPrefix />
       <SidebarItem href="/services" icon="server" label="Services" matchPrefix />
       <SidebarItem href="/logs" icon="file-text" label="Logs" matchPrefix />
+      <SidebarItem
+        href="/languages"
+        icon="file-code"
+        label="Languages"
+        matchPrefix
+      />
+      <SidebarItem
+        href="/databases"
+        icon="database"
+        label="Databases"
+        matchPrefix
+      />
       <SidebarItem
         href="/settings"
         icon="settings"
