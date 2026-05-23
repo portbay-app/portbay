@@ -16,6 +16,8 @@ dist/
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+docs-site/.vitepress/cache/
+docs-site/.vitepress/dist/
 
 # Node
 node_modules/
