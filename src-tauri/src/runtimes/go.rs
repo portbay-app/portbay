@@ -20,6 +20,10 @@ impl LanguageRuntime for GoRuntime {
     fn install_hint(&self) -> &'static str {
         "brew install go"
     }
+    fn probe_version(&self, binary: &std::path::Path) -> Option<String> {
+        // `go --version` is not valid; Go reports via `go version`.
+        version_from(binary, "version")
+    }
 
     fn detect(&self) -> Vec<RuntimeInstall> {
         let mut out: Vec<RuntimeInstall> = Vec::new();

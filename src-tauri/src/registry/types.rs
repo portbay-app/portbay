@@ -432,6 +432,35 @@ impl DnsmasqSettings {
     }
 }
 
+/// PortBay-managed language-runtime settings persisted in the registry:
+/// installs the user added by hand (that auto-detection didn't surface) and
+/// the default version per language. Both default to empty, so pre-runtimes
+/// registry files keep loading cleanly (this is additive — no version bump).
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSettings {
+    /// Manually-added installs (a binary path the detector didn't find).
+    #[serde(default)]
+    pub manual: Vec<ManualRuntime>,
+    /// Default version per language id (e.g. `{"php": "8.3"}`). New projects
+    /// inherit this when their runtime can't be auto-detected.
+    #[serde(default)]
+    pub defaults: BTreeMap<String, String>,
+}
+
+/// One manually-added runtime install. PortBay reuses the binary in place —
+/// it never copies or re-installs it (the detect-first model).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualRuntime {
+    /// Language id this install belongs to ("php", "node", …).
+    pub lang: String,
+    /// Version label `<binary> --version` reported at add time (e.g. "8.4").
+    pub version: String,
+    /// Absolute path to the binary the user browsed to.
+    pub binary: PathBuf,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

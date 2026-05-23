@@ -15,8 +15,8 @@ pub mod types;
 
 pub use error::{RegistryError, Result};
 pub use types::{
-    DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, Group, Project,
-    ProjectId, ProjectType, Readiness, Runtime,
+    DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, Group, ManualRuntime,
+    Project, ProjectId, ProjectType, Readiness, Runtime, RuntimeSettings,
 };
 
 /// The registry-file schema version this build reads and writes.
@@ -121,6 +121,11 @@ pub struct Registry {
     /// pre-DNS-settings registry files loading with sane defaults.
     #[serde(default)]
     pub dnsmasq: DnsmasqSettings,
+
+    /// Manually-added runtime installs + default version per language.
+    /// `#[serde(default)]` keeps pre-runtimes registry files loading.
+    #[serde(default)]
+    pub runtimes: RuntimeSettings,
 }
 
 impl Registry {
@@ -133,6 +138,7 @@ impl Registry {
             groups: Vec::new(),
             databases: Vec::new(),
             dnsmasq: DnsmasqSettings::default(),
+            runtimes: RuntimeSettings::default(),
         }
     }
 
