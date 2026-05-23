@@ -27,6 +27,7 @@
   import { onMount } from "svelte";
   import { tunnels } from "$lib/stores/tunnels.svelte";
   import { onboarding } from "$lib/stores/onboarding.svelte";
+  import { sidebar } from "$lib/stores/sidebar.svelte";
 
   onMount(() => {
     tunnels.start();
@@ -51,12 +52,14 @@
   /** True when the current route owns the full window — hide the app shell. */
   const isFullscreen = $derived(page.url.pathname.startsWith("/onboarding"));
 
-  // grid-template-columns chosen for the screenshot's proportions:
-  //   sidebar  220px (180px in compact)
+  // grid-template-columns:
+  //   sidebar  user-resizable (160–360 px), or forced 180 in compact
   //   main     1fr (greedy)
   //   rail     320px (collapses to 0 in compact)
   const gridCols = $derived(
-    density.value === "compact" ? "180px 1fr 0px" : "220px 1fr 320px",
+    density.value === "compact"
+      ? "180px 1fr 0px"
+      : `${sidebar.width}px 1fr 320px`,
   );
   const currentTheme = $derived(theme.value);
 </script>

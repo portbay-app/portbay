@@ -11,9 +11,16 @@
 -->
 <script lang="ts">
   import SidebarItem from "./SidebarItem.svelte";
+  import SidebarResizeHandle from "./SidebarResizeHandle.svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { SidecarPill } from "$lib/components/sidecars";
   import { sidecars } from "$lib/stores/sidecars.svelte";
+  import { density } from "$lib/stores/density.svelte";
+
+  /** Hide the resize handle when density is `compact` — the layout
+   *  forces sidebar width to its own clamp in that mode, so manual
+   *  resize would have no visible effect. */
+  const showHandle = $derived(density.value !== "compact");
 
   async function refresh() {
     await sidecars.refresh();
@@ -21,7 +28,7 @@
 </script>
 
 <aside
-  class="h-full flex flex-col bg-surface border-r border-border"
+  class="relative h-full flex flex-col bg-surface border-r border-border"
   aria-label="Primary navigation"
 >
   <!-- Brand row — pt-9 leaves room for macOS traffic lights -->
@@ -65,4 +72,8 @@
       <Icon name="refresh-cw" size={14} />
     </button>
   </div>
+
+  {#if showHandle}
+    <SidebarResizeHandle />
+  {/if}
 </aside>
