@@ -29,27 +29,16 @@
     StartBehavior,
   } from "$lib/stores/preferences.svelte";
   import { safeInvoke } from "$lib/ipc";
+  // Canonical wire shapes — imported so they can't drift from the Rust side.
+  import type { ResolverStatus, DomainMigration } from "$lib/types/dns";
 
   // ---- Existing data sources retained for the "Advanced" region ----
-  interface ResolverStatus {
-    suffix: string;
-    installed: boolean;
-    path: string;
-    currentContents: string | null;
-    currentPort: number;
-  }
   let dnsStatus = $state<ResolverStatus | null>(null);
   let dnsBusy = $state<boolean>(false);
 
   interface DomainSettings {
     domainSuffix: string;
     projectCount: number;
-  }
-  interface DomainMigration {
-    oldSuffix: string;
-    newSuffix: string;
-    changedProjects: number;
-    certDirsRemoved: number;
   }
   let domainSettings = $state<DomainSettings | null>(null);
   let domainDraft = $state<string>("test");

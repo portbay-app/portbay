@@ -86,7 +86,19 @@ function createDatabasesStore() {
     if (isBusy(id, name)) return;
     setBusy(id, name, true);
     try {
-      await safeInvoke(`${name}_database_instance`, { id });
+      // Explicit per-action commands rather than a built command name, so
+      // these stay greppable and survive a backend rename under typecheck.
+      switch (name) {
+        case "start":
+          await safeInvoke("start_database_instance", { id });
+          break;
+        case "stop":
+          await safeInvoke("stop_database_instance", { id });
+          break;
+        case "restart":
+          await safeInvoke("restart_database_instance", { id });
+          break;
+      }
       await refresh();
     } catch {
       /* toast already pushed */

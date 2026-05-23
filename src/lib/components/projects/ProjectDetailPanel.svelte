@@ -20,7 +20,7 @@
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { dns } from "$lib/stores/dns.svelte";
-  import type { CertInfo } from "$lib/types/certs";
+  import { createCertInfo } from "$lib/stores/certInfo.svelte";
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView, ProjectType } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
@@ -47,9 +47,11 @@
   let logTail = $state<string[]>([]);
   let logLoading = $state<boolean>(false);
 
-  let certInfo = $state<CertInfo | null>(null);
-  let certLoading = $state<boolean>(false);
-  let certError = $state<string | null>(null);
+  // Shared cert loader (same semantics as the detail rail).
+  const cert = createCertInfo();
+  const certInfo = $derived(cert.info);
+  const certLoading = $derived(cert.loading);
+  const certError = $derived(cert.error);
   let reissuing = $state<boolean>(false);
 
   let rawConfigOpen = $state<boolean>(false);
@@ -182,27 +184,8 @@
     }
   }
 
-  async function loadCert() {
-    if (!project || !project.https) {
-      certInfo = null;
-      certError = null;
-      return;
-    }
-    certLoading = true;
-    certError = null;
-    try {
-      certInfo = await safeInvoke<CertInfo>("cert_info", { id: project.id });
-    } catch (e) {
-      certInfo = null;
-      const err = e as CommandError | undefined;
-      // PROJECT_NOT_FOUND from cert_info means "no cert issued yet" —
-      // that's the empty state, not a hard error.
-      certError = err && err.code !== "PROJECT_NOT_FOUND"
-        ? err.whatHappened
-        : null;
-    } finally {
-      certLoading = false;
-    }
+  function loadCert() {
+    return cert.load(project);
   }
 
   async function reissue() {

@@ -39,7 +39,7 @@
 
   import type { ProjectView } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
-  import type { CertInfo } from "$lib/types/certs";
+  import { createCertInfo } from "$lib/stores/certInfo.svelte";
 
   // ---- Resolved project (driven by projects.selectedId) ----
   const project = $derived<ProjectView | null>(
@@ -67,27 +67,14 @@
     });
   });
 
-  // Cert info — refreshed when the selection changes.
-  let certInfo = $state<CertInfo | null>(null);
-  let certError = $state<string | null>(null);
+  // Cert info — refreshed when the selection changes. Shared loader so the
+  // rail and the detail panel can't drift on cert-loading semantics.
+  const cert = createCertInfo();
+  const certInfo = $derived(cert.info);
+  const certError = $derived(cert.error);
 
-  async function loadCert() {
-    if (!project || !project.https) {
-      certInfo = null;
-      certError = null;
-      return;
-    }
-    try {
-      certInfo = await safeInvoke<CertInfo>("cert_info", { id: project.id });
-      certError = null;
-    } catch (e) {
-      const err = e as { code?: string; whatHappened?: string } | undefined;
-      certInfo = null;
-      certError =
-        err && err.code !== "PROJECT_NOT_FOUND"
-          ? (err.whatHappened ?? null)
-          : null;
-    }
+  function loadCert() {
+    return cert.load(project);
   }
 
   // Reload cert when the selection changes.
