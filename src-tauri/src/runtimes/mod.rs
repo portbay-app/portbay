@@ -31,6 +31,7 @@ pub mod php;
 pub mod python;
 pub mod ruby;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,8 @@ pub enum InstallSource {
     Pyenv,
     /// Found on `$PATH` without a recognised version manager.
     System,
+    /// Added by hand via "Add by path" — a binary the detector didn't find.
+    Manual,
 }
 
 /// One detected install of a particular runtime. Generic across
@@ -123,6 +126,9 @@ pub struct LanguageView {
     pub versions: Vec<VersionView>,
     /// Hint shown when `versions` is empty, e.g. "brew install php".
     pub install_hint: String,
+    /// The version marked as this language's default (from the registry's
+    /// runtime settings), or `None` when no default is set.
+    pub default_version: Option<String>,
 }
 
 /// Trait every supported language implements. Pulling the surface
@@ -134,6 +140,12 @@ pub trait LanguageRuntime {
     fn install_hint(&self) -> &'static str;
     /// Detect every install on this machine.
     fn detect(&self) -> Vec<RuntimeInstall>;
+    /// Probe an arbitrary binary's version string, for the "add by path"
+    /// flow. Default runs `<binary> --version`; runtimes whose flag differs
+    /// (Go uses `version`) override this.
+    fn probe_version(&self, binary: &std::path::Path) -> Option<String> {
+        version_from(binary, "--version")
+    }
     /// Per-version config tabs. Default: a single "Info" tab that
     /// shows the binary path and source. PHP overrides this with
     /// FPM / php.ini / extensions tabs.
@@ -168,6 +180,7 @@ pub fn source_label(s: InstallSource) -> &'static str {
         InstallSource::Nvm => "nvm",
         InstallSource::Pyenv => "pyenv",
         InstallSource::System => "System",
+        InstallSource::Manual => "Manual",
     }
 }
 
@@ -184,15 +197,49 @@ fn registry() -> Vec<Box<dyn LanguageRuntime>> {
     ]
 }
 
-/// Top-level IPC entry point: scan every language and return one
-/// fully-populated view. Per-version `tabs` are pre-computed so the
-/// frontend can render the whole panel without an extra round-trip.
-pub fn list_all() -> Vec<LanguageView> {
+/// Look up a single language by its stable id (for the add-by-path flow).
+pub fn runtime_by_id(id: &str) -> Option<Box<dyn LanguageRuntime>> {
+    registry().into_iter().find(|r| r.id() == id)
+}
+
+/// Top-level IPC entry point: scan every language, fold in the user's
+/// manually-added installs, and mark each language's default version.
+/// Per-version `tabs` are pre-computed so the frontend renders the whole
+/// panel without an extra round-trip.
+///
+/// `manual` and `defaults` come from the registry's [`RuntimeSettings`]; a
+/// manual install whose binary the detector already surfaced is skipped (no
+/// duplicate row).
+pub fn list_all(
+    manual: &[crate::registry::ManualRuntime],
+    defaults: &std::collections::BTreeMap<String, String>,
+) -> Vec<LanguageView> {
     registry()
         .into_iter()
         .map(|lang| {
-            let mut versions = lang
-                .detect()
+            let id = lang.id();
+            let mut installs = lang.detect();
+
+            // Fold in manual installs for this language, skipping any whose
+            // binary the detector already found (dedup by canonical path).
+            let detected: HashSet<PathBuf> = installs
+                .iter()
+                .map(|i| i.binary.canonicalize().unwrap_or_else(|_| i.binary.clone()))
+                .collect();
+            for m in manual.iter().filter(|m| m.lang == id) {
+                let canon = m.binary.canonicalize().unwrap_or_else(|_| m.binary.clone());
+                if detected.contains(&canon) {
+                    continue;
+                }
+                installs.push(RuntimeInstall {
+                    version: m.version.clone(),
+                    binary: m.binary.clone(),
+                    source: InstallSource::Manual,
+                    config_dir: None,
+                });
+            }
+
+            let mut versions = installs
                 .into_iter()
                 .map(|install| VersionView {
                     tabs: lang.tabs(&install),
@@ -204,9 +251,10 @@ pub fn list_all() -> Vec<LanguageView> {
             // a project ships >9.x.
             versions.sort_by(|a, b| b.install.version.cmp(&a.install.version));
             LanguageView {
-                id: lang.id().into(),
+                id: id.into(),
                 display_name: lang.display_name().into(),
                 install_hint: lang.install_hint().into(),
+                default_version: defaults.get(id).cloned(),
                 versions,
             }
         })
@@ -282,7 +330,7 @@ mod tests {
 
     #[test]
     fn list_all_returns_one_view_per_registered_language() {
-        let views = list_all();
+        let views = list_all(&[], &std::collections::BTreeMap::new());
         let ids: Vec<&str> = views.iter().map(|v| v.id.as_str()).collect();
         assert!(ids.contains(&"php"));
         assert!(ids.contains(&"node"));
@@ -302,8 +350,36 @@ mod tests {
             display_name: runtime.display_name().into(),
             versions: vec![],
             install_hint: runtime.install_hint().into(),
+            default_version: None,
         };
         assert!(!lang.install_hint.is_empty());
         let _ = PathBuf::from(""); // suppress unused import lint
+    }
+
+    #[test]
+    fn default_version_is_surfaced_from_settings() {
+        let mut defaults = std::collections::BTreeMap::new();
+        defaults.insert("php".to_string(), "8.3".to_string());
+        let views = list_all(&[], &defaults);
+        let php = views.iter().find(|v| v.id == "php").unwrap();
+        assert_eq!(php.default_version.as_deref(), Some("8.3"));
+    }
+
+    #[test]
+    fn manual_install_is_merged_into_its_language() {
+        // A manual binary the detector wouldn't surface (version 99.9) must
+        // appear under its language with the Manual source.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("php");
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        let manual = vec![crate::registry::ManualRuntime {
+            lang: "php".into(),
+            version: "99.9".into(),
+            binary: bin,
+        }];
+        let views = list_all(&manual, &std::collections::BTreeMap::new());
+        let php = views.iter().find(|v| v.id == "php").unwrap();
+        assert!(php.versions.iter().any(|v| v.install.version == "99.9"
+            && matches!(v.install.source, InstallSource::Manual)));
     }
 }
