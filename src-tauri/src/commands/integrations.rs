@@ -149,6 +149,28 @@ const TOOL_DEFINITIONS: &[ToolDefinition] = &[
             bundle_ids: &["dev.warp.Warp-Stable"],
         }),
     },
+    ToolDefinition {
+        id: "iterm",
+        label: "iTerm",
+        kind: ToolKind::Terminal,
+        launch: LaunchMode::MacApp(MacApp {
+            app_names: &["iTerm"],
+            bundle_ids: &["com.googlecode.iterm2"],
+        }),
+    },
+    // macOS Terminal.app — ships with the OS, always available. Listed
+    // last so user-installed terminals take precedence when both are
+    // present, but it's still surfaced as the system default when
+    // nothing else is detected.
+    ToolDefinition {
+        id: "terminal",
+        label: "Terminal",
+        kind: ToolKind::Terminal,
+        launch: LaunchMode::MacApp(MacApp {
+            app_names: &["Terminal"],
+            bundle_ids: &["com.apple.Terminal"],
+        }),
+    },
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -322,7 +344,11 @@ fn find_app_by_name(app_names: &[&str]) -> Option<PathBuf> {
 fn standard_app_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![
         PathBuf::from("/Applications"),
+        PathBuf::from("/Applications/Utilities"),
         PathBuf::from("/System/Applications"),
+        // Terminal.app lives here on modern macOS — needed for the
+        // built-in macOS Terminal fallback in TOOL_DEFINITIONS.
+        PathBuf::from("/System/Applications/Utilities"),
     ];
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join("Applications"));

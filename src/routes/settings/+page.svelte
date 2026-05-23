@@ -426,7 +426,7 @@
   let advancedDiagnosticsOpen = $state<boolean>(false);
 </script>
 
-<div class="px-6 py-5 space-y-6 max-w-[1100px]">
+<div class="px-6 py-5 space-y-6">
   <!-- Page heading -->
   <header class="space-y-1">
     <h1 class="text-[22px] font-semibold tracking-tight text-fg">Settings</h1>

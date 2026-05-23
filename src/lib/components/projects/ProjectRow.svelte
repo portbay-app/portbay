@@ -31,6 +31,8 @@
   import { typeLabel } from "$lib/types/projects";
 
   import ProjectRowMenu from "./ProjectRowMenu.svelte";
+  import OpenInButton from "./OpenInButton.svelte";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
   interface Props {
     project: ProjectView;
@@ -97,6 +99,20 @@
       await safeInvoke("open_project", { id: project.id });
     } catch {
       /* toast already pushed */
+    }
+  }
+
+  async function revealInFinder(e: MouseEvent) {
+    e.stopPropagation();
+    try {
+      // `revealItemInDir` opens the parent folder and selects the
+      // target — works for both files and directories. Passing the
+      // project root reveals it inside its parent (e.g. `Sites/` with
+      // the project folder highlighted), which matches what most users
+      // expect from "Reveal in Finder".
+      await revealItemInDir(project.path);
+    } catch {
+      /* opener pushes its own toast */
     }
   }
 </script>
@@ -172,9 +188,43 @@
     </span>
   </td>
 
-  <!-- Actions: primary stop/start + ellipsis -->
+  <!--
+    Actions cell — secondary icon strip (Open URL, Reveal, Open in)
+    followed by the primary start/stop button and the overflow menu.
+    The secondary icons used to live in the right rail only; with the
+    rail now hidden by default they earn a spot in the row so common
+    actions are one click from idle.
+  -->
   <td class={cellClass}>
-    <div class="flex items-center gap-1.5 justify-end">
+    <div class="flex items-center gap-0.5 justify-end">
+      <button
+        type="button"
+        onclick={openUrl}
+        title="Open in browser"
+        aria-label="Open {project.url} in browser"
+        class="inline-flex items-center justify-center w-7 h-7 rounded-md
+               text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+      >
+        <Icon name="globe" size={13} />
+      </button>
+
+      <button
+        type="button"
+        onclick={revealInFinder}
+        title="Reveal in Finder"
+        aria-label="Reveal {project.name} in Finder"
+        class="inline-flex items-center justify-center w-7 h-7 rounded-md
+               text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+      >
+        <Icon name="folder" size={13} />
+      </button>
+
+      <div onclick={(e) => e.stopPropagation()} role="presentation">
+        <OpenInButton projectId={project.id} variant="icon" />
+      </div>
+
+      <span class="w-px h-5 bg-border/60 mx-1" aria-hidden="true"></span>
+
       {#if isRunning}
         <button
           type="button"
@@ -186,7 +236,7 @@
           title="Stop {project.name}"
           aria-label="Stop {project.name}"
           class="inline-flex items-center justify-center w-8 h-8 rounded-md
-                 text-on-accent bg-accent hover:brightness-110
+                 text-on-accent bg-status-crashed hover:brightness-110
                  active:brightness-95 disabled:opacity-50 transition"
         >
           {#if busy === "stop"}
@@ -206,8 +256,8 @@
           title="Start {project.name}"
           aria-label="Start {project.name}"
           class="inline-flex items-center justify-center w-8 h-8 rounded-md
-                 text-status-running border border-status-running/40
-                 hover:bg-status-running/10 disabled:opacity-50 transition"
+                 text-on-accent bg-status-running hover:brightness-110
+                 active:brightness-95 disabled:opacity-50 transition"
         >
           {#if busy === "start"}
             <Icon name="refresh-cw" size={12} class="animate-spin" />

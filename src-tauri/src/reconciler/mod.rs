@@ -150,7 +150,10 @@ impl Reconciler {
         // the hosts sub-step Skip in that case.
         let dns_routing_active = {
             let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
-            crate::dnsmasq::resolver::is_installed(&state.domain_suffix, port)
+            // `reg` is the source of truth for the suffix — a just-migrated
+            // suffix routes through the right `/etc/resolver/<suffix>` file
+            // without waiting for an app restart.
+            crate::dnsmasq::resolver::is_installed(&reg.domain_suffix, port)
         };
         let hosts_outcome = hosts::reconcile(&reg, hosts_cache, dns_routing_active);
 

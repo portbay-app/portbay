@@ -15,14 +15,17 @@
   import { search } from "$lib/stores/search.svelte";
   import EmptyState from "./EmptyState.svelte";
   import ProjectRow from "./ProjectRow.svelte";
+  import ProjectCard from "./ProjectCard.svelte";
   import type { ProjectView } from "$lib/types/projects";
 
   export type SortKey = "name-asc" | "name-desc" | "status" | "port";
+  export type ViewMode = "list" | "grid";
 
   interface Props {
     sortKey?: SortKey;
+    viewMode?: ViewMode;
   }
-  let { sortKey = "name-asc" }: Props = $props();
+  let { sortKey = "name-asc", viewMode = "list" }: Props = $props();
 
   onMount(() => {
     // Store lifetime is owned by the root layout — calling start()
@@ -115,18 +118,39 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="bg-surface border border-border rounded-2xl overflow-hidden">
-  {#if projects.loading && projects.value.length === 0}
+{#if projects.loading && projects.value.length === 0}
+  <div class="bg-surface border border-border rounded-2xl">
     <p class="text-xs text-fg-subtle px-4 py-6">Loading projects…</p>
-  {:else if projects.value.length === 0}
-    <div class="px-4 py-6">
-      <EmptyState variant="registry-empty" />
-    </div>
-  {:else if filtered.length === 0}
-    <div class="px-4 py-6">
-      <EmptyState variant="filtered" query={search.value} />
-    </div>
-  {:else}
+  </div>
+{:else if projects.value.length === 0}
+  <div class="bg-surface border border-border rounded-2xl px-4 py-6">
+    <EmptyState variant="registry-empty" />
+  </div>
+{:else if filtered.length === 0}
+  <div class="bg-surface border border-border rounded-2xl px-4 py-6">
+    <EmptyState variant="filtered" query={search.value} />
+  </div>
+{:else if viewMode === "grid"}
+  <!--
+    Grid view — responsive 1/2/3 column card grid. No outer card chrome
+    so the cards themselves carry the visual weight.
+  -->
+  <div
+    class="grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3"
+    role="list"
+    aria-label="Projects"
+  >
+    {#each filtered as project (project.id)}
+      <ProjectCard {project} />
+    {/each}
+  </div>
+{:else}
+  <!--
+    The table card intentionally does NOT clip overflow — the per-row
+    ellipsis menu is `position: fixed` and needs to escape the card
+    bounds. ProjectRowMenu handles its own layering.
+  -->
+  <div class="bg-surface border border-border rounded-2xl">
     <table class="w-full">
       <thead>
         <tr
@@ -147,5 +171,5 @@
         {/each}
       </tbody>
     </table>
-  {/if}
-</div>
+  </div>
+{/if}

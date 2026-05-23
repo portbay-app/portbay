@@ -49,6 +49,10 @@ use portbay_lib::process_compose::{
 };
 use portbay_lib::registry::{self, store, Project, ProjectId, ProjectType, Readiness, Registry};
 
+/// Domain suffix used when no registry exists yet. Kept in sync with the
+/// GUI's `lib.rs::DEFAULT_DOMAIN_SUFFIX` so the CLI and app agree.
+const DEFAULT_DOMAIN_SUFFIX: &str = "portbay.test";
+
 // =============================================================================
 // CLI shape
 // =============================================================================
@@ -384,7 +388,7 @@ impl CliContext {
     }
 
     fn load_registry(&self) -> Result<Registry, CliError> {
-        store::load_or_default(&self.registry_path, "test").map_err(CliError::Registry)
+        store::load_or_default(&self.registry_path, DEFAULT_DOMAIN_SUFFIX).map_err(CliError::Registry)
     }
 
     fn save_registry(&self, r: &Registry) -> Result<(), CliError> {
@@ -1149,7 +1153,7 @@ fn add_host_best_effort(
     let suffix = ctx
         .load_registry()
         .map(|reg| reg.domain_suffix)
-        .unwrap_or_else(|_| "test".into());
+        .unwrap_or_else(|_| DEFAULT_DOMAIN_SUFFIX.into());
     if HostsHelperClient::system()
         .add(hostname, ip, &suffix)
         .is_ok()
@@ -1166,7 +1170,7 @@ fn remove_host_best_effort(
     let suffix = ctx
         .load_registry()
         .map(|reg| reg.domain_suffix)
-        .unwrap_or_else(|_| "test".into());
+        .unwrap_or_else(|_| DEFAULT_DOMAIN_SUFFIX.into());
     if HostsHelperClient::system()
         .remove(hostname, &suffix)
         .is_ok()

@@ -8,6 +8,7 @@
     "core:window:allow-start-dragging",
     "shell:allow-execute",
     "opener:default",
+    "opener:allow-reveal-item-in-dir",
     "dialog:default",
     {
       "identifier": "shell:allow-spawn",

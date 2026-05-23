@@ -162,6 +162,254 @@ pub struct Group {
     pub projects: Vec<ProjectId>,
 }
 
+/// Stable, URL/YAML-safe identifier for a database instance. Mirrors
+/// [`ProjectId`] — it becomes a Process Compose process name (prefixed
+/// `db-`) so it must round-trip cleanly through YAML keys.
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DatabaseInstanceId(String);
+
+impl DatabaseInstanceId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for DatabaseInstanceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for DatabaseInstanceId {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl From<String> for DatabaseInstanceId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+/// The database engines PortBay can provision and supervise.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseEngine {
+    Mysql,
+    Mariadb,
+    Postgres,
+    Redis,
+    Mongo,
+}
+
+impl DatabaseEngine {
+    /// Stable string id used in slugs, the engine catalogue, and the wire
+    /// protocol. Matches the `serde(rename_all = "snake_case")` output.
+    pub fn id(&self) -> &'static str {
+        match self {
+            DatabaseEngine::Mysql => "mysql",
+            DatabaseEngine::Mariadb => "mariadb",
+            DatabaseEngine::Postgres => "postgres",
+            DatabaseEngine::Redis => "redis",
+            DatabaseEngine::Mongo => "mongo",
+        }
+    }
+
+    /// Human-facing engine name (no version).
+    pub fn label(&self) -> &'static str {
+        match self {
+            DatabaseEngine::Mysql => "MySQL",
+            DatabaseEngine::Mariadb => "MariaDB",
+            DatabaseEngine::Postgres => "PostgreSQL",
+            DatabaseEngine::Redis => "Redis",
+            DatabaseEngine::Mongo => "MongoDB",
+        }
+    }
+
+    /// Canonical default listening port for the engine.
+    pub fn default_port(&self) -> u16 {
+        match self {
+            DatabaseEngine::Mysql | DatabaseEngine::Mariadb => 3306,
+            DatabaseEngine::Postgres => 5432,
+            DatabaseEngine::Redis => 6379,
+            DatabaseEngine::Mongo => 27017,
+        }
+    }
+
+    /// Parse from the stable string id. Returns `None` for unknown ids.
+    pub fn from_id(s: &str) -> Option<Self> {
+        match s {
+            "mysql" => Some(DatabaseEngine::Mysql),
+            "mariadb" => Some(DatabaseEngine::Mariadb),
+            "postgres" => Some(DatabaseEngine::Postgres),
+            "redis" => Some(DatabaseEngine::Redis),
+            "mongo" => Some(DatabaseEngine::Mongo),
+            _ => None,
+        }
+    }
+}
+
+/// A database server instance PortBay provisions and supervises.
+///
+/// Each instance owns an isolated data directory under the app-data dir,
+/// runs on its own port, and is launched by Process Compose. Instances
+/// can be linked to projects, which injects connection env vars into the
+/// linked project's process (see [`DatabaseInstance::connection_env`]).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseInstance {
+    pub id: DatabaseInstanceId,
+    pub name: String,
+    pub engine: DatabaseEngine,
+
+    /// Engine version detected at create time (display only, e.g. "8.4.0").
+    #[serde(default)]
+    pub version: String,
+
+    /// Listening port. Allocated free at create time.
+    pub port: u16,
+
+    /// PortBay-owned data directory (absolute).
+    pub data_dir: PathBuf,
+
+    /// Engine config file the daemon reads (absolute). `None` for engines
+    /// launched purely with CLI flags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<PathBuf>,
+
+    /// Unix socket path the daemon binds (absolute), when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<PathBuf>,
+
+    /// Whether the daemon auto-starts when PortBay boots.
+    #[serde(default)]
+    pub auto_start: bool,
+
+    /// Projects this instance is linked to. Linking injects connection
+    /// env vars into each project's process.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_projects: Vec<ProjectId>,
+}
+
+impl DatabaseInstance {
+    /// The Process Compose process name for this instance. Prefixed `db-`
+    /// so it can't collide with a project id.
+    pub fn process_id(&self) -> String {
+        format!("db-{}", self.id)
+    }
+
+    /// Default super-user account name for the engine.
+    pub fn default_account(&self) -> &'static str {
+        match self.engine {
+            DatabaseEngine::Postgres => "postgres",
+            DatabaseEngine::Mysql | DatabaseEngine::Mariadb => "root",
+            // Redis/Mongo have no user by default in a fresh local instance.
+            DatabaseEngine::Redis | DatabaseEngine::Mongo => "",
+        }
+    }
+
+    /// A connection URL a framework can consume.
+    pub fn connection_url(&self) -> String {
+        let port = self.port;
+        match self.engine {
+            DatabaseEngine::Mysql | DatabaseEngine::Mariadb => {
+                format!("mysql://root@127.0.0.1:{port}/")
+            }
+            DatabaseEngine::Postgres => {
+                format!("postgresql://postgres@127.0.0.1:{port}/postgres")
+            }
+            DatabaseEngine::Redis => format!("redis://127.0.0.1:{port}"),
+            DatabaseEngine::Mongo => format!("mongodb://127.0.0.1:{port}"),
+        }
+    }
+
+    /// Connection env vars injected into linked projects. Discrete `DB_*`
+    /// vars plus a single `DATABASE_URL`. These are namespaced enough that
+    /// they rarely clash with framework-specific vars, and the per-project
+    /// `env` (set by the user) always overrides them downstream.
+    pub fn connection_env(&self) -> std::collections::BTreeMap<String, String> {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("DATABASE_URL".into(), self.connection_url());
+        env.insert("DB_CONNECTION".into(), self.engine.id().into());
+        env.insert("DB_HOST".into(), "127.0.0.1".into());
+        env.insert("DB_PORT".into(), self.port.to_string());
+        let account = self.default_account();
+        if !account.is_empty() {
+            env.insert("DB_USERNAME".into(), account.into());
+            env.insert("DB_PASSWORD".into(), String::new());
+        }
+        env
+    }
+}
+
+/// Largest `cache-size` we'll write. dnsmasq itself warns past ~10k, and a
+/// local dev resolver never needs more.
+pub const MAX_DNS_CACHE_SIZE: u16 = 10_000;
+
+/// Largest `local-ttl` we'll write (one day in seconds). Guards against a
+/// runaway value pinning a stale answer for weeks.
+pub const MAX_DNS_LOCAL_TTL: u32 = 86_400;
+
+fn default_dns_cache_size() -> u16 {
+    150
+}
+
+/// User-tunable dnsmasq daemon settings, editable from the DNS page.
+///
+/// PortBay's dnsmasq runs loopback-only and answers only for the wildcard
+/// suffix (`listen-address=127.0.0.1`, `bind-interfaces`, `no-resolv`,
+/// `no-hosts`). Those directives are fixed for safety and aren't represented
+/// here. The fields below are the directives that are both safe and
+/// meaningful on such a resolver — cache sizing and TTL behaviour. Changing
+/// any of them regenerates `dnsmasq.conf` and restarts the daemon.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsmasqSettings {
+    /// `cache-size=N` — number of names dnsmasq caches. dnsmasq's own
+    /// default is 150; 0 disables caching entirely.
+    #[serde(default = "default_dns_cache_size")]
+    pub cache_size: u16,
+
+    /// `local-ttl=N` — TTL (seconds) dnsmasq reports for names it answers
+    /// authoritatively (our wildcard). 0 is dnsmasq's default and the safest
+    /// for local dev, where the loopback target never changes.
+    #[serde(default)]
+    pub local_ttl: u32,
+
+    /// When true, emit `no-negcache` so dnsmasq doesn't cache negative
+    /// (NXDOMAIN) answers — handy while a hostname is still being wired up
+    /// and a cached miss would otherwise linger.
+    #[serde(default)]
+    pub disable_negative_cache: bool,
+}
+
+impl Default for DnsmasqSettings {
+    fn default() -> Self {
+        Self {
+            cache_size: default_dns_cache_size(),
+            local_ttl: 0,
+            disable_negative_cache: false,
+        }
+    }
+}
+
+impl DnsmasqSettings {
+    /// Clamp every field into a range dnsmasq will accept, so a value typed
+    /// in the UI can never produce a config the daemon rejects on restart.
+    pub fn sanitised(&self) -> Self {
+        Self {
+            cache_size: self.cache_size.min(MAX_DNS_CACHE_SIZE),
+            local_ttl: self.local_ttl.min(MAX_DNS_LOCAL_TTL),
+            disable_negative_cache: self.disable_negative_cache,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +489,37 @@ mod tests {
             json.get("document_root").is_none(),
             "optional PHP fields should be omitted when empty"
         );
+    }
+
+    #[test]
+    fn dnsmasq_settings_default_matches_dnsmasq_defaults() {
+        let s = DnsmasqSettings::default();
+        assert_eq!(s.cache_size, 150);
+        assert_eq!(s.local_ttl, 0);
+        assert!(!s.disable_negative_cache);
+    }
+
+    #[test]
+    fn dnsmasq_settings_partial_json_fills_defaults() {
+        // A blob with only one field set still deserialises, the rest
+        // falling back to defaults — this is what keeps the registry
+        // forward-compatible.
+        let s: DnsmasqSettings = serde_json::from_str(r#"{ "cacheSize": 500 }"#).unwrap();
+        assert_eq!(s.cache_size, 500);
+        assert_eq!(s.local_ttl, 0);
+        assert!(!s.disable_negative_cache);
+    }
+
+    #[test]
+    fn dnsmasq_settings_sanitise_clamps_out_of_range() {
+        let s = DnsmasqSettings {
+            cache_size: u16::MAX,
+            local_ttl: u32::MAX,
+            disable_negative_cache: true,
+        }
+        .sanitised();
+        assert_eq!(s.cache_size, MAX_DNS_CACHE_SIZE);
+        assert_eq!(s.local_ttl, MAX_DNS_LOCAL_TTL);
+        assert!(s.disable_negative_cache);
     }
 }

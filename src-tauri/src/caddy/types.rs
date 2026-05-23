@@ -40,11 +40,25 @@ pub struct Server {
     pub routes: Vec<Route>,
     /// Disable Caddy's automatic HTTPS redirects — same Quirk-1 fix.
     pub automatic_https: AutomaticHttps,
+    /// Error-handling subroute. When a handler errors (e.g. reverse_proxy
+    /// can't reach a dev server that's still starting up), Caddy runs these
+    /// routes — we serve PortBay's placeholder page here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<ServerErrors>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerErrors {
+    pub routes: Vec<Route>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AutomaticHttps {
     pub disable_redirects: bool,
+    /// Fully disable Caddy's automatic-HTTPS machinery (ACME, on-demand TLS).
+    /// PortBay loads its own mkcert certs and serves plain HTTP on :80, so we
+    /// never want Caddy reaching out for public certs.
+    pub disable: bool,
 }
 
 /// A Caddy route. The `@id` field becomes the runtime handle for later
@@ -53,7 +67,9 @@ pub struct AutomaticHttps {
 pub struct Route {
     #[serde(rename = "@id")]
     pub id: String,
-    #[serde(rename = "match")]
+    /// Host matchers. Empty (omitted) means the route matches every request —
+    /// used for the catch-all placeholder route.
+    #[serde(rename = "match", skip_serializing_if = "Vec::is_empty")]
     pub match_: Vec<MatchClause>,
     pub handle: Vec<serde_json::Value>,
     pub terminal: bool,
@@ -125,10 +141,13 @@ mod tests {
             routes: vec![],
             automatic_https: AutomaticHttps {
                 disable_redirects: true,
+                disable: true,
             },
+            errors: None,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["automatic_https"]["disable_redirects"], true);
+        assert_eq!(v["automatic_https"]["disable"], true);
     }
 
     #[test]
