@@ -25,6 +25,7 @@ pub mod onboarding;
 pub mod php;
 pub mod portfile;
 pub mod preferences;
+pub mod runtimes;
 pub mod projects;
 pub mod sidecars;
 pub mod system;
