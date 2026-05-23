@@ -5,7 +5,7 @@
 //! write goes through these commands so we can layer in side effects
 //! (Caddy reconcile, hosts file write, cert issuance) in one place later.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use tauri::State;
@@ -13,7 +13,7 @@ use tauri::State;
 use crate::commands::dto::{AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch};
 use crate::error::{AppError, AppResult};
 use crate::process_compose::Process;
-use crate::registry::{store, Project, ProjectId, ProjectType, Readiness, Registry};
+use crate::registry::{store, Project, ProjectId, ProjectType, Readiness, Registry, Runtime};
 use crate::state::AppState;
 
 /// `list_projects()` — registry merged with live PC status.
@@ -86,6 +86,16 @@ pub async fn add_project(
         timeout_seconds: 75,
     });
 
+    // Inherit the language's default runtime version (set in the Languages
+    // panel) when this project doesn't pin one itself. For PHP we mirror it
+    // into `php_version` too, since the FPM reconciler still reads that field.
+    let runtime = default_runtime_for(input.kind, &registry.runtimes.defaults);
+    let php_version = if input.kind == ProjectType::Php {
+        runtime.as_ref().map(|r| r.version.clone())
+    } else {
+        None
+    };
+
     let project = Project {
         id,
         name,
@@ -106,8 +116,8 @@ pub async fn add_project(
         auto_start: input.auto_start,
         tags: vec![],
         document_root: None,
-        php_version: None,
-        runtime: None,
+        php_version,
+        runtime,
     };
 
     registry.add_project(project.clone())?;
@@ -309,9 +319,54 @@ pub(crate) async fn fetch_pc_state(state: &AppState) -> Option<HashMap<String, P
 // established `crate::commands::projects::slugify` path keeps resolving.
 pub(crate) use crate::util::slugify;
 
+/// Resolve the default runtime a new project of `kind` should inherit from
+/// the per-language defaults. Static/Custom projects have no managed runtime.
+/// Returns `None` when no default is set for the mapped language.
+fn default_runtime_for(kind: ProjectType, defaults: &BTreeMap<String, String>) -> Option<Runtime> {
+    let lang = match kind {
+        ProjectType::Next | ProjectType::Vite | ProjectType::Node => "node",
+        ProjectType::Php => "php",
+        ProjectType::Static | ProjectType::Custom => return None,
+    };
+    defaults.get(lang).map(|version| Runtime {
+        lang: lang.to_string(),
+        version: version.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_runtime_inherited_per_language() {
+        let mut defaults = BTreeMap::new();
+        defaults.insert("node".to_string(), "22".to_string());
+        defaults.insert("php".to_string(), "8.3".to_string());
+
+        assert_eq!(
+            default_runtime_for(ProjectType::Next, &defaults),
+            Some(Runtime {
+                lang: "node".into(),
+                version: "22".into()
+            })
+        );
+        assert_eq!(
+            default_runtime_for(ProjectType::Php, &defaults),
+            Some(Runtime {
+                lang: "php".into(),
+                version: "8.3".into()
+            })
+        );
+        // Static/Custom have no managed runtime.
+        assert_eq!(default_runtime_for(ProjectType::Static, &defaults), None);
+    }
+
+    #[test]
+    fn no_default_set_yields_no_runtime() {
+        let defaults = BTreeMap::new();
+        assert_eq!(default_runtime_for(ProjectType::Next, &defaults), None);
+    }
 
     #[test]
     fn slugify_matches_cli_behaviour() {
