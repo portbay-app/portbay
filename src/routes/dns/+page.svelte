@@ -382,14 +382,14 @@
           <article
             class="rounded-2xl px-5 py-4 border {pf.ready
               ? 'bg-status-running/5 border-status-running/30'
-              : 'bg-amber-500/5 border-amber-500/30'}"
+              : 'bg-status-unhealthy/5 border-status-unhealthy/30'}"
           >
             <header class="flex items-center justify-between gap-3 mb-3">
               <div class="flex items-center gap-2 min-w-0">
                 <Icon
                   name={pf.ready ? "circle-check" : "circle-alert"}
                   size={15}
-                  class={pf.ready ? "text-status-running" : "text-amber-400"}
+                  class={pf.ready ? "text-status-running" : "text-status-unhealthy"}
                 />
                 <h3 class="text-[13px] font-semibold text-fg">
                   {pf.ready ? "Local DNS is set up" : "Set up local DNS"}
@@ -444,7 +444,7 @@
 
             {#if !pf.ready && (pf.port80InUse || pf.port443InUse)}
               <p
-                class="mt-3 text-[11px] text-amber-300/90 leading-relaxed flex items-start gap-1.5"
+                class="mt-3 text-[11px] text-status-port-conflict leading-relaxed flex items-start gap-1.5"
               >
                 <Icon name="info" size={12} class="mt-0.5 shrink-0" />
                 <span>
