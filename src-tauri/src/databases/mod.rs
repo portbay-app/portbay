@@ -498,7 +498,14 @@ pub fn client_invocation(instance: &DatabaseInstance, client: &Path) -> String {
 /// Run a command synchronously with a hard timeout. Returns stdout on
 /// success; on failure returns a combined stderr+stdout message (or
 /// "timeout" / "spawn failed: …").
-fn run_capture(bin: &PathBuf, args: &[&str], timeout: Duration) -> Result<String, String> {
+///
+/// Blocking by design (it polls + sleeps). Async callers must invoke it
+/// inside `tokio::task::spawn_blocking` so they don't stall the runtime.
+pub(crate) fn run_capture(
+    bin: &PathBuf,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())

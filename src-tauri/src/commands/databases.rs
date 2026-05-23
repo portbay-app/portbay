@@ -16,8 +16,7 @@
 //!   - `open_database_client`         — launch the CLI in Terminal
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -150,14 +149,19 @@ pub async fn install_database_engine(engine: String) -> AppResult<()> {
     let eng = parse_engine(&engine)?;
     let brew = require_brew()?;
     let formula = install_formula(eng);
-    run_capture(&brew, &["install", formula], Duration::from_secs(8 * 60))
-        .map(|_| ())
-        .map_err(|e| {
-            AppError::Internal(format!(
-                "brew install {formula} failed: {}",
-                truncate(&e, 600)
-            ))
-        })
+    // `brew install` can run for minutes — never on the async runtime.
+    tokio::task::spawn_blocking(move || {
+        engine::run_capture(&brew, &["install", formula], Duration::from_secs(8 * 60))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("install join: {e}")))?
+    .map(|_| ())
+    .map_err(|e| {
+        AppError::Internal(format!(
+            "brew install {formula} failed: {}",
+            truncate(&e, 600)
+        ))
+    })
 }
 
 // ===========================================================================
@@ -279,11 +283,19 @@ pub async fn create_database_instance(
         None => allocate_port(&registry, eng),
     };
 
-    // Provision: init data dir + write config. Synchronous; the GUI shows a
-    // spinner. This is the slow, one-shot step.
+    // Provision: init data dir + write config. This shells out to
+    // `mysqld --initialize-insecure` / `initdb`, which can take 30–120s.
+    // Run it off the async runtime so status, metrics, and log-stream IPC
+    // stay responsive while the GUI shows its spinner.
     let detection = engine::detect(eng);
-    engine::provision(eng, &daemon, &app_data, id.as_str(), port)
-        .map_err(AppError::Internal)?;
+    let provision_data = app_data.clone();
+    let provision_id = id.clone();
+    tokio::task::spawn_blocking(move || {
+        engine::provision(eng, &daemon, &provision_data, &provision_id, port)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("provision join: {e}")))?
+    .map_err(AppError::Internal)?;
 
     let instance = DatabaseInstance {
         id: DatabaseInstanceId::new(id.clone()),
@@ -574,46 +586,6 @@ fn allocate_port(registry: &Registry, eng: DatabaseEngine) -> u16 {
         }
     }
     eng.default_port()
-}
-
-fn run_capture(bin: &PathBuf, args: &[&str], timeout: Duration) -> Result<String, String> {
-    let mut child = Command::new(bin)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn failed: {e}"))?;
-
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if started.elapsed() > timeout {
-                    let _ = child.kill();
-                    return Err("timeout".into());
-                }
-                std::thread::sleep(Duration::from_millis(80));
-            }
-            Err(e) => return Err(format!("wait failed: {e}")),
-        }
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("wait_with_output failed: {e}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let combined = format!("{}{}", stderr.trim(), stdout.trim());
-        Err(if combined.is_empty() {
-            format!("exit {}", output.status)
-        } else {
-            combined
-        })
-    }
 }
 
 fn truncate(s: &str, limit: usize) -> &str {
