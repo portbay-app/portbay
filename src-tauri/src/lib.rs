@@ -8,6 +8,7 @@ pub mod hosts;
 pub mod import;
 pub mod mailpit;
 pub mod mkcert;
+pub mod portfile;
 pub mod process_compose;
 pub mod reconciler;
 pub mod registry;
@@ -255,6 +256,10 @@ pub fn run() {
             commands::import::detect_sources,
             commands::import::preview_import,
             commands::import::import_projects,
+            commands::portfile::export_portfile,
+            commands::portfile::detect_portfile,
+            commands::portfile::import_portfile_preview,
+            commands::portfile::import_portfile_commit,
             commands::dnsmasq::dnsmasq_resolver_status,
             commands::dnsmasq::dnsmasq_install_resolver,
             commands::dnsmasq::dnsmasq_uninstall_resolver,

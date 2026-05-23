@@ -233,6 +233,23 @@
     }
   }
 
+  async function exportPortfile() {
+    if (!project) return;
+    try {
+      const written = await safeInvoke<string>("export_portfile", { id: project.id });
+      errorBus.push({
+        code: "EXPORT_OK",
+        whatHappened: `Wrote ${written}`,
+        whyItMatters: "Commit this file to your repo so teammates get the same local setup.",
+        whoCausedIt: "system",
+        actions: [],
+      });
+    } catch {
+      /* safeInvoke toast already pushed */
+    }
+  }
+
+
   async function run(op: "start" | "stop" | "restart") {
     if (!project) return;
     try {
@@ -398,6 +415,14 @@
           class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md text-fg-muted border border-border hover:text-fg hover:bg-surface-2 transition-colors"
         >
           <Icon name="rotate-cw" size={12} /> Restart
+        </button>
+        <button
+          type="button"
+          onclick={exportPortfile}
+          title="Write .portbay.json to the project folder so this setup is reproducible"
+          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md text-fg-muted border border-border hover:text-fg hover:bg-surface-2 transition-colors"
+        >
+          <Icon name="external-link" size={12} /> Export
         </button>
         <button
           type="button"

@@ -20,6 +20,7 @@ pub mod integrations;
 pub mod lifecycle;
 pub mod log_stream;
 pub mod metrics;
+pub mod portfile;
 pub mod projects;
 pub mod sidecars;
 pub mod system;

@@ -33,7 +33,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "console")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
@@ -42,7 +42,9 @@ use std::net::Ipv4Addr;
 
 use portbay_lib::caddy::CertPaths;
 use portbay_lib::hosts::{HostsError, HostsManager};
-use portbay_lib::process_compose::{PcClient, Process, ProjectStatus, DEFAULT_PORT as PC_DEFAULT_PORT};
+use portbay_lib::process_compose::{
+    PcClient, Process, ProjectStatus, DEFAULT_PORT as PC_DEFAULT_PORT,
+};
 use portbay_lib::registry::{self, store, Project, ProjectId, ProjectType, Readiness, Registry};
 
 // =============================================================================
@@ -114,6 +116,13 @@ enum Cmd {
     /// Manage /etc/hosts entries for PortBay projects.
     #[command(subcommand)]
     Hosts(HostsCmd),
+
+    /// Write `<project_path>/.portbay.json` so this project's setup can
+    /// be committed to a repo and reproduced by teammates.
+    Export {
+        /// Project id.
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -274,6 +283,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Open { id } => cmd_open(&ctx, &id).await,
         Cmd::Doctor => cmd_doctor(&ctx).await,
         Cmd::Hosts(sub) => cmd_hosts(&ctx, sub).await,
+        Cmd::Export { id } => cmd_export(&ctx, &id).await,
     }
 }
 
@@ -330,19 +340,24 @@ async fn cmd_list(ctx: &CliContext) -> Result<ExitCode, CliError> {
     }
 
     if projects.is_empty() {
-        ctx.term.write_line(&format!(
-            "{} No projects registered. {} `portbay add <path>`",
-            style("·").dim(),
-            style("Add one with").dim()
-        ))
-        .ok();
+        ctx.term
+            .write_line(&format!(
+                "{} No projects registered. {} `portbay add <path>`",
+                style("·").dim(),
+                style("Add one with").dim()
+            ))
+            .ok();
         return Ok(ExitCode::SUCCESS);
     }
 
     // Map of statuses keyed by project id. Empty if daemon is down.
     let pc_state = fetch_pc_state(ctx).await;
 
-    let id_w = projects.iter().map(|p| p.id.as_str().len()).max().unwrap_or(2);
+    let id_w = projects
+        .iter()
+        .map(|p| p.id.as_str().len())
+        .max()
+        .unwrap_or(2);
     let host_w = projects.iter().map(|p| p.hostname.len()).max().unwrap_or(2);
     for p in projects {
         let status = pc_state
@@ -350,15 +365,16 @@ async fn cmd_list(ctx: &CliContext) -> Result<ExitCode, CliError> {
             .and_then(|m| m.get(p.id.as_str()))
             .map(|proc| proc.portbay_status());
         let badge = status_badge(status);
-        ctx.term.write_line(&format!(
-            "  {badge} {id:<id_w$}  {host:<host_w$}  {kind}",
-            id = style(p.id.as_str()).bold(),
-            host = style(&p.hostname).dim(),
-            kind = style(format!("{:?}", p.kind).to_lowercase()).dim(),
-            id_w = id_w,
-            host_w = host_w,
-        ))
-        .ok();
+        ctx.term
+            .write_line(&format!(
+                "  {badge} {id:<id_w$}  {host:<host_w$}  {kind}",
+                id = style(p.id.as_str()).bold(),
+                host = style(&p.hostname).dim(),
+                kind = style(format!("{:?}", p.kind).to_lowercase()).dim(),
+                id_w = id_w,
+                host_w = host_w,
+            ))
+            .ok();
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -377,12 +393,7 @@ async fn cmd_status(ctx: &CliContext, id: Option<&str>) -> Result<ExitCode, CliE
         None => reg
             .list_projects()
             .iter()
-            .map(|p| {
-                (
-                    p,
-                    pc_state.as_ref().and_then(|m| m.get(p.id.as_str())),
-                )
-            })
+            .map(|p| (p, pc_state.as_ref().and_then(|m| m.get(p.id.as_str()))))
             .collect(),
     };
 
@@ -406,44 +417,55 @@ async fn cmd_status(ctx: &CliContext, id: Option<&str>) -> Result<ExitCode, CliE
     }
 
     if pc_state.is_none() {
-        ctx.term.write_line(&format!(
-            "{} Daemon not reachable on port {}. Status reflects registry only.",
-            style("!").yellow(),
-            ctx.pc_port
-        ))
-        .ok();
+        ctx.term
+            .write_line(&format!(
+                "{} Daemon not reachable on port {}. Status reflects registry only.",
+                style("!").yellow(),
+                ctx.pc_port
+            ))
+            .ok();
     }
 
     for (p, proc) in entries {
         let status = proc.map(|p| p.portbay_status());
-        ctx.term.write_line(&format!(
-            "  {} {}  {}",
-            status_badge(status),
-            style(p.id.as_str()).bold(),
-            style(&p.hostname).dim(),
-        ))
-        .ok();
-        if let Some(proc) = proc {
-            ctx.term.write_line(&format!(
-                "      pid={pid} running={running} ready={ready} restarts={restarts}",
-                pid = proc.pid,
-                running = proc.is_running,
-                ready = proc.is_ready,
-                restarts = proc.restarts
+        ctx.term
+            .write_line(&format!(
+                "  {} {}  {}",
+                status_badge(status),
+                style(p.id.as_str()).bold(),
+                style(&p.hostname).dim(),
             ))
             .ok();
+        if let Some(proc) = proc {
+            ctx.term
+                .write_line(&format!(
+                    "      pid={pid} running={running} ready={ready} restarts={restarts}",
+                    pid = proc.pid,
+                    running = proc.is_running,
+                    ready = proc.is_ready,
+                    restarts = proc.restarts
+                ))
+                .ok();
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
 async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> {
-    let mut reg = ctx.load_registry()?;
-
     let canonical = args
         .path
         .canonicalize()
         .map_err(|e| CliError::BadInput(format!("path: {e}")))?;
+
+    // Auto-detect a committed `.portbay.json` before falling back to the
+    // standard flow. The file's contents win for every field; CLI `--`
+    // overrides (--name, --id) still apply.
+    let portfile_path = canonical.join(portbay_lib::portfile::PORTBAY_FILE_NAME);
+    if portfile_path.is_file() {
+        return cmd_add_from_portfile(ctx, &canonical, &portfile_path, args).await;
+    }
+
+    let mut reg = ctx.load_registry()?;
 
     let dir_name = canonical
         .file_name()
@@ -487,7 +509,8 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         php_version: None,
     };
 
-    reg.add_project(project.clone()).map_err(CliError::Registry)?;
+    reg.add_project(project.clone())
+        .map_err(CliError::Registry)?;
     ctx.save_registry(&reg)?;
 
     // Best-effort hosts write. Permission-denied is reported as a hint, not
@@ -505,21 +528,159 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
             })
         );
     } else {
-        ctx.term.write_line(&format!(
-            "{} {} registered as {}",
-            style("✓").green(),
-            project.id.as_str(),
-            style(&project.hostname).dim()
-        ))
-        .ok();
-        if project.https {
-            ctx.term.write_line(&format!(
-                "  {} cert issuance + Caddy wiring will happen when the daemon picks it up.",
-                style("·").dim()
+        ctx.term
+            .write_line(&format!(
+                "{} {} registered as {}",
+                style("✓").green(),
+                project.id.as_str(),
+                style(&project.hostname).dim()
             ))
             .ok();
+        if project.https {
+            ctx.term
+                .write_line(&format!(
+                    "  {} cert issuance + Caddy wiring will happen when the daemon picks it up.",
+                    style("·").dim()
+                ))
+                .ok();
         }
         emit_hosts_hint(&ctx.term, &project.hostname, &hosts_outcome, true);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Path taken by `cmd_add` when the picked folder already contains a
+/// `.portbay.json`. The file's values win; CLI `--id` and `--name`
+/// overrides still apply. Any secrets the file lists are inserted
+/// into the project's env as empty placeholders — the user fills them
+/// in via the GUI or `--secret KEY=VALUE` flags (latter is a future
+/// extension; today's surface is the minimal one).
+async fn cmd_add_from_portfile(
+    ctx: &CliContext,
+    canonical: &Path,
+    portfile_path: &Path,
+    args: AddArgs,
+) -> Result<ExitCode, CliError> {
+    use std::collections::BTreeMap;
+
+    let bytes = std::fs::read(portfile_path)
+        .map_err(|e| CliError::BadInput(format!("read {}: {e}", portfile_path.display())))?;
+    let file = portbay_lib::portfile::from_json_bytes(&bytes)
+        .map_err(|e| CliError::BadInput(format!("parse .portbay.json: {e}")))?;
+
+    let dir_name = canonical
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("project")
+        .to_string();
+    let id_str = args.id.unwrap_or_else(|| slugify(&dir_name));
+    let id = ProjectId::new(id_str.clone());
+
+    // CLI cannot prompt interactively for secret values. We materialise
+    // the project with every listed secret set to an empty placeholder;
+    // the user fills them in later via the GUI's detail panel or by
+    // editing the registry JSON directly. The names alone are useful —
+    // running `portbay logs <id>` will show `[KEY] not set` warnings
+    // from frameworks expecting them.
+    let secrets_for_materialise: BTreeMap<String, String> = file
+        .secrets
+        .iter()
+        .map(|k| (k.clone(), String::new()))
+        .collect();
+
+    let plan = portbay_lib::portfile::ImportPlan::new(file.clone(), canonical.to_path_buf());
+    let project = portbay_lib::portfile::materialise_project(&plan, id, &secrets_for_materialise)
+        .map_err(|e| CliError::BadInput(format!("materialise: {e}")))?;
+
+    let mut reg = ctx.load_registry()?;
+    reg.add_project(project.clone())
+        .map_err(CliError::Registry)?;
+    ctx.save_registry(&reg)?;
+
+    // Best-effort hosts add. Same UX as cmd_add's main path.
+    let hosts_outcome = HostsManager::system().add(&project.hostname, Ipv4Addr::LOCALHOST);
+
+    if ctx.json {
+        let warnings = hosts_warnings(&hosts_outcome);
+        println!(
+            "{}",
+            serde_json::json!({
+                "project": project,
+                "source": ".portbay.json",
+                "secrets_pending": file.secrets,
+                "warnings": warnings,
+            })
+        );
+    } else {
+        ctx.term
+            .write_line(&format!(
+                "{} {} imported from {} as {}",
+                style("✓").green(),
+                id_str,
+                style(".portbay.json").dim(),
+                style(&project.hostname).dim(),
+            ))
+            .ok();
+        if !file.secrets.is_empty() {
+            ctx.term
+                .write_line(&format!(
+                    "  {} {} secret(s) not set: {}",
+                    style("·").yellow(),
+                    file.secrets.len(),
+                    file.secrets.join(", "),
+                ))
+                .ok();
+            ctx.term
+                .write_line(&format!(
+                    "  {} fill them via the GUI's detail panel before starting.",
+                    style("·").dim(),
+                ))
+                .ok();
+        }
+        for w in &hosts_warnings(&hosts_outcome) {
+            ctx.term
+                .write_line(&format!("  {} {}", style("·").yellow(), w))
+                .ok();
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_export(ctx: &CliContext, id: &str) -> Result<ExitCode, CliError> {
+    let reg = ctx.load_registry()?;
+    let project = reg
+        .get_project(&ProjectId::new(id))
+        .ok_or_else(|| CliError::BadInput(format!("project `{id}` not found")))?;
+    let file = portbay_lib::portfile::export_project(project);
+    let json = portbay_lib::portfile::to_json_string(&file)
+        .map_err(|e| CliError::BadInput(format!("serialise: {e}")))?;
+    let out_path = project.path.join(portbay_lib::portfile::PORTBAY_FILE_NAME);
+    std::fs::write(&out_path, &json)
+        .map_err(|e| CliError::BadInput(format!("write {}: {e}", out_path.display())))?;
+    if ctx.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "wrote": out_path.display().to_string(),
+                "secrets_count": file.secrets.len(),
+            })
+        );
+    } else {
+        ctx.term
+            .write_line(&format!(
+                "{} wrote {} ({} env, {} secret name(s))",
+                style("✓").green(),
+                style(out_path.display().to_string()).dim(),
+                file.env_template.len(),
+                file.secrets.len(),
+            ))
+            .ok();
+        ctx.term
+            .write_line(&format!(
+                "  {} commit this file so teammates can reproduce the setup.",
+                style("·").dim(),
+            ))
+            .ok();
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -527,9 +688,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
 async fn cmd_remove(ctx: &CliContext, args: RemoveArgs) -> Result<ExitCode, CliError> {
     let mut reg = ctx.load_registry()?;
     let pid = ProjectId::new(args.id.clone());
-    let removed = reg
-        .remove_project(&pid)
-        .map_err(CliError::Registry)?;
+    let removed = reg.remove_project(&pid).map_err(CliError::Registry)?;
     ctx.save_registry(&reg)?;
 
     let mut warnings: Vec<String> = Vec::new();
@@ -567,14 +726,17 @@ async fn cmd_remove(ctx: &CliContext, args: RemoveArgs) -> Result<ExitCode, CliE
             })
         );
     } else {
-        ctx.term.write_line(&format!(
-            "{} {} removed.",
-            style("✓").green(),
-            removed.id.as_str()
-        ))
-        .ok();
+        ctx.term
+            .write_line(&format!(
+                "{} {} removed.",
+                style("✓").green(),
+                removed.id.as_str()
+            ))
+            .ok();
         for w in &warnings {
-            ctx.term.write_line(&format!("  {} {w}", style("!").yellow())).ok();
+            ctx.term
+                .write_line(&format!("  {} {w}", style("!").yellow()))
+                .ok();
         }
         if let Some(outcome) = &hosts_outcome {
             emit_hosts_hint(&ctx.term, &removed.hostname, outcome, false);
@@ -604,15 +766,14 @@ async fn cmd_proc_op(ctx: &CliContext, id: &str, op: ProcOp) -> Result<ExitCode,
     match result {
         Ok(()) => {
             if ctx.json {
-                println!("{}", serde_json::json!({ "ok": true, "id": id, "verb": verb }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "ok": true, "id": id, "verb": verb })
+                );
             } else {
-                ctx.term.write_line(&format!(
-                    "{} {} {}",
-                    style("✓").green(),
-                    verb,
-                    id
-                ))
-                .ok();
+                ctx.term
+                    .write_line(&format!("{} {} {}", style("✓").green(), verb, id))
+                    .ok();
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -627,11 +788,9 @@ async fn cmd_stop(ctx: &CliContext, args: StopArgs) -> Result<ExitCode, CliError
         let names: Vec<&str> = processes.iter().map(|p| p.name.as_str()).collect();
         if names.is_empty() {
             if !ctx.json {
-                ctx.term.write_line(&format!(
-                    "{} Nothing to stop.",
-                    style("·").dim()
-                ))
-                .ok();
+                ctx.term
+                    .write_line(&format!("{} Nothing to stop.", style("·").dim()))
+                    .ok();
             }
             return Ok(ExitCode::SUCCESS);
         }
@@ -639,12 +798,13 @@ async fn cmd_stop(ctx: &CliContext, args: StopArgs) -> Result<ExitCode, CliError
         if ctx.json {
             println!("{}", serde_json::to_string_pretty(&result)?);
         } else {
-            ctx.term.write_line(&format!(
-                "{} stopped {} process(es)",
-                style("✓").green(),
-                names.len()
-            ))
-            .ok();
+            ctx.term
+                .write_line(&format!(
+                    "{} stopped {} process(es)",
+                    style("✓").green(),
+                    names.len()
+                ))
+                .ok();
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -677,9 +837,7 @@ async fn cmd_open(ctx: &CliContext, id: &str) -> Result<ExitCode, CliError> {
         .ok_or_else(|| CliError::ProjectNotFound(id.to_string()))?;
     let scheme = if p.https { "https" } else { "http" };
     let url = format!("{scheme}://{}", p.hostname);
-    let status = std::process::Command::new("open")
-        .arg(&url)
-        .status();
+    let status = std::process::Command::new("open").arg(&url).status();
     if ctx.json {
         println!(
             "{}",
@@ -695,7 +853,10 @@ async fn cmd_open(ctx: &CliContext, id: &str) -> Result<ExitCode, CliError> {
                 .ok();
         } else {
             ctx.term
-                .write_line(&format!("{} `open` exited non-zero for {url}", style("!").yellow()))
+                .write_line(&format!(
+                    "{} `open` exited non-zero for {url}",
+                    style("!").yellow()
+                ))
                 .ok();
         }
     } else if let Err(e) = status {
@@ -761,9 +922,7 @@ async fn cmd_doctor(ctx: &CliContext) -> Result<ExitCode, CliError> {
     // certs root presence
     if let Some(root) = certs_root() {
         let exists = root.exists();
-        let count = std::fs::read_dir(&root)
-            .map(|d| d.count())
-            .unwrap_or(0);
+        let count = std::fs::read_dir(&root).map(|d| d.count()).unwrap_or(0);
         let detail = if exists {
             format!("{} ({} entries)", root.display(), count)
         } else {
@@ -782,7 +941,12 @@ async fn cmd_doctor(ctx: &CliContext) -> Result<ExitCode, CliError> {
             let reg = ctx.load_registry().ok();
             let expected: std::collections::HashSet<String> = reg
                 .as_ref()
-                .map(|r| r.list_projects().iter().map(|p| p.hostname.clone()).collect())
+                .map(|r| {
+                    r.list_projects()
+                        .iter()
+                        .map(|p| p.hostname.clone())
+                        .collect()
+                })
                 .unwrap_or_default();
             let present: std::collections::HashSet<String> =
                 entries.iter().map(|e| e.hostname.clone()).collect();
@@ -956,12 +1120,7 @@ enum Verdict {
 async fn fetch_pc_state(ctx: &CliContext) -> Option<std::collections::HashMap<String, Process>> {
     let client = ctx.pc();
     let processes = client.processes().await.ok()?;
-    Some(
-        processes
-            .into_iter()
-            .map(|p| (p.name.clone(), p))
-            .collect(),
-    )
+    Some(processes.into_iter().map(|p| (p.name.clone(), p)).collect())
 }
 
 fn status_badge(status: Option<ProjectStatus>) -> console::StyledObject<&'static str> {
@@ -1023,7 +1182,9 @@ impl CliError {
             CliError::ProjectNotFound(_) | CliError::BadInput(_) => 2,
             CliError::Pc(_) => 3,
             CliError::Hosts(HostsError::PermissionDenied { .. }) => 6,
-            CliError::Registry(_) | CliError::Json(_) | CliError::Other(_) | CliError::Hosts(_) => 1,
+            CliError::Registry(_) | CliError::Json(_) | CliError::Other(_) | CliError::Hosts(_) => {
+                1
+            }
         }
     }
 }
@@ -1099,8 +1260,7 @@ mod tests {
 
     #[test]
     fn cli_parses_add_with_defaults() {
-        let cli =
-            Cli::try_parse_from(["portbay", "add", "/tmp/x"]).unwrap();
+        let cli = Cli::try_parse_from(["portbay", "add", "/tmp/x"]).unwrap();
         let Cmd::Add(args) = cli.cmd else {
             panic!("expected Add")
         };
@@ -1127,8 +1287,7 @@ mod tests {
 
     #[test]
     fn cli_parses_pc_port_override() {
-        let cli =
-            Cli::try_parse_from(["portbay", "--pc-port", "9000", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["portbay", "--pc-port", "9000", "status"]).unwrap();
         assert_eq!(cli.pc_port, Some(9000));
     }
 
