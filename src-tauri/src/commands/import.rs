@@ -166,6 +166,7 @@ fn build_project(site: &ImportedSite) -> std::result::Result<Project, String> {
         tags: vec![site.source.tag().to_string()],
         document_root: None,
         php_version: site.php_version.clone(),
+        runtime: None,
     })
 }
 

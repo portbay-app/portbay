@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::registry::error::{RegistryError, Result};
-use crate::registry::Registry;
+use crate::registry::{migrate, Registry, SUPPORTED_VERSION};
 
 /// The registry's well-known location inside the platform's data dir.
 ///
@@ -29,6 +29,12 @@ pub fn default_path() -> Result<PathBuf> {
 
 /// Load a registry from the given path. Returns `NotFound` if the file is
 /// missing. For first-run convenience, prefer [`load_or_default`].
+///
+/// A registry written by an older build is migrated up to
+/// [`SUPPORTED_VERSION`] (see [`migrate`]) and then rewritten to disk in its
+/// new shape, so the upgrade happens exactly once. The pre-migration file is
+/// backed up first (`registry.json` → `registry.json.v1.bak`) so a downgrade
+/// or recovery is always possible.
 pub fn load_from(path: &Path) -> Result<Registry> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -37,9 +43,59 @@ pub fn load_from(path: &Path) -> Result<Registry> {
         }
         Err(e) => return Err(RegistryError::io(path, e)),
     };
-    let reg: Registry = serde_json::from_slice(&bytes)?;
-    reg.validate_version()?;
+
+    let (reg, migrated_from) = parse_and_migrate(&bytes)?;
+
+    if let Some(from) = migrated_from {
+        back_up(path, from)?;
+        save_to(&reg, path)?;
+    }
+
     Ok(reg)
+}
+
+/// Parse registry bytes and, when the document predates [`SUPPORTED_VERSION`],
+/// migrate it in memory. Returns the registry plus `Some(from_version)` when a
+/// migration was applied (so the caller can persist it), or `None` when the
+/// file was already current. Pure — does no I/O — so the version gating and
+/// migration are unit-testable without touching disk.
+fn parse_and_migrate(bytes: &[u8]) -> Result<(Registry, Option<u32>)> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    // A missing `version` is treated as v1 (the field predates being written
+    // unconditionally); anything present is read as the declared version.
+    let found = value.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
+    if found > SUPPORTED_VERSION {
+        return Err(RegistryError::UnsupportedVersion {
+            found,
+            supported: SUPPORTED_VERSION,
+        });
+    }
+
+    if found < SUPPORTED_VERSION {
+        let migrated = migrate(value, found)?;
+        let reg: Registry = serde_json::from_value(migrated)?;
+        Ok((reg, Some(found)))
+    } else {
+        let reg: Registry = serde_json::from_value(value)?;
+        Ok((reg, None))
+    }
+}
+
+/// Copy the on-disk registry to a sibling backup before a migration rewrites
+/// it, e.g. `registry.json` → `registry.json.v1.bak`. The copy must succeed —
+/// we never overwrite a pre-migration file without first preserving it.
+fn back_up(path: &Path, from_version: u32) -> Result<()> {
+    let mut backup = path.to_path_buf();
+    let file_name = backup
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("registry.json"));
+    let mut name = file_name;
+    name.push(format!(".v{from_version}.bak"));
+    backup.set_file_name(name);
+    fs::copy(path, &backup).map_err(|e| RegistryError::io(&backup, e))?;
+    Ok(())
 }
 
 /// Load the registry from `path`, or return a fresh empty registry with the
@@ -113,6 +169,7 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            runtime: None,
         }
     }
 
@@ -176,6 +233,63 @@ mod tests {
             Err(RegistryError::UnsupportedVersion { found: 99, .. }) => {}
             other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn loading_a_v1_file_migrates_backs_up_and_rewrites_as_v2() {
+        use crate::registry::types::ProjectId;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("registry.json");
+        let v1 = serde_json::json!({
+            "version": 1,
+            "domain_suffix": "test",
+            "projects": [{
+                "id": "legacy-shop",
+                "name": "Legacy Shop",
+                "path": "/tmp/legacy-shop",
+                "type": "php",
+                "hostname": "legacy-shop.test",
+                "https": true,
+                "document_root": "public",
+                "php_version": "8.3"
+            }]
+        });
+        fs::write(&path, v1.to_string()).unwrap();
+
+        let reg = load_from(&path).unwrap();
+        assert_eq!(reg.version, SUPPORTED_VERSION);
+        let p = reg.get_project(&ProjectId::new("legacy-shop")).unwrap();
+        assert_eq!(p.runtime.as_ref().unwrap().lang, "php");
+        assert_eq!(p.runtime.as_ref().unwrap().version, "8.3");
+
+        // The original v1 document is preserved as a backup.
+        let backup = tmp.path().join("registry.json.v1.bak");
+        assert!(backup.exists(), "v1 backup must be written");
+        let backed: serde_json::Value =
+            serde_json::from_slice(&fs::read(&backup).unwrap()).unwrap();
+        assert_eq!(backed["version"], 1);
+
+        // The live file is rewritten in v2 shape, so a second load is a no-op
+        // (no migration, identical result).
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["version"], 2);
+        let reg2 = load_from(&path).unwrap();
+        assert_eq!(reg2, reg);
+    }
+
+    #[test]
+    fn loading_a_current_v2_file_does_not_create_a_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("registry.json");
+        let mut reg = Registry::new("test");
+        reg.add_project(sample_project("a")).unwrap();
+        save_to(&reg, &path).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded, reg);
+        assert!(!tmp.path().join("registry.json.v1.bak").exists());
     }
 
     #[test]

@@ -107,6 +107,7 @@ pub async fn add_project(
         tags: vec![],
         document_root: None,
         php_version: None,
+        runtime: None,
     };
 
     registry.add_project(project.clone())?;
