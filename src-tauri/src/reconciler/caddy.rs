@@ -81,8 +81,10 @@ pub(super) async fn reconcile(
     }
 
     cache.last_applied = Some(hash);
-    let routes = reg.list_projects().iter().filter(|p| p.https).count();
-    StepOutcome::applied(format!("{routes} https route(s) loaded"))
+    let projects = reg.list_projects();
+    let https = projects.iter().filter(|p| p.https).count();
+    let http = projects.len() - https;
+    StepOutcome::applied(format!("{https} https + {http} http route(s) loaded"))
 }
 
 fn hash_bytes(b: &[u8]) -> u64 {
