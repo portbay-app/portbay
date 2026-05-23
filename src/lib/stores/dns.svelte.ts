@@ -14,6 +14,7 @@ import { projects } from "$lib/stores/projects.svelte";
 import {
   DEFAULT_DNS_SETTINGS,
   type DnsmasqSettings,
+  type DnsPreflight,
   type DnsRecord,
   type DomainMigration,
   type ManagedHostsEntry,
@@ -25,10 +26,14 @@ function createDnsStore() {
   let settings = $state<DnsmasqSettings>({ ...DEFAULT_DNS_SETTINGS });
   let records = $state<DnsRecord[]>([]);
   let hosts = $state<ManagedHostsEntry[]>([]);
+  let preflight = $state<DnsPreflight | null>(null);
   let loading = $state<boolean>(false);
 
   /** Per-action busy markers keyed by action name. */
   let busy = $state<Record<string, boolean>>({});
+
+  /** Session guard so a Play-triggered setup only auto-prompts once. */
+  let autoSetupTried = false;
 
   function isBusy(action: string): boolean {
     return busy[action] === true;
@@ -42,16 +47,18 @@ function createDnsStore() {
     if (!browser) return;
     loading = true;
     try {
-      const [s, set, recs, h] = await Promise.all([
+      const [s, set, recs, h, pf] = await Promise.all([
         safeInvoke<ResolverStatus>("dnsmasq_resolver_status"),
         safeInvoke<DnsmasqSettings>("get_dnsmasq_settings"),
         safeInvoke<DnsRecord[]>("list_dns_records"),
         safeInvoke<ManagedHostsEntry[]>("list_managed_hosts"),
+        safeInvoke<DnsPreflight>("dns_preflight"),
       ]);
       status = s;
       settings = set;
       records = recs;
       hosts = h;
+      preflight = pf;
     } catch {
       // safeInvoke pushed the toast.
     } finally {
@@ -128,6 +135,52 @@ function createDnsStore() {
     }
   }
 
+  /**
+   * One-click first-run setup. Installs PortBay's privileged helper (one
+   * macOS password prompt), which then writes /etc/resolver and restarts
+   * dnsmasq — after this, *.suffix resolves with no further prompts.
+   */
+  async function setupLocalDns(): Promise<void> {
+    if (isBusy("setup")) return;
+    setBusy("setup", true);
+    try {
+      await safeInvoke("setup_local_dns");
+      errorBus.push({
+        code: "DNS_SETUP_DONE",
+        whatHappened: "Local DNS is set up.",
+        whyItMatters:
+          "PortBay's privileged helper is installed and your project hostnames now resolve to this machine.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
+      await refresh();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      setBusy("setup", false);
+    }
+  }
+
+  /**
+   * Called from the Play button before a project starts. Checks routing
+   * readiness; if it isn't set up, runs the one-prompt setup *once* per
+   * session. Never throws and never blocks the project from starting — a
+   * project still works via localhost even if the user skips DNS setup.
+   */
+  async function ensureReady(): Promise<void> {
+    if (!browser) return;
+    try {
+      const pf = await safeInvoke<DnsPreflight>("dns_preflight");
+      preflight = pf;
+      if (pf.ready || autoSetupTried) return;
+      autoSetupTried = true;
+      await setupLocalDns();
+    } catch {
+      // Never block project start on a routing check.
+    }
+  }
+
   async function restart(): Promise<void> {
     if (isBusy("restart")) return;
     setBusy("restart", true);
@@ -194,6 +247,9 @@ function createDnsStore() {
     get hosts() {
       return hosts;
     },
+    get preflight() {
+      return preflight;
+    },
     get loading() {
       return loading;
     },
@@ -207,6 +263,8 @@ function createDnsStore() {
     uninstallResolver,
     restart,
     setSuffix,
+    setupLocalDns,
+    ensureReady,
   };
 }
 

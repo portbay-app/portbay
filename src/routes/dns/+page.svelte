@@ -371,6 +371,89 @@
       </header>
 
       <div class="px-8 py-6 space-y-4 max-w-3xl">
+        <!-- First-run setup / routing health -->
+        {#if dns.preflight}
+          {@const pf = dns.preflight}
+          <article
+            class="rounded-2xl px-5 py-4 border {pf.ready
+              ? 'bg-status-running/5 border-status-running/30'
+              : 'bg-amber-500/5 border-amber-500/30'}"
+          >
+            <header class="flex items-center justify-between gap-3 mb-3">
+              <div class="flex items-center gap-2 min-w-0">
+                <Icon
+                  name={pf.ready ? "circle-check" : "circle-alert"}
+                  size={15}
+                  class={pf.ready ? "text-status-running" : "text-amber-400"}
+                />
+                <h3 class="text-[13px] font-semibold text-fg">
+                  {pf.ready ? "Local DNS is set up" : "Set up local DNS"}
+                </h3>
+              </div>
+              {#if !pf.ready}
+                <button
+                  type="button"
+                  onclick={() => dns.setupLocalDns()}
+                  disabled={dns.isBusy("setup")}
+                  class="shrink-0 inline-flex items-center gap-1.5 h-8 px-3.5 rounded-md text-[12px] font-medium
+                         text-on-accent bg-accent hover:brightness-110 active:brightness-95
+                         disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
+                >
+                  {#if dns.isBusy("setup")}
+                    <Icon name="refresh-cw" size={11} class="animate-spin" />
+                    Setting up…
+                  {:else}
+                    <Icon name="lock" size={11} />
+                    Set up local DNS
+                  {/if}
+                </button>
+              {/if}
+            </header>
+
+            <p class="text-[11.5px] text-fg-muted leading-relaxed mb-3">
+              {#if pf.ready}
+                <code class="font-mono">*.{pf.suffix}</code> resolves to this machine
+                via PortBay's resolver on port {pf.dnsmasqPort}.
+              {:else}
+                One macOS password prompt installs PortBay's privileged helper; it
+                then routes <code class="font-mono">*.{pf.suffix}</code> here with no
+                further prompts.
+              {/if}
+            </p>
+
+            {#snippet check(label: string, ok: boolean)}
+              <div class="flex items-center gap-2 text-[12px]">
+                <Icon
+                  name={ok ? "circle-check" : "circle-stop"}
+                  size={13}
+                  class={ok ? "text-status-running" : "text-fg-subtle"}
+                />
+                <span class={ok ? "text-fg" : "text-fg-muted"}>{label}</span>
+              </div>
+            {/snippet}
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+              {@render check("Privileged helper", pf.helperInstalled)}
+              {@render check("Resolver installed", pf.resolverInstalled)}
+              {@render check("dnsmasq running", pf.dnsmasqRunning)}
+            </div>
+
+            {#if !pf.ready && (pf.port80InUse || pf.port443InUse)}
+              <p
+                class="mt-3 text-[11px] text-amber-300/90 leading-relaxed flex items-start gap-1.5"
+              >
+                <Icon name="info" size={12} class="mt-0.5 shrink-0" />
+                <span>
+                  Ports {pf.port80InUse ? "80" : ""}{pf.port80InUse && pf.port443InUse
+                    ? " and "
+                    : ""}{pf.port443InUse ? "443" : ""} are already in use. If your
+                  site shows another app's page, stop the other local web server
+                  (e.g. ServBay/Herd/Valet) so PortBay can serve it.
+                </span>
+              </p>
+            {/if}
+          </article>
+        {/if}
+
         <!-- Domain suffix -->
         <article class="bg-surface border border-border/70 rounded-2xl px-5 py-4">
           <header class="flex items-center gap-2 mb-3.5">

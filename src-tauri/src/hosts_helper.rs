@@ -72,6 +72,16 @@ pub enum HelperRequest {
         entries: Vec<HelperEntry>,
         domain_suffix: String,
     },
+    /// Write `/etc/resolver/<suffix>` pointing macOS at the local dnsmasq
+    /// port. Root-only — that's why it goes through the helper.
+    InstallResolver {
+        suffix: String,
+        port: u16,
+    },
+    /// Remove `/etc/resolver/<suffix>`.
+    RemoveResolver {
+        suffix: String,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -183,6 +193,19 @@ impl HostsHelperClient {
         })
     }
 
+    pub fn install_resolver(&self, suffix: &str, port: u16) -> Result<()> {
+        self.expect_ok(&HelperRequest::InstallResolver {
+            suffix: suffix.into(),
+            port,
+        })
+    }
+
+    pub fn remove_resolver(&self, suffix: &str) -> Result<()> {
+        self.expect_ok(&HelperRequest::RemoveResolver {
+            suffix: suffix.into(),
+        })
+    }
+
     fn expect_ok(&self, request: &HelperRequest) -> Result<()> {
         let _ = self.request(request)?;
         Ok(())
@@ -221,6 +244,115 @@ impl HostsHelperClient {
     }
 }
 
+/// Stable install location for the helper binary outside the app bundle.
+pub const INSTALLED_BIN: &str = "/usr/local/bin/portbay-hosts-helper";
+
+/// The LaunchDaemon plist that runs the helper as root at boot and keeps it
+/// alive. Installed to `/Library/LaunchDaemons/<PLIST_NAME>`.
+fn daemon_plist() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{HELPER_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{INSTALLED_BIN}</string>
+    <string>--socket</string><string>{SOCKET_PATH}</string>
+    <string>--hosts-file</string><string>/etc/hosts</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+"#
+    )
+}
+
+/// Install the helper as a root LaunchDaemon via a single macOS
+/// authorization prompt (`osascript … with administrator privileges`). Copies
+/// `helper_bin` into [`INSTALLED_BIN`], writes the plist, and (re)bootstraps
+/// the daemon. After this returns Ok the daemon is starting; callers should
+/// poll [`HostsHelperClient::is_available`] for the socket.
+#[cfg(target_os = "macos")]
+pub fn install_daemon(helper_bin: &Path) -> Result<()> {
+    use std::process::Command;
+
+    let plist_path = format!("/Library/LaunchDaemons/{PLIST_NAME}");
+    // The whole privileged install runs as one root shell script, so the user
+    // sees a single password prompt. Paths we interpolate are either constants
+    // or the resolved helper binary path (single-quoted).
+    let script = format!(
+        "#!/bin/sh\nset -e\n\
+         /bin/mkdir -p /usr/local/bin\n\
+         /bin/cp {src} '{INSTALLED_BIN}'\n\
+         /bin/chmod 755 '{INSTALLED_BIN}'\n\
+         /bin/cat > '{plist_path}' <<'PORTBAY_PLIST'\n{plist}PORTBAY_PLIST\n\
+         /bin/chmod 644 '{plist_path}'\n\
+         /bin/launchctl bootout system/{HELPER_LABEL} 2>/dev/null || true\n\
+         /bin/launchctl bootstrap system '{plist_path}'\n\
+         /bin/launchctl enable system/{HELPER_LABEL}\n",
+        src = shell_single_quote(&helper_bin.to_string_lossy()),
+        plist = daemon_plist(),
+    );
+
+    let tmp = std::env::temp_dir().join("portbay-helper-install.sh");
+    std::fs::write(&tmp, script).map_err(|e| HelperError::io(&tmp, e))?;
+
+    let apple = format!(
+        r#"do shell script "/bin/sh {}" with prompt "PortBay needs to install its privileged helper to manage local DNS and your hosts file." with administrator privileges"#,
+        applescript_escape(&tmp.to_string_lossy())
+    );
+    let output = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(&apple)
+        .output()
+        .map_err(|e| HelperError::io("osascript", e))?;
+    let _ = std::fs::remove_file(&tmp);
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("(-128)") || stderr.contains("User canceled") {
+        return Err(HelperError::BadRequest(
+            "cancelled — the authorization dialog was dismissed".into(),
+        ));
+    }
+    Err(HelperError::Protocol(format!(
+        "helper install failed: {}",
+        stderr.trim()
+    )))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn install_daemon(_helper_bin: &Path) -> Result<()> {
+    Err(HelperError::Protocol(
+        "privileged helper install is macOS-only in this build".into(),
+    ))
+}
+
+/// POSIX single-quote a string for safe interpolation into `/bin/sh`.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Escape a string for embedding inside an AppleScript double-quoted literal.
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 pub fn request_allowed(request: &HelperRequest) -> Result<()> {
     match request {
         HelperRequest::List | HelperRequest::Clear => Ok(()),
@@ -241,6 +373,9 @@ pub fn request_allowed(request: &HelperRequest) -> Result<()> {
                 ensure_host_matches_suffix(&entry.hostname, domain_suffix)?;
             }
             Ok(())
+        }
+        HelperRequest::InstallResolver { suffix, .. } | HelperRequest::RemoveResolver { suffix } => {
+            ensure_valid_resolver_suffix(suffix)
         }
     }
 }
@@ -272,6 +407,50 @@ pub fn handle_request(request: HelperRequest, manager: &HostsManager) -> Result<
             manager.replace_all(entries.into_iter().map(|entry| (entry.hostname, entry.ip)))?;
             Ok(HelperResponse::ok())
         }
+        HelperRequest::InstallResolver { suffix, port } => {
+            let path = crate::dnsmasq::resolver::resolver_file_path(&suffix);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| HelperError::io(parent, e))?;
+            }
+            std::fs::write(&path, crate::dnsmasq::resolver::resolver_file_content(port))
+                .map_err(|e| HelperError::io(&path, e))?;
+            Ok(HelperResponse::ok())
+        }
+        HelperRequest::RemoveResolver { suffix } => {
+            let path = crate::dnsmasq::resolver::resolver_file_path(&suffix);
+            match std::fs::remove_file(&path) {
+                Ok(()) => Ok(HelperResponse::ok()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HelperResponse::ok()),
+                Err(e) => Err(HelperError::io(&path, e)),
+            }
+        }
+    }
+}
+
+/// Validate a resolver suffix before it becomes a path under `/etc/resolver/`.
+/// Allows dot-separated DNS labels of `[a-z0-9-]` (so `portbay.test` is fine)
+/// and rejects anything that could escape the directory or inject shell/path
+/// metacharacters.
+fn ensure_valid_resolver_suffix(suffix: &str) -> Result<()> {
+    let trimmed = suffix.trim().trim_start_matches('.').trim_end_matches('.');
+    let valid = !trimmed.is_empty()
+        && trimmed.len() <= 253
+        && !trimmed.contains("..")
+        && trimmed.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(HelperError::BadRequest(format!(
+            "invalid resolver suffix `{suffix}`"
+        )))
     }
 }
 
@@ -391,6 +570,33 @@ mod tests {
         };
         assert!(handle_request(request, &manager).is_err());
         assert!(manager.list_managed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolver_suffix_validation_allows_local_rejects_traversal() {
+        assert!(ensure_valid_resolver_suffix("test").is_ok());
+        assert!(ensure_valid_resolver_suffix("portbay.test").is_ok());
+        assert!(ensure_valid_resolver_suffix(".portbay.test.").is_ok());
+        // Path-traversal / metacharacters must be rejected.
+        assert!(ensure_valid_resolver_suffix("../etc/passwd").is_err());
+        assert!(ensure_valid_resolver_suffix("a/b").is_err());
+        assert!(ensure_valid_resolver_suffix("a..b").is_err());
+        assert!(ensure_valid_resolver_suffix("foo;rm -rf").is_err());
+        assert!(ensure_valid_resolver_suffix("").is_err());
+    }
+
+    #[test]
+    fn request_allowed_gates_resolver_ops_on_suffix() {
+        assert!(request_allowed(&HelperRequest::InstallResolver {
+            suffix: "portbay.test".into(),
+            port: 53053,
+        })
+        .is_ok());
+        assert!(request_allowed(&HelperRequest::InstallResolver {
+            suffix: "../bad".into(),
+            port: 53053,
+        })
+        .is_err());
     }
 
     #[test]
