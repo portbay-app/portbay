@@ -8,9 +8,7 @@
 //! a future optimisation card if measurement shows full-load latency
 //! becomes a problem (sub-100 ms in the spike at <50 routes).
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use crate::caddy::{
@@ -88,9 +86,7 @@ pub(super) async fn reconcile(
 }
 
 fn hash_bytes(b: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    b.hash(&mut h);
-    h.finish()
+    crate::util::stable_hash(b)
 }
 
 #[cfg(test)]
@@ -157,7 +153,6 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010, true)).unwrap();
         let h_https = hash_of(&r, &HashMap::new());
-        r.list_projects(); // borrow-checker placeholder; replace project below
         let mut r2 = Registry::new("test");
         r2.add_project(next_project("a", 3010, false)).unwrap();
         let h_http = hash_of(&r2, &HashMap::new());

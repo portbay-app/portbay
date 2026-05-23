@@ -304,23 +304,9 @@ pub(crate) async fn fetch_pc_state(state: &AppState) -> Option<HashMap<String, P
     Some(processes.into_iter().map(|p| (p.name.clone(), p)).collect())
 }
 
-/// Lowercase + hyphenate + collapse runs of non-alphanumerics into a single
-/// dash. Lifted from `bin/portbay.rs::slugify` — both surfaces produce the
-/// same ids from the same inputs.
-pub(crate) fn slugify(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_dash = true;
-    for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
+// Single source of truth lives in `crate::util`. Re-exported here so the
+// established `crate::commands::projects::slugify` path keeps resolving.
+pub(crate) use crate::util::slugify;
 
 #[cfg(test)]
 mod tests {

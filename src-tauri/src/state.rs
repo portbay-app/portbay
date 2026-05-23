@@ -153,7 +153,7 @@ impl AppState {
     pub fn preferences_snapshot(&self) -> Preferences {
         self.preferences
             .lock()
-            .expect("preferences mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
@@ -162,7 +162,7 @@ impl AppState {
     /// exit as a crash, so a clean Stop never gets painted red even
     /// when the child runtime exits with a non-zero code.
     pub fn mark_stop_requested(&self, project_id: &str) {
-        let mut guard = self.stop_intents.lock().expect("stop_intents mutex poisoned");
+        let mut guard = self.stop_intents.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(project_id.to_string(), Instant::now());
         // Garbage-collect entries older than the intent window so the
         // map can't grow unboundedly in long-running sessions.
@@ -172,7 +172,7 @@ impl AppState {
     /// True if Stop was requested for this project recently enough that
     /// the next observed exit should still be attributed to that Stop.
     pub fn recently_stop_requested(&self, project_id: &str) -> bool {
-        let guard = self.stop_intents.lock().expect("stop_intents mutex poisoned");
+        let guard = self.stop_intents.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .get(project_id)
             .map(|ts| ts.elapsed() < STOP_INTENT_WINDOW)
@@ -184,7 +184,7 @@ impl AppState {
     pub fn pc_client(&self) -> Result<PcClient, crate::error::AppError> {
         self.pc_client
             .lock()
-            .expect("pc_client mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or(crate::error::AppError::SidecarDown("process-compose"))
     }
@@ -195,7 +195,7 @@ impl AppState {
     pub fn caddy_client(&self) -> Result<CaddyClient, crate::error::AppError> {
         self.caddy_client
             .lock()
-            .expect("caddy_client mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or(crate::error::AppError::SidecarDown("caddy"))
     }
@@ -213,16 +213,16 @@ impl AppState {
         let client = self
             .pc
             .lock()
-            .expect("pc mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .start(app, config_path)?;
-        *self.pc_client.lock().expect("pc_client mutex poisoned") = Some(client);
+        *self.pc_client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
         Ok(())
     }
 
     /// Stop the bundled process-compose sidecar and clear the cached client.
     pub fn shutdown_pc(&self) {
-        self.pc.lock().expect("pc mutex poisoned").stop();
-        *self.pc_client.lock().expect("pc_client mutex poisoned") = None;
+        self.pc.lock().unwrap_or_else(|e| e.into_inner()).stop();
+        *self.pc_client.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Start (or restart) the bundled Caddy sidecar against the bootstrap
@@ -244,7 +244,7 @@ impl AppState {
         let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
         let config_path = write_caddy_bootstrap_config(admin_port, https_port)?;
 
-        let client = self.caddy.lock().expect("caddy mutex poisoned").start(
+        let client = self.caddy.lock().unwrap_or_else(|e| e.into_inner()).start(
             app,
             &config_path,
             admin_port,
@@ -252,7 +252,7 @@ impl AppState {
         *self
             .caddy_client
             .lock()
-            .expect("caddy_client mutex poisoned") = Some(client.clone());
+            .unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
 
         // Poll admin endpoint until the daemon responds. The sidecar
         // command line was already accepted; the child may still be in
@@ -272,11 +272,11 @@ impl AppState {
 
     /// Stop the bundled Caddy sidecar and clear the cached client.
     pub fn shutdown_caddy(&self) {
-        self.caddy.lock().expect("caddy mutex poisoned").stop();
+        self.caddy.lock().unwrap_or_else(|e| e.into_inner()).stop();
         *self
             .caddy_client
             .lock()
-            .expect("caddy_client mutex poisoned") = None;
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Start the dnsmasq sidecar against the registry's domain suffix.
@@ -301,14 +301,14 @@ impl AppState {
         let config_path = dnsmasq::write_config(&reg.domain_suffix, port, &reg.dnsmasq)?;
         self.dnsmasq
             .lock()
-            .expect("dnsmasq mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .start(app, &config_path, port)?;
         Ok(())
     }
 
     /// Stop the dnsmasq sidecar. Idempotent.
     pub fn shutdown_dnsmasq(&self) {
-        self.dnsmasq.lock().expect("dnsmasq mutex poisoned").stop();
+        self.dnsmasq.lock().unwrap_or_else(|e| e.into_inner()).stop();
     }
 
     /// Start the Mailpit sidecar with SMTP + web UI listeners on
@@ -331,14 +331,14 @@ impl AppState {
         let db_path = mailpit::lifecycle::default_db_path()?;
         self.mailpit
             .lock()
-            .expect("mailpit mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .start(app, smtp, ui, &db_path)?;
         Ok(())
     }
 
     /// Stop the Mailpit sidecar. Idempotent.
     pub fn shutdown_mailpit(&self) {
-        self.mailpit.lock().expect("mailpit mutex poisoned").stop();
+        self.mailpit.lock().unwrap_or_else(|e| e.into_inner()).stop();
     }
 }
 

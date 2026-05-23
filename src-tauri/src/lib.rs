@@ -23,6 +23,7 @@ pub mod state;
 pub mod telemetry;
 pub mod tray;
 pub mod tunnel;
+pub mod util;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -154,7 +155,7 @@ pub fn run() {
             std::fs::write(&yaml_path, &initial_yaml).map_err(boxed)?;
 
             // Resolve mkcert; None is a tolerable degraded state.
-            let mkcert_binary = resolve_mkcert_binary(&app.handle());
+            let mkcert_binary = resolve_mkcert_binary(app.handle());
             let mkcert = mkcert_binary
                 .as_ref()
                 .and_then(|p| Mkcert::default_in_data_dir(p.clone()));
@@ -179,7 +180,7 @@ pub fn run() {
             // readiness) so we drive it with a block_on; the wait is
             // bounded by `CADDY_READINESS_TIMEOUT`.
             let state: tauri::State<AppState> = app.state();
-            state.boot_pc(&app.handle(), &yaml_path).map_err(boxed)?;
+            state.boot_pc(app.handle(), &yaml_path).map_err(boxed)?;
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::block_on(async {
@@ -193,7 +194,7 @@ pub fn run() {
             // noise — no production queries route through it yet — so
             // a binary-missing or spawn failure is logged but does
             // not block startup.
-            if let Err(e) = state.boot_dnsmasq(&app.handle()) {
+            if let Err(e) = state.boot_dnsmasq(app.handle()) {
                 tracing::warn!(error = %e, "dnsmasq sidecar did not start");
             }
 
@@ -201,7 +202,7 @@ pub fn run() {
             // dnsmasq: useful for catching outgoing SMTP from local
             // projects, but not on the critical path of any other
             // sidecar.
-            if let Err(e) = state.boot_mailpit(&app.handle()) {
+            if let Err(e) = state.boot_mailpit(app.handle()) {
                 tracing::warn!(error = %e, "mailpit sidecar did not start");
             }
 
@@ -242,7 +243,7 @@ pub fn run() {
                 state.preferences_snapshot()
             };
             if prefs.show_tray_icon {
-                if let Err(e) = crate::tray::install(&app.handle()) {
+                if let Err(e) = crate::tray::install(app.handle()) {
                     tracing::warn!(error = %e, "menu-bar tray failed to initialise");
                 }
             }

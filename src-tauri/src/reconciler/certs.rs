@@ -13,9 +13,7 @@
 //! `Failed` for the step; Caddy will still POST /load without certs and
 //! the user sees a typed sidecar warning surface elsewhere.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 
 use crate::caddy::CertPaths;
 use crate::mkcert::Mkcert;
@@ -142,9 +140,13 @@ fn lookup_only(reg: &Registry, mkcert: &Mkcert) -> HashMap<String, CertPaths> {
 fn lookup_set_hash(lookup: &HashMap<String, CertPaths>) -> u64 {
     let mut ids: Vec<&String> = lookup.keys().collect();
     ids.sort();
-    let mut h = DefaultHasher::new();
-    ids.hash(&mut h);
-    h.finish()
+    // Newline-joined sorted ids → stable across Rust toolchains.
+    let joined = ids
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::util::stable_hash(joined.as_bytes())
 }
 
 #[cfg(test)]

@@ -6,8 +6,6 @@
 //! running daemon — every YAML mutation costs one restart. This is a
 //! known upstream constraint, called out in the kanban Outcome.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use tauri::AppHandle;
@@ -251,9 +249,7 @@ pub fn default_yaml_path() -> std::io::Result<PathBuf> {
 }
 
 fn hash_string(s: &str) -> u64 {
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
+    crate::util::stable_hash(s.as_bytes())
 }
 
 /// Crate-internal hash helper exposed so `Reconciler::prime_pc_cache_from_yaml`

@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::registry::{DatabaseEngine, DatabaseInstance};
@@ -93,24 +94,30 @@ fn spec(engine: DatabaseEngine) -> &'static EngineSpec {
 // ===========================================================================
 
 /// Resolve the Homebrew prefix. Probes `brew --prefix`; falls back to the
-/// two standard locations. Cached per-process would be nice but detection
-/// is infrequent, so we keep it simple.
+/// two standard locations. Memoised for the process lifetime — `brew --prefix`
+/// forks a subprocess, and `list_database_instances` would otherwise re-run it
+/// several times per status tick.
 pub fn brew_prefix() -> Option<PathBuf> {
-    if let Ok(brew) = which::which("brew") {
-        if let Ok(out) = run_capture(&brew, &["--prefix"], Duration::from_secs(8)) {
-            let p = PathBuf::from(out.trim());
-            if p.exists() {
-                return Some(p);
+    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            if let Ok(brew) = which::which("brew") {
+                if let Ok(out) = run_capture(&brew, &["--prefix"], Duration::from_secs(8)) {
+                    let p = PathBuf::from(out.trim());
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
             }
-        }
-    }
-    for guess in ["/opt/homebrew", "/usr/local"] {
-        let p = PathBuf::from(guess);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
+            for guess in ["/opt/homebrew", "/usr/local"] {
+                let p = PathBuf::from(guess);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+            None
+        })
+        .clone()
 }
 
 fn opt_bin_dirs(engine: DatabaseEngine, prefix: Option<&Path>) -> Vec<PathBuf> {

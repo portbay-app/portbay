@@ -5,8 +5,6 @@
 //! into the generic `RuntimeInstall` + `ConfigTab` surface the
 //! `/languages` panel renders.
 
-use std::path::PathBuf;
-
 use crate::php::{self, PhpInstall, PhpSource};
 use crate::runtimes::{
     ConfigTab, InstallSource, KvRow, LanguageRuntime, RuntimeInstall,
@@ -188,14 +186,4 @@ fn placeholder_install(install: &RuntimeInstall) -> PhpInstall {
         loaded_extensions: Vec::new(),
         source: PhpSource::System,
     }
-}
-
-#[allow(dead_code)]
-fn _typecheck_pathbuf_export() -> &'static std::path::Path {
-    std::path::Path::new(".")
-}
-
-#[allow(dead_code)]
-fn _suppress_unused_pathbuf() {
-    let _ = PathBuf::new();
 }

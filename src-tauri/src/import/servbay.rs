@@ -200,7 +200,6 @@ fn parse_block(block: &str) -> ParsedVhost {
         }
         if let Some(rest) = line.strip_prefix("server_name") {
             out.server_name = rest
-                .trim()
                 .split_whitespace()
                 .next()
                 .unwrap_or("")

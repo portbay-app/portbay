@@ -3,10 +3,10 @@
 //! Surface:
 //! - A persistent menu-bar icon that updates colour to reflect the
 //!   aggregate health of all PortBay-managed projects:
-//!     gray  → daemon down or no projects
-//!     blue  → at least one project starting
-//!     green → all running projects healthy
-//!     red   → at least one project crashed / port-conflicted
+//!   gray  → daemon down or no projects
+//!   blue  → at least one project starting
+//!   green → all running projects healthy
+//!   red   → at least one project crashed / port-conflicted
 //! - A left/right-click menu listing every registered project with a
 //!   Start/Stop/Restart/Open submenu, plus the global controls (Stop all,
 //!   Show window, Preferences, Quit).
@@ -83,7 +83,7 @@ pub enum AggregateStatus {
 }
 
 impl AggregateStatus {
-    pub fn from_iter<I: IntoIterator<Item = ProjectStatus>>(statuses: I) -> Self {
+    pub fn from_statuses<I: IntoIterator<Item = ProjectStatus>>(statuses: I) -> Self {
         let mut any_error = false;
         let mut any_starting = false;
         let mut any_running = false;
@@ -209,7 +209,7 @@ pub fn refresh(
     statuses: &std::collections::HashMap<String, ProjectStatus>,
 ) {
     let state: tauri::State<AppState> = app.state();
-    let aggregate = AggregateStatus::from_iter(
+    let aggregate = AggregateStatus::from_statuses(
         projects
             .iter()
             .map(|p| statuses.get(p.id.as_str()).copied().unwrap_or(ProjectStatus::Stopped)),
@@ -400,13 +400,13 @@ mod tests {
 
     #[test]
     fn empty_aggregate_is_idle() {
-        assert_eq!(AggregateStatus::from_iter([]), AggregateStatus::Idle);
+        assert_eq!(AggregateStatus::from_statuses([]), AggregateStatus::Idle);
     }
 
     #[test]
     fn all_stopped_is_idle() {
         let s = [ProjectStatus::Stopped, ProjectStatus::Stopped];
-        assert_eq!(AggregateStatus::from_iter(s), AggregateStatus::Idle);
+        assert_eq!(AggregateStatus::from_statuses(s), AggregateStatus::Idle);
     }
 
     #[test]
@@ -415,7 +415,7 @@ mod tests {
         // should see the "transition in progress" colour rather than
         // green so the tray reflects in-flight work.
         let s = [ProjectStatus::Running, ProjectStatus::Starting];
-        assert_eq!(AggregateStatus::from_iter(s), AggregateStatus::Starting);
+        assert_eq!(AggregateStatus::from_statuses(s), AggregateStatus::Starting);
     }
 
     #[test]
@@ -425,13 +425,13 @@ mod tests {
             ProjectStatus::Starting,
             ProjectStatus::Crashed,
         ];
-        assert_eq!(AggregateStatus::from_iter(s), AggregateStatus::Error);
+        assert_eq!(AggregateStatus::from_statuses(s), AggregateStatus::Error);
     }
 
     #[test]
     fn port_conflict_is_an_error_state() {
         let s = [ProjectStatus::Running, ProjectStatus::PortConflict];
-        assert_eq!(AggregateStatus::from_iter(s), AggregateStatus::Error);
+        assert_eq!(AggregateStatus::from_statuses(s), AggregateStatus::Error);
     }
 
     #[test]
@@ -442,7 +442,7 @@ mod tests {
         // running colour (green) at the tray level so we don't claim
         // red for an issue the user can't fix from the menu bar.
         let s = [ProjectStatus::Running, ProjectStatus::Unhealthy];
-        assert_eq!(AggregateStatus::from_iter(s), AggregateStatus::Running);
+        assert_eq!(AggregateStatus::from_statuses(s), AggregateStatus::Running);
     }
 
 }
