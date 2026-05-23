@@ -36,7 +36,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use console::{style, Term};
 use std::net::Ipv4Addr;
 
@@ -73,8 +74,16 @@ struct Cli {
     #[arg(long, global = true, value_name = "PORT")]
     pc_port: Option<u16>,
 
+    /// Hidden helper used by shell completion scripts to list project ids.
+    #[arg(long, hide = true, global = true)]
+    complete_projects: bool,
+
+    /// Hidden helper used by shell completion scripts to list running project ids.
+    #[arg(long, hide = true, global = true)]
+    complete_running_projects: bool,
+
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -123,6 +132,12 @@ enum Cmd {
     Export {
         /// Project id.
         id: String,
+    },
+
+    /// Generate shell completion scripts.
+    Completions {
+        /// Shell to generate completions for.
+        shell: Shell,
     },
 }
 
@@ -271,8 +286,22 @@ fn main() -> ExitCode {
 }
 
 async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
+    if cli.complete_projects {
+        return cmd_complete_projects(&cli, false).await;
+    }
+    if cli.complete_running_projects {
+        return cmd_complete_projects(&cli, true).await;
+    }
     let ctx = CliContext::from_args(&cli)?;
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        let mut command = Cli::command();
+        command
+            .print_help()
+            .map_err(|e| CliError::Other(e.to_string()))?;
+        println!();
+        return Ok(ExitCode::SUCCESS);
+    };
+    match cmd {
         Cmd::List => cmd_list(&ctx).await,
         Cmd::Status { id } => cmd_status(&ctx, id.as_deref()).await,
         Cmd::Add(args) => cmd_add(&ctx, args).await,
@@ -285,7 +314,43 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Doctor => cmd_doctor(&ctx).await,
         Cmd::Hosts(sub) => cmd_hosts(&ctx, sub).await,
         Cmd::Export { id } => cmd_export(&ctx, &id).await,
+        Cmd::Completions { shell } => cmd_completions(shell),
     }
+}
+
+fn cmd_completions(shell: Shell) -> Result<ExitCode, CliError> {
+    let mut command = Cli::command();
+    let mut stdout = std::io::stdout();
+    generate(shell, &mut command, "portbay", &mut stdout);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_complete_projects(cli: &Cli, running_only: bool) -> Result<ExitCode, CliError> {
+    let ctx = CliContext::from_args(cli)?;
+    let reg = ctx.load_registry()?;
+    let running = if running_only {
+        fetch_pc_state(&ctx).await
+    } else {
+        None
+    };
+    let mut ids: Vec<String> = reg
+        .list_projects()
+        .iter()
+        .filter(|p| {
+            if !running_only {
+                return true;
+            }
+            running
+                .as_ref()
+                .and_then(|m| m.get(p.id.as_str()))
+                .map(|p| p.is_running)
+                .unwrap_or(false)
+        })
+        .map(|p| p.id.as_str().to_owned())
+        .collect();
+    ids.sort();
+    println!("{}", ids.join(" "));
+    Ok(ExitCode::SUCCESS)
 }
 
 // =============================================================================
