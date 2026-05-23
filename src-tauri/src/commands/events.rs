@@ -160,7 +160,7 @@ pub fn spawn_status_poller(app: AppHandle) {
 /// under the failed project row. We tail the last few lines of the
 /// project's log file and translate known error patterns into actionable
 /// messages — generic "exit code N" tells the user nothing; "Port 3010
-/// is already in use (likely ServBay)" tells them exactly what to fix.
+/// is already in use" tells them exactly what to fix.
 ///
 /// Best-effort: any I/O failure falls back to the bare exit-code line.
 fn crashed_summary(state: &AppState, project_id: &str, exit_code: i32) -> String {
@@ -170,8 +170,9 @@ fn crashed_summary(state: &AppState, project_id: &str, exit_code: i32) -> String
     // Pattern → human summary. Ordered: most specific first.
     if let Some(port) = parse_eaddrinuse(&tail) {
         return format!(
-            "Port {port} is already in use — another process is holding it. \
-             Stop the other process (ServBay, MAMP, an existing dev server) and try again.",
+            "Port {port} is already in use by another local-dev server. \
+             Stop the process holding it (or change this project's port in \
+             its detail panel) and try again.",
         );
     }
     if tail.iter().any(|l| {
