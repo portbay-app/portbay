@@ -56,7 +56,8 @@
       "binaries/caddy",
       "binaries/mkcert",
       "binaries/mailpit",
-      "binaries/cloudflared"
+      "binaries/cloudflared",
+      "binaries/dnsmasq"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0",
