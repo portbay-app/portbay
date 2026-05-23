@@ -6,9 +6,8 @@
   onboarding re-run, migration import, about) so nothing regresses.
 
   Save model: every control writes through `preferences.update(...)`
-  on change — the changes persist immediately. The footer "Save
-  Changes" button is a no-op acknowledgement (visible affordance,
-  no buffer-then-commit cycle).
+  on change — the changes persist immediately. There is no Save button,
+  because there's nothing to buffer-then-commit; one would only mislead.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
@@ -228,20 +227,6 @@
   }
 
   // ---- Settings actions ----
-  function saveChangesAck() {
-    // Every control writes through preferences.update() on change, so
-    // there's nothing to commit here. The button exists as an explicit
-    // affordance — confirming the changes are persisted.
-    errorBus.push({
-      code: "SETTINGS_SAVED",
-      whatHappened: "Settings saved.",
-      whyItMatters: "Every change is persisted as you make it.",
-      whoCausedIt: "system",
-      severity: "success",
-      actions: [],
-    });
-  }
-
   let restoreArmed = $state<boolean>(false);
   let resetArmed = $state<boolean>(false);
 
@@ -770,21 +755,9 @@
     </div>
   </section>
 
-  <!-- Footer actions -->
+  <!-- Footer actions — settings persist on change, so there's no Save. -->
   <div class="flex items-center justify-between gap-3 pt-2">
     <div class="flex items-center gap-3">
-      <button
-        type="button"
-        onclick={saveChangesAck}
-        class="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg
-               text-[13px] font-medium tracking-tight
-               bg-accent text-on-accent shadow-sm
-               hover:brightness-110 active:brightness-95
-               focus-visible:outline-none focus-visible:ring-2
-               focus-visible:ring-accent/40 transition"
-      >
-        Save Changes
-      </button>
       <button
         type="button"
         onclick={restoreDefaults}

@@ -22,7 +22,6 @@
   import AddDatabaseWizard from "$lib/components/databases/AddDatabaseWizard.svelte";
   import { ProjectDetailPanel } from "$lib/components/projects";
   import { LogViewer } from "$lib/components/logs";
-  import TunnelModal from "$lib/components/tunnels/TunnelModal.svelte";
   import GroupEditorModal from "$lib/components/groups/GroupEditorModal.svelte";
   import CommandPalette from "$lib/components/palette/CommandPalette.svelte";
   import { ConfirmDialog } from "$lib/components/atoms";
@@ -189,7 +188,6 @@
   <AddDatabaseWizard />
   <ProjectDetailPanel />
   <LogViewer />
-  <TunnelModal />
   <GroupEditorModal />
   <CommandPalette />
   <ConfirmDialog />
