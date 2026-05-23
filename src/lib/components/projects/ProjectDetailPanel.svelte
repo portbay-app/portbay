@@ -14,6 +14,7 @@
   import EnvEditor from "./EnvEditor.svelte";
   import AdvancedFields from "./AdvancedFields.svelte";
   import ProjectDbConnections from "./ProjectDbConnections.svelte";
+  import ArtifactsSection from "./ArtifactsSection.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
@@ -682,6 +683,9 @@
 
       <!-- Database connection(s) parsed from the project's .env (if any) -->
       <ProjectDbConnections {project} />
+
+      <!-- Build artifacts (disk usage + clean), if any are present -->
+      <ArtifactsSection {project} />
 
       <!-- Advanced — tags / extra ports / services / PHP -->
       <DashboardCard title="Advanced" flush>
