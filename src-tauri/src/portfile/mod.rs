@@ -184,6 +184,7 @@ pub fn materialise_project(
         tags: plan.file.tags.clone(),
         document_root: plan.file.document_root.clone(),
         php_version: plan.file.php_version.clone(),
+        runtime: None,
     })
 }
 
@@ -226,6 +227,7 @@ mod tests {
             tags: vec!["client:demo".into()],
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
+            runtime: None,
         }
     }
 

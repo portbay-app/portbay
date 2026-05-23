@@ -413,6 +413,7 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            runtime: None,
         }
     }
 
@@ -434,6 +435,7 @@ mod tests {
             tags: vec![],
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
+            runtime: None,
         }
     }
 

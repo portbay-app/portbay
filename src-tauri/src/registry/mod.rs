@@ -16,15 +16,87 @@ pub mod types;
 pub use error::{RegistryError, Result};
 pub use types::{
     DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, Group, Project,
-    ProjectId, ProjectType, Readiness,
+    ProjectId, ProjectType, Readiness, Runtime,
 };
 
-/// The registry-file schema version this build can read and write.
+/// The registry-file schema version this build reads and writes.
 ///
-/// On load, a version higher than this is rejected with
-/// [`RegistryError::UnsupportedVersion`]. Lower versions go through
-/// `migrate()` (currently a no-op — we'll fill it in when v2 ships).
-pub const SUPPORTED_VERSION: u32 = 1;
+/// On load, a higher version is rejected with
+/// [`RegistryError::UnsupportedVersion`]; a lower version is upgraded by
+/// [`migrate`] and the file is rewritten in the new shape (see
+/// `store::load_from`).
+///
+/// ## Version history
+/// - **v1** — original shape (`ASSESSMENT_AND_PLAN.md` §7.1).
+/// - **v2** — adds [`Project::runtime`]; migrated from the legacy
+///   `php_version` field.
+pub const SUPPORTED_VERSION: u32 = 2;
+
+/// Upgrade a raw registry JSON document from `from_version` up to
+/// [`SUPPORTED_VERSION`], applying each version step in order. Every step
+/// fills new fields from the old shape (or sensible defaults) and never
+/// drops data, so the result deserializes cleanly into [`Registry`].
+///
+/// Callers reject a `from_version` greater than [`SUPPORTED_VERSION`] before
+/// calling this. A version with no registered step is a bug and surfaces as
+/// [`RegistryError::Migration`].
+pub fn migrate(value: serde_json::Value, from_version: u32) -> Result<serde_json::Value> {
+    let mut value = value;
+    let mut version = from_version;
+    while version < SUPPORTED_VERSION {
+        value = match version {
+            1 => migrate_v1_to_v2(value)?,
+            other => {
+                return Err(RegistryError::Migration {
+                    from: other,
+                    reason: format!("no migration step from v{other}"),
+                });
+            }
+        };
+        version += 1;
+    }
+    Ok(value)
+}
+
+/// v1 → v2: introduce [`Project::runtime`]. v1 only ever pinned a PHP
+/// version (`php_version`), so projects carrying one gain the structured
+/// equivalent `{ "lang": "php", "version": … }`. Every other field is
+/// carried over verbatim, and `php_version` is intentionally preserved —
+/// current consumers still read it.
+fn migrate_v1_to_v2(value: serde_json::Value) -> Result<serde_json::Value> {
+    let mut obj = match value {
+        serde_json::Value::Object(map) => map,
+        _ => {
+            return Err(RegistryError::Migration {
+                from: 1,
+                reason: "registry root is not a JSON object".into(),
+            });
+        }
+    };
+
+    obj.insert("version".into(), serde_json::json!(2));
+
+    if let Some(serde_json::Value::Array(projects)) = obj.get_mut("projects") {
+        for project in projects.iter_mut() {
+            let serde_json::Value::Object(p) = project else {
+                continue;
+            };
+            let has_runtime = p.get("runtime").is_some_and(|r| !r.is_null());
+            if has_runtime {
+                continue;
+            }
+            if let Some(ver) = p.get("php_version").and_then(|v| v.as_str()) {
+                let ver = ver.to_owned();
+                p.insert(
+                    "runtime".into(),
+                    serde_json::json!({ "lang": "php", "version": ver }),
+                );
+            }
+        }
+    }
+
+    Ok(serde_json::Value::Object(obj))
+}
 
 /// The top-level registry document.
 ///
@@ -62,17 +134,6 @@ impl Registry {
             databases: Vec::new(),
             dnsmasq: DnsmasqSettings::default(),
         }
-    }
-
-    /// Reject registries whose `version` is newer than this build supports.
-    pub(crate) fn validate_version(&self) -> Result<()> {
-        if self.version > SUPPORTED_VERSION {
-            return Err(RegistryError::UnsupportedVersion {
-                found: self.version,
-                supported: SUPPORTED_VERSION,
-            });
-        }
-        Ok(())
     }
 
     // ---- Project CRUD ------------------------------------------------------
@@ -248,6 +309,7 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            runtime: None,
         }
     }
 
@@ -360,16 +422,90 @@ mod tests {
         assert_eq!(reg.dnsmasq.cache_size, 150);
     }
 
+    // ---- Migration --------------------------------------------------------
+
+    /// A representative v1 registry blob: one PHP project (with `php_version`)
+    /// and one Node project (without), plus a group and the dnsmasq block —
+    /// the shape a real user's file would have before the v2 bump.
+    fn v1_registry_json() -> serde_json::Value {
+        serde_json::json!({
+            "version": 1,
+            "domain_suffix": "test",
+            "projects": [
+                {
+                    "id": "legacy-shop",
+                    "name": "Legacy Shop",
+                    "path": "/tmp/legacy-shop",
+                    "type": "php",
+                    "hostname": "legacy-shop.test",
+                    "https": true,
+                    "document_root": "public",
+                    "php_version": "8.3"
+                },
+                {
+                    "id": "marketing-site",
+                    "name": "Marketing Site",
+                    "path": "/tmp/marketing-site",
+                    "type": "next",
+                    "start_command": "pnpm dev",
+                    "port": 3010,
+                    "hostname": "marketing-site.test",
+                    "https": true
+                }
+            ],
+            "groups": [
+                { "id": "suite", "name": "Suite", "projects": ["legacy-shop", "marketing-site"] }
+            ]
+        })
+    }
+
     #[test]
-    fn version_above_supported_is_rejected() {
-        let mut r = Registry::new("test");
-        r.version = SUPPORTED_VERSION + 1;
-        match r.validate_version() {
-            Err(RegistryError::UnsupportedVersion { found, supported }) => {
-                assert_eq!(found, SUPPORTED_VERSION + 1);
-                assert_eq!(supported, SUPPORTED_VERSION);
-            }
-            other => panic!("expected UnsupportedVersion, got {other:?}"),
-        }
+    fn migrate_v1_to_v2_derives_runtime_from_php_version() {
+        let migrated = migrate(v1_registry_json(), 1).unwrap();
+        let reg: Registry = serde_json::from_value(migrated).unwrap();
+
+        assert_eq!(reg.version, 2);
+
+        // The PHP project gains a structured runtime derived from php_version,
+        // and the legacy field is preserved (no loss).
+        let php = reg.get_project(&ProjectId::new("legacy-shop")).unwrap();
+        assert_eq!(
+            php.runtime,
+            Some(Runtime {
+                lang: "php".into(),
+                version: "8.3".into()
+            })
+        );
+        assert_eq!(php.php_version.as_deref(), Some("8.3"));
+
+        // The non-PHP project has no runtime to derive — left as None.
+        let next = reg.get_project(&ProjectId::new("marketing-site")).unwrap();
+        assert!(next.runtime.is_none());
+
+        // Nothing else was dropped.
+        assert_eq!(reg.domain_suffix, "test");
+        assert_eq!(reg.list_projects().len(), 2);
+        assert_eq!(reg.list_groups().len(), 1);
+    }
+
+    #[test]
+    fn migrate_is_idempotent_when_runtime_already_present() {
+        // Running the v1→v2 step over a doc that already has a runtime must
+        // not clobber it.
+        let mut v1 = v1_registry_json();
+        v1["projects"][0]["runtime"] = serde_json::json!({ "lang": "php", "version": "7.4" });
+        let migrated = migrate(v1, 1).unwrap();
+        let reg: Registry = serde_json::from_value(migrated).unwrap();
+        let php = reg.get_project(&ProjectId::new("legacy-shop")).unwrap();
+        assert_eq!(php.runtime.as_ref().unwrap().version, "7.4");
+    }
+
+    #[test]
+    fn migrate_from_current_version_is_a_noop() {
+        // Already at SUPPORTED_VERSION: migrate returns the value untouched.
+        let mut doc = v1_registry_json();
+        doc["version"] = serde_json::json!(SUPPORTED_VERSION);
+        let out = migrate(doc.clone(), SUPPORTED_VERSION).unwrap();
+        assert_eq!(out, doc);
     }
 }
