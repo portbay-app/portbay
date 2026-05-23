@@ -16,6 +16,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
   import { Icon } from "$lib/components/atoms";
   import LanguageMark from "$lib/components/runtimes/LanguageMark.svelte";
@@ -96,7 +97,63 @@
     nvm: "bg-cyan-500/15 text-cyan-300 light:text-cyan-700 border-cyan-500/30",
     pyenv: "bg-blue-500/15 text-blue-300 light:text-blue-700 border-blue-500/30",
     system: "bg-fg-subtle/15 text-fg-subtle border-fg-subtle/30",
+    manual:
+      "bg-fuchsia-500/15 text-fuchsia-300 light:text-fuchsia-700 border-fuchsia-500/30",
   };
+
+  /** Language currently running an add-by-path probe — disables its row. */
+  let busyLang = $state<string | null>(null);
+
+  /**
+   * Register an existing binary the auto-detector didn't find. PortBay
+   * reuses it in place (detect-first); it is never copied or re-installed.
+   */
+  async function addByPath(langId: string, displayName: string) {
+    const picked = await openDialog({
+      directory: false,
+      multiple: false,
+      title: `Select a ${displayName} binary`,
+    });
+    if (typeof picked !== "string") return;
+    busyLang = langId;
+    try {
+      languages = await safeInvoke<LanguageView[]>("add_runtime_by_path", {
+        lang: langId,
+        path: picked,
+      });
+    } catch {
+      /* safeInvoke toasted the envelope */
+    } finally {
+      busyLang = null;
+    }
+  }
+
+  /** Set (or clear, when `version` is null) the default version for a language. */
+  async function setDefault(langId: string, version: string | null) {
+    try {
+      languages = await safeInvoke<LanguageView[]>("set_default_runtime", {
+        lang: langId,
+        version,
+      });
+    } catch {
+      /* toast */
+    }
+  }
+
+  /** Remove a manually-added install (PortBay never touches the binary itself). */
+  async function removeManual(langId: string, version: string) {
+    try {
+      languages = await safeInvoke<LanguageView[]>("remove_runtime_path", {
+        lang: langId,
+        version,
+      });
+      if (selectedKey?.langId === langId && selectedKey?.version === version) {
+        selectedKey = null;
+      }
+    } catch {
+      /* toast */
+    }
+  }
 
   async function copyHint(hint: string) {
     try {
@@ -233,6 +290,15 @@
                           {version.install.version}
                         </span>
                       </span>
+                      {#if lang.defaultVersion === version.install.version}
+                        <span
+                          class="text-[9px] px-1 py-0.5 rounded bg-accent/15
+                                 text-accent border border-accent/30"
+                          title="Default version for new projects"
+                        >
+                          default
+                        </span>
+                      {/if}
                       <span
                         class="text-[9px] font-mono px-1.5 py-0.5 rounded
                                border {sourceClass[version.install.source]}"
@@ -242,6 +308,25 @@
                     </button>
                   {/each}
                 {/if}
+
+                <!-- Add an existing binary the detector didn't find -->
+                <button
+                  type="button"
+                  onclick={() => addByPath(lang.id, lang.displayName)}
+                  disabled={busyLang === lang.id}
+                  class="w-full flex items-center gap-2 px-2 py-1.5 ml-1 rounded-md
+                         text-left text-[11px] text-fg-subtle hover:text-fg-muted
+                         hover:bg-surface-2/60 border border-dashed border-border/60
+                         disabled:opacity-50 transition-colors"
+                  title="Register an existing binary by path (PortBay reuses it in place)"
+                >
+                  <Icon
+                    name={busyLang === lang.id ? "refresh-cw" : "plus"}
+                    size={11}
+                    class={busyLang === lang.id ? "animate-spin" : ""}
+                  />
+                  Add by path…
+                </button>
               </div>
             {/if}
           </div>
@@ -273,6 +358,7 @@
       </div>
     {:else}
       {@const { lang, version } = selected}
+      {@const isDefault = lang.defaultVersion === version.install.version}
       <!-- Header strip -->
       <header class="px-8 pt-7 pb-5 border-b border-border/70">
         <div class="flex items-center gap-3">
@@ -306,6 +392,39 @@
                   ? "Copied!"
                   : version.install.binary}
               </button>
+            </div>
+
+            <!-- Version actions: default selection + manual removal -->
+            <div class="mt-2.5 flex items-center gap-2">
+              <button
+                type="button"
+                onclick={() =>
+                  setDefault(lang.id, isDefault ? null : version.install.version)}
+                class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md
+                       text-[11px] border transition-colors
+                       {isDefault
+                  ? 'border-accent/40 bg-accent/10 text-accent'
+                  : 'border-border text-fg-muted hover:text-fg hover:bg-surface-2'}"
+                title="The version new {lang.displayName} projects inherit by default"
+              >
+                <Icon name={isDefault ? "check" : "plus"} size={11} />
+                {isDefault ? "Default for new projects" : "Set as default"}
+              </button>
+              {#if version.install.source === "manual"}
+                <button
+                  type="button"
+                  onclick={() =>
+                    removeManual(lang.id, version.install.version)}
+                  class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md
+                         text-[11px] border border-border text-fg-muted
+                         hover:text-status-crashed hover:border-status-crashed/50
+                         transition-colors"
+                  title="Remove this manually-added entry (the binary is left untouched)"
+                >
+                  <Icon name="x" size={11} />
+                  Remove
+                </button>
+              {/if}
             </div>
           </div>
         </div>
