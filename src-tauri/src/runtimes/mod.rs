@@ -24,6 +24,7 @@
 //!   config dirs, and the registry v1→v2 migration are deferred to
 //!   follow-up commits on the same kanban card.
 
+pub mod env;
 pub mod go;
 pub mod node;
 pub mod php;
@@ -215,20 +216,6 @@ pub fn list_all() -> Vec<LanguageView> {
 // -----------------------------------------------------------------------
 // Shared helpers — used by multiple language detectors below.
 // -----------------------------------------------------------------------
-
-/// macOS Homebrew install prefixes. Apple Silicon prefers
-/// `/opt/homebrew`; Intel uses `/usr/local`. We probe each — most
-/// dev machines will only have one.
-pub fn homebrew_prefixes() -> Vec<PathBuf> {
-    let mut prefixes = Vec::new();
-    for c in ["/opt/homebrew/opt", "/usr/local/opt"] {
-        let p = PathBuf::from(c);
-        if p.exists() {
-            prefixes.push(p);
-        }
-    }
-    prefixes
-}
 
 /// Run `<binary> <arg>` and return the first whitespace-separated
 /// token that looks like a semver. Used by Node / Python / Go / Ruby

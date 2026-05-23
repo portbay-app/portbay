@@ -19,8 +19,12 @@
   import ProjectRow from "./ProjectRow.svelte";
 
   onMount(() => {
+    // Store lifetime is owned by the root layout — calling start()
+    // here is a no-op when the listener is already up. We deliberately
+    // do *not* stop() on unmount: other routes (/domains, /services,
+    // /logs, /languages) share the same store and would lose their
+    // live data when the user navigates away from the dashboard.
     void projects.start();
-    return () => projects.stop();
   });
 
   const filtered = $derived.by(() => {

@@ -26,9 +26,11 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-/// Versions we know how to detect via Homebrew. Each entry maps to a
-/// `php@<ver>` formula; the bare `php` formula handles the rolling
-/// latest version that Homebrew points at.
+/// Versions Homebrew is known to ship as `php@<ver>` formulae. The
+/// detector no longer relies on this list (it scans every matching
+/// formula directly), but the `/languages` "Install version" modal
+/// uses it to render install hints for versions the user *doesn't*
+/// yet have. Bump as Homebrew ships new majors.
 pub const KNOWN_VERSIONS: &[&str] = &["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"];
 
 /// One detected PHP install. Fully serialisable so the Tauri command
@@ -80,28 +82,12 @@ pub fn detect_all() -> Vec<PhpInstall> {
     let mut out: Vec<PhpInstall> = Vec::new();
     let mut seen_versions: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for ver in KNOWN_VERSIONS {
-        for prefix in homebrew_prefixes() {
-            let candidate = prefix.join(format!("php@{ver}"));
-            if !candidate.exists() {
-                continue;
-            }
-            let bin = candidate.join("bin").join("php");
-            if !bin.exists() {
-                continue;
-            }
-            if let Some(install) = probe(&bin, ver, PhpSource::Homebrew) {
-                if seen_versions.insert(install.version.clone()) {
-                    out.push(install);
-                }
-            }
-        }
-    }
-
-    // The bare `php` formula resolves to the current Homebrew major.
-    // Probe it last so a versioned formula with the same major wins.
-    for prefix in homebrew_prefixes() {
-        let bin = prefix.join("php").join("bin").join("php");
+    // Every formula matching `php` or `php@<ver>` under the user's
+    // discovered brew prefix. `runtimes::env::brew_formulae_matching`
+    // queries `brew --prefix` so it works for any install location —
+    // Apple Silicon default, Intel, custom volume, Linuxbrew.
+    for (_name, dir) in crate::runtimes::env::brew_formulae_matching("php") {
+        let bin = dir.join("bin").join("php");
         if !bin.exists() {
             continue;
         }
@@ -112,7 +98,7 @@ pub fn detect_all() -> Vec<PhpInstall> {
         }
     }
 
-    // Plain `php` on PATH as a final fallback.
+    // Anything on the (login-shell-expanded) PATH as a final fallback.
     if let Ok(path) = which::which("php") {
         if let Some(install) = probe(&path, "", PhpSource::System) {
             if seen_versions.insert(install.version.clone()) {
@@ -176,19 +162,9 @@ fn probe(bin: &Path, version_hint: &str, source: PhpSource) -> Option<PhpInstall
     })
 }
 
-/// macOS Homebrew install prefixes — Apple Silicon and Intel both
-/// exist in the wild; we probe each.
-fn homebrew_prefixes() -> Vec<PathBuf> {
-    let mut prefixes = Vec::new();
-    let candidates = ["/opt/homebrew/opt", "/usr/local/opt"];
-    for c in candidates {
-        let p = PathBuf::from(c);
-        if p.exists() {
-            prefixes.push(p);
-        }
-    }
-    prefixes
-}
+// `homebrew_prefixes` removed — the detector now goes through
+// `crate::runtimes::env::brew_formulae_matching` which discovers the
+// user's actual brew prefix via `brew --prefix`. See env.rs.
 
 /// Locate php-fpm next to a php binary. Homebrew lays it out as
 /// `<prefix>/sbin/php-fpm` while some other distributions co-locate

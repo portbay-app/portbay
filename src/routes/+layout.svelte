@@ -32,6 +32,7 @@
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import { sidebar } from "$lib/stores/sidebar.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
+  import { projects } from "$lib/stores/projects.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
 
   onMount(() => {
@@ -41,6 +42,14 @@
     if (isTrayPanel) return;
 
     tunnels.start();
+    // The projects store has page-spanning lifetime — it's read by
+    // /domains, /services, /logs, /languages, the right rail, the
+    // sidebar, and the command palette. Starting it in the root
+    // layout (mounted once per webview) keeps the listener alive
+    // across route navigation; without this, navigating away from
+    // the dashboard could leave other routes looking at a stale or
+    // emptied store.
+    void projects.start();
     void preferences.load();
 
     // Tray-driven nav: the menu-bar "Preferences…" item emits
