@@ -114,9 +114,39 @@
         return null;
 
       case "dnsmasq":
-        // The resolver-file install flow is a separate card. Until it
-        // lands, the dnsmasq card is read-only: it shows whether the
-        // sidecar is running and on which port, but offers no actions.
+        if (info.status === "running") {
+          return {
+            label: "Restart",
+            icon: "rotate-cw",
+            tone: "neutral",
+            run: async () => {
+              try {
+                await safeInvoke("restart_dnsmasq");
+                await sidecars.refresh();
+              } catch {
+                /* toast pushed */
+              }
+            },
+          };
+        }
+        if (info.status === "stopped") {
+          // Binary on PATH but the daemon isn't running. The settings
+          // page exposes the install/uninstall resolver flow; for now,
+          // surface a "Start" affordance via restart_dnsmasq.
+          return {
+            label: "Start",
+            icon: "play",
+            tone: "accent",
+            run: async () => {
+              try {
+                await safeInvoke("restart_dnsmasq");
+                await sidecars.refresh();
+              } catch {
+                /* toast pushed */
+              }
+            },
+          };
+        }
         return null;
 
       case "mailpit":

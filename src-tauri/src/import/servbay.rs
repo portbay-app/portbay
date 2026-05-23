@@ -33,7 +33,9 @@ fn candidate_vhost_dirs() -> Vec<PathBuf> {
         paths.push(home_data.join("disabled-vhosts"));
     }
     paths.push(PathBuf::from("/Applications/ServBay/etc/nginx/sites"));
-    paths.push(PathBuf::from("/Applications/ServBay/etc/nginx/sites-enabled"));
+    paths.push(PathBuf::from(
+        "/Applications/ServBay/etc/nginx/sites-enabled",
+    ));
     paths
 }
 
@@ -197,7 +199,12 @@ fn parse_block(block: &str) -> ParsedVhost {
             continue;
         }
         if let Some(rest) = line.strip_prefix("server_name") {
-            out.server_name = rest.trim().split_whitespace().next().unwrap_or("").to_string();
+            out.server_name = rest
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
         } else if let Some(rest) = line.strip_prefix("root") {
             out.root = Some(rest.trim().trim_matches(';').trim().to_string());
         } else if line.contains("listen") && line.contains("ssl") {
@@ -254,7 +261,10 @@ server {
         let blocks = parse_vhost(SAMPLE);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].server_name, "myapp.test");
-        assert_eq!(blocks[0].root.as_deref(), Some("/Users/x/Sites/myapp/public"));
+        assert_eq!(
+            blocks[0].root.as_deref(),
+            Some("/Users/x/Sites/myapp/public")
+        );
         assert!(!blocks[0].https);
         assert_eq!(blocks[1].server_name, "secure.test");
         assert!(blocks[1].https);
@@ -262,7 +272,8 @@ server {
 
     #[test]
     fn parse_skips_server_name_keyword_collision() {
-        let input = "server_name should_not_open_a_block;\nserver {\n  server_name x.test;\n  root /p;\n}";
+        let input =
+            "server_name should_not_open_a_block;\nserver {\n  server_name x.test;\n  root /p;\n}";
         let blocks = parse_vhost(input);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].server_name, "x.test");

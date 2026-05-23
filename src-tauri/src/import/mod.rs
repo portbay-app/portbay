@@ -108,11 +108,7 @@ pub struct DetectedSource {
 
 /// Run every detector and return the per-source summary.
 pub fn detect_all() -> Vec<DetectedSource> {
-    vec![
-        herd::detect(),
-        servbay::detect(),
-        mamp::detect(),
-    ]
+    vec![herd::detect(), servbay::detect(), mamp::detect()]
 }
 
 /// Parse all sites from the given source. Errors per site are logged
@@ -162,7 +158,10 @@ mod tests {
 
     #[test]
     fn derive_id_lowercases_and_hyphenates() {
-        assert_eq!(derive_id("/Users/x/Sites/Tribal House CMS"), "tribal-house-cms");
+        assert_eq!(
+            derive_id("/Users/x/Sites/Tribal House CMS"),
+            "tribal-house-cms"
+        );
         assert_eq!(derive_id("/Users/x/MyApp"), "myapp");
         assert_eq!(derive_id("/Users/x/__weird__"), "weird");
     }

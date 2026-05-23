@@ -100,13 +100,7 @@ pub async fn import_projects(
     for id in ids {
         let Some(site) = by_id.get(&id) else {
             skipped.push(SkippedRow {
-                site: ImportedSite::from_parts(
-                    source,
-                    String::new(),
-                    String::new(),
-                    None,
-                    false,
-                ),
+                site: ImportedSite::from_parts(source, String::new(), String::new(), None, false),
                 reason: format!("id `{id}` not present in current scan"),
             });
             continue;

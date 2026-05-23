@@ -83,8 +83,8 @@ pub fn read_sites() -> Result<Vec<ImportedSite>> {
     }
 
     let bytes = std::fs::read(&path).map_err(|e| ImportError::io(&path, e))?;
-    let cfg: HerdConfig = serde_json::from_slice(&bytes)
-        .map_err(|e| ImportError::malformed(&path, e.to_string()))?;
+    let cfg: HerdConfig =
+        serde_json::from_slice(&bytes).map_err(|e| ImportError::malformed(&path, e.to_string()))?;
 
     let mut out: Vec<ImportedSite> = Vec::new();
 

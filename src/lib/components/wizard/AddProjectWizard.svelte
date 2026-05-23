@@ -23,6 +23,7 @@
   import { projects } from "$lib/stores/projects.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import type { CommandError } from "$lib/types/error";
+  import type { PortbayFile } from "$lib/types/portfile";
   import type { ProjectType, ProjectView } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
   import type { DetectedProject } from "$lib/types/wizard";
@@ -47,6 +48,16 @@
   let dropHint = $state<string>("");
   let dragUnlisten: UnlistenFn | null = null;
 
+  /**
+   * Populated when the picked folder contains a `.portbay.json`. The
+   * wizard switches into "importing" mode: L2 is locked to the file's
+   * values, the secrets list is rendered as required inputs above
+   * Commit, and submission goes through `import_portfile_commit`
+   * instead of `add_project`.
+   */
+  let portfile = $state<PortbayFile | null>(null);
+  let portfileSecrets = $state<Record<string, string>>({});
+
   function resetForm() {
     path = "";
     id = "";
@@ -61,6 +72,8 @@
     rawDraft = "";
     dropActive = false;
     dropHint = "";
+    portfile = null;
+    portfileSecrets = {};
     formError = null;
   }
 
@@ -85,7 +98,36 @@
     path = folderPath;
     detecting = true;
     formError = null;
+    portfile = null;
+    portfileSecrets = {};
     try {
+      // Probe for a committed `.portbay.json` first. If present, the
+      // file's values win over framework auto-detection.
+      const file = await safeInvoke<PortbayFile | null>("detect_portfile", {
+        path: folderPath,
+      });
+      if (file) {
+        portfile = file;
+        portfileSecrets = Object.fromEntries(
+          (file.secrets ?? []).map((k) => [k, ""]),
+        );
+        name = file.name;
+        hostname = file.hostname;
+        port = file.port ?? null;
+        startCommand = file.startCommand ?? "";
+        kind = file.type;
+        https = file.https;
+        autoStart = file.autoStart;
+        // id is derived on the backend from the folder's last component.
+        const seg = folderPath.split("/").filter(Boolean).pop() ?? "imported";
+        id = seg
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "");
+        syncRawFromFields();
+        return;
+      }
+
       const det = await safeInvoke<DetectedProject>("detect_project", {
         path: folderPath,
       });
@@ -198,24 +240,52 @@
     submitting = true;
     formError = null;
     try {
-      await safeInvoke<ProjectView>("add_project", {
-        input: {
-          path,
-          id: id || undefined,
-          name: name || undefined,
-          hostname: hostname || undefined,
-          kind,
-          port: port ?? undefined,
-          startCommand: startCommand || undefined,
-          https,
-          autoStart,
-        },
-      });
+      if (portfile) {
+        // .portbay.json import path. Validate every required secret is
+        // filled before sending — backend rejects with SecretMissing
+        // otherwise and the GUI would have to re-prompt anyway.
+        const missing = (portfile.secrets ?? []).filter(
+          (k) => !portfileSecrets[k] || portfileSecrets[k] === "",
+        );
+        if (missing.length > 0) {
+          formError = {
+            code: "BAD_INPUT",
+            whatHappened: `Fill in ${missing.join(", ")} before importing.`,
+            whyItMatters:
+              "The .portbay.json lists these as secrets so they're never committed to the repo.",
+            whoCausedIt: "user",
+            actions: [],
+          };
+          submitting = false;
+          return;
+        }
+        await safeInvoke<string>("import_portfile_commit", {
+          input: {
+            path,
+            id: id || undefined,
+            secrets: portfileSecrets,
+          },
+        });
+      } else {
+        await safeInvoke<ProjectView>("add_project", {
+          input: {
+            path,
+            id: id || undefined,
+            name: name || undefined,
+            hostname: hostname || undefined,
+            kind,
+            port: port ?? undefined,
+            startCommand: startCommand || undefined,
+            https,
+            autoStart,
+          },
+        });
+      }
       // Refresh table to pick up the new row.
       await projects.refresh();
       errorBus.push({
-        code: "ADD_OK",
-        whatHappened: `${name || id} added.`,
+        code: portfile ? "IMPORT_OK" : "ADD_OK",
+        whatHappened: `${name || id} ${portfile ? "imported from .portbay.json" : "added"}.`,
         whyItMatters: "Start it from the projects table when you're ready.",
         whoCausedIt: "system",
         actions: [],
@@ -332,6 +402,46 @@
           and generates a <span class="font-mono">.test</span> hostname.
         </p>
       </DashboardCard>
+
+      {#if portfile}
+        <!-- .portbay.json import banner + secrets prompt -->
+        <DashboardCard title="Importing from .portbay.json" flush>
+          <p class="text-xs text-fg-muted">
+            Settings below are loaded from <span class="font-mono">.portbay.json</span>
+            in this folder.
+            {#if (portfile.secrets ?? []).length > 0}
+              Fill the secrets to finish.
+            {:else}
+              Click Commit to register the project.
+            {/if}
+          </p>
+
+          {#if (portfile.secrets ?? []).length > 0}
+            <div class="grid grid-cols-[140px,1fr] gap-x-4 gap-y-2 items-center text-sm mt-3">
+              {#each portfile.secrets ?? [] as secret (secret)}
+                <label for={`wizard-secret-${secret}`} class="text-fg-muted font-mono text-xs">
+                  {secret}
+                </label>
+                <input
+                  id={`wizard-secret-${secret}`}
+                  type="password"
+                  value={portfileSecrets[secret] ?? ""}
+                  oninput={(e) => {
+                    const v = (e.currentTarget as HTMLInputElement).value;
+                    portfileSecrets = { ...portfileSecrets, [secret]: v };
+                  }}
+                  placeholder="required"
+                  class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg font-mono"
+                />
+              {/each}
+            </div>
+            <p class="text-[11px] text-fg-subtle mt-2">
+              Values stay local to this machine. The file in the repo only carries the
+              names, not the values.
+            </p>
+          {/if}
+        </DashboardCard>
+      {/if}
 
       <!-- L2: standard fields -->
       <DashboardCard title="Settings" flush>
