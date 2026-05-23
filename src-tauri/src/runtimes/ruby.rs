@@ -1,19 +1,12 @@
 //! Ruby runtime detector.
 //!
-//! Probes:
-//!   1. Homebrew `ruby@<ver>` formula
-//!   2. Homebrew bare `ruby` formula
-//!   3. rbenv — `~/.rbenv/versions/<ver>/bin/ruby`
-//!   4. asdf — `~/.asdf/installs/ruby/<ver>/bin/ruby`
-//!   5. mise — `~/.local/share/mise/installs/ruby/<ver>/bin/ruby`
-//!   6. System `ruby`
+//! Discovery via `runtimes::env` — no hardcoded paths or versions.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::runtimes::{
-    homebrew_prefixes, version_from, InstallSource, LanguageRuntime, RuntimeInstall,
-};
+use crate::runtimes::env;
+use crate::runtimes::{version_from, InstallSource, LanguageRuntime, RuntimeInstall};
 
 pub struct RubyRuntime;
 
@@ -32,61 +25,62 @@ impl LanguageRuntime for RubyRuntime {
         let mut out: Vec<RuntimeInstall> = Vec::new();
         let mut seen: HashSet<PathBuf> = HashSet::new();
 
-        for prefix in homebrew_prefixes() {
-            if let Ok(entries) = std::fs::read_dir(&prefix) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let s = name.to_string_lossy();
-                    if !s.starts_with("ruby@") {
-                        continue;
-                    }
-                    push(
-                        &mut out,
-                        &mut seen,
-                        entry.path().join("bin").join("ruby"),
-                        InstallSource::Homebrew,
-                    );
-                }
-            }
+        for (_, dir) in env::brew_formulae_matching("ruby") {
             push(
                 &mut out,
                 &mut seen,
-                prefix.join("ruby").join("bin").join("ruby"),
+                dir.join("bin").join("ruby"),
                 InstallSource::Homebrew,
             );
         }
 
-        if let Some(home) = dirs::home_dir() {
-            for (manager, src) in [
-                (home.join(".rbenv").join("versions"), InstallSource::System),
-                (home.join(".asdf").join("installs").join("ruby"), InstallSource::Asdf),
-                (
-                    home.join(".local")
-                        .join("share")
-                        .join("mise")
-                        .join("installs")
-                        .join("ruby"),
-                    InstallSource::Mise,
-                ),
-            ] {
-                if let Ok(entries) = std::fs::read_dir(&manager) {
-                    for entry in entries.flatten() {
-                        push(
-                            &mut out,
-                            &mut seen,
-                            entry.path().join("bin").join("ruby"),
-                            src,
-                        );
-                    }
-                }
-            }
+        if let Some(rbenv) = env::rbenv_root() {
+            scan_children(
+                &rbenv.join("versions"),
+                "bin/ruby",
+                &mut out,
+                &mut seen,
+                InstallSource::System,
+            );
+        }
+        if let Some(asdf) = env::asdf_root() {
+            scan_children(
+                &asdf.join("installs").join("ruby"),
+                "bin/ruby",
+                &mut out,
+                &mut seen,
+                InstallSource::Asdf,
+            );
+        }
+        if let Some(mise) = env::mise_installs_root() {
+            scan_children(
+                &mise.join("ruby"),
+                "bin/ruby",
+                &mut out,
+                &mut seen,
+                InstallSource::Mise,
+            );
         }
 
         if let Ok(p) = which::which("ruby") {
             push(&mut out, &mut seen, p, InstallSource::System);
         }
-
         out
+    }
+}
+
+fn scan_children(
+    root: &std::path::Path,
+    rel: &str,
+    out: &mut Vec<RuntimeInstall>,
+    seen: &mut HashSet<PathBuf>,
+    source: InstallSource,
+) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        push(out, seen, entry.path().join(rel), source);
     }
 }
 

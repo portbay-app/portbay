@@ -95,10 +95,15 @@
     }
   }
 
-  // Re-init when the viewer opens for a different project.
+  // Re-init only when the viewer opens for a *different* project.
+  // We gate on the project id (a string) rather than the derived
+  // `project` object — the projects store mints new object references
+  // on every 1.5 s status tick, which would otherwise re-trigger this
+  // effect and wipe the log/reset Follow mode mid-stream.
+  const openedId = $derived(logViewer.id);
   $effect(() => {
-    const p = project;
-    if (!p) {
+    const id = openedId;
+    if (id === null) {
       stopFollow();
       return;
     }
@@ -300,27 +305,32 @@
         </button>
       </header>
 
-      <!-- Body -->
+      <!--
+        Body. The previous implementation wrapped each line in a
+        <div> *inside* a <pre>, which preserved every newline /
+        indent from the source template as rendered whitespace — the
+        cause of the huge gaps the user reported. We use a plain
+        container with `whitespace-pre` on each row so ANSI-rendered
+        spaces still align, without the source-template noise.
+      -->
       <div
         bind:this={scrollerEl}
         onscroll={onScroll}
-        class="flex-1 min-h-0 overflow-y-auto bg-bg p-3"
+        class="flex-1 min-h-0 overflow-y-auto bg-bg py-2 font-mono text-[12px] leading-[1.4] text-fg-muted"
       >
         {#if lines.length === 0}
-          <p class="text-xs text-fg-subtle italic px-2 py-4">
+          <p class="text-xs text-fg-subtle italic px-4 py-4">
             {loading ? "Loading log…" : "No log output yet."}
           </p>
         {:else}
-          <pre class="text-[12px] font-mono leading-relaxed text-fg-muted">
-{#each lines as line, i (i)}
-<div
-  data-line={i}
-  class="px-2 py-0.5 -mx-2 rounded
-         {matches.includes(i) ? 'bg-accent/10 text-fg' : ''}
-         {matches[matchIndex] === i ? 'ring-1 ring-accent' : ''}"
->{@html formatLogLine(line)}</div>
-{/each}
-          </pre>
+          {#each lines as line, i (i)}
+            <div
+              data-line={i}
+              class="px-4 whitespace-pre-wrap break-words
+                     {matches.includes(i) ? 'bg-accent/10 text-fg' : ''}
+                     {matches[matchIndex] === i ? 'ring-1 ring-accent' : ''}"
+            >{@html formatLogLine(line)}</div>
+          {/each}
         {/if}
       </div>
 

@@ -112,6 +112,14 @@ fn resolve_logs_dir() -> std::io::Result<PathBuf> {
 pub fn run() {
     init_tracing();
 
+    // Merge the user's login-shell PATH into the process environment
+    // before *anything* else spawns. GUI launches on macOS inherit a
+    // minimal PATH (no shell rc files run), so brew/asdf/mise/nvm
+    // installs are invisible until we ask the user's shell for its
+    // actual PATH. Must run before sidecar boot (which spawns
+    // process-compose) and before runtime detection.
+    crate::runtimes::env::bootstrap_user_env();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
