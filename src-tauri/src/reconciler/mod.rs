@@ -141,7 +141,8 @@ impl Reconciler {
 
         let pc_outcome = pc::reconcile(&reg, logs_dir, yaml_path, &state, app, pc_cache).await;
 
-        let caddy_outcome = caddy::reconcile(&reg, &certs_result.lookup, &state, caddy_cache).await;
+        let caddy_outcome =
+            caddy::reconcile(&reg, logs_dir, &certs_result.lookup, &state, caddy_cache).await;
 
         // When dnsmasq's `/etc/resolver/<suffix>` is in place and
         // points at the running daemon, hostname → loopback routing

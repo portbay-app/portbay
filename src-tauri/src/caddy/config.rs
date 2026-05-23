@@ -74,6 +74,7 @@ pub fn build_config<F>(
     reg: &Registry,
     admin_port: u16,
     https_port: u16,
+    php_socket_dir: &std::path::Path,
     cert_lookup: F,
 ) -> Result<CaddyConfig>
 where
@@ -87,7 +88,7 @@ where
             // v1 only wires HTTPS routes. Plain-HTTP could be added later.
             continue;
         }
-        routes.push(project_to_route(p));
+        routes.push(project_to_route(p, php_socket_dir));
         if let Some(paths) = cert_lookup(p.id.as_str()) {
             cert_files.push(TlsCertFile {
                 certificate: paths.certificate,
@@ -131,9 +132,13 @@ where
 
 /// Build a single route for a project. Used both by `build_config` and by
 /// runtime `append_route` calls after a project is added live.
-pub fn project_to_route(p: &Project) -> Route {
+///
+/// `php_socket_dir` is the parent directory under which PortBay
+/// expects per-version FPM sockets at `<dir>/<version>/php-fpm.sock`
+/// (matching [`crate::php::lifecycle::fpm_socket_path`]).
+pub fn project_to_route(p: &Project, php_socket_dir: &std::path::Path) -> Route {
     let id = format!("route_{}", p.id);
-    let handler = build_handler(p);
+    let handler = build_handler(p, php_socket_dir);
     Route {
         id,
         match_: vec![MatchClause {
@@ -144,9 +149,9 @@ pub fn project_to_route(p: &Project) -> Route {
     }
 }
 
-fn build_handler(p: &Project) -> serde_json::Value {
+fn build_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::Value {
     match p.kind {
-        ProjectType::Php => php_handler(p),
+        ProjectType::Php => php_handler(p, php_socket_dir),
         _ => reverse_proxy_handler(p),
     }
 }
@@ -159,7 +164,7 @@ fn reverse_proxy_handler(p: &Project) -> serde_json::Value {
     })
 }
 
-fn php_handler(p: &Project) -> serde_json::Value {
+fn php_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::Value {
     let doc_root = p
         .document_root
         .as_deref()
@@ -167,10 +172,13 @@ fn php_handler(p: &Project) -> serde_json::Value {
         .unwrap_or_else(|| p.path.clone());
     let doc_root_str = doc_root.to_string_lossy().into_owned();
 
-    let php_socket = match p.php_version.as_deref() {
-        Some(ver) => format!("unix//tmp/portbay-php-fpm-{ver}.sock"),
-        None => "unix//tmp/portbay-php-fpm.sock".to_string(),
-    };
+    // Match `crate::php::lifecycle::fpm_socket_path` exactly. When a
+    // project has no explicit version we fall back to a sentinel
+    // directory under the same parent so a future "default PHP"
+    // lookup still finds the socket via the same scheme.
+    let version = p.php_version.as_deref().unwrap_or("default");
+    let socket_path = php_socket_dir.join(version).join("php-fpm.sock");
+    let php_socket = format!("unix/{}", socket_path.to_string_lossy());
 
     // Nested subroute: *.php → FastCGI, everything else → file_server.
     json!({
@@ -199,6 +207,7 @@ fn php_handler(p: &Project) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::registry::{Project, ProjectId, ProjectType, Registry};
+    use std::path::Path;
     use std::path::PathBuf;
 
     fn next_project(id: &str, port: u16, https: bool) -> Project {
@@ -250,7 +259,7 @@ mod tests {
     #[test]
     fn empty_registry_produces_one_server_no_routes() {
         let r = Registry::new("test");
-        let c = build_config(&r, 2019, 8443, no_certs).unwrap();
+        let c = build_config(&r, 2019, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
         assert_eq!(c.admin.listen, "localhost:2019");
         assert_eq!(c.apps.http.http_port, 0);
         let s = c.apps.http.servers.get("portbay").unwrap();
@@ -275,7 +284,7 @@ mod tests {
                 None
             }
         };
-        let c = build_config(&r, 2019, 8443, lookup).unwrap();
+        let c = build_config(&r, 2019, 8443, Path::new("/tmp/portbay-php"), lookup).unwrap();
         let s = c.apps.http.servers.get("portbay").unwrap();
         assert_eq!(s.routes.len(), 1);
         assert_eq!(s.routes[0].id, "route_marketing-site");
@@ -293,7 +302,7 @@ mod tests {
     fn non_https_project_is_skipped() {
         let mut r = Registry::new("test");
         r.add_project(next_project("plain", 3010, false)).unwrap();
-        let c = build_config(&r, 2019, 8443, no_certs).unwrap();
+        let c = build_config(&r, 2019, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
         let s = c.apps.http.servers.get("portbay").unwrap();
         assert!(s.routes.is_empty());
     }
@@ -302,7 +311,7 @@ mod tests {
     fn php_project_uses_subroute_with_fastcgi() {
         let mut r = Registry::new("test");
         r.add_project(php_project("api-gateway", "8.3")).unwrap();
-        let c = build_config(&r, 2019, 8443, no_certs).unwrap();
+        let c = build_config(&r, 2019, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
         let s = c.apps.http.servers.get("portbay").unwrap();
         let h = &s.routes[0].handle[0];
         assert_eq!(h["handler"], "subroute");
@@ -316,7 +325,7 @@ mod tests {
         );
         assert_eq!(
             sub_routes[0]["handle"][0]["upstreams"][0]["dial"],
-            "unix//tmp/portbay-php-fpm-8.3.sock"
+            "unix//tmp/portbay-php/8.3/php-fpm.sock"
         );
         // Second sub-route: file_server fallback with index_names.
         assert_eq!(sub_routes[1]["handle"][0]["handler"], "file_server");
@@ -329,7 +338,7 @@ mod tests {
     #[test]
     fn project_to_route_id_matches_format() {
         let p = next_project("abc", 3000, true);
-        let r = project_to_route(&p);
+        let r = project_to_route(&p, Path::new("/tmp/portbay-php"));
         assert_eq!(r.id, "route_abc");
         assert!(r.terminal);
     }

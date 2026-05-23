@@ -42,10 +42,13 @@ pub(super) async fn reconcile(
     cache: &mut PcCache,
 ) -> StepOutcome {
     let mail_env = mail_env_from_state(state);
-    let yaml = match process_compose::config::to_yaml(reg, logs_dir, mail_env.as_ref()) {
-        Ok(y) => y,
-        Err(e) => return StepOutcome::failed(format!("yaml generation: {e}")),
-    };
+    let data_dir = data_dir_from_logs(logs_dir);
+    let php_fpm_specs = php_fpm_specs_for(reg, data_dir);
+    let yaml =
+        match process_compose::config::to_yaml(reg, logs_dir, mail_env.as_ref(), &php_fpm_specs) {
+            Ok(y) => y,
+            Err(e) => return StepOutcome::failed(format!("yaml generation: {e}")),
+        };
 
     let hash = hash_string(&yaml);
     if cache.last_applied == Some(hash) {
@@ -72,7 +75,101 @@ pub(super) async fn reconcile(
 /// after Mailpit comes up will regenerate the YAML with the
 /// injections and restart PC once.
 pub fn build_initial_yaml(reg: &Registry, logs_dir: &Path) -> Result<String, String> {
-    process_compose::config::to_yaml(reg, logs_dir, None).map_err(|e| e.to_string())
+    process_compose::config::to_yaml(reg, logs_dir, None, &[]).map_err(|e| e.to_string())
+}
+
+/// The PortBay app-data directory — `<logs_dir>/..`. Used to derive
+/// per-PHP-version pool/socket paths so Caddy and PC agree on a
+/// single location.
+fn data_dir_from_logs(logs_dir: &Path) -> &Path {
+    logs_dir.parent().unwrap_or(logs_dir)
+}
+
+/// Build a [`PhpFpmSpec`] for every PHP version any project uses, and
+/// materialise the pool config files those specs point at.
+///
+/// We probe `crate::php::detect_all()` once per tick. Detection runs
+/// `php --ini` / `php -m` per candidate which costs ~10–30 ms total
+/// on a typical Homebrew install — fine for the reconcile cadence.
+///
+/// Versions whose probe doesn't yield a `php-fpm` binary are silently
+/// skipped (the user already sees a warning on `/php`). Pool-config
+/// write failures are logged but don't abort the tick — PC will
+/// surface the FPM-start failure with a useful error.
+fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::config::PhpFpmSpec> {
+    use std::collections::HashSet;
+
+    let used_versions: HashSet<String> = reg
+        .list_projects()
+        .iter()
+        .filter_map(|p| p.php_version.clone())
+        .collect();
+    if used_versions.is_empty() {
+        return Vec::new();
+    }
+
+    let installs = crate::php::detect_all();
+    let mut specs = Vec::with_capacity(used_versions.len());
+    for ver in &used_versions {
+        let Some(install) = installs.iter().find(|i| &i.version == ver) else {
+            tracing::warn!(
+                target: "reconciler",
+                "PHP {ver} requested by a project but not installed — \
+                 PC entry skipped. Run `brew install php@{ver}` then \
+                 re-detect from the /php panel."
+            );
+            continue;
+        };
+        let Some(fpm_bin) = install.php_fpm_bin.clone() else {
+            tracing::warn!(
+                target: "reconciler",
+                "PHP {ver} is installed but php-fpm is missing — \
+                 PC entry skipped. Reinstall with `brew reinstall php@{ver}`."
+            );
+            continue;
+        };
+
+        let pool_path = crate::php::lifecycle::fpm_pool_path(data_dir, ver);
+        let socket_path = crate::php::lifecycle::fpm_socket_path(data_dir, ver);
+        let working_dir = pool_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| data_dir.to_path_buf());
+
+        // Write the pool config every tick so manual edits inside the
+        // file get overwritten (the user is supposed to drop tweaks
+        // into the extension-dir as separate .ini files; the pool
+        // config itself is PortBay-managed).
+        if let Some(parent) = pool_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    target: "reconciler",
+                    "couldn't create FPM dir {}: {e}",
+                    parent.display()
+                );
+                continue;
+            }
+        }
+        let pool_body = crate::php::lifecycle::render_pool_config(install, &socket_path);
+        if let Err(e) = std::fs::write(&pool_path, &pool_body) {
+            tracing::warn!(
+                target: "reconciler",
+                "couldn't write {}: {e}",
+                pool_path.display()
+            );
+            continue;
+        }
+
+        specs.push(process_compose::config::PhpFpmSpec {
+            process_id: crate::php::lifecycle::fpm_process_id(ver),
+            version: ver.clone(),
+            php_fpm_bin: fpm_bin,
+            pool_config: pool_path,
+            working_dir,
+        });
+    }
+    specs.sort_by(|a, b| a.process_id.cmp(&b.process_id));
+    specs
 }
 
 /// Read the Mailpit sidecar's status off `AppState` and translate it
@@ -156,8 +253,8 @@ mod tests {
         let mut b = Registry::new("test");
         b.add_project(next_project("y", 3011)).unwrap();
         b.add_project(next_project("x", 3010)).unwrap();
-        let y_a = process_compose::config::to_yaml(&a, Path::new("/tmp"), None).unwrap();
-        let y_b = process_compose::config::to_yaml(&b, Path::new("/tmp"), None).unwrap();
+        let y_a = process_compose::config::to_yaml(&a, Path::new("/tmp"), None, &[]).unwrap();
+        let y_b = process_compose::config::to_yaml(&b, Path::new("/tmp"), None, &[]).unwrap();
         // YAML emit may be ordering-stable already; we don't depend on
         // that. We do depend on the hash being deterministic given a
         // string input.
@@ -171,11 +268,13 @@ mod tests {
     fn yaml_hash_changes_when_project_added() {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
-        let h1 =
-            hash_string(&process_compose::config::to_yaml(&r, Path::new("/tmp"), None).unwrap());
+        let h1 = hash_string(
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap(),
+        );
         r.add_project(next_project("b", 3011)).unwrap();
-        let h2 =
-            hash_string(&process_compose::config::to_yaml(&r, Path::new("/tmp"), None).unwrap());
+        let h2 = hash_string(
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap(),
+        );
         assert_ne!(h1, h2);
     }
 

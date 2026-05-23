@@ -11,6 +11,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 
 use crate::caddy::{
     build_config, find_free_https_port, CaddyClient, CertPaths, DEFAULT_HTTPS_PORT,
@@ -35,6 +36,7 @@ impl CaddyCache {
 
 pub(super) async fn reconcile(
     reg: &Registry,
+    logs_dir: &Path,
     cert_lookup: &HashMap<String, CertPaths>,
     state: &AppState,
     cache: &mut CaddyCache,
@@ -51,7 +53,10 @@ pub(super) async fn reconcile(
         .admin_port();
     let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
 
-    let cfg = match build_config(reg, admin_port, https_port, |id| {
+    // PHP FastCGI sockets live under `<data_dir>/php/<version>/...`.
+    // The pc sub-reconciler writes the same path; both must agree.
+    let php_socket_dir = logs_dir.parent().unwrap_or(logs_dir).join("php");
+    let cfg = match build_config(reg, admin_port, https_port, &php_socket_dir, |id| {
         cert_lookup.get(id).cloned()
     }) {
         Ok(c) => c,
@@ -113,7 +118,10 @@ mod tests {
     }
 
     fn hash_of(reg: &Registry, lookup: &HashMap<String, CertPaths>) -> u64 {
-        let cfg = build_config(reg, 2019, 8443, |id| lookup.get(id).cloned()).unwrap();
+        let cfg = build_config(reg, 2019, 8443, Path::new("/tmp/portbay-php"), |id| {
+            lookup.get(id).cloned()
+        })
+        .unwrap();
         hash_bytes(&serde_json::to_vec(&cfg).unwrap())
     }
 

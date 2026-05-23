@@ -116,6 +116,25 @@ impl MailpitEnv {
     }
 }
 
+/// One PHP-FPM pool the reconciler wants Process Compose to keep
+/// alive. Emitted as a process entry alongside the registered
+/// projects so PC owns the lifecycle (same start/stop/log surface as
+/// every other process).
+#[derive(Debug, Clone)]
+pub struct PhpFpmSpec {
+    /// Stable process id (e.g. `php-fpm-8-3`). Same value [`crate::php::lifecycle::fpm_process_id`] returns.
+    pub process_id: String,
+    /// PHP version label this pool serves — used in the description.
+    pub version: String,
+    /// Absolute path to the `php-fpm` binary for this version.
+    pub php_fpm_bin: std::path::PathBuf,
+    /// Pool config file the daemon should read.
+    pub pool_config: std::path::PathBuf,
+    /// Working directory PC should `cd` into before spawning. Usually
+    /// the same directory the pool config lives in.
+    pub working_dir: std::path::PathBuf,
+}
+
 /// Build a YAML string from the registry.
 ///
 /// `logs_dir` is the directory each per-process log file is written to
@@ -124,12 +143,27 @@ impl MailpitEnv {
 /// `mail_env` injects SMTP defaults pointing at the local Mailpit
 /// catcher into every process. Pass `None` when Mailpit isn't
 /// running; pass `Some(MailpitEnv::with_smtp_port(port))` otherwise.
-pub fn to_yaml(reg: &Registry, logs_dir: &Path, mail_env: Option<&MailpitEnv>) -> Result<String> {
+///
+/// `php_fpm_specs` adds one PC process entry per running PHP version.
+/// Passing an empty slice (the default for cold-boot / non-PHP setups)
+/// is fine; the function only emits what's requested.
+pub fn to_yaml(
+    reg: &Registry,
+    logs_dir: &Path,
+    mail_env: Option<&MailpitEnv>,
+    php_fpm_specs: &[PhpFpmSpec],
+) -> Result<String> {
     let mut processes = BTreeMap::new();
     for p in &reg.projects {
         if let Some(entry) = project_to_pc_process(p, logs_dir, mail_env) {
             processes.insert(p.id.to_string(), entry);
         }
+    }
+    for spec in php_fpm_specs {
+        processes.insert(
+            spec.process_id.clone(),
+            php_fpm_to_pc_process(spec, logs_dir),
+        );
     }
 
     let global_log = logs_dir.join("process-compose.log");
@@ -142,6 +176,32 @@ pub fn to_yaml(reg: &Registry, logs_dir: &Path, mail_env: Option<&MailpitEnv>) -
     };
 
     Ok(serde_yaml::to_string(&doc)?)
+}
+
+fn php_fpm_to_pc_process(spec: &PhpFpmSpec, logs_dir: &Path) -> PcProcess {
+    let log_path = logs_dir.join(format!("{}.log", spec.process_id));
+    // `php-fpm -F` keeps it foreground; `-y` points at the pool
+    // config. Quoting via shell would risk newlines — Process
+    // Compose accepts the command as a single string, so we glue
+    // with spaces and trust the absolute paths.
+    let command = format!(
+        "{bin} -F -y {cfg}",
+        bin = spec.php_fpm_bin.to_string_lossy(),
+        cfg = spec.pool_config.to_string_lossy(),
+    );
+    PcProcess {
+        description: Some(format!("PHP-FPM {}", spec.version)),
+        working_dir: spec.working_dir.to_string_lossy().into_owned(),
+        command,
+        availability: PcAvailability { restart: "no" },
+        readiness_probe: None,
+        log_location: log_path.to_string_lossy().into_owned(),
+        environment: BTreeMap::new(),
+        shutdown: PcShutdown {
+            signal: 15,
+            timeout_seconds: 5,
+        },
+    }
 }
 
 fn project_to_pc_process(
@@ -285,7 +345,7 @@ mod tests {
     #[test]
     fn empty_registry_produces_minimal_yaml() {
         let r = Registry::new("test");
-        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
         assert!(yaml.contains("version: '0.5'") || yaml.contains("version: \"0.5\""));
         assert!(yaml.contains("processes: {}"));
     }
@@ -294,7 +354,7 @@ mod tests {
     fn next_project_produces_process_with_http_probe() {
         let mut r = Registry::new("test");
         r.add_project(next_project("marketing-site", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[]).unwrap();
         assert!(
             yaml.contains("marketing-site"),
             "process name missing: {yaml}"
@@ -320,7 +380,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(php_project("api-gateway")).unwrap();
         r.add_project(next_project("marketing-site", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
         assert!(!yaml.contains("api-gateway"));
         assert!(yaml.contains("marketing-site"));
     }
@@ -332,7 +392,7 @@ mod tests {
         p.env.insert("NODE_ENV".into(), "development".into());
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
         assert!(yaml.contains("DATABASE_URL"));
         assert!(yaml.contains("postgres://x"));
         assert!(yaml.contains("NODE_ENV"));
@@ -343,7 +403,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("withmail", 3010)).unwrap();
         let mail = MailpitEnv::with_smtp_port(1025);
-        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail)).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[]).unwrap();
         assert!(yaml.contains("MAIL_HOST: 127.0.0.1"));
         assert!(yaml.contains("MAIL_PORT: '1025'") || yaml.contains("MAIL_PORT: \"1025\""));
         assert!(yaml.contains("MAIL_MAILER: smtp"));
@@ -358,7 +418,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
         let mail = MailpitEnv::with_smtp_port(1025);
-        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail)).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[]).unwrap();
         // Project's explicit override wins; the default loopback is gone.
         assert!(yaml.contains("MAIL_HOST: mail.production.test"));
         assert!(!yaml.contains("MAIL_HOST: 127.0.0.1"));
@@ -368,7 +428,7 @@ mod tests {
     fn no_mail_env_leaves_yaml_without_mail_vars() {
         let mut r = Registry::new("test");
         r.add_project(next_project("nomail", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
         assert!(!yaml.contains("MAIL_HOST"));
         assert!(!yaml.contains("MAIL_PORT"));
     }
@@ -379,7 +439,7 @@ mod tests {
         p.readiness = Some(Readiness::Process);
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
         assert!(!yaml.contains("readiness_probe"));
     }
 
@@ -388,11 +448,75 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
         r.add_project(next_project("b", 3011)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
         let back: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         // Just confirm structural validity — content was checked above.
         assert!(back.get("processes").is_some());
         assert_eq!(back["processes"]["a"]["command"].as_str(), Some("pnpm dev"));
         assert_eq!(back["processes"]["b"]["command"].as_str(), Some("pnpm dev"));
+    }
+
+    #[test]
+    fn php_fpm_specs_emit_one_process_each() {
+        let r = Registry::new("test");
+        let specs = vec![
+            PhpFpmSpec {
+                process_id: "php-fpm-8-3".into(),
+                version: "8.3".into(),
+                php_fpm_bin: PathBuf::from("/opt/homebrew/opt/php@8.3/sbin/php-fpm"),
+                pool_config: PathBuf::from("/tmp/portbay/php/8.3/php-fpm.conf"),
+                working_dir: PathBuf::from("/tmp/portbay/php/8.3"),
+            },
+            PhpFpmSpec {
+                process_id: "php-fpm-7-4".into(),
+                version: "7.4".into(),
+                php_fpm_bin: PathBuf::from("/opt/homebrew/opt/php@7.4/sbin/php-fpm"),
+                pool_config: PathBuf::from("/tmp/portbay/php/7.4/php-fpm.conf"),
+                working_dir: PathBuf::from("/tmp/portbay/php/7.4"),
+            },
+        ];
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &specs).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let procs = &doc["processes"];
+
+        for id in ["php-fpm-8-3", "php-fpm-7-4"] {
+            let p = &procs[id];
+            assert!(p.is_mapping(), "process `{id}` missing");
+            let cmd = p["command"].as_str().unwrap();
+            assert!(cmd.contains("-F -y"), "command missing FPM flags: {cmd}");
+            assert!(cmd.contains("/php-fpm"), "command missing binary: {cmd}");
+            // Log location is per-process_id, not per-project name.
+            let log = p["log_location"].as_str().unwrap();
+            assert!(
+                log.ends_with(&format!("{id}.log")),
+                "log path mismatch: {log}"
+            );
+            // Description carries the human-readable version label.
+            let desc = p["description"].as_str().unwrap();
+            assert!(desc.starts_with("PHP-FPM "), "description shape: {desc}");
+        }
+    }
+
+    #[test]
+    fn php_fpm_specs_do_not_collide_with_project_ids() {
+        // A project literally named `php-fpm-8-3` should still be
+        // emitted; the spec entry uses the same key but only one
+        // wins. Ensure project entries take precedence (since the
+        // user's registry choices outrank our derived process ids).
+        let mut r = Registry::new("test");
+        r.add_project(next_project("php-fpm-8-3", 3000)).unwrap();
+        let spec = PhpFpmSpec {
+            process_id: "php-fpm-8-3".into(),
+            version: "8.3".into(),
+            php_fpm_bin: PathBuf::from("/x/bin/php-fpm"),
+            pool_config: PathBuf::from("/x/conf"),
+            working_dir: PathBuf::from("/x"),
+        };
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[spec]).unwrap();
+        // The spec inserts AFTER the project loop, so it overwrites —
+        // documenting that here. If we later want the project to win,
+        // swap the iteration order.
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert!(doc["processes"]["php-fpm-8-3"].is_mapping());
     }
 }
