@@ -41,7 +41,8 @@ pub(super) async fn reconcile(
     app: &AppHandle,
     cache: &mut PcCache,
 ) -> StepOutcome {
-    let yaml = match process_compose::config::to_yaml(reg, logs_dir) {
+    let mail_env = mail_env_from_state(state);
+    let yaml = match process_compose::config::to_yaml(reg, logs_dir, mail_env.as_ref()) {
         Ok(y) => y,
         Err(e) => return StepOutcome::failed(format!("yaml generation: {e}")),
     };
@@ -66,8 +67,27 @@ pub(super) async fn reconcile(
 
 /// Public helper exposed to `lib.rs::setup` so the cold-boot path can
 /// produce the initial YAML before `boot_pc` is called the first time.
+/// Mailpit hasn't booted yet at this point in setup, so the initial
+/// YAML always emits without Mail* env vars; the first reconcile tick
+/// after Mailpit comes up will regenerate the YAML with the
+/// injections and restart PC once.
 pub fn build_initial_yaml(reg: &Registry, logs_dir: &Path) -> Result<String, String> {
-    process_compose::config::to_yaml(reg, logs_dir).map_err(|e| e.to_string())
+    process_compose::config::to_yaml(reg, logs_dir, None).map_err(|e| e.to_string())
+}
+
+/// Read the Mailpit sidecar's status off `AppState` and translate it
+/// into the optional env-injection passed through to the YAML
+/// generator. Returns `None` when Mailpit isn't running (Mail* vars
+/// are absent from the generated YAML).
+fn mail_env_from_state(state: &AppState) -> Option<process_compose::config::MailpitEnv> {
+    let guard = state.mailpit.lock().expect("mailpit mutex poisoned");
+    if guard.is_running() {
+        Some(process_compose::config::MailpitEnv::with_smtp_port(
+            guard.smtp_port(),
+        ))
+    } else {
+        None
+    }
 }
 
 /// Default location for the persistent reconciled YAML. The bootstrap
@@ -136,8 +156,8 @@ mod tests {
         let mut b = Registry::new("test");
         b.add_project(next_project("y", 3011)).unwrap();
         b.add_project(next_project("x", 3010)).unwrap();
-        let y_a = process_compose::config::to_yaml(&a, Path::new("/tmp")).unwrap();
-        let y_b = process_compose::config::to_yaml(&b, Path::new("/tmp")).unwrap();
+        let y_a = process_compose::config::to_yaml(&a, Path::new("/tmp"), None).unwrap();
+        let y_b = process_compose::config::to_yaml(&b, Path::new("/tmp"), None).unwrap();
         // YAML emit may be ordering-stable already; we don't depend on
         // that. We do depend on the hash being deterministic given a
         // string input.
@@ -151,9 +171,11 @@ mod tests {
     fn yaml_hash_changes_when_project_added() {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
-        let h1 = hash_string(&process_compose::config::to_yaml(&r, Path::new("/tmp")).unwrap());
+        let h1 =
+            hash_string(&process_compose::config::to_yaml(&r, Path::new("/tmp"), None).unwrap());
         r.add_project(next_project("b", 3011)).unwrap();
-        let h2 = hash_string(&process_compose::config::to_yaml(&r, Path::new("/tmp")).unwrap());
+        let h2 =
+            hash_string(&process_compose::config::to_yaml(&r, Path::new("/tmp"), None).unwrap());
         assert_ne!(h1, h2);
     }
 

@@ -95,14 +95,39 @@ struct PcTcpSocket {
     port: u16,
 }
 
+/// SMTP defaults injected into every process's environment when
+/// Mailpit is running. Frameworks that read `MAIL_HOST` /
+/// `MAIL_PORT` / `MAIL_FROM_ADDRESS` / `MAIL_MAILER` (Laravel,
+/// Symfony) pick up the local catcher automatically. Project-level
+/// `env` overrides win — if the user has an explicit `MAIL_HOST`,
+/// these defaults stay out of the way.
+#[derive(Debug, Clone)]
+pub struct MailpitEnv {
+    pub smtp_port: u16,
+    pub from_address: String,
+}
+
+impl MailpitEnv {
+    pub fn with_smtp_port(smtp_port: u16) -> Self {
+        Self {
+            smtp_port,
+            from_address: "hello@example.local".into(),
+        }
+    }
+}
+
 /// Build a YAML string from the registry.
 ///
 /// `logs_dir` is the directory each per-process log file is written to
 /// (e.g. `~/Library/Application Support/PortBay/logs/`).
-pub fn to_yaml(reg: &Registry, logs_dir: &Path) -> Result<String> {
+///
+/// `mail_env` injects SMTP defaults pointing at the local Mailpit
+/// catcher into every process. Pass `None` when Mailpit isn't
+/// running; pass `Some(MailpitEnv::with_smtp_port(port))` otherwise.
+pub fn to_yaml(reg: &Registry, logs_dir: &Path, mail_env: Option<&MailpitEnv>) -> Result<String> {
     let mut processes = BTreeMap::new();
     for p in &reg.projects {
-        if let Some(entry) = project_to_pc_process(p, logs_dir) {
+        if let Some(entry) = project_to_pc_process(p, logs_dir, mail_env) {
             processes.insert(p.id.to_string(), entry);
         }
     }
@@ -119,7 +144,11 @@ pub fn to_yaml(reg: &Registry, logs_dir: &Path) -> Result<String> {
     Ok(serde_yaml::to_string(&doc)?)
 }
 
-fn project_to_pc_process(p: &Project, logs_dir: &Path) -> Option<PcProcess> {
+fn project_to_pc_process(
+    p: &Project,
+    logs_dir: &Path,
+    mail_env: Option<&MailpitEnv>,
+) -> Option<PcProcess> {
     // Projects without a start_command (pure Caddy-served sites) don't
     // produce a PC entry.
     let command = p.start_command.clone()?;
@@ -131,6 +160,15 @@ fn project_to_pc_process(p: &Project, logs_dir: &Path) -> Option<PcProcess> {
         .and_then(|r| readiness_to_pc_probe(r, p.port));
 
     let mut environment = BTreeMap::new();
+    // Inject Mailpit defaults first; the per-project env below
+    // overrides any key the user has set explicitly.
+    if let Some(mail) = mail_env {
+        environment.insert("MAIL_HOST".into(), "127.0.0.1".into());
+        environment.insert("MAIL_PORT".into(), mail.smtp_port.to_string());
+        environment.insert("MAIL_FROM_ADDRESS".into(), mail.from_address.clone());
+        environment.insert("MAIL_MAILER".into(), "smtp".into());
+        environment.insert("MAIL_ENCRYPTION".into(), "null".into());
+    }
     for (k, v) in &p.env {
         environment.insert(k.clone(), v.clone());
     }
@@ -247,7 +285,7 @@ mod tests {
     #[test]
     fn empty_registry_produces_minimal_yaml() {
         let r = Registry::new("test");
-        let yaml = to_yaml(&r, Path::new("/tmp")).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
         assert!(yaml.contains("version: '0.5'") || yaml.contains("version: \"0.5\""));
         assert!(yaml.contains("processes: {}"));
     }
@@ -256,7 +294,7 @@ mod tests {
     fn next_project_produces_process_with_http_probe() {
         let mut r = Registry::new("test");
         r.add_project(next_project("nour-beiruti", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp/logs")).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None).unwrap();
         assert!(
             yaml.contains("nour-beiruti"),
             "process name missing: {yaml}"
@@ -282,7 +320,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(php_project("tribal-house")).unwrap();
         r.add_project(next_project("nour-beiruti", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp")).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
         assert!(!yaml.contains("tribal-house"));
         assert!(yaml.contains("nour-beiruti"));
     }
@@ -294,10 +332,45 @@ mod tests {
         p.env.insert("NODE_ENV".into(), "development".into());
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp")).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
         assert!(yaml.contains("DATABASE_URL"));
         assert!(yaml.contains("postgres://x"));
         assert!(yaml.contains("NODE_ENV"));
+    }
+
+    #[test]
+    fn mail_env_injects_smtp_defaults_when_present() {
+        let mut r = Registry::new("test");
+        r.add_project(next_project("withmail", 3010)).unwrap();
+        let mail = MailpitEnv::with_smtp_port(1025);
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail)).unwrap();
+        assert!(yaml.contains("MAIL_HOST: 127.0.0.1"));
+        assert!(yaml.contains("MAIL_PORT: '1025'") || yaml.contains("MAIL_PORT: \"1025\""));
+        assert!(yaml.contains("MAIL_MAILER: smtp"));
+        assert!(yaml.contains("hello@example.local"));
+    }
+
+    #[test]
+    fn project_env_overrides_mail_defaults() {
+        let mut p = next_project("override", 3010);
+        p.env
+            .insert("MAIL_HOST".into(), "mail.production.test".into());
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let mail = MailpitEnv::with_smtp_port(1025);
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail)).unwrap();
+        // Project's explicit override wins; the default loopback is gone.
+        assert!(yaml.contains("MAIL_HOST: mail.production.test"));
+        assert!(!yaml.contains("MAIL_HOST: 127.0.0.1"));
+    }
+
+    #[test]
+    fn no_mail_env_leaves_yaml_without_mail_vars() {
+        let mut r = Registry::new("test");
+        r.add_project(next_project("nomail", 3010)).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
+        assert!(!yaml.contains("MAIL_HOST"));
+        assert!(!yaml.contains("MAIL_PORT"));
     }
 
     #[test]
@@ -306,7 +379,7 @@ mod tests {
         p.readiness = Some(Readiness::Process);
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp")).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
         assert!(!yaml.contains("readiness_probe"));
     }
 
@@ -315,7 +388,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
         r.add_project(next_project("b", 3011)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp")).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None).unwrap();
         let back: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         // Just confirm structural validity — content was checked above.
         assert!(back.get("processes").is_some());
