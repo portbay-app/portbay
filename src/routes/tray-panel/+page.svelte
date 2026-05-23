@@ -52,10 +52,28 @@
     void metrics.start();
     projectCpu.start();
 
+    // Each Tauri webview has its own JS context. Status events fire
+    // to every listener, but if the popover is hidden when the user
+    // clicks Start in the main window, the popover may show stale
+    // data on the next open. Defensive: refresh on every focus —
+    // cheap (one `list_projects` IPC) and guarantees the row dots
+    // match what the dashboard shows.
+    let unlistenFocus: (() => void) | null = null;
+    void (async () => {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const win = getCurrentWindow();
+      unlistenFocus = await win.onFocusChanged(({ payload: focused }) => {
+        if (focused) {
+          void projects.refresh();
+        }
+      });
+    })();
+
     return () => {
       // Don't fully stop projects/metrics — the main window may still
       // depend on them. Tear down only this view's listener.
       projectCpu.stop();
+      unlistenFocus?.();
     };
   });
 

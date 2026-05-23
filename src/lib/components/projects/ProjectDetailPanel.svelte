@@ -329,6 +329,7 @@
         whatHappened: `${label} copied.`,
         whyItMatters: "Paste anywhere.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
     } catch {

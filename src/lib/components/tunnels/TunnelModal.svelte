@@ -80,6 +80,7 @@
         whatHappened: "Public URL copied.",
         whyItMatters: "Paste anywhere.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
     } catch {

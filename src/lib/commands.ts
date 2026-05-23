@@ -55,7 +55,7 @@ export function collectCommands(): PaletteCommand[] {
       id: "app.stop-all",
       label: "Stop all running projects",
       group: "App",
-      icon: "circle-stop",
+      icon: "square",
       shortcut: "⇧⌘.",
       keywords: ["kill", "halt"],
       run: async () => {

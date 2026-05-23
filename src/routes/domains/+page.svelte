@@ -44,6 +44,7 @@
         whyItMatters:
           "Subdomains of this suffix now resolve to 127.0.0.1 via dnsmasq. /etc/hosts edits are no longer needed.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
       await refreshDns();

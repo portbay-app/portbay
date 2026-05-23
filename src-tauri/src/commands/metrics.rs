@@ -88,11 +88,12 @@ pub async fn system_metrics(state: State<'_, MetricsState>) -> AppResult<SystemM
 }
 
 /// Spawn the background metrics poller. Emits `portbay://metrics` every
-/// 2 s. Runs for the lifetime of the app handle (matches the existing
-/// status poller from card #1).
+/// 1 s — fast enough to track CPU spikes during a dev-server hot-reload
+/// without overwhelming sysinfo's refresh cost (~5-15 ms per sample on
+/// a modern Mac). Matches the cadence reference tools like ServBay use.
 pub fn spawn_metrics_poller(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
