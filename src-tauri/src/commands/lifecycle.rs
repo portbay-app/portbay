@@ -72,21 +72,24 @@ fn preflight_port(
         let Some(holder) = port_holder::find(port) else {
             continue;
         };
-        // If the holder looks like one of our own stale dev servers
-        // (matches the project's working directory in its command line),
-        // it's safe to clean up. The user explicitly clicked Start —
-        // we know they want this port for this project, and the only
-        // process matching that command line lineage is the previous
-        // run we lost track of.
+        // If the holder (or any of its ancestors) is one of our own
+        // stale dev servers, kill the topmost matching ancestor so
+        // wrappers propagate the signal down. The user explicitly
+        // clicked Start — we know they want this port for this
+        // project. Worker processes (e.g. Next.js's `next-server`)
+        // hide the path, but the dev-server shell that spawned them
+        // carries it; the ancestor walk catches those.
         if holder.looks_like_portbay_orphan(&working_dir) {
+            let target = holder.kill_target(&working_dir);
             tracing::info!(
                 project = %project_id,
-                pid = holder.pid,
+                holder_pid = holder.pid,
+                kill_pid = target,
                 port = port,
                 "killing stale PortBay-managed dev server before restart",
             );
             let _ = port_holder::kill_gracefully(
-                holder.pid,
+                target,
                 std::time::Duration::from_secs(2),
             );
             // Re-check; if the slot is now free, keep going.

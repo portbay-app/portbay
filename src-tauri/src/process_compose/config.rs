@@ -42,6 +42,15 @@ struct PcProcess {
 
     command: String,
 
+    /// When true, Process Compose loads the process definition but
+    /// does NOT auto-start it on boot — the user must explicitly call
+    /// /processes/start. We set this to `!project.auto_start` so the
+    /// PortBay app boots in a quiet state: projects appear in the
+    /// list, nothing runs until the user clicks Play. Without this
+    /// field, PC's default behaviour is to launch every process it
+    /// sees, which surprised users on fresh boots.
+    disabled: bool,
+
     availability: PcAvailability,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,6 +202,10 @@ fn php_fpm_to_pc_process(spec: &PhpFpmSpec, logs_dir: &Path) -> PcProcess {
         description: Some(format!("PHP-FPM {}", spec.version)),
         working_dir: spec.working_dir.to_string_lossy().into_owned(),
         command,
+        // PHP-FPM pools are infrastructure — they're only ever in the
+        // PC list when at least one PHP project pins their version,
+        // and they must be running for that project to serve. Auto-start.
+        disabled: false,
         availability: PcAvailability { restart: "no" },
         readiness_probe: None,
         log_location: log_path.to_string_lossy().into_owned(),
@@ -237,6 +250,12 @@ fn project_to_pc_process(
         description: Some(p.name.clone()),
         working_dir: p.path.to_string_lossy().into_owned(),
         command,
+        // Honour the registry's `auto_start` flag literally: when the
+        // user hasn't opted in, the process exists in PC's list but
+        // is dormant until they click Play. Defaults to false so a
+        // fresh app boot is quiet — projects show up but nothing
+        // runs.
+        disabled: !p.auto_start,
         availability: PcAvailability { restart: "no" },
         readiness_probe,
         log_location: log_path.to_string_lossy().into_owned(),

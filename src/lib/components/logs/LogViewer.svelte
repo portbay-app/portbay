@@ -227,6 +227,7 @@
         <!-- Follow toggle -->
         <label
           class="ml-auto flex items-center gap-1.5 text-xs text-fg-muted cursor-pointer"
+          title="Live tail — new log lines stream in as the project writes them. Like `tail -f`."
         >
           <input
             type="checkbox"
