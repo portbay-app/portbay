@@ -18,6 +18,16 @@ enum ToolKind {
     Terminal,
 }
 
+/// The custom URL schemes PortBay knows how to launch. A typed enum (rather
+/// than a `&str`) makes `deep_link_url` and `scheme_is_available` exhaustive —
+/// adding a variant is a compile error until both are updated, so a deep-link
+/// can never reach an `unreachable!`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepLinkScheme {
+    ClaudeCli,
+    Claude,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchMode {
     Cli {
@@ -26,7 +36,7 @@ enum LaunchMode {
     },
     MacApp(MacApp),
     DeepLink {
-        scheme: &'static str,
+        scheme: DeepLinkScheme,
     },
 }
 
@@ -110,14 +120,16 @@ const TOOL_DEFINITIONS: &[ToolDefinition] = &[
         label: "Claude Code",
         kind: ToolKind::Agent,
         launch: LaunchMode::DeepLink {
-            scheme: "claude-cli",
+            scheme: DeepLinkScheme::ClaudeCli,
         },
     },
     ToolDefinition {
         id: "claude-desktop",
         label: "Claude Desktop",
         kind: ToolKind::Agent,
-        launch: LaunchMode::DeepLink { scheme: "claude" },
+        launch: LaunchMode::DeepLink {
+            scheme: DeepLinkScheme::Claude,
+        },
     },
     ToolDefinition {
         id: "codex",
@@ -240,14 +252,14 @@ fn detect_installed_dev_tools() -> Vec<DevToolInfo> {
     detect_installed_dev_tools_with(
         |cli| which::which(cli).is_ok(),
         |app| resolve_mac_app(app).is_some(),
-        |scheme| scheme_is_available(scheme),
+        scheme_is_available,
     )
 }
 
 fn detect_installed_dev_tools_with(
     mut cli_exists: impl FnMut(&str) -> bool,
     mut app_exists: impl FnMut(MacApp) -> bool,
-    mut scheme_exists: impl FnMut(&str) -> bool,
+    mut scheme_exists: impl FnMut(DeepLinkScheme) -> bool,
 ) -> Vec<DevToolInfo> {
     TOOL_DEFINITIONS
         .iter()
@@ -278,9 +290,9 @@ fn tool_definition(id: &str) -> Option<ToolDefinition> {
         .find(|definition| definition.id == id)
 }
 
-fn scheme_is_available(scheme: &str) -> bool {
+fn scheme_is_available(scheme: DeepLinkScheme) -> bool {
     match scheme {
-        "claude-cli" => {
+        DeepLinkScheme::ClaudeCli => {
             which::which("claude").is_ok()
                 || dirs::home_dir()
                     .map(|home| {
@@ -289,12 +301,11 @@ fn scheme_is_available(scheme: &str) -> bool {
                     })
                     .unwrap_or(false)
         }
-        "claude" => resolve_mac_app(MacApp {
+        DeepLinkScheme::Claude => resolve_mac_app(MacApp {
             app_names: &["Claude"],
             bundle_ids: &["com.anthropic.claudefordesktop"],
         })
         .is_some(),
-        _ => false,
     }
 }
 
@@ -359,18 +370,17 @@ fn standard_app_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn deep_link_url(scheme: &str, path: &str) -> String {
+fn deep_link_url(scheme: DeepLinkScheme, path: &str) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     match scheme {
-        "claude-cli" => {
+        DeepLinkScheme::ClaudeCli => {
             query.append_pair("cwd", path);
             format!("claude-cli://open?{}", query.finish())
         }
-        "claude" => {
+        DeepLinkScheme::Claude => {
             query.append_pair("folder", path);
             format!("claude://code/new?{}", query.finish())
         }
-        _ => unreachable!("unsupported deep-link scheme"),
     }
 }
 
@@ -383,7 +393,7 @@ mod tests {
         let found = detect_installed_dev_tools_with(
             |cli| matches!(cli, "cursor" | "code" | "subl"),
             |app| app.app_names.contains(&"Warp"),
-            |scheme| scheme == "claude-cli",
+            |scheme| scheme == DeepLinkScheme::ClaudeCli,
         );
         let ids: Vec<&str> = found.iter().map(|tool| tool.id.as_str()).collect();
         assert_eq!(
@@ -429,13 +439,13 @@ mod tests {
 
     #[test]
     fn builds_claude_code_deep_link_with_encoded_cwd() {
-        let url = deep_link_url("claude-cli", "/Users/me/My Project");
+        let url = deep_link_url(DeepLinkScheme::ClaudeCli, "/Users/me/My Project");
         assert_eq!(url, "claude-cli://open?cwd=%2FUsers%2Fme%2FMy+Project");
     }
 
     #[test]
     fn builds_claude_desktop_code_link_with_encoded_folder() {
-        let url = deep_link_url("claude", "/Users/me/My Project");
+        let url = deep_link_url(DeepLinkScheme::Claude, "/Users/me/My Project");
         assert_eq!(url, "claude://code/new?folder=%2FUsers%2Fme%2FMy+Project");
     }
 }

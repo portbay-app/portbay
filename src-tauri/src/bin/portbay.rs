@@ -586,7 +586,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
     // Best-effort hosts write. Permission-denied is reported as a hint, not
     // an error — the project is registered either way, and the user can
     // catch up with `sudo portbay hosts add <hostname>`.
-    let hosts_outcome = add_host_best_effort(&ctx, &project.hostname, Ipv4Addr::LOCALHOST);
+    let hosts_outcome = add_host_best_effort(ctx, &project.hostname, Ipv4Addr::LOCALHOST);
 
     if ctx.json {
         let warnings = hosts_warnings(&hosts_outcome);
@@ -668,7 +668,7 @@ async fn cmd_add_from_portfile(
     ctx.save_registry(&reg)?;
 
     // Best-effort hosts add. Same UX as cmd_add's main path.
-    let hosts_outcome = add_host_best_effort(&ctx, &project.hostname, Ipv4Addr::LOCALHOST);
+    let hosts_outcome = add_host_best_effort(ctx, &project.hostname, Ipv4Addr::LOCALHOST);
 
     if ctx.json {
         let warnings = hosts_warnings(&hosts_outcome);
@@ -777,7 +777,7 @@ async fn cmd_remove(ctx: &CliContext, args: RemoveArgs) -> Result<ExitCode, CliE
 
         // Best-effort hosts entry removal — permission-denied reported as
         // a hint, not an error. The registry change has already landed.
-        hosts_outcome = Some(remove_host_best_effort(&ctx, &removed.hostname));
+        hosts_outcome = Some(remove_host_best_effort(ctx, &removed.hostname));
 
         // Live Caddy routes are left alone — the reconciler drops orphans
         // on next daemon boot.
@@ -1262,20 +1262,8 @@ fn certs_root() -> Option<PathBuf> {
     Some(p)
 }
 
-fn slugify(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_dash = true;
-    for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
+// Shared slugifier — same ids as the GUI's project/group commands.
+use portbay_lib::util::slugify;
 
 // Allows the linker to see this even though the file isn't referenced
 // from main(); silences "dead code" on the CertPaths reexport above.
@@ -1359,30 +1347,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slugify_lowercases_and_hyphenates() {
-        assert_eq!(slugify("Marketing Site"), "marketing-site");
-        assert_eq!(slugify("API Gateway"), "api-gateway");
-        assert_eq!(slugify("__weird___name__"), "weird-name");
-        assert_eq!(slugify("UPPER"), "upper");
-    }
-
-    #[test]
-    fn slugify_handles_unicode_by_dropping_it() {
-        // Phase 1: ASCII-only IDs. Anything else turns into hyphens.
-        assert_eq!(slugify("Café"), "caf");
-    }
-
-    #[test]
     fn cli_parses_list() {
         let cli = Cli::try_parse_from(["portbay", "list"]).unwrap();
-        assert!(matches!(cli.cmd, Cmd::List));
+        assert!(matches!(cli.cmd, Some(Cmd::List)));
         assert!(!cli.json);
     }
 
     #[test]
     fn cli_parses_add_with_defaults() {
         let cli = Cli::try_parse_from(["portbay", "add", "/tmp/x"]).unwrap();
-        let Cmd::Add(args) = cli.cmd else {
+        let Some(Cmd::Add(args)) = cli.cmd else {
             panic!("expected Add")
         };
         assert_eq!(args.path, PathBuf::from("/tmp/x"));
@@ -1393,7 +1367,7 @@ mod tests {
     #[test]
     fn cli_parses_stop_all() {
         let cli = Cli::try_parse_from(["portbay", "stop", "--all"]).unwrap();
-        let Cmd::Stop(args) = cli.cmd else {
+        let Some(Cmd::Stop(args)) = cli.cmd else {
             panic!("expected Stop")
         };
         assert!(args.all);
