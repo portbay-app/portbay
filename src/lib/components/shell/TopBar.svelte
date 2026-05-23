@@ -1,50 +1,31 @@
 <!--
-  TopBar — page title, command palette trigger, and primary actions.
+  TopBar — search palette + primary actions + chrome cluster.
 
-  Design rules (informed by Emil Kowalski's polish principles):
-
-  - **Color reserved for active state.** Idle buttons are tonally
-    flat (text-fg-muted on bg-surface). Hover lifts them to text-fg
-    with a subtle background. Only the Add action keeps a soft
-    accent halo because it's the highest-frequency primary action.
-  - **One hero.** The search/palette trigger gets generous width and
-    visual weight; everything else recedes.
-  - **Consistent rhythm.** Square 28×28 action buttons (was 32×32),
-    gap-1 inside clusters, gap-3 between distinct clusters, divider
-    between the actions and the destructive Stop-All.
-  - **No competing borders.** Replaced colored outlines with
-    background-on-hover; the page reads as a quieter surface that
-    invites action rather than shouting at the user.
+  Redesign:
+    - Page title moves out of the bar; the route component owns its own
+      heading (centred main area, larger type).
+    - Search palette trigger stretches to fill the available space —
+      it's the dominant element.
+    - Primary actions: "+ Add Project" (filled accent) and "Stop All"
+      (filled status-crashed). The two land side by side as peer CTAs.
+    - Right cluster: theme toggle, notifications bell (with unread
+      badge), and a deterministic-avatar user-menu trigger. Tunnels
+      pill appears between Stop All and the cluster when active.
 -->
 <script lang="ts">
-  import { page } from "$app/state";
-  import { goto } from "$app/navigation";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import { palette } from "$lib/stores/palette.svelte";
   import { tunnels } from "$lib/stores/tunnels.svelte";
   import { tunnelModal } from "$lib/stores/tunnelModal.svelte";
+  import { theme } from "$lib/stores/theme.svelte";
+  import { notifications } from "$lib/stores/notifications.svelte";
   import StopAllButton from "./StopAllButton.svelte";
+  import NotificationsPanel from "./NotificationsPanel.svelte";
+  import UserMenu from "./UserMenu.svelte";
 
-  // Map route paths to page titles. Falls back to a humanised path segment
-  // if the route isn't in the map (defensive — every Phase 2 route is here).
-  const pageTitles: Record<string, string> = {
-    "/": "Projects",
-    "/services": "Services",
-    "/domains": "Domains",
-    "/logs": "Logs",
-    "/languages": "Languages",
-    "/settings": "Settings",
-    "/preview": "Atoms preview",
-  };
-
-  const currentTitle = $derived.by(() => {
-    const path = page.url.pathname;
-    if (pageTitles[path]) return pageTitles[path];
-    const head = "/" + (path.split("/")[1] ?? "");
-    if (pageTitles[head]) return pageTitles[head];
-    return "PortBay";
-  });
+  let notificationsOpen = $state<boolean>(false);
+  let userMenuOpen = $state<boolean>(false);
 
   function openAddProject() {
     addProjectWizard.show();
@@ -53,39 +34,49 @@
   function openPalette() {
     palette.show();
   }
+
+  function toggleNotifications() {
+    notificationsOpen = !notificationsOpen;
+    if (notificationsOpen) userMenuOpen = false;
+  }
+
+  function toggleUserMenu() {
+    userMenuOpen = !userMenuOpen;
+    if (userMenuOpen) notificationsOpen = false;
+  }
+
+  // Avatar gradient is deterministic — PortBay is single-user, but we
+  // still want the topbar's chip to read as "an account UI" so the
+  // affordance is unmistakable. "P" initial sits on a brand-flavoured
+  // teal→indigo gradient.
+  const avatarGradient = "linear-gradient(135deg, #4d9cff 0%, #7b5cff 100%)";
 </script>
 
 <header
   data-tauri-drag-region
-  class="h-14 shrink-0 flex items-center gap-4 px-4 border-b border-border/60 bg-bg/95 backdrop-blur-sm select-none"
+  class="relative h-14 shrink-0 flex items-center gap-3 px-4
+         border-b border-border/60 bg-bg/95 backdrop-blur-sm select-none"
 >
-  <h1
-    data-tauri-drag-region
-    class="text-[15px] font-semibold tracking-tight text-fg shrink-0"
-  >
-    {currentTitle}
-  </h1>
-
   <!--
-    Search / command palette trigger — the hero of the bar.
-    Tightly centred in the available space so the cluster on the
-    right reads as secondary actions, not equal players.
+    Search / command palette trigger — hero of the bar. Grows to fill
+    horizontal space; the actions on the right are tight clusters.
   -->
-  <div class="flex-1 flex justify-center min-w-0">
+  <div class="flex-1 min-w-0">
     <button
       type="button"
       onclick={openPalette}
       aria-label="Open command palette"
-      class="group flex items-center gap-2.5 w-full max-w-md h-8 px-3 rounded-md
+      class="group flex items-center gap-2.5 w-full max-w-xl h-9 px-3
+             rounded-lg
              bg-surface/60 hover:bg-surface
              text-fg-subtle hover:text-fg-muted
              border border-border/50 hover:border-border
-             focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60
-             transition-all duration-150"
+             focus-visible:outline-none focus-visible:ring-1
+             focus-visible:ring-accent/60 transition-all duration-150"
     >
       <Icon name="search" size={13} class="shrink-0" />
       <span class="flex-1 text-left text-[13px] truncate">
-        Search or run a command
+        Search projects, domains, groups…
       </span>
       <kbd
         class="text-[10px] font-mono leading-none px-1.5 py-1 rounded
@@ -98,8 +89,8 @@
     </button>
   </div>
 
-  <!-- Action cluster: tunnels (when active), Add, Stop-All, Settings -->
-  <div class="flex items-center gap-1 shrink-0">
+  <!-- Primary action cluster -->
+  <div class="flex items-center gap-2 shrink-0">
     {#if tunnels.count > 0}
       <button
         type="button"
@@ -109,10 +100,9 @@
         }}
         title="{tunnels.count} active public tunnel{tunnels.count === 1 ? '' : 's'}"
         aria-label="View active tunnels"
-        class="inline-flex items-center gap-1.5 h-7 px-2 rounded-md
+        class="inline-flex items-center gap-1.5 h-9 px-2.5 rounded-lg
                text-accent bg-accent/10 hover:bg-accent/15
-               text-[12px] font-medium tabular-nums
-               transition-colors"
+               text-[12px] font-medium tabular-nums transition-colors"
       >
         <Icon name="globe" size={12} />
         {tunnels.count}
@@ -124,30 +114,92 @@
       onclick={openAddProject}
       title="Add project (⌘N)"
       aria-label="Add project"
-      class="inline-flex items-center justify-center w-7 h-7 rounded-md
-             text-fg-muted hover:text-status-running
-             bg-transparent hover:bg-status-running/10
-             transition-colors"
+      class="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg
+             text-[13px] font-medium tracking-tight
+             bg-accent text-on-accent shadow-sm
+             hover:brightness-110 active:brightness-95
+             focus-visible:outline-none focus-visible:ring-2
+             focus-visible:ring-accent/40 transition"
     >
       <Icon name="plus" size={14} />
+      Add Project
     </button>
 
     <StopAllButton />
+  </div>
 
-    <!-- Vertical divider between transient + settings actions -->
-    <div class="w-px h-4 bg-border/60 mx-1" aria-hidden="true"></div>
+  <!-- Divider -->
+  <div class="w-px h-5 bg-border/60 mx-1 shrink-0" aria-hidden="true"></div>
 
+  <!-- Chrome cluster: theme, notifications, user -->
+  <div class="relative flex items-center gap-1 shrink-0">
     <button
       type="button"
-      onclick={() => goto("/settings")}
-      title="Settings"
-      aria-label="Settings"
-      class="inline-flex items-center justify-center w-7 h-7 rounded-md
-             text-fg-muted hover:text-fg
-             bg-transparent hover:bg-surface-2
-             transition-colors"
+      onclick={() => theme.toggle()}
+      title="Toggle theme"
+      aria-label="Toggle theme ({theme.value === 'dark' ? 'currently dark' : 'currently light'})"
+      class="inline-flex items-center justify-center w-9 h-9 rounded-lg
+             text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
     >
-      <Icon name="settings" size={14} />
+      <Icon name={theme.value === "dark" ? "sun" : "moon"} size={15} />
     </button>
+
+    <div class="relative">
+      <button
+        type="button"
+        onclick={toggleNotifications}
+        title="Notifications"
+        aria-label="Notifications ({notifications.unreadCount} unread)"
+        aria-expanded={notificationsOpen}
+        class="inline-flex items-center justify-center w-9 h-9 rounded-lg
+               text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+      >
+        <Icon name="bell" size={15} />
+        {#if notifications.unreadCount > 0}
+          <span
+            class="absolute top-1 right-1.5 min-w-[14px] h-3.5 px-1
+                   rounded-full bg-status-crashed text-on-accent
+                   text-[9px] leading-[14px] font-semibold text-center
+                   tabular-nums shadow"
+          >
+            {notifications.unreadCount > 9 ? "9+" : notifications.unreadCount}
+          </span>
+        {/if}
+      </button>
+      <NotificationsPanel
+        open={notificationsOpen}
+        onclose={() => (notificationsOpen = false)}
+      />
+    </div>
+
+    <div class="relative">
+      <button
+        type="button"
+        onclick={toggleUserMenu}
+        title="User menu"
+        aria-label="User menu"
+        aria-expanded={userMenuOpen}
+        class="inline-flex items-center gap-1 h-9 pl-1 pr-1.5 rounded-lg
+               hover:bg-surface-2 transition-colors"
+      >
+        <span
+          class="inline-flex items-center justify-center w-7 h-7 rounded-full
+                 text-on-accent text-[11px] font-semibold tracking-tight
+                 shadow-inner"
+          style:background={avatarGradient}
+        >
+          P
+        </span>
+        <Icon
+          name="chevron-down"
+          size={12}
+          class="text-fg-subtle"
+        />
+      </button>
+      <UserMenu
+        open={userMenuOpen}
+        onclose={() => (userMenuOpen = false)}
+      />
+    </div>
   </div>
 </header>

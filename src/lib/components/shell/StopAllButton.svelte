@@ -130,14 +130,16 @@
 <svelte:window onkeydown={handleKey} />
 
 {#if state === "confirming"}
-  <div class="flex items-center gap-1.5 h-8 px-2 rounded-md border border-status-crashed/40 bg-status-crashed/10">
-    <span class="text-xs text-status-crashed pr-1">
+  <div
+    class="flex items-center gap-1.5 h-9 px-2 rounded-lg border border-status-crashed/40 bg-status-crashed/10"
+  >
+    <span class="text-[12px] text-status-crashed pr-1">
       Stop {runningCount} running?
     </span>
     <button
       type="button"
       onclick={commit}
-      class="inline-flex items-center justify-center w-6 h-6 rounded-md text-status-crashed hover:bg-status-crashed/20 transition-colors"
+      class="inline-flex items-center justify-center w-7 h-7 rounded-md text-status-crashed hover:bg-status-crashed/20 transition-colors"
       aria-label="Confirm stop all"
     >
       <Icon name="check" size={14} />
@@ -145,7 +147,7 @@
     <button
       type="button"
       onclick={cancel}
-      class="inline-flex items-center justify-center w-6 h-6 rounded-md text-fg-muted hover:bg-surface-2 transition-colors"
+      class="inline-flex items-center justify-center w-7 h-7 rounded-md text-fg-muted hover:bg-surface-2 transition-colors"
       aria-label="Cancel stop all"
     >
       <Icon name="x" size={14} />
@@ -153,13 +155,12 @@
   </div>
 {:else}
   <!--
-    Idle state: tonal neutral matching the rest of the top bar — only
-    the live-projects count promotes it visually. When projects are
-    actually running, the icon shifts to status-crashed (the same
-    red used everywhere "needs attention" is signalled), so the
-    user sees the button "wake up" only when there's something to
-    stop. Disabled state stays at fg-subtle so it reads as inert
-    rather than colour-faded.
+    Idle / running state — primary destructive button. The redesign
+    promotes this from the previous icon-only treatment to a filled
+    pill so it reads as a peer to the "+ Add Project" action. The
+    button stays filled even when nothing is running (just dimmed +
+    disabled) so the top bar's visual rhythm doesn't shift as
+    projects spin up.
   -->
   <button
     type="button"
@@ -169,17 +170,25 @@
       ? "Nothing to stop"
       : `Stop all ${runningCount} running projects (⇧⌘.)`}
     aria-label="Stop all running projects"
-    class="inline-flex items-center justify-center w-7 h-7 rounded-md
-           bg-transparent transition-colors
-           disabled:text-fg-subtle/60 disabled:cursor-not-allowed
-           {runningCount > 0
-      ? 'text-status-crashed hover:bg-status-crashed/10'
-      : 'text-fg-muted'}"
+    class="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg
+           text-[13px] font-medium tracking-tight
+           bg-status-crashed text-on-accent
+           shadow-sm hover:brightness-110 active:brightness-95
+           transition disabled:opacity-50 disabled:cursor-not-allowed
+           focus-visible:outline-none focus-visible:ring-2
+           focus-visible:ring-status-crashed/40"
   >
     {#if state === "running"}
       <Icon name="refresh-cw" size={13} class="animate-spin" />
+      Stopping…
     {:else}
-      <Icon name="square" size={10} class="fill-current" />
+      <span
+        class="inline-flex items-center justify-center w-3.5 h-3.5 rounded-[3px]
+               bg-on-accent/95 text-status-crashed"
+      >
+        <Icon name="square" size={9} class="fill-current" />
+      </span>
+      Stop All
     {/if}
   </button>
 {/if}
