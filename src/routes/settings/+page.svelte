@@ -12,6 +12,7 @@
   import { errorBus } from "$lib/stores/errors.svelte";
   import { density, type Density } from "$lib/stores/density.svelte";
   import { theme, type Theme } from "$lib/stores/theme.svelte";
+  import { preferences } from "$lib/stores/preferences.svelte";
   import { safeInvoke } from "$lib/ipc";
 
   interface ResolverStatus {
@@ -112,6 +113,7 @@
   let tauriVersion = $state<string>("…");
 
   onMount(() => {
+    void preferences.load();
     void refreshDnsStatus();
     void refreshMailStatus();
     void (async () => {
@@ -240,6 +242,67 @@
           </div>
         </label>
       {/each}
+    </div>
+  </DashboardCard>
+
+  <DashboardCard title="Behavior" flush>
+    <div class="space-y-3">
+      <p class="text-xs text-fg-muted leading-relaxed">
+        PortBay can live in your menu bar so quick actions don't require
+        focusing the window. The tray icon shows aggregate project
+        health and exposes Start, Stop, Restart, and Open for every
+        project — same as the dashboard, one click away.
+      </p>
+
+      <label
+        class="flex items-start gap-3 p-3 rounded-md border cursor-pointer transition-colors
+               border-border hover:border-border-strong"
+      >
+        <input
+          type="checkbox"
+          checked={preferences.value.showTrayIcon}
+          onchange={(e) =>
+            preferences.update({
+              showTrayIcon: (e.currentTarget as HTMLInputElement).checked,
+            })}
+          class="mt-1 accent-accent"
+          disabled={!preferences.loaded}
+        />
+        <div>
+          <div class="text-sm font-medium text-fg">Show menu bar icon</div>
+          <div class="text-xs text-fg-muted">
+            Adds a status-coloured PortBay icon to the macOS menu bar.
+            Gray when idle, blue while starting, green when healthy,
+            red when something needs attention.
+          </div>
+        </div>
+      </label>
+
+      <label
+        class="flex items-start gap-3 p-3 rounded-md border cursor-pointer transition-colors
+               {preferences.value.showTrayIcon
+          ? 'border-border hover:border-border-strong'
+          : 'border-border opacity-60 cursor-not-allowed'}"
+      >
+        <input
+          type="checkbox"
+          checked={preferences.value.closeToMenuBar}
+          onchange={(e) =>
+            preferences.update({
+              closeToMenuBar: (e.currentTarget as HTMLInputElement).checked,
+            })}
+          class="mt-1 accent-accent"
+          disabled={!preferences.loaded || !preferences.value.showTrayIcon}
+        />
+        <div>
+          <div class="text-sm font-medium text-fg">Close to menu bar</div>
+          <div class="text-xs text-fg-muted">
+            Closing the window keeps the app and your projects running.
+            Quit explicitly from the tray menu (or press ⌘Q) to stop
+            everything. Requires the menu bar icon.
+          </div>
+        </div>
+      </label>
     </div>
   </DashboardCard>
 
