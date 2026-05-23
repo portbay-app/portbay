@@ -34,6 +34,7 @@
   import { preferences } from "$lib/stores/preferences.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
+  import { installCrashReporter } from "$lib/stores/crashReporter.svelte";
 
   onMount(() => {
     // The tray popover renders in its own webview — it must not start
@@ -41,6 +42,7 @@
     // effects belong to the main window's instance of this layout.
     if (isTrayPanel) return;
 
+    installCrashReporter();
     tunnels.start();
     // The projects store has page-spanning lifetime — it's read by
     // /domains, /services, /logs, /languages, the right rail, the

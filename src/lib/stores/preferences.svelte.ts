@@ -18,12 +18,15 @@ export interface Preferences {
   closeToMenuBar: boolean;
   /** Internal: the one-time "still running" toast has been shown. */
   closeToMenuBarToastSeen: boolean;
+  /** Explicit opt-in for usage telemetry and crash-report upload. */
+  telemetryEnabled: boolean;
 }
 
 const DEFAULTS: Preferences = {
   showTrayIcon: true,
   closeToMenuBar: true,
   closeToMenuBarToastSeen: false,
+  telemetryEnabled: false,
 };
 
 function createPreferencesStore() {
