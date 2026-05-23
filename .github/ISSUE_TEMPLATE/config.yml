@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and setup help
+    url: https://github.com/portbay-app/portbay/discussions
+    about: Use Discussions for questions, setup help, and open-ended design discussion.
+  - name: Security reports
+    url: https://github.com/portbay-app/portbay/security/policy
+    about: Do not file public issues for vulnerabilities.
