@@ -1,23 +1,20 @@
 //! Node.js runtime detector.
 //!
-//! Probes (in order):
-//!   1. Homebrew `node@<ver>` formula (`/opt/homebrew/opt/node@22/bin/node`)
-//!   2. Homebrew bare `node` formula
-//!   3. nvm — `~/.nvm/versions/node/<ver>/bin/node`
-//!   4. asdf — `~/.asdf/installs/nodejs/<ver>/bin/node`
-//!   5. mise — `~/.local/share/mise/installs/node/<ver>/bin/node`
-//!   6. System `which node`
+//! Discovery is entirely driven by the user's actual environment —
+//! no hardcoded version lists, no hardcoded prefixes. Sources:
 //!
-//! Deduped by major.minor so the sidebar groups Node 22.11 and 22.12
-//! into a single "22" row in a follow-up. For now we surface each
-//! exact version detected.
+//!   1. Every `node` / `node@<ver>` formula under the user's brew prefix
+//!      (discovered via `brew --prefix`, see `env::brew_opt_prefixes`).
+//!   2. `~/.nvm/versions/node/<ver>/bin/node` (NVM_DIR honoured).
+//!   3. Every install under `<asdf-root>/installs/nodejs/<ver>`.
+//!   4. Every install under `<mise-installs>/node/<ver>`.
+//!   5. Anything else on `PATH` via `which::which`.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::runtimes::{
-    homebrew_prefixes, version_from, InstallSource, LanguageRuntime, RuntimeInstall,
-};
+use crate::runtimes::env;
+use crate::runtimes::{version_from, InstallSource, LanguageRuntime, RuntimeInstall};
 
 pub struct NodeRuntime;
 
@@ -35,57 +32,47 @@ impl LanguageRuntime for NodeRuntime {
         let mut out: Vec<RuntimeInstall> = Vec::new();
         let mut seen: HashSet<PathBuf> = HashSet::new();
 
-        // Homebrew versioned formulas (node@18, node@20, node@22, …).
-        for prefix in homebrew_prefixes() {
-            if let Ok(entries) = std::fs::read_dir(&prefix) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let s = name.to_string_lossy();
-                    if !s.starts_with("node@") {
-                        continue;
-                    }
-                    let bin = entry.path().join("bin").join("node");
-                    push_if_present(&mut out, &mut seen, bin, InstallSource::Homebrew);
-                }
-            }
-            let bare = prefix.join("node").join("bin").join("node");
-            push_if_present(&mut out, &mut seen, bare, InstallSource::Homebrew);
+        for (_, dir) in env::brew_formulae_matching("node") {
+            push(
+                &mut out,
+                &mut seen,
+                dir.join("bin").join("node"),
+                InstallSource::Homebrew,
+            );
         }
 
-        // nvm — versions live under ~/.nvm/versions/node/v<ver>/bin/node
-        if let Some(home) = dirs::home_dir() {
-            let nvm = home.join(".nvm").join("versions").join("node");
-            if let Ok(entries) = std::fs::read_dir(&nvm) {
-                for entry in entries.flatten() {
-                    let bin = entry.path().join("bin").join("node");
-                    push_if_present(&mut out, &mut seen, bin, InstallSource::Nvm);
-                }
-            }
-            // asdf
-            let asdf = home.join(".asdf").join("installs").join("nodejs");
-            scan_manager_installs(&asdf, "bin/node", &mut out, &mut seen, InstallSource::Asdf);
-            // mise
-            let mise = home
-                .join(".local")
-                .join("share")
-                .join("mise")
-                .join("installs")
-                .join("node");
-            scan_manager_installs(&mise, "bin/node", &mut out, &mut seen, InstallSource::Mise);
+        if let Some(nvm) = env::nvm_root() {
+            let versions_dir = nvm.join("versions").join("node");
+            scan_children(&versions_dir, "bin/node", &mut out, &mut seen, InstallSource::Nvm);
+        }
+        if let Some(asdf) = env::asdf_root() {
+            scan_children(
+                &asdf.join("installs").join("nodejs"),
+                "bin/node",
+                &mut out,
+                &mut seen,
+                InstallSource::Asdf,
+            );
+        }
+        if let Some(mise) = env::mise_installs_root() {
+            scan_children(
+                &mise.join("node"),
+                "bin/node",
+                &mut out,
+                &mut seen,
+                InstallSource::Mise,
+            );
         }
 
-        // System PATH (last so it loses dedup ties to package-manager hits).
+        // Anything on the user's (now login-shell-expanded) PATH.
         if let Ok(p) = which::which("node") {
-            push_if_present(&mut out, &mut seen, p, InstallSource::System);
+            push(&mut out, &mut seen, p, InstallSource::System);
         }
-
         out
     }
 }
 
-/// Walk `<root>/<version>/<rel>` for every direct child of `root`,
-/// pushing the resulting binary path when it exists.
-fn scan_manager_installs(
+fn scan_children(
     root: &std::path::Path,
     rel: &str,
     out: &mut Vec<RuntimeInstall>,
@@ -96,12 +83,11 @@ fn scan_manager_installs(
         return;
     };
     for entry in entries.flatten() {
-        let bin = entry.path().join(rel);
-        push_if_present(out, seen, bin, source);
+        push(out, seen, entry.path().join(rel), source);
     }
 }
 
-fn push_if_present(
+fn push(
     out: &mut Vec<RuntimeInstall>,
     seen: &mut HashSet<PathBuf>,
     bin: PathBuf,
@@ -110,8 +96,6 @@ fn push_if_present(
     if !bin.exists() {
         return;
     }
-    // Canonicalise so symlinks (Homebrew + nvm both symlink) don't
-    // produce two entries for the same install.
     let canonical = bin.canonicalize().unwrap_or_else(|_| bin.clone());
     if !seen.insert(canonical) {
         return;

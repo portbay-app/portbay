@@ -1,18 +1,12 @@
 //! Go runtime detector.
 //!
-//! Probes:
-//!   1. Homebrew `go@<ver>` formula
-//!   2. Homebrew bare `go` formula
-//!   3. asdf — `~/.asdf/installs/golang/<ver>/go/bin/go`
-//!   4. mise — `~/.local/share/mise/installs/go/<ver>/bin/go`
-//!   5. System `go`
+//! Discovery via `runtimes::env` — no hardcoded paths or versions.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::runtimes::{
-    homebrew_prefixes, version_from, InstallSource, LanguageRuntime, RuntimeInstall,
-};
+use crate::runtimes::env;
+use crate::runtimes::{version_from, InstallSource, LanguageRuntime, RuntimeInstall};
 
 pub struct GoRuntime;
 
@@ -31,33 +25,19 @@ impl LanguageRuntime for GoRuntime {
         let mut out: Vec<RuntimeInstall> = Vec::new();
         let mut seen: HashSet<PathBuf> = HashSet::new();
 
-        for prefix in homebrew_prefixes() {
-            if let Ok(entries) = std::fs::read_dir(&prefix) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let s = name.to_string_lossy();
-                    if !s.starts_with("go@") {
-                        continue;
-                    }
-                    push(
-                        &mut out,
-                        &mut seen,
-                        entry.path().join("bin").join("go"),
-                        InstallSource::Homebrew,
-                    );
-                }
-            }
+        for (_, dir) in env::brew_formulae_matching("go") {
             push(
                 &mut out,
                 &mut seen,
-                prefix.join("go").join("bin").join("go"),
+                dir.join("bin").join("go"),
                 InstallSource::Homebrew,
             );
         }
 
-        if let Some(home) = dirs::home_dir() {
-            let asdf = home.join(".asdf").join("installs").join("golang");
-            if let Ok(entries) = std::fs::read_dir(&asdf) {
+        if let Some(asdf) = env::asdf_root() {
+            // asdf-golang installs land under <root>/installs/golang/<ver>/go/bin/go
+            let golang = asdf.join("installs").join("golang");
+            if let Ok(entries) = std::fs::read_dir(&golang) {
                 for entry in entries.flatten() {
                     push(
                         &mut out,
@@ -67,13 +47,10 @@ impl LanguageRuntime for GoRuntime {
                     );
                 }
             }
-            let mise = home
-                .join(".local")
-                .join("share")
-                .join("mise")
-                .join("installs")
-                .join("go");
-            if let Ok(entries) = std::fs::read_dir(&mise) {
+        }
+        if let Some(mise) = env::mise_installs_root() {
+            let go_dir = mise.join("go");
+            if let Ok(entries) = std::fs::read_dir(&go_dir) {
                 for entry in entries.flatten() {
                     push(
                         &mut out,
@@ -88,7 +65,6 @@ impl LanguageRuntime for GoRuntime {
         if let Ok(p) = which::which("go") {
             push(&mut out, &mut seen, p, InstallSource::System);
         }
-
         out
     }
 }
