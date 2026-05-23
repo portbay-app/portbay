@@ -78,6 +78,7 @@
           whyItMatters:
             "Quit from the tray icon (or ⌘Q with the window focused) to stop the background processes.",
           whoCausedIt: "system",
+          severity: "info",
           actions: [],
         });
         void preferences.markCloseToastSeen();

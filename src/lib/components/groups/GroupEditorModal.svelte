@@ -72,6 +72,7 @@
           whatHappened: `Group "${name.trim()}" updated.`,
           whyItMatters: "Member changes apply on the next group action.",
           whoCausedIt: "system",
+          severity: "success",
           actions: [],
         });
       }

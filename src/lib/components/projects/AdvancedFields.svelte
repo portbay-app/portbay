@@ -182,6 +182,7 @@
         whatHappened: `${project.name} updated.`,
         whyItMatters: "Restart the project for changes to take effect.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
     } catch (e) {

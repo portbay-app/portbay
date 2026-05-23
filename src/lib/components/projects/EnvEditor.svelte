@@ -220,6 +220,7 @@
           ? "Restart the project for changes to take effect."
           : "Next start will use the new values.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
     } catch (e) {

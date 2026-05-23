@@ -155,6 +155,7 @@
         whatHappened: `Domain suffix changed from .${migration.oldSuffix} to .${migration.newSuffix}.`,
         whyItMatters: `${migration.changedProjects} project hostname(s) were migrated. PortBay will reconcile DNS, Caddy, and certificates in the background.`,
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
       await refreshDomainSettings();
@@ -176,6 +177,7 @@
         whyItMatters:
           "Subdomains of this suffix now resolve to 127.0.0.1 via dnsmasq. /etc/hosts edits are no longer needed.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
       await refreshDnsStatus();
@@ -196,6 +198,7 @@
         whyItMatters:
           "PortBay will fall back to writing /etc/hosts on the next reconcile tick.",
         whoCausedIt: "system",
+        severity: "info",
         actions: [],
       });
       await refreshDnsStatus();

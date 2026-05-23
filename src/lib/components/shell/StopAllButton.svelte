@@ -152,25 +152,34 @@
     </button>
   </div>
 {:else}
+  <!--
+    Idle state: tonal neutral matching the rest of the top bar — only
+    the live-projects count promotes it visually. When projects are
+    actually running, the icon shifts to status-crashed (the same
+    red used everywhere "needs attention" is signalled), so the
+    user sees the button "wake up" only when there's something to
+    stop. Disabled state stays at fg-subtle so it reads as inert
+    rather than colour-faded.
+  -->
   <button
     type="button"
     onclick={enterConfirming}
-    disabled={state === "running"}
+    disabled={state === "running" || runningCount === 0}
     title={runningCount === 0
       ? "Nothing to stop"
       : `Stop all ${runningCount} running projects (⇧⌘.)`}
     aria-label="Stop all running projects"
-    class="inline-flex items-center justify-center w-8 h-8 rounded-md
-           text-status-crashed border border-status-crashed/30
-           hover:bg-status-crashed/10 hover:border-status-crashed/60
-           disabled:opacity-50 disabled:cursor-not-allowed
-           transition-colors"
-    class:opacity-50={runningCount === 0}
+    class="inline-flex items-center justify-center w-7 h-7 rounded-md
+           bg-transparent transition-colors
+           disabled:text-fg-subtle/60 disabled:cursor-not-allowed
+           {runningCount > 0
+      ? 'text-status-crashed hover:bg-status-crashed/10'
+      : 'text-fg-muted'}"
   >
     {#if state === "running"}
-      <Icon name="refresh-cw" size={16} class="animate-spin" />
+      <Icon name="refresh-cw" size={13} class="animate-spin" />
     {:else}
-      <Icon name="circle-stop" size={16} />
+      <Icon name="square" size={10} class="fill-current" />
     {/if}
   </button>
 {/if}
