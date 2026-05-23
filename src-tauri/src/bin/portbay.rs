@@ -577,6 +577,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         tags: vec![],
         document_root: None,
         php_version: None,
+        runtime: None,
     };
 
     reg.add_project(project.clone())

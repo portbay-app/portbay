@@ -286,6 +286,7 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            runtime: None,
         }
     }
 

@@ -18,6 +18,9 @@ pub enum RegistryError {
     #[error("registry version {found} is unsupported (this build supports up to v{supported})")]
     UnsupportedVersion { found: u32, supported: u32 },
 
+    #[error("registry migration from v{from} failed: {reason}")]
+    Migration { from: u32, reason: String },
+
     #[error("project id `{0}` not found")]
     ProjectNotFound(ProjectId),
 

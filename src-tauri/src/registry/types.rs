@@ -152,6 +152,28 @@ pub struct Project {
     /// resolution uses this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub php_version: Option<String>,
+
+    // ----- Runtime selection (schema v2+) -------------------------------
+    /// Pinned language runtime — which language toolchain and version
+    /// PortBay launches this project with. Introduced in registry schema v2;
+    /// migrated v1 registries derive it from the legacy `php_version` (see
+    /// [`crate::registry::migrate`]). `None` means "fall back to the project
+    /// type's default runtime resolution." Kept alongside `php_version`
+    /// through the transition — existing consumers still read `php_version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Runtime>,
+}
+
+/// A pinned language runtime for a project: which language toolchain and
+/// which version to launch it with. See [`Project::runtime`].
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Runtime {
+    /// Stable language id, matching a
+    /// [`LanguageRuntime::id`](crate::runtimes::LanguageRuntime::id)
+    /// (`"php"`, `"node"`, `"python"`, …).
+    pub lang: String,
+    /// Version label, e.g. `"8.3"` or `"20.11.0"`.
+    pub version: String,
 }
 
 /// A named cluster of projects (e.g. "Marketing Stack") for batch operations.
@@ -480,6 +502,7 @@ mod tests {
             tags: vec!["client".into(), "nextjs".into()],
             document_root: None,
             php_version: None,
+            runtime: None,
         };
         let json = serde_json::to_value(&p).unwrap();
         assert_eq!(json["id"], "marketing-site");
