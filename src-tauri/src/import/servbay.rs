@@ -199,11 +199,7 @@ fn parse_block(block: &str) -> ParsedVhost {
             continue;
         }
         if let Some(rest) = line.strip_prefix("server_name") {
-            out.server_name = rest
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
+            out.server_name = rest.split_whitespace().next().unwrap_or("").to_string();
         } else if let Some(rest) = line.strip_prefix("root") {
             out.root = Some(rest.trim().trim_matches(';').trim().to_string());
         } else if line.contains("listen") && line.contains("ssl") {

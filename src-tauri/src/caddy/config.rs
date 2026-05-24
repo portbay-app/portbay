@@ -488,7 +488,10 @@ mod tests {
         assert_eq!(http.routes.len(), 2); // project + catch-all
         assert_eq!(http.routes[0].id, "route_plain");
         assert_eq!(http.routes[0].handle[0]["handler"], "reverse_proxy");
-        assert_eq!(http.routes[0].handle[0]["upstreams"][0]["dial"], "127.0.0.1:3010");
+        assert_eq!(
+            http.routes[0].handle[0]["upstreams"][0]["dial"],
+            "127.0.0.1:3010"
+        );
         // No cert needed for a plain-http project.
         assert!(c.apps.tls.certificates.load_files.is_empty());
     }

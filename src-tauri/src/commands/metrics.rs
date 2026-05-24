@@ -85,7 +85,12 @@ impl MetricsState {
         let root = disks
             .iter()
             .max_by_key(|d| d.total_space())
-            .map(|d| (d.total_space(), d.total_space().saturating_sub(d.available_space())))
+            .map(|d| {
+                (
+                    d.total_space(),
+                    d.total_space().saturating_sub(d.available_space()),
+                )
+            })
             .unwrap_or((0, 0));
         drop(disks);
 

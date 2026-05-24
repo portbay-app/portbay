@@ -43,10 +43,7 @@ pub struct ArtifactDir {
 /// Hardcoded so a clean target can never be an arbitrary user string.
 fn artifact_catalogue(kind: ProjectType) -> &'static [(&'static str, &'static str)] {
     match kind {
-        ProjectType::Next => &[
-            (".next", "Next.js build"),
-            ("node_modules", "Dependencies"),
-        ],
+        ProjectType::Next => &[(".next", "Next.js build"), ("node_modules", "Dependencies")],
         ProjectType::Vite => &[("dist", "Vite build"), ("node_modules", "Dependencies")],
         ProjectType::Node => &[("dist", "Build output"), ("node_modules", "Dependencies")],
         ProjectType::Php => &[
@@ -116,11 +113,7 @@ pub async fn scan_artifacts(state: State<'_, AppState>, id: String) -> AppResult
 /// `clean_artifact(id, rel)` — delete one catalogued artifact dir. Returns the
 /// number of bytes reclaimed. A no-op (returns 0) if the dir is absent.
 #[tauri::command]
-pub async fn clean_artifact(
-    state: State<'_, AppState>,
-    id: String,
-    rel: String,
-) -> AppResult<u64> {
+pub async fn clean_artifact(state: State<'_, AppState>, id: String, rel: String) -> AppResult<u64> {
     let (base, kind) = project_base(&state, &id)?;
     if !is_known_artifact(kind, &rel) {
         return Err(AppError::BadInput(format!(

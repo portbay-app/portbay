@@ -140,6 +140,11 @@ pub fn binary_available(app: &AppHandle) -> bool {
     which::which("dnsmasq").is_ok()
 }
 
+#[allow(dead_code)]
+fn _typecheck_pathbuf_export() -> PathBuf {
+    PathBuf::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,9 +154,4 @@ mod tests {
         let port = find_free_port(DEFAULT_PORT, 32);
         assert!(port.is_some());
     }
-}
-
-#[allow(dead_code)]
-fn _typecheck_pathbuf_export() -> PathBuf {
-    PathBuf::new()
 }

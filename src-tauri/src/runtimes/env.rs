@@ -108,7 +108,11 @@ fn shell_path() -> Option<String> {
         return Some(p);
     }
     tracing::warn!(shell = %shell.display(), "login-shell PATH probe timed out; trying non-interactive fallback");
-    run_path_probe(&shell, &["-c", "echo \"$PATH\""], SHELL_PATH_FALLBACK_TIMEOUT)
+    run_path_probe(
+        &shell,
+        &["-c", "echo \"$PATH\""],
+        SHELL_PATH_FALLBACK_TIMEOUT,
+    )
 }
 
 fn run_path_probe(shell: &std::path::Path, args: &[&str], timeout: Duration) -> Option<String> {
@@ -221,10 +225,7 @@ pub fn brew_opt_prefixes() -> Vec<PathBuf> {
 }
 
 fn brew_prefix_via_cli() -> Option<PathBuf> {
-    let out = Command::new("brew")
-        .arg("--prefix")
-        .output()
-        .ok()?;
+    let out = Command::new("brew").arg("--prefix").output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -331,7 +332,9 @@ pub fn mise_installs_root() -> Option<PathBuf> {
 }
 
 fn home_subdir(child: &str) -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(child)).filter(|p| p.is_dir())
+    dirs::home_dir()
+        .map(|h| h.join(child))
+        .filter(|p| p.is_dir())
 }
 
 /// List every Homebrew formula directory whose name matches

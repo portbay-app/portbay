@@ -219,9 +219,8 @@ impl Preferences {
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path()?;
         let tmp = path.with_extension("json.tmp");
-        let serialised = serde_json::to_vec_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let serialised = serde_json::to_vec_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         std::fs::write(&tmp, &serialised)?;
         std::fs::rename(&tmp, &path)?;
         Ok(())

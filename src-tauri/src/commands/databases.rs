@@ -25,9 +25,7 @@ use tauri_plugin_shell::ShellExt;
 use crate::commands::projects::{load_registry, save_registry, slugify};
 use crate::databases as engine;
 use crate::error::{AppError, AppResult};
-use crate::registry::{
-    DatabaseEngine, DatabaseInstance, DatabaseInstanceId, ProjectId, Registry,
-};
+use crate::registry::{DatabaseEngine, DatabaseInstance, DatabaseInstanceId, ProjectId, Registry};
 use crate::state::AppState;
 
 // ===========================================================================
@@ -229,11 +227,7 @@ fn instance_view(
             .map(|p| p.to_string_lossy().into_owned()),
         connection_url: inst.connection_url(),
         account: inst.default_account().into(),
-        linked_projects: inst
-            .linked_projects
-            .iter()
-            .map(|p| p.to_string())
-            .collect(),
+        linked_projects: inst.linked_projects.iter().map(|p| p.to_string()).collect(),
         binary_available: engine::daemon_binary(inst.engine).is_some(),
         provisioned: engine::is_initialized(inst.engine, &data),
     }
@@ -501,9 +495,8 @@ pub async fn open_database_client(
 
 async fn open_in_terminal(app: &AppHandle, command: &str) -> AppResult<()> {
     let safe = command.replace('"', "\\\"");
-    let script = format!(
-        "tell application \"Terminal\"\n  activate\n  do script \"{safe}\"\nend tell"
-    );
+    let script =
+        format!("tell application \"Terminal\"\n  activate\n  do script \"{safe}\"\nend tell");
     app.shell()
         .command("osascript")
         .args(["-e", &script])

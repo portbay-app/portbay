@@ -59,9 +59,11 @@ pub async fn add_runtime_by_path(
 
     let mut reg = load_registry(&state)?;
     let canon = binary.canonicalize().unwrap_or_else(|_| binary.clone());
-    let exists = reg.runtimes.manual.iter().any(|m| {
-        m.binary.canonicalize().unwrap_or_else(|_| m.binary.clone()) == canon
-    });
+    let exists = reg
+        .runtimes
+        .manual
+        .iter()
+        .any(|m| m.binary.canonicalize().unwrap_or_else(|_| m.binary.clone()) == canon);
     if !exists {
         reg.runtimes.manual.push(ManualRuntime {
             lang: lang.clone(),

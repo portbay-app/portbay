@@ -95,8 +95,9 @@ impl PortHolder {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("");
-        let matches_cmd = |cmd: &str| !dir_token.is_empty()
-            && (cmd.contains(working_dir) || cmd.contains(dir_token));
+        let matches_cmd = |cmd: &str| {
+            !dir_token.is_empty() && (cmd.contains(working_dir) || cmd.contains(dir_token))
+        };
         // Ancestors are ordered closest-to-holder first; the last one
         // is the topmost. Walk in reverse so a matching parent wins
         // over a matching worker.
@@ -209,7 +210,11 @@ fn resolve_command_line(pid: u32) -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 /// Best-effort binary path via `ps -o comm=`.
@@ -300,13 +305,12 @@ node    99887 nour   22u  IPv4 0xdef       0t0  TCP *:3010 (LISTEN)
             command: "node".into(),
             binary: None,
             command_line: Some(
-                "node /Volumes/DevSSD/projects/Clients/test-project/node_modules/.bin/next dev".into(),
+                "node /Volumes/DevSSD/projects/Clients/test-project/node_modules/.bin/next dev"
+                    .into(),
             ),
             ancestors: vec![],
         };
-        assert!(h.looks_like_portbay_orphan(
-            "/Volumes/DevSSD/projects/Clients/test-project",
-        ));
+        assert!(h.looks_like_portbay_orphan("/Volumes/DevSSD/projects/Clients/test-project",));
     }
 
     #[test]
@@ -318,9 +322,7 @@ node    99887 nour   22u  IPv4 0xdef       0t0  TCP *:3010 (LISTEN)
             command_line: Some("/usr/local/sbin/nginx -c /opt/nginx.conf".into()),
             ancestors: vec![],
         };
-        assert!(!h.looks_like_portbay_orphan(
-            "/Volumes/DevSSD/projects/Clients/test-project",
-        ));
+        assert!(!h.looks_like_portbay_orphan("/Volumes/DevSSD/projects/Clients/test-project",));
     }
 
     #[test]
@@ -346,9 +348,7 @@ node    99887 nour   22u  IPv4 0xdef       0t0  TCP *:3010 (LISTEN)
                 },
             ],
         };
-        assert!(h.looks_like_portbay_orphan(
-            "/Volumes/DevSSD/projects/Clients/test-project",
-        ));
+        assert!(h.looks_like_portbay_orphan("/Volumes/DevSSD/projects/Clients/test-project",));
     }
 
     #[test]
@@ -365,13 +365,12 @@ node    99887 nour   22u  IPv4 0xdef       0t0  TCP *:3010 (LISTEN)
                 Ancestor {
                     pid: 998,
                     command_line:
-                        "node /Volumes/DevSSD/projects/Clients/test-project/.bin/next dev"
-                            .into(),
+                        "node /Volumes/DevSSD/projects/Clients/test-project/.bin/next dev".into(),
                 },
                 Ancestor {
                     pid: 997,
-                    command_line:
-                        "pnpm /Volumes/DevSSD/projects/Clients/test-project run dev".into(),
+                    command_line: "pnpm /Volumes/DevSSD/projects/Clients/test-project run dev"
+                        .into(),
                 },
             ],
         };
