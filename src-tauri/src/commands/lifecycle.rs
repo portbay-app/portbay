@@ -12,7 +12,7 @@ use crate::commands::dto::{StopAllReport, StopAllResultEntry};
 use crate::commands::projects::load_registry;
 use crate::error::{AppError, AppResult};
 use crate::port_holder;
-use crate::registry::ProjectId;
+use crate::registry::{Project, ProjectId};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -59,6 +59,77 @@ pub async fn start_project(
     Ok(())
 }
 
+/// `force_start_project(id)` — the user's explicit "stop whatever's on the port
+/// and start anyway" choice, invoked from the port-conflict confirmation. Unlike
+/// `start_project`'s pre-flight (which only reclaims PortBay's *own* leaked
+/// orphans and surfaces foreign holders untouched), this SIGTERM→SIGKILLs a
+/// same-user foreign holder too. It still won't kill our own running server, and
+/// it can't touch a root-owned holder (`kill` returns EPERM) — that case falls
+/// through and re-surfaces as a normal `PortConflict`, so the user gets an
+/// honest "couldn't free it" rather than a mysterious PC failure.
+#[tauri::command]
+pub async fn force_start_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<()> {
+    if project_has_pc_process(&state, &id)? {
+        force_free_ports(&state, &id).await?;
+        // Re-check: anything we couldn't kill (e.g. a root-owned process) still
+        // blocks the bind — surface it rather than letting PC flail.
+        if let Some((port, holder)) = preflight_port(&state, &id)? {
+            return Err(AppError::PortConflict { port, holder });
+        }
+        let client = state.pc_client()?;
+        client.start(&id).await?;
+    }
+    let _ = state.reconciler.tick(&app).await;
+    Ok(())
+}
+
+/// Forcibly free every port this project binds by killing whatever holds it —
+/// except PortBay's own running server (no point killing what we're about to
+/// reuse). A reclaimable orphan is killed at its topmost wrapper (so the worker
+/// dies with it); a foreign holder is killed at its own pid. Root-owned holders
+/// survive (`kill` EPERM) and are caught by the caller's re-check.
+async fn force_free_ports(state: &State<'_, AppState>, id: &str) -> AppResult<()> {
+    let registry = load_registry(state)?;
+    let Some(project) = registry.get_project(&ProjectId::new(id)) else {
+        return Ok(());
+    };
+    let (ports, working_dir) = project_ports_and_dir(project);
+    let pc_pid = state.pc.lock().unwrap_or_else(|e| e.into_inner()).pid();
+
+    let kills: Vec<u32> = ports
+        .into_iter()
+        .filter_map(|port| {
+            let holder = port_holder::find(port)?;
+            // Never kill our own running dev server.
+            if pc_pid.is_some_and(|pp| holder.descends_from(pp)) {
+                return None;
+            }
+            Some(if holder.is_reclaimable_orphan(&working_dir) {
+                holder.kill_target(&working_dir)
+            } else {
+                holder.pid
+            })
+        })
+        .collect();
+    if kills.is_empty() {
+        return Ok(());
+    }
+
+    tokio::task::spawn_blocking(move || {
+        for pid in kills {
+            tracing::info!(kill_pid = pid, "force-freeing port at user request");
+            let _ = port_holder::kill_gracefully(pid, std::time::Duration::from_secs(2));
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("force-free task failed: {e}")))?;
+    Ok(())
+}
+
 /// True when the project has a Process Compose process backing it (i.e. it
 /// pins a `start_command`). Static / pure-Caddy projects return `false`: they
 /// have no daemon to start, stop, or restart.
@@ -89,25 +160,13 @@ fn preflight_port(
         .get_project(&ProjectId::new(project_id))
         .ok_or_else(|| AppError::NotFound(project_id.to_string()))?;
 
-    // Build the set of ports the start will try to bind. The primary
-    // port + extras share the same enforcement.
-    let mut ports: Vec<u16> = Vec::new();
-    if let Some(p) = project.port {
-        ports.push(p);
-    }
-    ports.extend(project.extra_ports.iter().copied());
+    // Ports this start will try to bind + the directory a leaked dev server
+    // for THIS project would run in. Shared with the post-stop reaper so both
+    // paths classify holders identically.
+    let (ports, working_dir) = project_ports_and_dir(project);
     if ports.is_empty() {
         return Ok(None);
     }
-
-    // The directory a leaked dev server for THIS project would run in. For a
-    // monorepo app pinned by a workspace filter, that's the app's sub-directory
-    // (root/apps/web), not the repo root — so two apps sharing one root don't
-    // both claim each other's orphans. Standalone projects use their own path.
-    let working_dir = match &project.workspace {
-        Some(ws) => ws.app_dir(&project.path).to_string_lossy().into_owned(),
-        None => project.path.to_string_lossy().into_owned(),
-    };
     // PID of our own process-compose, so we can tell PortBay's own running
     // dev server apart from a foreign holder of the same port.
     let pc_pid = state.pc.lock().unwrap_or_else(|e| e.into_inner()).pid();
@@ -155,6 +214,76 @@ fn preflight_port(
     Ok(None)
 }
 
+/// The ports a project binds (primary + extras) and the working directory a
+/// leaked dev server for it would run in. For a monorepo app pinned by a
+/// workspace filter that's the app's sub-directory (`root/apps/web`), not the
+/// repo root — so sibling apps sharing one root never claim each other's
+/// orphans. Standalone projects use their own path. Shared by the start
+/// pre-flight and the post-stop reaper so both classify holders identically.
+fn project_ports_and_dir(project: &Project) -> (Vec<u16>, String) {
+    let mut ports: Vec<u16> = Vec::new();
+    if let Some(p) = project.port {
+        ports.push(p);
+    }
+    ports.extend(project.extra_ports.iter().copied());
+    let working_dir = match &project.workspace {
+        Some(ws) => ws.app_dir(&project.path).to_string_lossy().into_owned(),
+        None => project.path.to_string_lossy().into_owned(),
+    };
+    (ports, working_dir)
+}
+
+/// Reap any leaked dev-server worker still holding this project's port(s) after
+/// a stop. Process Compose SIGTERMs the command it spawned, but npm/pnpm/turbo
+/// wrappers don't always forward that to the real worker (`next-server`), which
+/// then orphans to launchd and keeps the port. We kill **only** a reclaimable
+/// orphan — one whose cwd ties it to this project AND that has no live parent —
+/// reusing the exact predicate the start pre-flight trusts, so a foreign
+/// process the user runs themselves is never touched. Returns the count reaped.
+///
+/// The lsof/ps/kill work is blocking, so it runs on the blocking pool.
+async fn reap_owned_orphans(state: &State<'_, AppState>, id: &str) -> u32 {
+    let Ok(registry) = load_registry(state) else {
+        return 0;
+    };
+    let Some(project) = registry.get_project(&ProjectId::new(id)) else {
+        return 0;
+    };
+    let (ports, working_dir) = project_ports_and_dir(project);
+    if ports.is_empty() {
+        return 0;
+    }
+    let id = id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut reaped = 0;
+        for port in ports {
+            let Some(holder) = port_holder::find(port) else {
+                continue;
+            };
+            if holder.is_reclaimable_orphan(&working_dir) {
+                let target = holder.kill_target(&working_dir);
+                tracing::info!(
+                    project = %id,
+                    kill_pid = target,
+                    port = port,
+                    "reaping leaked dev server orphaned by stop",
+                );
+                let _ = port_holder::kill_gracefully(target, std::time::Duration::from_secs(2));
+                reaped += 1;
+            }
+        }
+        reaped
+    })
+    .await
+    .unwrap_or(0)
+}
+
+/// Grace window between asking Process Compose to stop a process and checking
+/// whether its worker leaked. Long enough for the wrapper to die and the worker
+/// to reparent to launchd (so the orphan gate recognises it), short enough to
+/// keep Stop feeling instant.
+const STOP_REAP_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
+
 #[tauri::command]
 pub async fn stop_project(state: State<'_, AppState>, id: String) -> AppResult<()> {
     // Static / pure-Caddy projects have no PC process to stop. Caddy keeps
@@ -166,6 +295,12 @@ pub async fn stop_project(state: State<'_, AppState>, id: String) -> AppResult<(
     state.mark_stop_requested(&id);
     let client = state.pc_client()?;
     client.stop(&id).await?;
+
+    // PC's SIGTERM may leave the real dev-server worker orphaned and still on
+    // the port; reap it so the next Start doesn't hit a self-inflicted
+    // "port in use" conflict.
+    tokio::time::sleep(STOP_REAP_DELAY).await;
+    let _ = reap_owned_orphans(&state, &id).await;
     Ok(())
 }
 
@@ -256,6 +391,17 @@ pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
         }
     }
 
+    // Reap any dev-server workers that orphaned instead of dying with their
+    // wrapper, so Stop All leaves zero PortBay-owned servers squatting on
+    // ports. One grace wait covers them all; each reap only touches that
+    // project's reclaimable orphans (never a foreign process).
+    if !report.results.is_empty() {
+        tokio::time::sleep(STOP_REAP_DELAY).await;
+        for entry in &report.results {
+            let _ = reap_owned_orphans(&state, &entry.id).await;
+        }
+    }
+
     Ok(report)
 }
 
@@ -276,4 +422,70 @@ pub async fn open_project(app: AppHandle, state: State<'_, AppState>, id: String
         .open_url(&url, None::<&str>)
         .map_err(|e| AppError::Internal(format!("opener failed: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::{ProjectType, Workspace, WorkspaceTool};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    fn project_at(
+        path: &str,
+        port: Option<u16>,
+        extra: Vec<u16>,
+        ws: Option<Workspace>,
+    ) -> Project {
+        Project {
+            id: ProjectId::new("p"),
+            name: "P".into(),
+            path: PathBuf::from(path),
+            kind: ProjectType::Node,
+            start_command: Some("pnpm dev".into()),
+            port,
+            extra_ports: extra,
+            hostname: "p.test".into(),
+            https: false,
+            services: vec![],
+            env: BTreeMap::new(),
+            readiness: None,
+            auto_start: false,
+            tags: vec![],
+            document_root: None,
+            php_version: None,
+            runtime: None,
+            workspace: ws,
+        }
+    }
+
+    #[test]
+    fn ports_and_dir_standalone_uses_project_path() {
+        let p = project_at("/repos/site", Some(3000), vec![4000], None);
+        let (ports, dir) = project_ports_and_dir(&p);
+        assert_eq!(ports, vec![3000, 4000]);
+        assert_eq!(dir, "/repos/site");
+    }
+
+    #[test]
+    fn ports_and_dir_monorepo_uses_workspace_app_dir() {
+        let ws = Workspace {
+            package: "@acme/web".into(),
+            rel_dir: "apps/web".into(),
+            tool: WorkspaceTool::Pnpm,
+        };
+        let p = project_at("/repos/monorepo", Some(3000), vec![], Some(ws));
+        let (ports, dir) = project_ports_and_dir(&p);
+        assert_eq!(ports, vec![3000]);
+        // The app sub-dir, so a sibling app sharing the root never claims this
+        // one's orphan (and vice versa).
+        assert_eq!(dir, "/repos/monorepo/apps/web");
+    }
+
+    #[test]
+    fn ports_and_dir_no_port_yields_empty() {
+        let p = project_at("/repos/static", None, vec![], None);
+        let (ports, _) = project_ports_and_dir(&p);
+        assert!(ports.is_empty());
+    }
 }
