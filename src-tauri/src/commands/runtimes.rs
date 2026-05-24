@@ -11,14 +11,19 @@
 //!   - `remove_runtime_path(lang, version)` — drop a manual entry.
 //!   - `set_default_runtime(lang, version)` — set/clear the default version a
 //!     new project inherits for that language.
-//!
-//! Deferred follow-up (same card): `install_runtime` via `brew` — the
-//! on-request convenience that delegates to the user's package manager.
+//!   - `install_runtime(lang)` — the on-request convenience that delegates to
+//!     Homebrew, streaming `brew install`'s output to the UI. PortBay still
+//!     never bundles a runtime; this just runs the command we'd otherwise tell
+//!     the user to run by hand.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use tauri::State;
+use serde::Serialize;
+use tauri::ipc::Channel;
+use tauri::{AppHandle, State};
+use tauri_plugin_shell::process::CommandEvent;
+use tauri_plugin_shell::ShellExt;
 
 use crate::commands::projects::{load_registry, save_registry};
 use crate::error::{AppError, AppResult};
@@ -113,6 +118,82 @@ pub async fn set_default_runtime(
     }
     save_registry(&state, &reg)?;
     Ok(runtimes::list_all(&reg.runtimes))
+}
+
+/// Progress events for [`install_runtime`], streamed over the `Channel`.
+/// `done` carries the final success flag so the UI can settle on a clean exit;
+/// on failure the command also returns `Err`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum InstallEvent {
+    Log { line: String },
+    Done { success: bool },
+}
+
+/// Install a runtime by delegating to Homebrew. PortBay never bundles a
+/// runtime — this runs the same `brew install <formula>` the sidebar otherwise
+/// shows as a hint, streaming brew's stdout/stderr to the UI line by line. The
+/// formula comes from the runtime's own [`brew_formula`], so the action stays
+/// in sync with the hint. The frontend re-lists runtimes on success so the new
+/// version appears without a manual refresh.
+///
+/// [`brew_formula`]: crate::runtimes::LanguageRuntime::brew_formula
+#[tauri::command]
+pub async fn install_runtime(
+    app: AppHandle,
+    lang: String,
+    on_event: Channel<InstallEvent>,
+) -> AppResult<()> {
+    let runtime = runtime_by_id(&lang)
+        .ok_or_else(|| AppError::BadInput(format!("unknown language `{lang}`")))?;
+    let formula = runtime.brew_formula().ok_or_else(|| {
+        AppError::BadInput(format!(
+            "{} can't be installed via Homebrew automatically",
+            runtime.display_name()
+        ))
+    })?;
+    drop(runtime);
+
+    let _ = on_event.send(InstallEvent::Log {
+        line: format!("$ brew install {formula}"),
+    });
+
+    let (mut rx, _child) = app
+        .shell()
+        .command("brew")
+        .args(["install", &formula])
+        .spawn()
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "couldn't start Homebrew — is `brew` installed and on PATH? ({e})"
+            ))
+        })?;
+
+    // brew streams progress to stderr and results to stdout; forward both.
+    let mut exit_code: Option<i32> = None;
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+                let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if !line.is_empty() {
+                    let _ = on_event.send(InstallEvent::Log { line });
+                }
+            }
+            CommandEvent::Terminated(payload) => {
+                exit_code = payload.code;
+            }
+            _ => {}
+        }
+    }
+
+    let success = exit_code == Some(0);
+    let _ = on_event.send(InstallEvent::Done { success });
+    if !success {
+        return Err(AppError::Internal(format!(
+            "`brew install {formula}` exited with code {exit_code:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Apply edits from an editable config tab (e.g. PHP's FPM / php.ini tabs).

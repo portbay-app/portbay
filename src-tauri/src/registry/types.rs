@@ -538,6 +538,26 @@ pub struct RuntimeSettings {
     pub php: BTreeMap<String, PhpVersionConfig>,
 }
 
+impl RuntimeSettings {
+    /// The runtime a freshly-added project of `kind` inherits from the
+    /// configured per-language defaults, or `None` when the type has no
+    /// managed runtime (Static/Custom) or no default is set for its language.
+    ///
+    /// Single source of truth shared by the GUI `add_project` command and the
+    /// CLI `portbay add`, so the two can't drift on inheritance behaviour.
+    pub fn default_for(&self, kind: ProjectType) -> Option<Runtime> {
+        let lang = match kind {
+            ProjectType::Next | ProjectType::Vite | ProjectType::Node => "node",
+            ProjectType::Php => "php",
+            ProjectType::Static | ProjectType::Custom => return None,
+        };
+        self.defaults.get(lang).map(|version| Runtime {
+            lang: lang.to_string(),
+            version: version.clone(),
+        })
+    }
+}
+
 /// PortBay-owned PHP config for a single detected version. Edited from the
 /// `/languages` FPM and PHP tabs; consumed by the reconciler when it renders
 /// the per-version FPM pool config.

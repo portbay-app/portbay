@@ -557,11 +557,23 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         timeout_seconds: 75,
     });
 
+    // Inherit the language's default runtime version (set in the Languages
+    // panel) exactly as the GUI's `add_project` does, so a project added from
+    // the CLI honours the same defaults. For PHP, mirror it into `php_version`
+    // too, since the FPM reconciler still reads that field.
+    let kind: ProjectType = args.kind.into();
+    let runtime = reg.runtimes.default_for(kind);
+    let php_version = if kind == ProjectType::Php {
+        runtime.as_ref().map(|r| r.version.clone())
+    } else {
+        None
+    };
+
     let project = Project {
         id,
         name,
         path: canonical,
-        kind: args.kind.into(),
+        kind,
         start_command: args.start_command,
         port: args.port,
         extra_ports: vec![],
@@ -577,8 +589,8 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         auto_start: args.auto_start,
         tags: vec![],
         document_root: None,
-        php_version: None,
-        runtime: None,
+        php_version,
+        runtime,
         workspace: None,
     };
 
