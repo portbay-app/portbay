@@ -29,9 +29,12 @@ Tauri looks for sidecars under `src-tauri/binaries/<name>-<target-triple>`. Proc
 ./scripts/fetch-mkcert.sh
 ./scripts/fetch-mailpit.sh
 ./scripts/fetch-cloudflared.sh
+./scripts/fetch-dnsmasq.sh
 ```
 
 The scripts write into the repository checkout. They should be run from the repo root. Do not hand-place global binaries into the app bundle while developing; the app should be able to reproduce its own expected local sidecar layout.
+
+`fetch-dnsmasq.sh` bundles the DNS resolver that powers wildcard `*.test` routing. Because PortBay ships its own copy, there is no separate `brew install dnsmasq` step — DNS routing works out of the box, both in a source checkout and in the signed release build.
 
 ## Verify The Checkout
 
