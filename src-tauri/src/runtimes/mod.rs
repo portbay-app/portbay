@@ -302,6 +302,17 @@ pub trait LanguageRuntime: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
     fn install_hint(&self) -> &'static str;
+    /// The Homebrew formula to `brew install` for this runtime's recommended
+    /// version, or `None` if PortBay can't drive a brew install for it. The
+    /// default derives it from `install_hint()` (everything after
+    /// `"brew install "`), so the install action and the sidebar hint can't
+    /// drift; a runtime whose hint isn't a `brew install …` line returns
+    /// `None` and simply won't offer the one-click install.
+    fn brew_formula(&self) -> Option<String> {
+        self.install_hint()
+            .strip_prefix("brew install ")
+            .map(|f| f.trim().to_string())
+    }
     /// Detect every install on this machine.
     fn detect(&self) -> Vec<RuntimeInstall>;
     /// Probe an arbitrary binary's version string, for the "add by path"
