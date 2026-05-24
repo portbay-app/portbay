@@ -417,12 +417,17 @@
 
             <p class="text-[11.5px] text-fg-muted leading-relaxed mb-3">
               {#if pf.ready}
-                <code class="font-mono">*.{pf.suffix}</code> resolves to this machine
-                via PortBay's resolver on port {pf.dnsmasqPort}.
+                Project hostnames under <code class="font-mono">.{pf.suffix}</code>
+                resolve to this machine via PortBay's managed
+                <code class="font-mono">/etc/hosts</code> entries.
+                {#if pf.dnsmasqRunning && pf.resolverInstalled}
+                  Arbitrary <code class="font-mono">*.{pf.suffix}</code> subdomains
+                  also resolve via dnsmasq on port {pf.dnsmasqPort}.
+                {/if}
               {:else}
                 One macOS password prompt installs PortBay's privileged helper; it
-                then routes <code class="font-mono">*.{pf.suffix}</code> here with no
-                further prompts.
+                then writes your project hostnames into
+                <code class="font-mono">/etc/hosts</code> with no further prompts.
               {/if}
             </p>
 
@@ -436,10 +441,11 @@
                 <span class={ok ? "text-fg" : "text-fg-muted"}>{label}</span>
               </div>
             {/snippet}
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
               {@render check("Privileged helper", pf.helperInstalled)}
+              {@render check("Hostnames in /etc/hosts", pf.hostsActive)}
+              {@render check("dnsmasq (wildcards)", pf.dnsmasqRunning)}
               {@render check("Resolver installed", pf.resolverInstalled)}
-              {@render check("dnsmasq running", pf.dnsmasqRunning)}
             </div>
 
             {#if !pf.ready && (pf.port80InUse || pf.port443InUse)}

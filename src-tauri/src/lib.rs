@@ -19,6 +19,7 @@ pub mod process_compose;
 pub mod reconciler;
 pub mod registry;
 pub mod runtimes;
+pub mod smoke;
 pub mod state;
 pub mod telemetry;
 pub mod tray;
@@ -144,12 +145,35 @@ pub fn run() {
             let logs_dir = resolve_logs_dir().map_err(boxed)?;
             let yaml_path = reconciler::default_yaml_path().map_err(boxed)?;
 
+            // First run = the registry file doesn't exist yet. Detect it
+            // before the load (which would create an in-memory default).
+            let first_run = !registry_path.exists();
+
             // Build the initial PC YAML from the registry so PC boots
             // against the real config rather than the deleted bootstrap
             // placeholder. Empty registry → empty `processes: {}`, PC
             // starts and waits.
-            let initial_registry =
+            let mut initial_registry =
                 store::load_or_default(&registry_path, DEFAULT_DOMAIN_SUFFIX).map_err(boxed)?;
+
+            // On a brand-new install, seed the "PortBay smoke" canary so the
+            // user can press Play once and confirm DNS → Caddy → file serving
+            // all work, before wiring up a real project. Persist it so it
+            // shows up like any other project.
+            if first_run {
+                match crate::smoke::seed_if_absent(&mut initial_registry) {
+                    Ok(true) => {
+                        if let Err(e) = store::save_to(&initial_registry, &registry_path) {
+                            tracing::warn!(error = %e, "failed to persist seeded smoke canary");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(error = %e, "smoke canary scaffold failed"),
+                }
+            }
+            // Materialise the canary's files on every boot so it survives a
+            // /tmp wipe or a deleted site dir. Cheap + idempotent.
+            crate::smoke::ensure_site_files(&initial_registry);
             let initial_yaml =
                 reconciler::build_initial_yaml(&initial_registry, &logs_dir).map_err(boxed)?;
             std::fs::write(&yaml_path, &initial_yaml).map_err(boxed)?;
@@ -180,6 +204,26 @@ pub fn run() {
             // readiness) so we drive it with a block_on; the wait is
             // bounded by `CADDY_READINESS_TIMEOUT`.
             let state: tauri::State<AppState> = app.state();
+
+            // Reap any process-compose left over from a previous run before we
+            // boot our own. A crash or force-quit can orphan PC (and the dev
+            // servers it supervised) to launchd; on a clean boot none of ours
+            // should be running yet, so anything carrying our config path is
+            // stale. Without this, stale instances accumulate across sessions
+            // and squat on the PC admin port. SIGTERM-shutdown on quit handles
+            // the prevent-leak half; this is the recover-on-boot half.
+            let reaped = process_compose::lifecycle::sweep_stale(
+                &yaml_path,
+                None,
+                process_compose::lifecycle::SweepMode::All,
+            );
+            if reaped > 0 {
+                tracing::info!(
+                    count = reaped,
+                    "reaped stale process-compose instances at boot"
+                );
+            }
+
             state.boot_pc(app.handle(), &yaml_path).map_err(boxed)?;
 
             let app_handle = app.handle().clone();

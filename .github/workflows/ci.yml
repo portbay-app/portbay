@@ -171,6 +171,12 @@ jobs:
           ./scripts/fetch-cloudflared.sh
           ./scripts/fetch-dnsmasq.sh
 
+      - name: Build privileged hosts helper (bundled sidecar)
+        # tauri.conf.json lists binaries/portbay-hosts-helper as an externalBin,
+        # so the file must exist (built from our own source) before the bundle
+        # step can resolve it. Host triple — this smoke build is native.
+        run: ./scripts/build-hosts-helper.sh
+
       - name: cargo tauri build --debug
         # Skips notarisation + signing; verifies the bundle layout is
         # still valid. Catches missing capabilities entries, broken
