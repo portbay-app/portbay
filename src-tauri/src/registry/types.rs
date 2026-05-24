@@ -164,6 +164,26 @@ pub struct Project {
     pub runtime: Option<Runtime>,
 }
 
+impl Project {
+    /// The PHP version this project should be served with, or `None` when it
+    /// isn't a PHP project. Prefers the structured [`Project::runtime`] pin
+    /// (the v2+ source of truth) and falls back to the legacy
+    /// [`Project::php_version`] field for projects that predate it (imported
+    /// sites, un-migrated registries).
+    ///
+    /// Both the Caddy FastCGI route and the FPM-pool reconciler resolve the
+    /// version through this one method, so they can never dial a socket the
+    /// other side didn't spawn. A project carrying a non-PHP `runtime` pin
+    /// returns `None` — it explicitly targets another toolchain.
+    pub fn php_version_effective(&self) -> Option<&str> {
+        match &self.runtime {
+            Some(rt) if rt.lang == "php" => Some(rt.version.as_str()),
+            Some(_) => None,
+            None => self.php_version.as_deref(),
+        }
+    }
+}
+
 /// A pinned language runtime for a project: which language toolchain and
 /// which version to launch it with. See [`Project::runtime`].
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -597,6 +617,58 @@ mod tests {
             json.get("document_root").is_none(),
             "optional PHP fields should be omitted when empty"
         );
+    }
+
+    fn bare_php_project() -> Project {
+        Project {
+            id: ProjectId::new("legacy-php"),
+            name: "Legacy PHP".into(),
+            path: PathBuf::from("/tmp/legacy-php"),
+            kind: ProjectType::Php,
+            start_command: None,
+            port: None,
+            extra_ports: vec![],
+            hostname: "legacy-php.test".into(),
+            https: true,
+            services: vec!["caddy".into(), "php-fpm".into()],
+            env: BTreeMap::new(),
+            readiness: None,
+            auto_start: false,
+            tags: vec![],
+            document_root: None,
+            php_version: None,
+            runtime: None,
+        }
+    }
+
+    #[test]
+    fn php_version_effective_prefers_runtime_then_falls_back() {
+        // Runtime pin wins.
+        let mut p = bare_php_project();
+        p.runtime = Some(Runtime {
+            lang: "php".into(),
+            version: "8.3".into(),
+        });
+        p.php_version = Some("7.4".into()); // stale legacy field is ignored
+        assert_eq!(p.php_version_effective(), Some("8.3"));
+
+        // No runtime → legacy field is the fallback (imported / un-migrated).
+        let mut legacy = bare_php_project();
+        legacy.php_version = Some("8.1".into());
+        assert_eq!(legacy.php_version_effective(), Some("8.1"));
+
+        // A non-PHP runtime pin means "not a PHP project" regardless of any
+        // stray legacy value.
+        let mut node = bare_php_project();
+        node.runtime = Some(Runtime {
+            lang: "node".into(),
+            version: "22".into(),
+        });
+        node.php_version = Some("8.3".into());
+        assert_eq!(node.php_version_effective(), None);
+
+        // Nothing set at all.
+        assert_eq!(bare_php_project().php_version_effective(), None);
     }
 
     #[test]
