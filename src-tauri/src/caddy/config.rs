@@ -290,15 +290,60 @@ pub fn project_to_route(p: &Project, php_socket_dir: &std::path::Path) -> Route 
 fn build_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::Value {
     match p.kind {
         ProjectType::Php => php_handler(p, php_socket_dir),
+        // Static sites have no dev server — serve their files straight off
+        // disk. Routing them through reverse_proxy (the old `_` arm) dialed
+        // 127.0.0.1:80, i.e. Caddy itself, and never served anything.
+        ProjectType::Static => static_handler(p),
         _ => reverse_proxy_handler(p),
     }
 }
 
+/// `file_server` handler rooted at the project's document root (or its path
+/// when no doc root is set). Serves a Static project's files directly, with the
+/// usual index fallbacks so `/` lands on `index.html`.
+fn static_handler(p: &Project) -> serde_json::Value {
+    let root = p
+        .document_root
+        .as_deref()
+        .map(|d| p.path.join(d))
+        .unwrap_or_else(|| p.path.clone());
+    json!({
+        "handler": "file_server",
+        "root": root.to_string_lossy().into_owned(),
+        "index_names": ["index.html", "index.htm"]
+    })
+}
+
 fn reverse_proxy_handler(p: &Project) -> serde_json::Value {
     let port = p.port.unwrap_or(80);
+    let dial = format!("127.0.0.1:{port}");
+    // Dev-server HMR / live-reload WebSockets: Next.js (via `allowedDevOrigins`),
+    // Vite, and webpack-dev-server all reject upgrade requests whose `Origin`
+    // isn't a loopback dev origin. Behind PortBay's pretty hostname the browser
+    // sends `Origin: http(s)://<host>`, so the upstream closes the socket and
+    // HMR dies — the page loads, but live-reload spins forever. Rewrite `Origin`
+    // to the loopback dev origin for WebSocket upgrades ONLY (matched on the
+    // `Upgrade: websocket` header), so HMR works with zero per-project config.
+    // Plain (non-upgrade) requests keep their real `Origin`, so app-level
+    // CSRF/CORS is left untouched.
     json!({
-        "handler": "reverse_proxy",
-        "upstreams": [{ "dial": format!("127.0.0.1:{port}") }]
+        "handler": "subroute",
+        "routes": [
+            {
+                "match": [{ "header": { "Upgrade": ["websocket"] } }],
+                "handle": [{
+                    "handler": "reverse_proxy",
+                    "headers": { "request": { "set": { "Origin": [format!("http://localhost:{port}")] } } },
+                    "upstreams": [{ "dial": dial }]
+                }]
+            },
+            {
+                "handle": [{
+                    "handler": "reverse_proxy",
+                    "upstreams": [{ "dial": dial }]
+                }]
+            }
+        ]
     })
 }
 
@@ -457,9 +502,14 @@ mod tests {
         assert_eq!(https.routes.len(), 2);
         assert_eq!(https.routes[0].id, "route_marketing-site");
         assert_eq!(https.routes[0].match_[0].host[0], "marketing-site.test");
+        // The project handler is a subroute; its non-upgrade branch proxies to
+        // the dev server.
         let h = &https.routes[0].handle[0];
-        assert_eq!(h["handler"], "reverse_proxy");
-        assert_eq!(h["upstreams"][0]["dial"], "127.0.0.1:3010");
+        assert_eq!(h["handler"], "subroute");
+        assert_eq!(
+            h["routes"][1]["handle"][0]["upstreams"][0]["dial"],
+            "127.0.0.1:3010"
+        );
 
         // :80 server redirects the https host to https.
         let http = c.apps.http.servers.get("portbay_http").unwrap();
@@ -483,17 +533,44 @@ mod tests {
         assert_eq!(https.routes.len(), 1);
         assert_eq!(https.routes[0].id, "route_fallback_https");
 
-        // http server reverse-proxies the plain project.
+        // http server reverse-proxies the plain project via a subroute.
         let http = c.apps.http.servers.get("portbay_http").unwrap();
         assert_eq!(http.routes.len(), 2); // project + catch-all
         assert_eq!(http.routes[0].id, "route_plain");
-        assert_eq!(http.routes[0].handle[0]["handler"], "reverse_proxy");
+        assert_eq!(http.routes[0].handle[0]["handler"], "subroute");
         assert_eq!(
-            http.routes[0].handle[0]["upstreams"][0]["dial"],
+            http.routes[0].handle[0]["routes"][1]["handle"][0]["upstreams"][0]["dial"],
             "127.0.0.1:3010"
         );
         // No cert needed for a plain-http project.
         assert!(c.apps.tls.certificates.load_files.is_empty());
+    }
+
+    #[test]
+    fn reverse_proxy_rewrites_origin_on_websocket_upgrade_only() {
+        let mut r = Registry::new("test");
+        r.add_project(next_project("hmr", 3010, false)).unwrap();
+        let c = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let http = c.apps.http.servers.get("portbay_http").unwrap();
+        let sub = &http.routes[0].handle[0];
+        assert_eq!(sub["handler"], "subroute");
+
+        // Branch 0: WebSocket upgrades, matched on the Upgrade header, get
+        // Origin rewritten to the loopback dev origin so the dev server's
+        // cross-origin HMR guard accepts the connection.
+        let ws = &sub["routes"][0];
+        assert_eq!(ws["match"][0]["header"]["Upgrade"][0], "websocket");
+        assert_eq!(
+            ws["handle"][0]["headers"]["request"]["set"]["Origin"][0],
+            "http://localhost:3010"
+        );
+        assert_eq!(ws["handle"][0]["upstreams"][0]["dial"], "127.0.0.1:3010");
+
+        // Branch 1: everything else proxies through with no Origin rewrite.
+        let plain = &sub["routes"][1];
+        assert!(plain["match"].is_null());
+        assert!(plain["handle"][0]["headers"].is_null());
+        assert_eq!(plain["handle"][0]["upstreams"][0]["dial"], "127.0.0.1:3010");
     }
 
     #[test]
@@ -544,6 +621,23 @@ mod tests {
             sub[0]["handle"][0]["upstreams"][0]["dial"],
             "unix//tmp/portbay-php/8.4/php-fpm.sock"
         );
+    }
+
+    #[test]
+    fn static_project_is_served_by_file_server_not_reverse_proxy() {
+        let mut r = Registry::new("test");
+        let mut p = next_project("docs", 0, false);
+        p.kind = ProjectType::Static;
+        p.start_command = None;
+        p.port = None;
+        p.document_root = Some("public".into());
+        r.add_project(p).unwrap();
+        let c = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let http = c.apps.http.servers.get("portbay_http").unwrap();
+        let h = &http.routes[0].handle[0];
+        assert_eq!(h["handler"], "file_server");
+        assert_eq!(h["root"], "/tmp/docs/public");
+        assert_eq!(h["index_names"][0], "index.html");
     }
 
     #[test]

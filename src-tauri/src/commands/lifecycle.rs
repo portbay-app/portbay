@@ -21,34 +21,53 @@ pub async fn start_project(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
-    // Port pre-flight. If the project pins a port and something else
-    // is already bound to it, either clean up the orphan ourselves
-    // (only when we can prove the holder is one of our stale dev
-    // servers) or surface a precise PortConflict error so the user
-    // knows exactly which process to stop. Skipping this step would
-    // let Process Compose try, fail mysteriously, and surface a bare
-    // "exited with code 1" — the cause the user reported.
-    if let Some(holder) = preflight_port(&state, &id)? {
-        return Err(AppError::PortConflict {
-            port: holder.0,
-            holder: holder.1,
-        });
+    // Pure Caddy-served projects (Static sites, anything with no
+    // `start_command`) have no Process Compose process. Calling
+    // `client.start` for them hits PC's `/process/start/<name>` for a name
+    // PC has never heard of → HTTP 400. They're served straight from disk by
+    // Caddy's file_server, so "starting" them just means making sure the
+    // route is live — handled by the reconcile tick below.
+    if project_has_pc_process(&state, &id)? {
+        // Port pre-flight. If the project pins a port and something else
+        // is already bound to it, either clean up the orphan ourselves
+        // (only when we can prove the holder is one of our stale dev
+        // servers) or surface a precise PortConflict error so the user
+        // knows exactly which process to stop. Skipping this step would
+        // let Process Compose try, fail mysteriously, and surface a bare
+        // "exited with code 1" — the cause the user reported.
+        if let Some(holder) = preflight_port(&state, &id)? {
+            return Err(AppError::PortConflict {
+                port: holder.0,
+                holder: holder.1,
+            });
+        }
+
+        let client = state.pc_client()?;
+        client.start(&id).await?;
     }
 
-    let client = state.pc_client()?;
-    client.start(&id).await?;
-
-    // After the process is up, force a reconcile pass so the hosts file,
-    // dnsmasq, and Caddy all reflect the project's hostname *before* we
-    // hand control back to the UI. Without this, the user can press
-    // Play and click the URL before the background reconciler has had a
-    // chance to add a route — landing them on a DNS error instead of
-    // their freshly-started app. The tick is idempotent and runs all
-    // sub-reconcilers; on success the project URL is immediately
+    // After the process is up (or immediately, for static sites), force a
+    // reconcile pass so the hosts file, dnsmasq, and Caddy all reflect the
+    // project's hostname *before* we hand control back to the UI. Without
+    // this, the user can press Play and click the URL before the background
+    // reconciler has had a chance to add a route — landing them on a DNS
+    // error instead of their freshly-started app. The tick is idempotent and
+    // runs all sub-reconcilers; on success the project URL is immediately
     // resolvable.
     let _ = state.reconciler.tick(&app).await;
 
     Ok(())
+}
+
+/// True when the project has a Process Compose process backing it (i.e. it
+/// pins a `start_command`). Static / pure-Caddy projects return `false`: they
+/// have no daemon to start, stop, or restart.
+fn project_has_pc_process(state: &State<'_, AppState>, project_id: &str) -> AppResult<bool> {
+    let registry = load_registry(state)?;
+    let project = registry
+        .get_project(&ProjectId::new(project_id))
+        .ok_or_else(|| AppError::NotFound(project_id.to_string()))?;
+    Ok(project.start_command.is_some())
 }
 
 /// Walk the registry for the given project, look up any port it pins
@@ -82,33 +101,48 @@ fn preflight_port(
     }
 
     let working_dir = project.path.to_string_lossy().into_owned();
+    // PID of our own process-compose, so we can tell PortBay's own running
+    // dev server apart from a foreign holder of the same port.
+    let pc_pid = state.pc.lock().unwrap_or_else(|e| e.into_inner()).pid();
 
     for port in ports {
         let Some(holder) = port_holder::find(port) else {
             continue;
         };
-        // If the holder (or any of its ancestors) is one of our own
-        // stale dev servers, kill the topmost matching ancestor so
-        // wrappers propagate the signal down. The user explicitly
-        // clicked Start — we know they want this port for this
-        // project. Worker processes (e.g. Next.js's `next-server`)
-        // hide the path, but the dev-server shell that spawned them
-        // carries it; the ancestor walk catches those.
-        if holder.looks_like_portbay_orphan(&working_dir) {
+
+        // 1. A leaked PortBay dev server from a previous session (orphaned to
+        //    launchd, cwd inside this project). The user clicked Start for this
+        //    project — reclaim the port on their behalf. Kill the topmost
+        //    matching ancestor so wrappers propagate the signal to their
+        //    worker; for a bare orphan that's the holder itself.
+        if holder.is_reclaimable_orphan(&working_dir) {
             let target = holder.kill_target(&working_dir);
             tracing::info!(
                 project = %project_id,
                 holder_pid = holder.pid,
                 kill_pid = target,
                 port = port,
-                "killing stale PortBay-managed dev server before restart",
+                "reclaiming leaked PortBay-managed dev server before start",
             );
             let _ = port_holder::kill_gracefully(target, std::time::Duration::from_secs(2));
-            // Re-check; if the slot is now free, keep going.
             if port_holder::find(port).is_none() {
                 continue;
             }
+            // Couldn't free it — surface as a conflict rather than looping.
+            return Ok(Some((port, holder.display())));
         }
+
+        // 2. PortBay's OWN running server (descends from our process-compose).
+        //    Not a conflict — it's this project already up, or the fresh child
+        //    a restart just spawned. Leave it alone.
+        if pc_pid.is_some_and(|pp| holder.descends_from(pp)) {
+            continue;
+        }
+
+        // 3. Anything else — a live process the user is running themselves
+        //    (a terminal `npm run dev`, ServBay, …) or an unrelated process on
+        //    this port. We never kill processes we don't own; surface a precise
+        //    conflict so the user decides.
         return Ok(Some((port, holder.display())));
     }
     Ok(None)
@@ -116,6 +150,12 @@ fn preflight_port(
 
 #[tauri::command]
 pub async fn stop_project(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    // Static / pure-Caddy projects have no PC process to stop. Caddy keeps
+    // serving their files for as long as they're in the registry, so Stop is
+    // a no-op rather than a 400 against a non-existent PC process.
+    if !project_has_pc_process(&state, &id)? {
+        return Ok(());
+    }
     state.mark_stop_requested(&id);
     let client = state.pc_client()?;
     client.stop(&id).await?;
@@ -128,6 +168,13 @@ pub async fn restart_project(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
+    // Static / pure-Caddy projects have nothing to restart in PC; just
+    // re-assert routing so the file_server route is fresh.
+    if !project_has_pc_process(&state, &id)? {
+        let _ = state.reconciler.tick(&app).await;
+        return Ok(());
+    }
+
     // Restart kills the child too, so wrapper-translated SIGTERM exits
     // (npm → exit 1) shouldn't be flagged as crashes either.
     state.mark_stop_requested(&id);

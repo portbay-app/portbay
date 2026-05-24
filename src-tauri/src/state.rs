@@ -297,6 +297,20 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .start(app, &config_path, port)?;
+
+        // Drift guard: dnsmasq picks a fresh free port on every boot, but
+        // `/etc/resolver/<suffix>` is written once and would otherwise keep
+        // pointing at a now-dead port after a restart. If DNS routing was
+        // previously set up (the file exists) and our privileged helper is
+        // reachable, silently re-point the file at the port we just bound.
+        // Best-effort — /etc/hosts is the primary path, so a failure here
+        // never blocks boot.
+        if crate::dnsmasq::resolver::read_installed(&reg.domain_suffix).is_some() {
+            let helper = crate::hosts_helper::HostsHelperClient::system();
+            if helper.is_available() {
+                let _ = helper.install_resolver(&reg.domain_suffix, port);
+            }
+        }
         Ok(())
     }
 

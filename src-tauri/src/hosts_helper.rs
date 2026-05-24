@@ -279,10 +279,24 @@ fn daemon_plist() -> String {
 pub fn install_daemon(helper_bin: &Path) -> Result<()> {
     use std::process::Command;
 
+    // macOS TCC blocks even a root process spawned via `osascript … with
+    // administrator privileges` from reading files on external / removable
+    // volumes. A dev checkout on `/Volumes/<disk>` is the common case, and so
+    // is a `$TMPDIR` relocated onto that same disk — so neither `helper_bin`
+    // nor `std::env::temp_dir()` is safe to hand to the root shell; both fail
+    // with "Operation not permitted" (EPERM). Stage the binary AND the install
+    // script under `/private/tmp` instead (always system-local and outside
+    // TCC's file-access walls), in a 0700 dir owned by the current user so no
+    // other local user can tamper with what root is about to execute. Root
+    // bypasses the 0700 mode for its own reads.
+    let work = stage_dir()?;
+    let staged_bin = work.join("portbay-hosts-helper");
+    std::fs::copy(helper_bin, &staged_bin).map_err(|e| HelperError::io(&staged_bin, e))?;
+
     let plist_path = format!("/Library/LaunchDaemons/{PLIST_NAME}");
     // The whole privileged install runs as one root shell script, so the user
     // sees a single password prompt. Paths we interpolate are either constants
-    // or the resolved helper binary path (single-quoted).
+    // or the staged helper path (single-quoted).
     let script = format!(
         "#!/bin/sh\nset -e\n\
          /bin/mkdir -p /usr/local/bin\n\
@@ -293,11 +307,11 @@ pub fn install_daemon(helper_bin: &Path) -> Result<()> {
          /bin/launchctl bootout system/{HELPER_LABEL} 2>/dev/null || true\n\
          /bin/launchctl bootstrap system '{plist_path}'\n\
          /bin/launchctl enable system/{HELPER_LABEL}\n",
-        src = shell_single_quote(&helper_bin.to_string_lossy()),
+        src = shell_single_quote(&staged_bin.to_string_lossy()),
         plist = daemon_plist(),
     );
 
-    let tmp = std::env::temp_dir().join("portbay-helper-install.sh");
+    let tmp = work.join("install.sh");
     std::fs::write(&tmp, script).map_err(|e| HelperError::io(&tmp, e))?;
 
     let apple = format!(
@@ -309,7 +323,7 @@ pub fn install_daemon(helper_bin: &Path) -> Result<()> {
         .arg(&apple)
         .output()
         .map_err(|e| HelperError::io("osascript", e))?;
-    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_dir_all(&work);
 
     if output.status.success() {
         return Ok(());
@@ -331,6 +345,32 @@ pub fn install_daemon(_helper_bin: &Path) -> Result<()> {
     Err(HelperError::Protocol(
         "privileged helper install is macOS-only in this build".into(),
     ))
+}
+
+/// Create a private staging directory under `/private/tmp` for the privileged
+/// install handoff. `/private/tmp` (not `$TMPDIR`) is deliberate: it is always
+/// on the system volume and outside macOS TCC's file-access protections, so
+/// the root shell can read what we put there. Mode 0700 + a per-process name
+/// keep other local users out of the window between write and root-exec.
+#[cfg(target_os = "macos")]
+fn stage_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = PathBuf::from("/private/tmp").join(format!(
+        "portbay-helper-install.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| HelperError::io(&dir, e))?;
+    let mut perms = std::fs::metadata(&dir)
+        .map_err(|e| HelperError::io(&dir, e))?
+        .permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(&dir, perms).map_err(|e| HelperError::io(&dir, e))?;
+    Ok(dir)
 }
 
 /// POSIX single-quote a string for safe interpolation into `/bin/sh`.

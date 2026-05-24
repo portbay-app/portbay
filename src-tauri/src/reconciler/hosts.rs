@@ -27,19 +27,7 @@ pub(super) struct HostsCache {
     last_perm_denied: Option<u64>,
 }
 
-pub(super) fn reconcile(
-    reg: &Registry,
-    cache: &mut HostsCache,
-    dns_routing_active: bool,
-) -> StepOutcome {
-    if dns_routing_active {
-        // dnsmasq + /etc/resolver/<suffix> is doing the routing.
-        // /etc/hosts is redundant; skip with a clear reason and leave
-        // the existing block alone (the user can remove it via the
-        // "Clean up old hosts entries" flow if they want).
-        return StepOutcome::skipped("dnsmasq resolver-file is installed; /etc/hosts not needed");
-    }
-
+pub(super) fn reconcile(reg: &Registry, cache: &mut HostsCache) -> StepOutcome {
     // Prefer PortBay's own privileged helper (a root LaunchDaemon) so the
     // GUI can write /etc/hosts without a per-write sudo prompt and without
     // depending on any third-party tool. Fall back to a direct write when

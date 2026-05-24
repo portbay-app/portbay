@@ -57,7 +57,8 @@
       "binaries/mkcert",
       "binaries/mailpit",
       "binaries/cloudflared",
-      "binaries/dnsmasq"
+      "binaries/dnsmasq",
+      "binaries/portbay-hosts-helper"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0",
