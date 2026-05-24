@@ -445,6 +445,40 @@ pub fn version_from(bin: &std::path::Path, arg: &str) -> Option<String> {
     None
 }
 
+/// Surgically apply `key → value` updates to a flat, line-based config file's
+/// text (e.g. `~/.npmrc`, Go's `env`, `~/.gemrc`). For each update every
+/// existing line whose key (the text before the first `sep`) matches is
+/// dropped, then a single canonical `key{joiner}value` line is appended when
+/// setting (`None` removes the key entirely). Every unrelated line — comments,
+/// other sections, settings PortBay doesn't surface — is preserved verbatim.
+///
+/// Shared by the system-owned runtime config tabs (Node/Go/Ruby) so each one
+/// reuses the same well-tested, non-destructive write.
+pub(crate) fn apply_flat_config(
+    existing: &str,
+    sep: char,
+    joiner: &str,
+    updates: &[(&str, Option<String>)],
+) -> String {
+    let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+    for (key, value) in updates {
+        lines.retain(|line| {
+            line.trim_start()
+                .split_once(sep)
+                .map(|(k, _)| k.trim() != *key)
+                .unwrap_or(true)
+        });
+        if let Some(v) = value {
+            lines.push(format!("{key}{joiner}{v}"));
+        }
+    }
+    let mut body = lines.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    body
+}
+
 /// Truncate a "1.22.3" → "1.22" so the sidebar groups by major.minor.
 /// Keeps the full version available in the binary's actual install.
 pub fn major_minor(version: &str) -> String {
@@ -542,13 +576,42 @@ mod tests {
 
     #[test]
     fn default_runtime_has_no_editable_settings() {
-        // Go doesn't override apply_config, so it falls back to the default
-        // impl that rejects every patch.
+        // Every shipped runtime now overrides apply_config, so exercise the
+        // default impl through a minimal stand-in: it must reject any patch.
+        struct NoConfig;
+        impl LanguageRuntime for NoConfig {
+            fn id(&self) -> &'static str {
+                "noconfig"
+            }
+            fn display_name(&self) -> &'static str {
+                "NoConfig"
+            }
+            fn install_hint(&self) -> &'static str {
+                ""
+            }
+            fn detect(&self) -> Vec<RuntimeInstall> {
+                Vec::new()
+            }
+        }
         let mut settings = crate::registry::RuntimeSettings::default();
-        let go = go::GoRuntime;
-        let err = go
-            .apply_config("1.22", "info", &std::collections::BTreeMap::new(), &mut settings)
+        let err = NoConfig
+            .apply_config("1", "any", &std::collections::BTreeMap::new(), &mut settings)
             .unwrap_err();
         assert!(err.contains("no editable settings"));
+    }
+
+    #[test]
+    fn apply_flat_config_preserves_other_lines_and_dedupes() {
+        let existing = "# comment\nGOPATH=/old\nGOFLAGS=-mod=vendor\nGOPATH=/dup\n";
+        let out = apply_flat_config(
+            existing,
+            '=',
+            "=",
+            &[("GOPROXY", Some("https://proxy/".into())), ("GOPATH", None)],
+        );
+        assert!(out.contains("# comment"));
+        assert!(out.contains("GOFLAGS=-mod=vendor")); // value with '=' survives
+        assert!(out.contains("GOPROXY=https://proxy/"));
+        assert!(!out.contains("GOPATH=")); // removed (both occurrences)
     }
 }
