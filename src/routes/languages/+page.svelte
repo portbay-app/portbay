@@ -709,8 +709,7 @@
                     </span>
                   {:else}
                     <span class="text-[11px] text-fg-subtle">
-                      Edits write to PortBay's managed config and reload the
-                      affected service.
+                      Saved changes apply immediately.
                     </span>
                   {/if}
                 </div>
