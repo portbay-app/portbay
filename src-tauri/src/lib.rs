@@ -278,6 +278,11 @@ pub fn run() {
             commands::events::spawn_status_poller(app.handle().clone());
             commands::metrics::spawn_metrics_poller(app.handle().clone());
 
+            // Background build-artifact auto-clean. No-op unless the user opted
+            // into a weekly/monthly cadence in Settings; the cadence gate lives
+            // inside the scheduler.
+            commands::artifacts::spawn_auto_clean_scheduler(app.handle().clone());
+
             // Install the menu-bar tray if the user hasn't disabled it.
             // Failures degrade gracefully — the dashboard still works
             // without a tray — so a tray-install error is warn-logged
