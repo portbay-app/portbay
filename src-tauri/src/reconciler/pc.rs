@@ -154,7 +154,16 @@ fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::co
                 continue;
             }
         }
-        let pool_body = crate::php::lifecycle::render_pool_config(install, &socket_path);
+        // Per-version PortBay tuning + php.ini overrides from the registry
+        // (set via the /languages FPM and PHP tabs). Absent → defaults, which
+        // render the same pool config as before any tuning was saved.
+        let php_cfg = reg.runtimes.php.get(ver).cloned().unwrap_or_default();
+        let pool_body = crate::php::lifecycle::render_pool_config(
+            install,
+            &socket_path,
+            &php_cfg.fpm,
+            &php_cfg.ini,
+        );
         if let Err(e) = std::fs::write(&pool_path, &pool_body) {
             tracing::warn!(
                 target: "reconciler",

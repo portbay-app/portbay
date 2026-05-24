@@ -25,6 +25,8 @@
     LanguageView,
     VersionView,
     InstallSource,
+    KvRow,
+    ConfigTab,
   } from "$lib/types/runtimes";
   import { sourceLabel } from "$lib/types/runtimes";
 
@@ -152,6 +154,66 @@
       }
     } catch {
       /* toast */
+    }
+  }
+
+  /**
+   * Pending edits for the currently-open (language, version, tab), keyed by
+   * row key. Reset whenever that scope changes or a save completes — see the
+   * effect below. A row is dirty when its draft differs from the server value.
+   */
+  let drafts = $state<Record<string, string>>({});
+  let savingTab = $state<string | null>(null);
+
+  const editScope = $derived(
+    selected && activeTab
+      ? `${selected.lang.id}:${selected.version.install.version}:${activeTab}`
+      : "",
+  );
+  $effect(() => {
+    // Touching editScope re-runs this whenever the open tab/version changes,
+    // discarding edits that belonged to the previously-open scope.
+    void editScope;
+    drafts = {};
+  });
+
+  /** Current value of a row: its pending draft, else the server value. */
+  function fieldValue(row: KvRow): string {
+    return drafts[row.key] ?? row.value;
+  }
+
+  function setDraft(key: string, value: string) {
+    drafts = { ...drafts, [key]: value };
+  }
+
+  /** Editable rows whose draft differs from the persisted value. */
+  function dirtyPatches(tab: ConfigTab): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const row of tab.rows) {
+      if (row.field.kind === "readonly") continue;
+      const next = drafts[row.key];
+      if (next !== undefined && next !== row.value) out[row.key] = next;
+    }
+    return out;
+  }
+
+  /** Persist an editable tab's edits, then re-render with the saved values. */
+  async function saveTab(langId: string, version: string, tab: ConfigTab) {
+    const patches = dirtyPatches(tab);
+    if (Object.keys(patches).length === 0) return;
+    savingTab = tab.id;
+    try {
+      languages = await safeInvoke<LanguageView[]>("update_runtime_config", {
+        lang: langId,
+        version,
+        tabId: tab.id,
+        patches,
+      });
+      drafts = {};
+    } catch {
+      /* safeInvoke toasted the validation envelope; keep edits for a retry */
+    } finally {
+      savingTab = null;
     }
   }
 
@@ -462,6 +524,8 @@
         <!-- Active tab content -->
         {#each version.tabs as tab (tab.id)}
           {#if activeTab === tab.id}
+            {@const patches = dirtyPatches(tab)}
+            {@const dirtyCount = Object.keys(patches).length}
             <div
               class="px-8 py-6"
               role="tabpanel"
@@ -476,60 +540,134 @@
                   class="grid gap-x-6 gap-y-5 grid-cols-1 md:grid-cols-2"
                   role="list"
                 >
-                  {#each tab.rows as row (row.label)}
+                  {#each tab.rows as row (row.key)}
+                    {@const isDirty =
+                      row.field.kind !== "readonly" &&
+                      drafts[row.key] !== undefined &&
+                      drafts[row.key] !== row.value}
                     <div role="listitem" class="min-w-0">
                       <span
-                        class="block text-[11px] font-medium text-fg-muted mb-1.5"
+                        class="flex items-center gap-1.5 text-[11px] font-medium
+                               text-fg-muted mb-1.5"
                       >
                         {row.label}
+                        {#if isDirty}
+                          <span
+                            class="inline-block w-1.5 h-1.5 rounded-full bg-accent"
+                            title="Unsaved change"
+                            aria-label="Unsaved change"
+                          ></span>
+                        {/if}
                       </span>
-                      <div class="flex items-stretch gap-1.5">
-                        <div
-                          class="flex-1 min-w-0 px-3 py-2 rounded-md bg-surface-2/60
-                                 border border-border/60 text-[12px] font-mono
-                                 text-fg break-all"
-                        >
-                          {#if row.value}
-                            {row.value}
-                          {:else}
-                            <span class="text-fg-subtle">—</span>
-                          {/if}
-                        </div>
-                        <button
-                          type="button"
-                          onclick={() => copyValue(row.value)}
-                          title={copiedHint === row.value
-                            ? "Copied!"
-                            : "Copy value"}
-                          aria-label="Copy value"
-                          class="shrink-0 inline-flex items-center justify-center
-                                 w-9 px-2 rounded-md border border-border/60
-                                 text-fg-muted hover:text-fg
-                                 hover:bg-surface-2 transition-colors
-                                 {copiedHint === row.value
-                            ? 'text-status-running'
-                            : ''}"
-                        >
-                          <Icon
-                            name={copiedHint === row.value ? "check" : "link"}
-                            size={13}
-                          />
-                        </button>
-                        {#if row.isPath && row.value}
+
+                      {#if row.field.kind === "readonly"}
+                        <!-- Read-only metadata: value + copy/reveal -->
+                        <div class="flex items-stretch gap-1.5">
+                          <div
+                            class="flex-1 min-w-0 px-3 py-2 rounded-md bg-surface-2/60
+                                   border border-border/60 text-[12px] font-mono
+                                   text-fg break-all"
+                          >
+                            {#if row.value}
+                              {row.value}
+                            {:else}
+                              <span class="text-fg-subtle">—</span>
+                            {/if}
+                          </div>
                           <button
                             type="button"
-                            onclick={() => revealPath(row.value)}
-                            title="Reveal in Finder"
-                            aria-label="Reveal {row.label} in Finder"
+                            onclick={() => copyValue(row.value)}
+                            title={copiedHint === row.value
+                              ? "Copied!"
+                              : "Copy value"}
+                            aria-label="Copy value"
                             class="shrink-0 inline-flex items-center justify-center
                                    w-9 px-2 rounded-md border border-border/60
-                                   text-accent hover:text-accent-hover
-                                   hover:bg-accent/10 transition-colors"
+                                   text-fg-muted hover:text-fg
+                                   hover:bg-surface-2 transition-colors
+                                   {copiedHint === row.value
+                              ? 'text-status-running'
+                              : ''}"
                           >
-                            <Icon name="folder" size={13} />
+                            <Icon
+                              name={copiedHint === row.value ? "check" : "link"}
+                              size={13}
+                            />
                           </button>
-                        {/if}
-                      </div>
+                          {#if row.isPath && row.value}
+                            <button
+                              type="button"
+                              onclick={() => revealPath(row.value)}
+                              title="Reveal in Finder"
+                              aria-label="Reveal {row.label} in Finder"
+                              class="shrink-0 inline-flex items-center justify-center
+                                     w-9 px-2 rounded-md border border-border/60
+                                     text-accent hover:text-accent-hover
+                                     hover:bg-accent/10 transition-colors"
+                            >
+                              <Icon name="folder" size={13} />
+                            </button>
+                          {/if}
+                        </div>
+                      {:else if row.field.kind === "select"}
+                        <select
+                          value={fieldValue(row)}
+                          onchange={(e) =>
+                            setDraft(row.key, e.currentTarget.value)}
+                          class="w-full px-3 py-2 rounded-md bg-surface-2/60 text-[12px]
+                                 font-mono text-fg border transition-colors
+                                 focus:outline-none focus:ring-1 focus:ring-accent/50
+                                 {isDirty
+                            ? 'border-accent/60'
+                            : 'border-border/60'}"
+                        >
+                          {#each row.field.options as opt (opt)}
+                            <option value={opt}>{opt}</option>
+                          {/each}
+                        </select>
+                      {:else if row.field.kind === "bool"}
+                        <label
+                          class="inline-flex items-center gap-2 px-3 py-2 rounded-md
+                                 bg-surface-2/60 border text-[12px] text-fg
+                                 cursor-pointer transition-colors
+                                 {isDirty
+                            ? 'border-accent/60'
+                            : 'border-border/60'}"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={fieldValue(row) === "true"}
+                            onchange={(e) =>
+                              setDraft(
+                                row.key,
+                                e.currentTarget.checked ? "true" : "false",
+                              )}
+                            class="accent-accent"
+                          />
+                          {fieldValue(row) === "true" ? "Enabled" : "Disabled"}
+                        </label>
+                      {:else}
+                        <!-- text / number -->
+                        <input
+                          type={row.field.kind === "number" ? "number" : "text"}
+                          value={fieldValue(row)}
+                          min={row.field.kind === "number"
+                            ? row.field.min
+                            : undefined}
+                          max={row.field.kind === "number"
+                            ? row.field.max
+                            : undefined}
+                          oninput={(e) =>
+                            setDraft(row.key, e.currentTarget.value)}
+                          class="w-full px-3 py-2 rounded-md bg-surface-2/60 text-[12px]
+                                 font-mono text-fg border transition-colors
+                                 focus:outline-none focus:ring-1 focus:ring-accent/50
+                                 {isDirty
+                            ? 'border-accent/60'
+                            : 'border-border/60'}"
+                        />
+                      {/if}
+
                       {#if row.hint}
                         <p
                           class="mt-1.5 text-[10.5px] text-fg-subtle leading-relaxed"
@@ -539,6 +677,42 @@
                       {/if}
                     </div>
                   {/each}
+                </div>
+              {/if}
+
+              {#if tab.editable}
+                <div
+                  class="mt-7 pt-4 border-t border-border/60 flex items-center gap-3"
+                >
+                  <button
+                    type="button"
+                    disabled={dirtyCount === 0 || savingTab === tab.id}
+                    onclick={() =>
+                      saveTab(lang.id, version.install.version, tab)}
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
+                           text-[12px] font-medium border transition-colors
+                           {dirtyCount > 0
+                      ? 'border-accent/50 bg-accent/10 text-accent hover:bg-accent/15'
+                      : 'border-border text-fg-subtle'}
+                           disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Icon
+                      name={savingTab === tab.id ? "refresh-cw" : "check"}
+                      size={12}
+                      class={savingTab === tab.id ? "animate-spin" : ""}
+                    />
+                    {savingTab === tab.id ? "Saving…" : "Save changes"}
+                  </button>
+                  {#if dirtyCount > 0}
+                    <span class="text-[11px] text-fg-subtle">
+                      {dirtyCount} unsaved {dirtyCount === 1 ? "change" : "changes"}
+                    </span>
+                  {:else}
+                    <span class="text-[11px] text-fg-subtle">
+                      Edits write to PortBay's managed config and reload the
+                      affected service.
+                    </span>
+                  {/if}
                 </div>
               {/if}
             </div>
