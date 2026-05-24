@@ -140,11 +140,17 @@ fn build_project(site: &ImportedSite) -> std::result::Result<Project, String> {
         return Err(format!("path is not absolute: {}", site.path));
     }
     let id = ProjectId::new(&site.suggested_id);
-    let kind = if site.php_version.is_some() {
-        ProjectType::Php
-    } else {
-        ProjectType::Custom
-    };
+    // Prefer the source's explicit type hint (ServBay knows from the vhost
+    // whether it's a PHP-FPM app or a plain file server); otherwise fall back
+    // to the php-version heuristic. Custom is the last resort — note it would
+    // be reverse-proxied, so the static/php hint matters for correct serving.
+    let kind = site.kind_hint.unwrap_or_else(|| {
+        if site.php_version.is_some() {
+            ProjectType::Php
+        } else {
+            ProjectType::Custom
+        }
+    });
     Ok(Project {
         id,
         name: site.suggested_name.clone(),
@@ -164,7 +170,7 @@ fn build_project(site: &ImportedSite) -> std::result::Result<Project, String> {
         readiness: Some(Readiness::Process),
         auto_start: false,
         tags: vec![site.source.tag().to_string()],
-        document_root: None,
+        document_root: site.document_root.clone(),
         php_version: site.php_version.clone(),
         // Populate the structured runtime pin too (not just the legacy field),
         // so imported PHP sites converge onto `runtime` like GUI-created ones.
@@ -209,6 +215,39 @@ mod tests {
         assert!(matches!(p.kind, ProjectType::Custom));
         assert!(p.php_version.is_none());
         assert_eq!(p.tags, vec!["source:mamp"]);
+    }
+
+    #[test]
+    fn build_project_honors_kind_hint_and_document_root() {
+        // A ServBay PHP site: type known from the vhost, doc root split off.
+        let mut site = ImportedSite::from_parts(
+            ImportSource::ServBay,
+            "/Volumes/x/Tribal House/tribal-house-cms".into(),
+            "tribal-house.localhost".into(),
+            None,
+            false,
+        );
+        site.kind_hint = Some(ProjectType::Php);
+        site.document_root = Some("public".into());
+        let p = build_project(&site).unwrap();
+        assert!(matches!(p.kind, ProjectType::Php));
+        assert_eq!(p.document_root.as_deref(), Some("public"));
+        assert_eq!(p.name, "tribal-house-cms");
+        assert_eq!(p.tags, vec!["source:servbay"]);
+    }
+
+    #[test]
+    fn build_project_static_hint_maps_to_static_not_custom() {
+        let mut site = ImportedSite::from_parts(
+            ImportSource::ServBay,
+            "/Users/x/Sites/brochure".into(),
+            "brochure.localhost".into(),
+            None,
+            false,
+        );
+        site.kind_hint = Some(ProjectType::Static);
+        let p = build_project(&site).unwrap();
+        assert!(matches!(p.kind, ProjectType::Static));
     }
 
     #[test]
