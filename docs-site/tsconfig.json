@@ -1,0 +1,20 @@
+{
+  // Self-contained config for the VitePress docs site. Without this,
+  // esbuild walks up to the repo-root tsconfig.json, which `extends`
+  // the SvelteKit-generated ./.svelte-kit/tsconfig.json — a file that
+  // doesn't exist on a clean checkout (it's produced by `svelte-kit
+  // sync`), so `vitepress build` fails in CI. The docs site has no
+  // dependency on the app's type graph, so it gets its own config.
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+  },
+  "include": [".vitepress/**/*.ts", ".vitepress/**/*.mts", ".vitepress/**/*.vue"]
+}
