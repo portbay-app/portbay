@@ -336,18 +336,12 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Destroyed => {
+                    // Main window torn down → the app is quitting. The
+                    // app-level RunEvent::Exit handler also calls this; it's
+                    // idempotent, so whichever signal fires first wins and the
+                    // other is a no-op.
                     let state: tauri::State<AppState> = window.state();
-                    state.shutdown_pc();
-                    state.shutdown_caddy();
-                    state.shutdown_dnsmasq();
-                    state.shutdown_mailpit();
-                    // Drop every live tunnel so cloudflared children
-                    // don't outlive the window. The Drop impl on
-                    // TunnelManager handles the kill loop.
-                    {
-                        let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned");
-                        *tunnels = crate::tunnel::TunnelManager::new();
-                    }
+                    state.shutdown_all();
                 }
                 _ => {}
             }
@@ -362,6 +356,7 @@ pub fn run() {
             commands::projects::detect_workspace_apps,
             commands::projects::validate_project_folder,
             commands::lifecycle::start_project,
+            commands::lifecycle::force_start_project,
             commands::lifecycle::stop_project,
             commands::lifecycle::restart_project,
             commands::lifecycle::stop_all,
@@ -385,6 +380,7 @@ pub fn run() {
             commands::artifacts::clean_artifact,
             commands::artifacts::clean_all_artifacts,
             commands::system::quit_app,
+            commands::system::open_main_window,
             commands::log_stream::subscribe_logs,
             commands::import::detect_sources,
             commands::import::preview_import,
@@ -452,6 +448,15 @@ pub fn run() {
             commands::telemetry::record_js_error,
             commands::telemetry::record_telemetry_event,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Guarantee the teardown runs on EVERY quit path — ⌘Q, the tray
+            // "Quit" item (`app.exit`), or the last window closing — not only
+            // the main window's `Destroyed` event the old handler relied on.
+            // `shutdown_all` is idempotent, so firing from both is safe.
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                app_handle.state::<AppState>().shutdown_all();
+            }
+        });
 }
