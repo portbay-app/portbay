@@ -239,27 +239,10 @@ fn validate_npmrc_patch(
     Ok(out)
 }
 
-/// Apply key updates to npmrc text, preserving every unrelated line. Each key's
-/// existing occurrences are dropped and a single canonical `key=value` line is
-/// appended when setting (removed entirely when the value is `None`).
+/// Apply key updates to npmrc text (flat `key=value`), preserving every
+/// unrelated line. Thin wrapper over the shared [`crate::runtimes`] helper.
 fn apply_npmrc_text(existing: &str, updates: &[(&str, Option<String>)]) -> String {
-    let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
-    for (key, value) in updates {
-        lines.retain(|line| {
-            line.trim_start()
-                .split_once('=')
-                .map(|(k, _)| k.trim() != *key)
-                .unwrap_or(true)
-        });
-        if let Some(v) = value {
-            lines.push(format!("{key}={v}"));
-        }
-    }
-    let mut body = lines.join("\n");
-    if !body.is_empty() {
-        body.push('\n');
-    }
-    body
+    crate::runtimes::apply_flat_config(existing, '=', "=", updates)
 }
 
 fn write_npmrc_keys(updates: &[(&str, Option<String>)]) -> Result<(), String> {
