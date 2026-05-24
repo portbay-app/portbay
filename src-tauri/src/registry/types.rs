@@ -162,6 +162,17 @@ pub struct Project {
     /// through the transition — existing consumers still read `php_version`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<Runtime>,
+
+    // ----- Monorepo / workspace (optional) ------------------------------
+    /// When set, this project runs a single app inside a monorepo via a
+    /// workspace filter rather than as a standalone folder; `path` stays the
+    /// monorepo root (so the root lockfile, `.env`, and task-runner config
+    /// resolve). Additive field — absent on standalone projects and on
+    /// registries written before it landed (deserialises to `None`), so it
+    /// needs no schema-version bump, matching how `databases`/`runtimes` were
+    /// added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<Workspace>,
 }
 
 impl Project {
@@ -194,6 +205,56 @@ pub struct Runtime {
     pub lang: String,
     /// Version label, e.g. `"8.3"` or `"20.11.0"`.
     pub version: String,
+}
+
+/// Package-manager / task-runner used to scope a single-app run inside a
+/// monorepo. Determines the shape of the filtered dev command.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceTool {
+    Pnpm,
+    Npm,
+    Yarn,
+    Turbo,
+}
+
+/// Set on a project that runs ONE app of a monorepo via a workspace filter.
+/// The project's `path` is the monorepo root; the dev server is scoped to a
+/// single package so a `turbo run dev --parallel`-style fan-out doesn't start
+/// every app in the repo.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workspace {
+    /// Filter token the tool understands — typically the package name
+    /// (`@bookslash/web`) passed to `--filter` / `--workspace` / `workspace`.
+    pub package: String,
+    /// The app's directory RELATIVE to the monorepo root (e.g. `apps/web`).
+    /// Used to attribute the spawned dev server's port to *this* project when
+    /// several apps share one monorepo root.
+    pub rel_dir: String,
+    /// Which tool scopes the run.
+    pub tool: WorkspaceTool,
+}
+
+impl Workspace {
+    /// The dev command that runs only this app, scoped by `tool`. Used by the
+    /// Process Compose config builder to fill in a `start_command` the user
+    /// didn't set explicitly. Run from the monorepo root (the project `path`).
+    pub fn derive_dev_command(&self) -> String {
+        match self.tool {
+            WorkspaceTool::Pnpm => format!("pnpm --filter {} dev", self.package),
+            WorkspaceTool::Npm => format!("npm run dev --workspace {}", self.package),
+            WorkspaceTool::Yarn => format!("yarn workspace {} dev", self.package),
+            WorkspaceTool::Turbo => format!("turbo run dev --filter={}", self.package),
+        }
+    }
+
+    /// Absolute path to the app's directory, given the monorepo root (the
+    /// project `path`). The dev server's working directory in practice — what
+    /// port attribution should match against.
+    pub fn app_dir(&self, root: &std::path::Path) -> PathBuf {
+        root.join(&self.rel_dir)
+    }
 }
 
 /// A named cluster of projects (e.g. "Marketing Stack") for batch operations.
@@ -608,6 +669,7 @@ mod tests {
             document_root: None,
             php_version: None,
             runtime: None,
+            workspace: None,
         };
         let json = serde_json::to_value(&p).unwrap();
         assert_eq!(json["id"], "marketing-site");
@@ -638,6 +700,7 @@ mod tests {
             document_root: None,
             php_version: None,
             runtime: None,
+            workspace: None,
         }
     }
 
@@ -669,6 +732,75 @@ mod tests {
 
         // Nothing set at all.
         assert_eq!(bare_php_project().php_version_effective(), None);
+    }
+
+    #[test]
+    fn workspace_derives_tool_specific_dev_command() {
+        let mk = |tool| Workspace {
+            package: "@bookslash/web".into(),
+            rel_dir: "apps/web".into(),
+            tool,
+        };
+        assert_eq!(
+            mk(WorkspaceTool::Pnpm).derive_dev_command(),
+            "pnpm --filter @bookslash/web dev"
+        );
+        assert_eq!(
+            mk(WorkspaceTool::Npm).derive_dev_command(),
+            "npm run dev --workspace @bookslash/web"
+        );
+        assert_eq!(
+            mk(WorkspaceTool::Yarn).derive_dev_command(),
+            "yarn workspace @bookslash/web dev"
+        );
+        assert_eq!(
+            mk(WorkspaceTool::Turbo).derive_dev_command(),
+            "turbo run dev --filter=@bookslash/web"
+        );
+    }
+
+    #[test]
+    fn workspace_app_dir_joins_rel_dir_onto_root() {
+        let ws = Workspace {
+            package: "@bookslash/web".into(),
+            rel_dir: "apps/web".into(),
+            tool: WorkspaceTool::Pnpm,
+        };
+        assert_eq!(
+            ws.app_dir(std::path::Path::new("/repos/BookSlash")),
+            PathBuf::from("/repos/BookSlash/apps/web")
+        );
+    }
+
+    #[test]
+    fn project_omits_workspace_when_absent_and_loads_older_json_as_none() {
+        // Standalone project: workspace is skipped from the wire shape.
+        let mut p = bare_php_project();
+        assert!(p.workspace.is_none());
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(
+            json.get("workspace").is_none(),
+            "absent workspace must be omitted, keeping the field additive"
+        );
+
+        // A pre-workspace registry blob (no `workspace` key) still loads,
+        // defaulting the field to None — what makes the field need no bump.
+        let older = serde_json::json!({
+            "id": "legacy", "name": "Legacy", "path": "/tmp/legacy",
+            "type": "static", "hostname": "legacy.test"
+        });
+        let loaded: Project = serde_json::from_value(older).unwrap();
+        assert!(loaded.workspace.is_none());
+
+        // And a project carrying a workspace round-trips through JSON.
+        p.workspace = Some(Workspace {
+            package: "@bookslash/web".into(),
+            rel_dir: "apps/web".into(),
+            tool: WorkspaceTool::Pnpm,
+        });
+        let round: Project = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!(round.workspace.as_ref().unwrap().package, "@bookslash/web");
+        assert_eq!(round.workspace.as_ref().unwrap().tool, WorkspaceTool::Pnpm);
     }
 
     #[test]

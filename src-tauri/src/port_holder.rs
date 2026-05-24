@@ -424,6 +424,24 @@ node    99887 nour   22u  IPv4 0xdef       0t0  TCP *:3010 (LISTEN)
     }
 
     #[test]
+    fn sibling_monorepo_apps_disambiguate_by_app_dir() {
+        // Two apps share one monorepo root. An orphaned dev server whose cwd is
+        // apps/api must tie to the api app's dir but NOT to the web app's dir.
+        // This is why preflight_port passes the workspace app_dir (root/relDir)
+        // rather than the shared root — so the web project's Start never
+        // reclaims the api project's orphan and vice versa.
+        let mut h = holder("next-server (v15.5.15)", vec![]);
+        h.cwd = Some(PathBuf::from(
+            "/Volumes/DevSSD/projects/Clients/BookSlash/apps/api",
+        ));
+        h.orphaned = true;
+        assert!(h.ties_to_project("/Volumes/DevSSD/projects/Clients/BookSlash/apps/api"));
+        assert!(!h.ties_to_project("/Volumes/DevSSD/projects/Clients/BookSlash/apps/web"));
+        assert!(h.is_reclaimable_orphan("/Volumes/DevSSD/projects/Clients/BookSlash/apps/api"));
+        assert!(!h.is_reclaimable_orphan("/Volumes/DevSSD/projects/Clients/BookSlash/apps/web"));
+    }
+
+    #[test]
     fn live_holder_in_project_tree_is_not_reclaimable() {
         // Same project tie via cwd, but a LIVE parent (the user running it in
         // a terminal). We must NOT reclaim/kill the user's own process — only

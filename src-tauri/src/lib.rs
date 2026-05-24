@@ -354,6 +354,7 @@ pub fn run() {
             commands::projects::update_project,
             commands::projects::remove_project,
             commands::projects::detect_project,
+            commands::projects::detect_workspace_apps,
             commands::projects::validate_project_folder,
             commands::lifecycle::start_project,
             commands::lifecycle::stop_project,

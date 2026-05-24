@@ -416,6 +416,24 @@
     </section>
   {/if}
 
+  {#if project.workspace}
+    <section class="space-y-2">
+      <span class="text-xs uppercase tracking-wide text-fg-subtle">Monorepo</span>
+      <div class="grid grid-cols-[110px,1fr] gap-x-3 gap-y-1 text-xs">
+        <span class="text-fg-subtle">Package</span>
+        <span class="font-mono text-fg-muted break-all">{project.workspace.package}</span>
+        <span class="text-fg-subtle">App dir</span>
+        <span class="font-mono text-fg-muted break-all">{project.workspace.relDir}</span>
+        <span class="text-fg-subtle">Filter</span>
+        <span class="font-mono text-fg-muted">{project.workspace.tool}</span>
+      </div>
+      <p class="text-[10px] text-fg-subtle">
+        Runs one app of a monorepo from the repo root via a workspace filter.
+        Set when the project is added; remove and re-add to change it.
+      </p>
+    </section>
+  {/if}
+
   {#if anyDirty}
     <div
       class="flex items-center justify-end gap-2 pt-2 border-t border-border"

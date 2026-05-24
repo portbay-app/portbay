@@ -292,6 +292,7 @@ async fn finalize(
         start_command: kind.default_start_command().map(str::to_string),
         https: true,
         auto_start: false,
+        workspace: None,
     };
 
     let view = add_project(state.clone(), input).await?;

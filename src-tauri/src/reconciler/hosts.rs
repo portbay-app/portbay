@@ -159,6 +159,7 @@ mod tests {
             document_root: None,
             php_version: None,
             runtime: None,
+            workspace: None,
         }
     }
 
