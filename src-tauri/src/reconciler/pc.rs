@@ -103,10 +103,13 @@ fn data_dir_from_logs(logs_dir: &Path) -> &Path {
 fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::config::PhpFpmSpec> {
     use std::collections::HashSet;
 
+    // Resolve each project's PHP version through `php_version_effective`
+    // (runtime pin first, legacy `php_version` fallback) — the same source the
+    // Caddy FastCGI route dials, so every spawned pool has a matching upstream.
     let used_versions: HashSet<String> = reg
         .list_projects()
         .iter()
-        .filter_map(|p| p.php_version.clone())
+        .filter_map(|p| p.php_version_effective().map(str::to_owned))
         .collect();
     if used_versions.is_empty() {
         return Vec::new();
