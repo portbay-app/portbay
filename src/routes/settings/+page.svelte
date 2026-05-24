@@ -15,6 +15,7 @@
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import Toggle from "$lib/components/atoms/Toggle.svelte";
+  import SetupRequirements from "$lib/components/setup/SetupRequirements.svelte";
   import Segmented from "$lib/components/atoms/Segmented.svelte";
   import ColorSwatchGroup from "$lib/components/atoms/ColorSwatchGroup.svelte";
 
@@ -343,6 +344,14 @@
     void refreshDomainSettings();
     void refreshDnsStatus();
     void refreshTelemetry();
+
+    // Arriving from the dashboard's "Fix it →" banner (/settings#setup):
+    // bring the Setup surface into view once it has rendered.
+    if (window.location.hash === "#setup") {
+      requestAnimationFrame(() =>
+        document.getElementById("setup")?.scrollIntoView({ block: "start" }),
+      );
+    }
     void (async () => {
       try {
         appVersion = await getVersion();
@@ -435,6 +444,9 @@
       Control how PortBay manages your local development environment.
     </p>
   </header>
+
+  <!-- ============== Setup required (self-hides when healthy) ============== -->
+  <SetupRequirements />
 
   <!-- ============== General ============== -->
   <section
