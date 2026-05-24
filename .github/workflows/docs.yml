@@ -34,6 +34,10 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
+          # Pinned to match ci.yml / release.yml (PNPM_VERSION: "10").
+          # action-setup@v4 needs an explicit version when package.json
+          # carries no `packageManager` field.
+          version: 10
           run_install: false
 
       - name: Setup Node
