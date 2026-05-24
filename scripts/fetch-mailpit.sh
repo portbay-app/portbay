@@ -59,4 +59,8 @@ if [[ "$uname_s" == "Darwin" ]]; then
 fi
 
 echo "fetch-mailpit: ✓ ${dest}"
-"$dest" version 2>/dev/null || "$dest" --version
+# Best-effort smoke print only. `mailpit version` performs an online
+# "latest release" check that returns 403 on unauthenticated CI, and
+# mailpit has no `--version` flag — neither may fail the fetch. The
+# successful download + extract above is the real success signal.
+"$dest" version 2>/dev/null || true

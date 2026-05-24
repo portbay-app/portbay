@@ -67,4 +67,6 @@ if [[ "$uname_s" == "Darwin" ]]; then
 fi
 
 echo "fetch-process-compose: ✓ ${dest}"
-"$dest" version | head -n 2
+# Best-effort smoke print; the successful download + extract is the real
+# success signal, so never let the version probe fail the fetch.
+"$dest" version 2>/dev/null | head -n 2 || true
