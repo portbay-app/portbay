@@ -9,7 +9,7 @@ The first run should establish three things: the registry location, the sidecar 
 | Registry | Created under `~/Library/Application Support/PortBay/registry.json` when the first project is saved. |
 | Runtime file | Written under `~/Library/Application Support/PortBay/runtime.json` once Process Compose and Caddy have live ports. |
 | Sidecars | Process Compose and Caddy should report reachable once started. |
-| Hostnames | Project hostnames are routed through Caddy and resolved through `/etc/hosts` or dnsmasq, depending on the current build. |
+| Hostnames | Project hostnames are routed through Caddy. Exact hostnames resolve via the privileged `/etc/hosts` helper; wildcard `*.test` resolution is handled by the bundled dnsmasq sidecar, which ships with PortBay and needs no separate install. |
 
 ## What To Check
 
