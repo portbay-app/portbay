@@ -24,6 +24,12 @@ concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Run JS actions (checkout, setup-node, action-setup) on Node 24. Node 20
+  # is deprecated on GitHub runners and forced off after 2026-06-02; opting
+  # in now silences the deprecation warnings ahead of that cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     runs-on: ubuntu-latest

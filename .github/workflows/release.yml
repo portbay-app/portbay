@@ -26,6 +26,9 @@ env:
   RUST_TOOLCHAIN: "stable"
   NODE_VERSION: "20"
   PNPM_VERSION: "10"
+  # Run JS actions on Node 24 — Node 20 is deprecated on GitHub runners and
+  # forced off after 2026-06-02; opting in now silences the warnings.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-and-sign:
@@ -61,10 +64,12 @@ jobs:
 
       - name: Fetch sidecar binaries
         run: |
+          ./scripts/fetch-process-compose.sh
           ./scripts/fetch-caddy.sh
           ./scripts/fetch-mkcert.sh
           ./scripts/fetch-mailpit.sh
           ./scripts/fetch-cloudflared.sh
+          ./scripts/fetch-dnsmasq.sh
 
       - name: Build signed app
         env:
