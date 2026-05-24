@@ -266,6 +266,20 @@ pub fn nvm_root() -> Option<PathBuf> {
     home_subdir(".nvm")
 }
 
+/// Discover Bun's official-installer directory (the `curl bun.sh/install`
+/// location). Priority:
+///   1. `$BUN_INSTALL`
+///   2. `~/.bun`
+pub fn bun_root() -> Option<PathBuf> {
+    if let Ok(d) = std::env::var("BUN_INSTALL") {
+        let p = PathBuf::from(d);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    home_subdir(".bun")
+}
+
 /// Discover the pyenv root. Priority:
 ///   1. `pyenv root` (the CLI's own answer)
 ///   2. `$PYENV_ROOT`

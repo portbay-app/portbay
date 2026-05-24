@@ -124,6 +124,27 @@
       font-weight="800"
     >Rb</text>
   </svg>
+{:else if id === "bun"}
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 32 32"
+    fill="none"
+    class={cls}
+    aria-hidden="true"
+  >
+    <rect x="3" y="3" width="26" height="26" rx="8" fill="#FBF0DF" />
+    <text
+      x="16"
+      y="20"
+      text-anchor="middle"
+      fill="#14151A"
+      font-family="Inter, system-ui, sans-serif"
+      font-size="9"
+      font-weight="800"
+      letter-spacing="0.3"
+    >bun</text>
+  </svg>
 {:else}
   <svg
     width={size}
