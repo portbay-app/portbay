@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 
 use tauri::State;
 
-use crate::commands::dto::{AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch};
+use crate::commands::dto::{
+    AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch, WorkspaceAppDto,
+    WorkspaceScan,
+};
 use crate::error::{AppError, AppResult};
 use crate::process_compose::Process;
 use crate::registry::{store, Project, ProjectId, ProjectType, Readiness, Registry, Runtime};
@@ -118,6 +121,7 @@ pub async fn add_project(
         document_root: None,
         php_version,
         runtime,
+        workspace: input.workspace,
     };
 
     registry.add_project(project.clone())?;
@@ -181,6 +185,9 @@ pub async fn update_project(
     if let Some(ver) = patch.php_version {
         project.php_version = Some(ver);
     }
+    if let Some(ws) = patch.workspace {
+        project.workspace = Some(ws);
+    }
 
     let snapshot = project.clone();
     save_registry(&state, &registry)?;
@@ -225,6 +232,76 @@ pub async fn detect_project(
         suggested_port,
         suggested_start_command,
     })
+}
+
+/// `detect_workspace_apps(path)` — if `path` is a JS monorepo root, list the
+/// runnable apps inside it so the wizard can offer to run just one.
+///
+/// Returns `Ok(None)` for a plain folder (the wizard then uses the normal
+/// single-folder `detect_project` flow). Each returned app is pre-filled with
+/// standalone-project defaults: its sub-directory as `path`, framework-detected
+/// kind/port, and a `<package-manager> dev` command that runs only that app
+/// (no `turbo --parallel` fan-out).
+#[tauri::command]
+pub async fn detect_workspace_apps(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<Option<WorkspaceScan>> {
+    let root = canonical_project_folder(&path)?;
+    let Some(layout) = crate::registry::workspace::detect(&root) else {
+        return Ok(None);
+    };
+
+    let registry = load_registry(&state)?;
+    let suffix = &registry.domain_suffix;
+
+    let apps = layout
+        .packages
+        .iter()
+        .map(|pkg| {
+            // Name/id from the directory leaf (`apps/web` → `web`); the package
+            // name keeps the scope prefix that doesn't belong in a hostname.
+            let leaf = Path::new(&pkg.rel_dir)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&pkg.rel_dir);
+            let id = slugify(leaf);
+            let (kind, port, detected_cmd) = detect_kind(&pkg.abs_dir);
+            // Honour the repo's package manager rather than detect_kind's
+            // hardcoded `pnpm dev`, but only for an app that has a dev command.
+            let start_command = detected_cmd.map(|_| standalone_dev_command(layout.tool));
+            WorkspaceAppDto {
+                package: pkg.name.clone(),
+                rel_dir: pkg.rel_dir.clone(),
+                path: pkg.abs_dir.display().to_string(),
+                kind,
+                suggested_hostname: format!("{id}.{suffix}"),
+                suggested_id: id,
+                suggested_name: leaf.to_string(),
+                suggested_port: port,
+                suggested_start_command: start_command,
+            }
+        })
+        .collect();
+
+    Ok(Some(WorkspaceScan {
+        tool: layout.tool,
+        apps,
+    }))
+}
+
+/// The dev command that runs a single package from its OWN directory, in the
+/// repo's package manager. Used for the Tier-1 flow where the chosen app is a
+/// standalone project rooted at its sub-directory (so no workspace filter is
+/// needed). Turbo isn't a package manager, so it maps to pnpm here; the
+/// detector never selects Turbo as the tool anyway.
+fn standalone_dev_command(tool: crate::registry::WorkspaceTool) -> String {
+    use crate::registry::WorkspaceTool::*;
+    match tool {
+        Pnpm | Turbo => "pnpm dev".into(),
+        Npm => "npm run dev".into(),
+        Yarn => "yarn dev".into(),
+    }
 }
 
 /// `validate_project_folder(path)` — canonicalise a dropped path and reject files.

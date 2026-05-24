@@ -12,12 +12,13 @@ use serde::{Deserialize, Serialize};
 pub mod error;
 pub mod store;
 pub mod types;
+pub mod workspace;
 
 pub use error::{RegistryError, Result};
 pub use types::{
     DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, FpmTuning, Group,
     ManualRuntime, PhpVersionConfig, Project, ProjectId, ProjectType, Readiness, Runtime,
-    RuntimeSettings,
+    RuntimeSettings, Workspace, WorkspaceTool,
 };
 
 /// The registry-file schema version this build reads and writes.
@@ -314,6 +315,7 @@ mod tests {
             document_root: None,
             php_version: None,
             runtime: None,
+            workspace: None,
         }
     }
 

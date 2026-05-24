@@ -26,7 +26,13 @@
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import type { CommandError } from "$lib/types/error";
   import type { PortbayFile, PortfilePreview } from "$lib/types/portfile";
-  import type { ProjectType, ProjectView } from "$lib/types/projects";
+  import type {
+    ProjectType,
+    ProjectView,
+    Workspace,
+    WorkspaceApp,
+    WorkspaceScan,
+  } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
   import type { DetectedProject } from "$lib/types/wizard";
 
@@ -91,6 +97,29 @@
   /** True when the file's derived id already exists — surfaced before commit. */
   let portfileIdCollision = $state<boolean>(false);
 
+  /**
+   * Set when the picked folder is a JS monorepo root. The wizard shows a
+   * one-app picker; choosing an app fills the standard fields with that app's
+   * sub-directory so it's added as its own standalone project (rather than a
+   * root `pnpm dev` that fans out to every app). `null` = not a monorepo.
+   */
+  let workspaceScan = $state<WorkspaceScan | null>(null);
+  /** Absolute path of the app the user picked from `workspaceScan`, if any. */
+  let workspaceChosenPath = $state<string>("");
+  /** The monorepo root path — preserved so "use whole repo" still works after
+   *  picking an app (which overwrites `path` with the app's sub-directory). */
+  let workspaceRootPath = $state<string>("");
+  /**
+   * Tier-2 toggle: run the chosen app from the repo ROOT via a workspace
+   * filter (for apps whose dev script needs the monorepo build pipeline)
+   * instead of directly from its own folder. Off by default (Tier 1).
+   */
+  let workspaceFromRoot = $state<boolean>(false);
+  /** The app currently selected in the picker — re-applied when the toggle flips. */
+  let workspaceChosenApp = $state<WorkspaceApp | null>(null);
+  /** The workspace binding sent to add_project (Tier 2 only); null = standalone. */
+  let workspaceBinding = $state<Workspace | null>(null);
+
   function resetForm() {
     path = "";
     id = "";
@@ -108,6 +137,12 @@
     portfile = null;
     portfileSecrets = {};
     portfileIdCollision = false;
+    workspaceScan = null;
+    workspaceChosenPath = "";
+    workspaceRootPath = "";
+    workspaceFromRoot = false;
+    workspaceChosenApp = null;
+    workspaceBinding = null;
     formError = null;
   }
 
@@ -135,6 +170,12 @@
     portfile = null;
     portfileSecrets = {};
     portfileIdCollision = false;
+    workspaceScan = null;
+    workspaceChosenPath = "";
+    workspaceRootPath = "";
+    workspaceFromRoot = false;
+    workspaceChosenApp = null;
+    workspaceBinding = null;
     try {
       // Probe for a committed `.portbay.json` first. If present, the
       // file's values win over framework auto-detection.
@@ -176,20 +217,102 @@
         return;
       }
 
-      const det = await safeInvoke<DetectedProject>("detect_project", {
-        path: folderPath,
-      });
-      id = det.suggestedId;
-      name = det.suggestedName;
-      hostname = det.suggestedHostname;
-      port = det.suggestedPort;
-      startCommand = det.suggestedStartCommand ?? "";
-      kind = det.kind;
-      syncRawFromFields();
-      schedulePortCheck(port);
+      // Monorepo probe: if the folder is a workspace root with runnable
+      // apps, show the app picker instead of auto-filling. The standard
+      // fields fill in once the user chooses an app (chooseWorkspaceApp).
+      try {
+        const scan = await safeInvoke<WorkspaceScan | null>(
+          "detect_workspace_apps",
+          { path: folderPath },
+        );
+        if (scan && scan.apps.length > 0) {
+          workspaceScan = scan;
+          workspaceRootPath = folderPath;
+          return;
+        }
+      } catch {
+        // Non-fatal — fall through to single-folder detection.
+      }
+
+      await detectSingleFolder(folderPath);
     } catch (e) {
       // safeInvoke already toasted; surface inline too so the user knows
       // the form didn't autofill.
+      formError = e as CommandError;
+    } finally {
+      detecting = false;
+    }
+  }
+
+  /** Single-folder framework detection — fills the standard fields. */
+  async function detectSingleFolder(folderPath: string) {
+    const det = await safeInvoke<DetectedProject>("detect_project", {
+      path: folderPath,
+    });
+    id = det.suggestedId;
+    name = det.suggestedName;
+    hostname = det.suggestedHostname;
+    port = det.suggestedPort;
+    startCommand = det.suggestedStartCommand ?? "";
+    kind = det.kind;
+    syncRawFromFields();
+    schedulePortCheck(port);
+  }
+
+  /**
+   * The user picked one app from the monorepo. Configure it as a standalone
+   * project rooted at its sub-directory — so only this app runs, not the whole
+   * `turbo --parallel` fan-out. (Running from the repo root via a workspace
+   * filter is a Tier-2 option set later in the project detail panel.)
+   */
+  function chooseWorkspaceApp(app: WorkspaceApp) {
+    workspaceChosenApp = app;
+    workspaceChosenPath = app.path;
+    id = app.suggestedId;
+    name = app.suggestedName;
+    hostname = app.suggestedHostname;
+    port = app.suggestedPort;
+    kind = app.kind;
+    if (workspaceFromRoot && workspaceScan) {
+      // Tier 2: run from the repo root with a workspace filter. Leave the
+      // start command empty so the backend derives `<tool> --filter … dev`.
+      path = workspaceRootPath;
+      startCommand = "";
+      workspaceBinding = {
+        package: app.package,
+        relDir: app.relDir,
+        tool: workspaceScan.tool,
+      };
+    } else {
+      // Tier 1: standalone project rooted at the app's own directory.
+      path = app.path;
+      startCommand = app.suggestedStartCommand ?? "";
+      workspaceBinding = null;
+    }
+    formError = null;
+    syncRawFromFields();
+    schedulePortCheck(port);
+  }
+
+  /** Re-apply the chosen app when the Tier-1/Tier-2 toggle flips. */
+  function onWorkspaceModeToggle() {
+    if (workspaceChosenApp) chooseWorkspaceApp(workspaceChosenApp);
+  }
+
+  /** Dismiss the monorepo picker and treat the root as a single project. */
+  async function useWholeRepo() {
+    const root = workspaceRootPath || path;
+    path = root;
+    workspaceScan = null;
+    workspaceChosenPath = "";
+    workspaceRootPath = "";
+    workspaceFromRoot = false;
+    workspaceChosenApp = null;
+    workspaceBinding = null;
+    detecting = true;
+    try {
+      await detectSingleFolder(root);
+    } catch (e) {
       formError = e as CommandError;
     } finally {
       detecting = false;
@@ -327,6 +450,7 @@
             startCommand: startCommand || undefined,
             https,
             autoStart,
+            workspace: workspaceBinding ?? undefined,
           },
         });
       }
@@ -510,6 +634,71 @@
               names, not the values.
             </p>
           {/if}
+        </DashboardCard>
+      {/if}
+
+      {#if workspaceScan}
+        <!-- Monorepo app picker: choosing one fills the fields below with that
+             app's sub-directory so only it runs (no turbo --parallel fan-out). -->
+        <DashboardCard title="Monorepo detected" flush>
+          <p class="text-xs text-fg-muted">
+            This looks like a <span class="font-mono">{workspaceScan.tool}</span>
+            monorepo. Pick the app to run — PortBay adds it as its own project so
+            the other apps in the repo don't start.
+          </p>
+          <div class="mt-3 space-y-1.5">
+            {#each workspaceScan.apps as app (app.path)}
+              <button
+                type="button"
+                onclick={() => chooseWorkspaceApp(app)}
+                class="w-full flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition-colors
+                       {workspaceChosenPath === app.path
+                  ? 'border-accent bg-accent/10'
+                  : 'border-border bg-bg/50 hover:border-border-strong'}"
+              >
+                <span class="min-w-0">
+                  <span class="block text-sm text-fg truncate">{app.suggestedName}</span>
+                  <span class="block text-[11px] text-fg-subtle font-mono truncate">
+                    {app.relDir}
+                  </span>
+                </span>
+                <span class="flex items-center gap-2 shrink-0">
+                  <span class="text-[10px] uppercase tracking-wide text-fg-muted">
+                    {typeLabel[app.kind]}
+                  </span>
+                  {#if workspaceChosenPath === app.path}
+                    <Icon name="check" size={14} class="text-accent" />
+                  {/if}
+                </span>
+              </button>
+            {/each}
+          </div>
+          <label
+            class="mt-3 flex items-start gap-2 text-[11px] text-fg-muted cursor-pointer"
+            title="For apps whose dev script needs the monorepo's build pipeline (e.g. Turbo builds dependencies first). Runs from the repo root with a workspace filter instead of the app's own folder."
+          >
+            <input
+              type="checkbox"
+              bind:checked={workspaceFromRoot}
+              onchange={onWorkspaceModeToggle}
+              class="mt-0.5 accent-accent"
+            />
+            <span>
+              Run from the repo root with a
+              <span class="font-mono">{workspaceScan.tool}</span> filter
+              <span class="text-fg-subtle"
+                >— only if the app's dev script needs the monorepo build
+                pipeline.</span
+              >
+            </span>
+          </label>
+          <button
+            type="button"
+            onclick={useWholeRepo}
+            class="mt-2 block text-[11px] text-fg-subtle hover:text-fg underline-offset-2 hover:underline"
+          >
+            Not a monorepo? Use the whole folder instead.
+          </button>
         </DashboardCard>
       {/if}
 
