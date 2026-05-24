@@ -19,7 +19,7 @@
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
-  import { formatLogLine } from "./ansi";
+  import { parseLogLine, levelClass, type LogLine } from "./ansi";
 
   /** Cap on rendered lines. Keeps DOM size bounded under chatty servers. */
   const MAX_LINES = 5_000;
@@ -31,7 +31,11 @@
       : (projects.value.find((p) => p.id === logViewer.id) ?? null),
   );
 
-  let lines = $state<string[]>([]);
+  // `parsed` is the render/search/copy source: each raw line is unwrapped from
+  // Process Compose's JSON envelope, ANSI-rendered, and tagged with a level.
+  // Parsed once on arrival (here + in follow) rather than re-derived, so a
+  // chatty follow stream stays O(1) per line instead of re-parsing the buffer.
+  let parsed = $state<LogLine[]>([]);
   let loading = $state<boolean>(false);
   let follow = $state<boolean>(false);
   let searchQuery = $state<string>("");
@@ -45,12 +49,13 @@
     if (!project) return;
     loading = true;
     try {
-      lines = await safeInvoke<string[]>("tail_logs", {
+      const raw = await safeInvoke<string[]>("tail_logs", {
         id: project.id,
         limit: 1000,
       });
+      parsed = raw.map(parseLogLine);
     } catch {
-      lines = [];
+      parsed = [];
     } finally {
       loading = false;
       if (autoScroll) requestAnimationFrame(scrollToBottom);
@@ -67,10 +72,10 @@
     const id = project.id;
     const ch = new Channel<string>();
     ch.onmessage = (line) => {
-      lines = lines.concat(line);
+      parsed = parsed.concat(parseLogLine(line));
       // Trim the head when over cap so the DOM stays bounded.
-      if (lines.length > MAX_LINES) {
-        lines = lines.slice(TRIM_CHUNK);
+      if (parsed.length > MAX_LINES) {
+        parsed = parsed.slice(TRIM_CHUNK);
       }
       if (autoScroll) requestAnimationFrame(scrollToBottom);
     };
@@ -109,7 +114,7 @@
       return;
     }
     untrack(() => {
-      lines = [];
+      parsed = [];
       searchQuery = "";
       matchIndex = 0;
       autoScroll = true;
@@ -129,8 +134,8 @@
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [] as number[];
     const found: number[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].toLowerCase().includes(q)) found.push(i);
+    for (let i = 0; i < parsed.length; i++) {
+      if (parsed[i].text.toLowerCase().includes(q)) found.push(i);
     }
     return found;
   });
@@ -154,7 +159,7 @@
 
   async function copyAll() {
     try {
-      await navigator.clipboard.writeText(lines.join("\n"));
+      await navigator.clipboard.writeText(parsed.map((p) => p.text).join("\n"));
       errorBus.push({
         code: "COPIED",
         whatHappened: "Log copied.",
@@ -323,18 +328,19 @@
         onscroll={onScroll}
         class="flex-1 min-h-0 overflow-y-auto bg-bg py-2 font-mono text-[12px] leading-[1.4] text-fg-muted"
       >
-        {#if lines.length === 0}
+        {#if parsed.length === 0}
           <p class="text-xs text-fg-subtle italic px-4 py-4">
             {loading ? "Loading log…" : "No log output yet."}
           </p>
         {:else}
-          {#each lines as line, i (i)}
+          {#each parsed as pl, i (i)}
             <div
               data-line={i}
-              class="px-4 whitespace-pre-wrap break-words
+              class="px-4 whitespace-pre-wrap break-words {levelClass(pl.level)}
+                     {pl.level === 'error' ? 'bg-status-crashed/5' : ''}
                      {matches.includes(i) ? 'bg-accent/10 text-fg' : ''}
                      {matches[matchIndex] === i ? 'ring-1 ring-accent' : ''}"
-            >{@html formatLogLine(line)}</div>
+            >{@html pl.html}</div>
           {/each}
         {/if}
       </div>
@@ -343,7 +349,7 @@
       <footer
         class="shrink-0 px-4 py-2 border-t border-border flex items-center gap-3 text-[11px] text-fg-subtle"
       >
-        <span>{lines.length} lines</span>
+        <span>{parsed.length} lines</span>
         {#if follow}
           <span class="text-status-running">● following (live stream)</span>
         {/if}

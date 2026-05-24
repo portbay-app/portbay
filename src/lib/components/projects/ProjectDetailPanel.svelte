@@ -20,6 +20,7 @@
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { logViewer } from "$lib/stores/logViewer.svelte";
+  import { parseLogLine, levelClass } from "$lib/components/logs/ansi";
   import { projects } from "$lib/stores/projects.svelte";
   import { dns } from "$lib/stores/dns.svelte";
   import { createCertInfo } from "$lib/stores/certInfo.svelte";
@@ -48,6 +49,8 @@
 
   let logTail = $state<string[]>([]);
   let logLoading = $state<boolean>(false);
+  // Unwrap PC's JSON log envelope + tag each line with a level for colouring.
+  const logTailParsed = $derived(logTail.map(parseLogLine));
 
   // Shared cert loader (same semantics as the detail rail).
   const cert = createCertInfo();
@@ -715,14 +718,20 @@
             </button>
           </div>
         {/snippet}
-        {#if logTail.length === 0}
+        {#if logTailParsed.length === 0}
           <p class="text-xs text-fg-subtle">
             {logLoading ? "Loading…" : "No log output yet."}
           </p>
         {:else}
-          <pre
+          <div
             class="text-[11px] font-mono leading-relaxed text-fg-muted bg-bg/60 border border-border rounded-md p-2 overflow-x-auto max-h-48"
-          >{logTail.join("\n")}</pre>
+          >
+            {#each logTailParsed as pl, i (i)}
+              <div class="whitespace-pre-wrap break-words {levelClass(pl.level)}">
+                {@html pl.html}
+              </div>
+            {/each}
+          </div>
         {/if}
       </DashboardCard>
 
