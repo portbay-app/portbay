@@ -301,6 +301,9 @@ fn standalone_dev_command(tool: crate::registry::WorkspaceTool) -> String {
         Pnpm | Turbo => "pnpm dev".into(),
         Npm => "npm run dev".into(),
         Yarn => "yarn dev".into(),
+        // Bun runs scripts as `bun run <script>`; bare `bun dev` collides with
+        // reserved subcommands, so always go through `run`.
+        Bun => "bun run dev".into(),
     }
 }
 
@@ -329,14 +332,18 @@ fn detect_kind(path: &Path) -> (ProjectType, u16, Option<String>) {
     let pkg = path.join("package.json");
     if pkg.exists() {
         let body = std::fs::read_to_string(&pkg).unwrap_or_default();
+        // The run command follows the project's actual package manager
+        // (`packageManager` field → lockfile → pnpm default) so the first Play
+        // matches the lockfile instead of always guessing `pnpm dev`.
+        let cmd = standalone_dev_command(crate::registry::workspace::detect_package_manager(path));
         // Cheap string match — full JSON parse isn't worth the cycles.
         if body.contains("\"next\"") {
-            return (ProjectType::Next, 3000, Some("pnpm dev".into()));
+            return (ProjectType::Next, 3000, Some(cmd));
         }
         if body.contains("\"vite\"") {
-            return (ProjectType::Vite, 5173, Some("pnpm dev".into()));
+            return (ProjectType::Vite, 5173, Some(cmd));
         }
-        return (ProjectType::Node, 3000, Some("pnpm dev".into()));
+        return (ProjectType::Node, 3000, Some(cmd));
     }
 
     if path.join("composer.json").exists() || has_php_index(path) {
@@ -501,5 +508,64 @@ mod tests {
         std::fs::write(&file, "<h1>nope</h1>").unwrap();
         let err = canonical_project_folder(file.to_str().unwrap()).unwrap_err();
         assert!(err.to_string().contains("folder"));
+    }
+
+    /// Write a `package.json` with the given raw fields plus a framework dep,
+    /// then optionally drop a lockfile beside it.
+    fn write_js_project(dir: &Path, package_json: &str, lockfile: Option<&str>) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("package.json"), package_json).unwrap();
+        if let Some(name) = lockfile {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+    }
+
+    #[test]
+    fn detect_kind_bun_lockfile_yields_bun_run_dev() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "app", "dependencies": { "next": "14" } }"#,
+            Some("bun.lockb"),
+        );
+        let (kind, port, cmd) = detect_kind(dir.path());
+        assert_eq!(kind, ProjectType::Next);
+        assert_eq!(port, 3000);
+        assert_eq!(cmd.as_deref(), Some("bun run dev"));
+    }
+
+    #[test]
+    fn detect_kind_npm_lockfile_yields_npm_run_dev() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "app", "devDependencies": { "vite": "5" } }"#,
+            Some("package-lock.json"),
+        );
+        let (kind, _port, cmd) = detect_kind(dir.path());
+        assert_eq!(kind, ProjectType::Vite);
+        assert_eq!(cmd.as_deref(), Some("npm run dev"));
+    }
+
+    #[test]
+    fn detect_kind_package_manager_field_beats_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        // npm lockfile present, but the field declares yarn — the field wins.
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "app", "packageManager": "yarn@4.1.0", "dependencies": {} }"#,
+            Some("package-lock.json"),
+        );
+        let (kind, _port, cmd) = detect_kind(dir.path());
+        assert_eq!(kind, ProjectType::Node);
+        assert_eq!(cmd.as_deref(), Some("yarn dev"));
+    }
+
+    #[test]
+    fn detect_kind_defaults_to_pnpm_when_no_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(dir.path(), r#"{ "name": "app" }"#, None);
+        let (_kind, _port, cmd) = detect_kind(dir.path());
+        assert_eq!(cmd.as_deref(), Some("pnpm dev"));
     }
 }
