@@ -18,7 +18,7 @@ use tauri::State;
 use crate::commands::projects::{load_registry, save_registry};
 use crate::error::{AppError, AppResult};
 use crate::import::{self, DetectedSource, ImportSource, ImportedSite};
-use crate::registry::{Project, ProjectId, ProjectType, Readiness};
+use crate::registry::{Project, ProjectId, ProjectType, Readiness, Runtime};
 use crate::state::AppState;
 
 /// One row in the import preview. Built from `ImportedSite` plus
@@ -166,7 +166,12 @@ fn build_project(site: &ImportedSite) -> std::result::Result<Project, String> {
         tags: vec![site.source.tag().to_string()],
         document_root: None,
         php_version: site.php_version.clone(),
-        runtime: None,
+        // Populate the structured runtime pin too (not just the legacy field),
+        // so imported PHP sites converge onto `runtime` like GUI-created ones.
+        runtime: site.php_version.clone().map(|version| Runtime {
+            lang: "php".into(),
+            version,
+        }),
     })
 }
 

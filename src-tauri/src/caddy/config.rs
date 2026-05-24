@@ -310,11 +310,13 @@ fn php_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::Val
         .unwrap_or_else(|| p.path.clone());
     let doc_root_str = doc_root.to_string_lossy().into_owned();
 
-    // Match `crate::php::lifecycle::fpm_socket_path` exactly. When a
-    // project has no explicit version we fall back to a sentinel
-    // directory under the same parent so a future "default PHP"
-    // lookup still finds the socket via the same scheme.
-    let version = p.php_version.as_deref().unwrap_or("default");
+    // Match `crate::php::lifecycle::fpm_socket_path` exactly. The version is
+    // resolved through `php_version_effective` (runtime pin first, legacy
+    // `php_version` fallback) — the same source the FPM-pool reconciler uses,
+    // so Caddy never dials a socket the reconciler didn't spawn. When a project
+    // has no version we fall back to a sentinel directory under the same parent
+    // so a future "default PHP" lookup still finds the socket via the scheme.
+    let version = p.php_version_effective().unwrap_or("default");
     let socket_path = php_socket_dir.join(version).join("php-fpm.sock");
     let php_socket = format!("unix/{}", socket_path.to_string_lossy());
 
@@ -516,6 +518,28 @@ mod tests {
         assert_eq!(
             sub_routes[1]["handle"][0]["root"],
             "/tmp/api-gateway/public"
+        );
+    }
+
+    #[test]
+    fn php_route_resolves_version_from_runtime_pin() {
+        // A project pinned via `runtime` with NO legacy php_version must still
+        // dial the correct per-version socket — proving the route reads through
+        // php_version_effective, not the raw field.
+        let mut r = Registry::new("test");
+        let mut p = php_project("api-gateway", "0.0"); // placeholder legacy value
+        p.php_version = None;
+        p.runtime = Some(crate::registry::Runtime {
+            lang: "php".into(),
+            version: "8.4".into(),
+        });
+        r.add_project(p).unwrap();
+        let c = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let s = c.apps.http.servers.get("portbay").unwrap();
+        let sub = &s.routes[0].handle[0]["routes"];
+        assert_eq!(
+            sub[0]["handle"][0]["upstreams"][0]["dial"],
+            "unix//tmp/portbay-php/8.4/php-fpm.sock"
         );
     }
 
