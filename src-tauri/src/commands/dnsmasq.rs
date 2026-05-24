@@ -6,7 +6,7 @@
 //! invokes this from the CLI), the daemon runs harmlessly on
 //! loopback and macOS never routes anything to it.
 
-use std::net::TcpStream;
+use std::net::{Ipv4Addr, TcpStream};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -14,9 +14,9 @@ use tauri::{AppHandle, State};
 
 use crate::dnsmasq::resolver;
 use crate::error::{AppError, AppResult};
-use crate::hosts::HostsManager;
+use crate::hosts::{HostsEntry, HostsManager};
 use crate::hosts_helper::{self, HostsHelperClient};
-use crate::registry::{store, DnsmasqSettings};
+use crate::registry::{store, DnsmasqSettings, Registry};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,16 +228,33 @@ pub struct DnsPreflight {
     pub dnsmasq_port: u16,
     /// PortBay's privileged helper LaunchDaemon is installed + reachable.
     pub helper_installed: bool,
-    /// `/etc/resolver/<suffix>` points at the running dnsmasq.
+    /// Every project hostname is present in PortBay's `/etc/hosts` block —
+    /// the primary resolution path. Vacuously true when there are no projects.
+    pub hosts_active: bool,
+    /// `/etc/resolver/<suffix>` points at the running dnsmasq (wildcard
+    /// enhancement; not required for the critical path).
     pub resolver_installed: bool,
-    /// The bundled dnsmasq sidecar is running.
+    /// The bundled dnsmasq sidecar is running (wildcard enhancement).
     pub dnsmasq_running: bool,
     /// Something is already listening on :80 / :443 (likely another local web
     /// server such as ServBay) — PortBay can't serve clean URLs until it's freed.
     pub port_80_in_use: bool,
     pub port_443_in_use: bool,
-    /// True when routing is fully set up (helper or resolver in place + dnsmasq up).
+    /// True when the primary path is live: the helper is installed and every
+    /// project hostname is in `/etc/hosts`. dnsmasq/resolver are optional and
+    /// deliberately excluded so a wildcard-only hiccup never re-triggers setup.
     pub ready: bool,
+}
+
+/// True iff every project hostname in the registry is present in the supplied
+/// `/etc/hosts` managed entries. Vacuously true for an empty registry. Pure so
+/// it can be unit-tested without touching the real hosts file.
+fn hosts_block_covers(reg: &Registry, managed: &[HostsEntry]) -> bool {
+    use std::collections::HashSet;
+    let present: HashSet<&str> = managed.iter().map(|e| e.hostname.as_str()).collect();
+    reg.list_projects()
+        .iter()
+        .all(|p| present.contains(p.hostname.as_str()))
 }
 
 fn port_in_use(port: u16) -> bool {
@@ -251,18 +268,22 @@ fn port_in_use(port: u16) -> bool {
 /// Inspect the local routing setup so the UI can guide first-time users.
 #[tauri::command]
 pub async fn dns_preflight(state: State<'_, AppState>) -> AppResult<DnsPreflight> {
-    let suffix = current_suffix(&state);
+    let reg = store::load_or_default(&state.registry_path, &state.domain_suffix)?;
+    let suffix = reg.domain_suffix.clone();
     let (port, dnsmasq_running) = {
         let guard = state.dnsmasq.lock().expect("dnsmasq mutex poisoned");
         (guard.port(), guard.is_running())
     };
     let helper_installed = HostsHelperClient::system().is_available();
     let resolver_installed = resolver::is_installed(&suffix, port);
+    let managed = HostsManager::system().list_managed().unwrap_or_default();
+    let hosts_active = hosts_block_covers(&reg, &managed);
     Ok(DnsPreflight {
-        ready: dnsmasq_running && resolver_installed,
+        ready: helper_installed && hosts_active,
         suffix,
         dnsmasq_port: port,
         helper_installed,
+        hosts_active,
         resolver_installed,
         dnsmasq_running,
         port_80_in_use: port_in_use(80),
@@ -289,12 +310,13 @@ fn resolve_helper_bin() -> AppResult<std::path::PathBuf> {
     }
 }
 
-/// Install PortBay's privileged helper LaunchDaemon. One macOS auth prompt;
-/// afterwards the helper performs hosts + resolver writes with no further
-/// prompts. Polls for the helper socket so the caller knows it's live.
-#[tauri::command]
-pub async fn install_privileged_helper(_app: AppHandle) -> AppResult<()> {
-    if HostsHelperClient::system().is_available() {
+/// Ensure PortBay's privileged helper LaunchDaemon is installed and its
+/// socket is reachable. No-op (and no prompt) when it's already up; otherwise
+/// triggers the single macOS auth prompt, then polls for the socket. Shared by
+/// `install_privileged_helper` and `setup_local_dns`.
+async fn ensure_helper_installed() -> AppResult<()> {
+    let client = HostsHelperClient::system();
+    if client.is_available() {
         return Ok(());
     }
     let helper_bin = resolve_helper_bin()?;
@@ -304,7 +326,6 @@ pub async fn install_privileged_helper(_app: AppHandle) -> AppResult<()> {
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     // The daemon is bootstrapped but may take a beat to bind its socket.
-    let client = HostsHelperClient::system();
     for _ in 0..30 {
         if client.is_available() {
             return Ok(());
@@ -316,46 +337,131 @@ pub async fn install_privileged_helper(_app: AppHandle) -> AppResult<()> {
     ))
 }
 
-/// One-click first-run setup: ensure the privileged helper is installed (one
-/// prompt), then install the resolver for the active suffix through it (no
-/// extra prompt) and restart dnsmasq so its wildcard is live.
+/// Install PortBay's privileged helper LaunchDaemon. One macOS auth prompt;
+/// afterwards the helper performs hosts + resolver writes with no further
+/// prompts. Polls for the helper socket so the caller knows it's live.
+#[tauri::command]
+pub async fn install_privileged_helper(_app: AppHandle) -> AppResult<()> {
+    ensure_helper_installed().await
+}
+
+/// One-click first-run setup. Guarantees that every project hostname resolves
+/// the instant this returns, with at most one macOS password prompt:
+///
+/// 1. Ensure the privileged helper is installed (the only step that can
+///    prompt; silent if already installed).
+/// 2. **Primary path** — synchronously write every project hostname into
+///    `/etc/hosts` through the helper. This is the bulletproof guarantee: it
+///    needs no port, no daemon, and no resolver file, and the system resolver
+///    consults `/etc/hosts` before DNS. Callers (Play) await this, so the line
+///    exists before the dev server starts.
+/// 3. **Optional enhancement** — best-effort dnsmasq + `/etc/resolver` at its
+///    live port so `dig` and arbitrary `*.suffix` subdomains resolve too. A
+///    failure here never fails setup; `/etc/hosts` already did the job.
 #[tauri::command]
 pub async fn setup_local_dns(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
-    if !HostsHelperClient::system().is_available() {
-        let helper_bin = resolve_helper_bin()?;
-        tokio::task::spawn_blocking(move || hosts_helper::install_daemon(&helper_bin))
-            .await
-            .map_err(|e| AppError::Internal(format!("helper install join: {e}")))?
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let client = HostsHelperClient::system();
-        let mut up = false;
-        for _ in 0..30 {
-            if client.is_available() {
-                up = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        if !up {
-            return Err(AppError::Internal(
-                "privileged helper did not come up after install".into(),
-            ));
+    // 1. Privileged helper — the one prompt.
+    ensure_helper_installed().await?;
+
+    // 2. Primary path: write all project hostnames to /etc/hosts now.
+    let reg = store::load_or_default(&state.registry_path, &state.domain_suffix)?;
+    let suffix = reg.domain_suffix.clone();
+    let pairs: Vec<(String, Ipv4Addr)> = reg
+        .list_projects()
+        .iter()
+        .map(|p| (p.hostname.clone(), Ipv4Addr::LOCALHOST))
+        .collect();
+    {
+        let suffix = suffix.clone();
+        tokio::task::spawn_blocking(move || {
+            HostsHelperClient::system().replace_all(pairs, &suffix)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("hosts write join: {e}")))?
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    }
+
+    // 3. Optional enhancement: bring dnsmasq up and point /etc/resolver at the
+    //    port it actually bound. No trailing restart — boot_dnsmasq already
+    //    reads the current suffix from the registry, and a restart would
+    //    re-pick a free port and strand the resolver file we just wrote.
+    if state.boot_dnsmasq(&app).is_ok() {
+        let (port, running) = {
+            let guard = state.dnsmasq.lock().expect("dnsmasq mutex poisoned");
+            (guard.port(), guard.is_running())
+        };
+        if running {
+            let _ = tokio::task::spawn_blocking(move || {
+                HostsHelperClient::system().install_resolver(&suffix, port)
+            })
+            .await;
         }
     }
 
-    // Make sure dnsmasq is up so the resolver points at a live port.
-    state.boot_dnsmasq(&app).ok();
-    let suffix = current_suffix(&state);
-    let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
-
-    let client = HostsHelperClient::system();
-    tokio::task::spawn_blocking(move || client.install_resolver(&suffix, port))
-        .await
-        .map_err(|e| AppError::Internal(format!("resolver install join: {e}")))?
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    // Restart dnsmasq so the wildcard reflects the current suffix + settings.
-    state.shutdown_dnsmasq();
-    state.boot_dnsmasq(&app)?;
+    // Keep the reconciler's hosts cache coherent with the direct write above.
+    state.reconciler.mark_dirty();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::{Project, ProjectId, ProjectType};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    fn project(id: &str, host: &str) -> Project {
+        Project {
+            id: ProjectId::new(id),
+            name: id.into(),
+            path: PathBuf::from(format!("/tmp/{id}")),
+            kind: ProjectType::Next,
+            start_command: Some("pnpm dev".into()),
+            port: Some(3010),
+            extra_ports: vec![],
+            hostname: host.into(),
+            https: false,
+            services: vec!["caddy".into()],
+            env: BTreeMap::new(),
+            readiness: None,
+            auto_start: false,
+            tags: vec![],
+            document_root: None,
+            php_version: None,
+            runtime: None,
+        }
+    }
+
+    fn entry(host: &str) -> HostsEntry {
+        HostsEntry {
+            ip: Ipv4Addr::LOCALHOST,
+            hostname: host.into(),
+        }
+    }
+
+    #[test]
+    fn empty_registry_is_vacuously_covered() {
+        let reg = Registry::new("portbay.test");
+        assert!(hosts_block_covers(&reg, &[]));
+    }
+
+    #[test]
+    fn covered_only_when_every_hostname_present() {
+        let mut reg = Registry::new("portbay.test");
+        reg.add_project(project("a", "a.portbay.test")).unwrap();
+        reg.add_project(project("b", "b.portbay.test")).unwrap();
+
+        // Missing one → not covered.
+        assert!(!hosts_block_covers(&reg, &[entry("a.portbay.test")]));
+
+        // All present (extra unrelated entries don't matter) → covered.
+        assert!(hosts_block_covers(
+            &reg,
+            &[
+                entry("a.portbay.test"),
+                entry("b.portbay.test"),
+                entry("unrelated.test"),
+            ],
+        ));
+    }
 }

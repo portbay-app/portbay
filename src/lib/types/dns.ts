@@ -43,6 +43,8 @@ export interface DnsPreflight {
   suffix: string;
   dnsmasqPort: number;
   helperInstalled: boolean;
+  /** Every project hostname is present in PortBay's /etc/hosts block. */
+  hostsActive: boolean;
   resolverInstalled: boolean;
   dnsmasqRunning: boolean;
   port80InUse: boolean;

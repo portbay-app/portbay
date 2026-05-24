@@ -16,9 +16,11 @@
 //! the GUI surfaces the missing-binary state via the sidecar slot.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tauri::AppHandle;
-use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 use crate::dnsmasq::error::{DnsmasqError, Result};
@@ -35,6 +37,12 @@ pub const PORT_SCAN_RANGE: u16 = 32;
 pub struct DnsmasqSidecar {
     child: Option<CommandChild>,
     port: u16,
+    /// True only while the spawned dnsmasq is actually alive. The Tauri
+    /// `CommandChild` handle exists the instant `.spawn()` returns even if
+    /// the process exits a millisecond later (e.g. a bad config or arg), so
+    /// `child.is_some()` alone is a liar. A background task watching the
+    /// sidecar's event stream flips this to `false` on `Terminated`.
+    alive: Arc<AtomicBool>,
 }
 
 impl Default for DnsmasqSidecar {
@@ -48,11 +56,12 @@ impl DnsmasqSidecar {
         Self {
             child: None,
             port: DEFAULT_PORT,
+            alive: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.child.is_some()
+        self.child.is_some() && self.alive.load(Ordering::Relaxed)
     }
 
     pub fn port(&self) -> u16 {
@@ -64,7 +73,7 @@ impl DnsmasqSidecar {
     /// caller (`state::boot_dnsmasq`) writes the config with the same
     /// port it passes here.
     pub fn start(&mut self, app: &AppHandle, config_path: &Path, port: u16) -> Result<()> {
-        if self.child.is_some() {
+        if self.is_running() {
             return Ok(());
         }
         self.port = port;
@@ -72,14 +81,45 @@ impl DnsmasqSidecar {
         let config_str = config_path.to_string_lossy().into_owned();
         let cmd = resolve_command(app, &config_str)?;
 
-        let (_rx, child) = cmd
+        let (mut rx, child) = cmd
             .spawn()
             .map_err(|e| DnsmasqError::SpawnFailed(e.to_string()))?;
+        self.alive.store(true, Ordering::Relaxed);
         self.child = Some(child);
+
+        // Drain the sidecar's event stream so dnsmasq's own diagnostics are
+        // visible (they were dropped on the floor before — which is exactly
+        // why a fatal `junk found in command line` exit went unnoticed), and
+        // flip `alive` the moment the process exits so `is_running` can't keep
+        // claiming a dead daemon is up.
+        let alive = self.alive.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(bytes) => {
+                        let line = String::from_utf8_lossy(&bytes);
+                        let line = line.trim_end();
+                        if !line.is_empty() {
+                            tracing::debug!(target: "dnsmasq", "{line}");
+                        }
+                    }
+                    CommandEvent::Error(err) => {
+                        tracing::warn!(target: "dnsmasq", error = %err, "dnsmasq sidecar error");
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        tracing::warn!(target: "dnsmasq", code = ?payload.code, "dnsmasq sidecar terminated");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            alive.store(false, Ordering::Relaxed);
+        });
         Ok(())
     }
 
     pub fn stop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
         if let Some(child) = self.child.take() {
             let _ = child.kill();
         }
@@ -92,23 +132,61 @@ impl Drop for DnsmasqSidecar {
     }
 }
 
+/// Locate PortBay's bundled dnsmasq next to the running executable. Tauri
+/// copies sidecars beside the binary for `cargo run` / `tauri dev` and into
+/// the app bundle's MacOS dir for a packaged build, so this finds our OWN
+/// dnsmasq in both. Returns `None` if it isn't there.
+fn bundled_binary_beside_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    for name in [
+        "dnsmasq",
+        "dnsmasq-aarch64-apple-darwin",
+        "dnsmasq-x86_64-apple-darwin",
+    ] {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn resolve_command(
     app: &AppHandle,
     config_str: &str,
 ) -> Result<tauri_plugin_shell::process::Command> {
-    // Try the bundled sidecar first. The shell plugin only surfaces a
-    // success once it has resolved a real binary on disk, so we can
-    // fall through to PATH cleanly on Err.
+    // dnsmasq is GNU-getopt and only accepts the config flag in its
+    // `-C <file>` / `--conf-file=<file>` forms; the space-separated
+    // `--conf-file <file>` is parsed as a stray positional argument and
+    // aborts startup with "junk found in command line". We pass `-C` as
+    // two argv entries (no shell involved, so a path with spaces stays one
+    // argument).
+    const CONF_FLAG: &str = "-C";
+
+    // 1. The Tauri sidecar slot (works once `binaries/dnsmasq` is in the
+    //    shell allow-spawn capability).
     if let Ok(sidecar) = app.shell().sidecar("dnsmasq") {
-        return Ok(sidecar.args(["--conf-file", config_str]));
+        return Ok(sidecar.args([CONF_FLAG, config_str]));
     }
 
-    // Fall back to the system binary on PATH (Homebrew, ServBay, etc.).
+    // 2. Our bundled binary, by absolute path, via the general
+    //    `shell:allow-execute` permission. This keeps PortBay on its OWN
+    //    dnsmasq even when the sidecar scope isn't wired — and never reaches
+    //    for a foreign binary (ServBay/Homebrew).
+    if let Some(path) = bundled_binary_beside_exe() {
+        return Ok(app
+            .shell()
+            .command(path.to_string_lossy().into_owned())
+            .args([CONF_FLAG, config_str]));
+    }
+
+    // 3. Last resort: a `dnsmasq` on PATH (dev machines with Homebrew, etc.).
     let path = which::which("dnsmasq").map_err(|_| DnsmasqError::BinaryMissing)?;
     Ok(app
         .shell()
         .command(path.to_string_lossy().into_owned())
-        .args(["--conf-file", config_str]))
+        .args([CONF_FLAG, config_str]))
 }
 
 /// Resolve a free local port for dnsmasq. Scans `start..start+range`
@@ -134,10 +212,9 @@ pub fn find_free_port(start: u16, range: u16) -> Option<u16> {
 /// daemon never booted on a clean machine; and depending on a foreign
 /// `dnsmasq` on `PATH` (e.g. ServBay's) is exactly what we must not do.
 pub fn binary_available(app: &AppHandle) -> bool {
-    if app.shell().sidecar("dnsmasq").is_ok() {
-        return true;
-    }
-    which::which("dnsmasq").is_ok()
+    app.shell().sidecar("dnsmasq").is_ok()
+        || bundled_binary_beside_exe().is_some()
+        || which::which("dnsmasq").is_ok()
 }
 
 #[allow(dead_code)]

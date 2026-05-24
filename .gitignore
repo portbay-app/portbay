@@ -51,4 +51,6 @@ src-tauri/binaries/caddy-*
 src-tauri/binaries/mkcert-*
 src-tauri/binaries/mailpit-*
 src-tauri/binaries/cloudflared-*
+# Built from source by scripts/build-hosts-helper.sh, not committed.
+src-tauri/binaries/portbay-hosts-helper-*
 .playwright-mcp/

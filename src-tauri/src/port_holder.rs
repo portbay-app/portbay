@@ -11,7 +11,7 @@
 //!     lsof returns nothing. We treat that as "not held" — best-effort.
 //!
 //! No process is mutated here. Callers decide whether to kill (only
-//! safe for PortBay-managed orphans — see `is_likely_portbay_managed`).
+//! safe for leaked PortBay orphans — see `is_reclaimable_orphan`).
 
 use std::path::PathBuf;
 
@@ -33,6 +33,13 @@ pub struct PortHolder {
     /// to just the command name. Used to decide whether a holder is
     /// a PortBay-managed orphan or an external local-dev tool.
     pub command_line: Option<String>,
+    /// The holder's current working directory, when resolvable. This is the
+    /// most reliable attribution signal: a dev server inherits its project
+    /// directory as cwd, and — unlike argv and the parent chain — cwd survives
+    /// the process being orphaned to launchd. Worker processes like
+    /// `next-server` hide the project path in argv and lose their ancestors
+    /// when orphaned; their cwd still points inside the project.
+    pub cwd: Option<PathBuf>,
     /// Walk from the immediate parent up to `MAX_ANCESTORS` levels.
     /// Worker processes (e.g. Next.js's `next-server`) hide the
     /// project path; the shell that spawned them
@@ -41,6 +48,13 @@ pub struct PortHolder {
     /// PID to SIGTERM (always the topmost matching ancestor so the
     /// wrapper propagates the signal to its worker).
     pub ancestors: Vec<Ancestor>,
+    /// True when the holder has no live parent (reparented to launchd /
+    /// PID 1, or the parent is otherwise unresolvable). An orphaned holder
+    /// that ties to the project is a leaked PortBay dev server we can safely
+    /// reclaim; a holder with a live parent is either our own running
+    /// supervisor tree or a process the user is managing themselves, and we
+    /// never kill those.
+    pub orphaned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -62,19 +76,25 @@ impl PortHolder {
         format!("{} (pid {})", self.command, self.pid)
     }
 
-    /// Heuristic: does this look like a process PortBay itself
-    /// spawned and lost track of? We match the holder's own command
-    /// line OR any ancestor's command line against the project's
-    /// working_dir (full path or the leaf folder name). Worker
-    /// processes hide the path; their parent dev-server shell carries
-    /// it — without walking the chain we miss every Next.js orphan.
-    pub fn looks_like_portbay_orphan(&self, working_dir: &str) -> bool {
+    /// Does this holder belong to the given project? Matches three signals,
+    /// any of which is sufficient:
+    ///   - its **cwd** is the project dir or a descendant (the strongest
+    ///     signal — survives orphaning, where argv/ancestors don't),
+    ///   - its own command line references the project path / leaf folder,
+    ///   - any ancestor's command line does (workers hide the path; the shell
+    ///     that spawned them carries it).
+    pub fn ties_to_project(&self, working_dir: &str) -> bool {
         let dir_token = std::path::Path::new(working_dir)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("");
         if dir_token.is_empty() {
             return false;
+        }
+        if let Some(cwd) = &self.cwd {
+            if cwd.starts_with(working_dir) {
+                return true;
+            }
         }
         let matches_cmd = |cmd: &str| cmd.contains(working_dir) || cmd.contains(dir_token);
         if let Some(cmd) = &self.command_line {
@@ -85,11 +105,27 @@ impl PortHolder {
         self.ancestors.iter().any(|a| matches_cmd(&a.command_line))
     }
 
+    /// A leaked PortBay dev server we can safely reclaim on the user's behalf:
+    /// it has no live parent (orphaned to launchd) AND it ties to the project
+    /// whose Play button was just pressed. The orphan gate is what keeps us
+    /// from ever killing a live process the user is managing themselves.
+    pub fn is_reclaimable_orphan(&self, working_dir: &str) -> bool {
+        self.orphaned && self.ties_to_project(working_dir)
+    }
+
+    /// True when `pid` appears anywhere in the holder's ancestor chain — i.e.
+    /// the holder descends from that process. Used with PortBay's own
+    /// process-compose pid to recognise our own running dev server (so the
+    /// pre-flight doesn't mistake it for an external conflict).
+    pub fn descends_from(&self, pid: u32) -> bool {
+        self.ancestors.iter().any(|a| a.pid == pid)
+    }
+
     /// PID to SIGTERM when we've decided to kill an orphan. Returns
     /// the topmost ancestor that matches the project's working_dir —
     /// kill the wrapper, the worker dies with it. Falls back to the
     /// holder's own PID when no ancestor matches (defensive; we only
-    /// reach this code when `looks_like_portbay_orphan` returned true).
+    /// reach this code when `is_reclaimable_orphan` returned true).
     pub fn kill_target(&self, working_dir: &str) -> u32 {
         let dir_token = std::path::Path::new(working_dir)
             .file_name()
@@ -147,13 +183,41 @@ fn parse_lsof_first(text: &str) -> Option<PortHolder> {
         let command = cols.next()?.to_string();
         let pid_str = cols.next()?;
         let pid: u32 = pid_str.parse().ok()?;
+        // A parent of 0/1 (or one we can't read) means the process was
+        // reparented to launchd — i.e. orphaned.
+        let orphaned = !matches!(resolve_parent_pid(pid), Some(p) if p > 1);
         return Some(PortHolder {
             pid,
             command: command.clone(),
             binary: resolve_binary(pid),
             command_line: resolve_command_line(pid),
+            cwd: resolve_cwd(pid),
             ancestors: walk_ancestors(pid),
+            orphaned,
         });
+    }
+    None
+}
+
+/// Resolve a process's current working directory via
+/// `lsof -a -p <pid> -d cwd -Fn`, which prints the cwd on a line prefixed
+/// with `n`. `None` when lsof can't read it (permissions, process gone).
+fn resolve_cwd(pid: u32) -> Option<PathBuf> {
+    let out = std::process::Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-Fn", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix('n') {
+            let path = path.trim();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
     }
     None
 }
@@ -298,70 +362,113 @@ node    99887 nour   22u  IPv4 0xdef       0t0  TCP *:3010 (LISTEN)
         assert_eq!(h.pid, 99887);
     }
 
-    #[test]
-    fn looks_like_orphan_matches_on_project_dir_token() {
-        let h = PortHolder {
-            pid: 123,
-            command: "node".into(),
-            binary: None,
-            command_line: Some(
-                "node /Volumes/DevSSD/projects/Clients/test-project/node_modules/.bin/next dev"
-                    .into(),
-            ),
-            ancestors: vec![],
-        };
-        assert!(h.looks_like_portbay_orphan("/Volumes/DevSSD/projects/Clients/test-project",));
-    }
-
-    #[test]
-    fn looks_like_orphan_rejects_unrelated_processes() {
-        let h = PortHolder {
-            pid: 123,
-            command: "nginx".into(),
-            binary: None,
-            command_line: Some("/usr/local/sbin/nginx -c /opt/nginx.conf".into()),
-            ancestors: vec![],
-        };
-        assert!(!h.looks_like_portbay_orphan("/Volumes/DevSSD/projects/Clients/test-project",));
-    }
-
-    #[test]
-    fn looks_like_orphan_matches_via_parent_when_worker_hides_path() {
-        // The actual production case: next-server (the worker that
-        // binds the port) reports its name without any path. We need
-        // to look at its parent's command line to attribute it.
-        let h = PortHolder {
+    fn holder(command_line: &str, ancestors: Vec<Ancestor>) -> PortHolder {
+        PortHolder {
             pid: 999,
             command: "node".into(),
             binary: None,
-            command_line: Some("next-server (v16.2.6)".into()),
-            ancestors: vec![
+            command_line: Some(command_line.into()),
+            cwd: None,
+            ancestors,
+            orphaned: false,
+        }
+    }
+
+    #[test]
+    fn ties_to_project_matches_on_project_dir_token() {
+        let h = holder(
+            "node /Volumes/DevSSD/projects/Clients/test-project/node_modules/.bin/next dev",
+            vec![],
+        );
+        assert!(h.ties_to_project("/Volumes/DevSSD/projects/Clients/test-project"));
+    }
+
+    #[test]
+    fn ties_to_project_rejects_unrelated_processes() {
+        let mut h = holder("/usr/local/sbin/nginx -c /opt/nginx.conf", vec![]);
+        h.command = "nginx".into();
+        assert!(!h.ties_to_project("/Volumes/DevSSD/projects/Clients/test-project"));
+    }
+
+    #[test]
+    fn ties_to_project_matches_via_parent_when_worker_hides_path() {
+        // next-server (the worker that binds the port) reports its name
+        // without any path; we attribute it via the parent's command line.
+        let h = holder(
+            "next-server (v16.2.6)",
+            vec![
                 Ancestor {
                     pid: 998,
                     command_line:
                         "node /Volumes/DevSSD/projects/Clients/test-project/node_modules/.bin/next dev --port 3010"
                             .into(),
                 },
+                Ancestor { pid: 997, command_line: "pnpm dev".into() },
+            ],
+        );
+        assert!(h.ties_to_project("/Volumes/DevSSD/projects/Clients/test-project"));
+    }
+
+    #[test]
+    fn ties_to_project_matches_via_cwd_when_orphaned() {
+        // The real BookSlash case: an orphaned next-server with no path in
+        // argv and no ancestors (reparented to launchd). Its cwd — a
+        // descendant of the project root — is the only signal, and it's enough.
+        let mut h = holder("next-server (v15.5.15)", vec![]);
+        h.cwd = Some(PathBuf::from(
+            "/Volumes/DevSSD/projects/Clients/BookSlash/apps/web",
+        ));
+        h.orphaned = true;
+        assert!(h.ties_to_project("/Volumes/DevSSD/projects/Clients/BookSlash"));
+        assert!(h.is_reclaimable_orphan("/Volumes/DevSSD/projects/Clients/BookSlash"));
+    }
+
+    #[test]
+    fn live_holder_in_project_tree_is_not_reclaimable() {
+        // Same project tie via cwd, but a LIVE parent (the user running it in
+        // a terminal). We must NOT reclaim/kill the user's own process — only
+        // warn. Orphan gate enforces that.
+        let mut h = holder(
+            "node /Volumes/DevSSD/projects/Clients/test-project/node_modules/.bin/vite",
+            vec![Ancestor {
+                pid: 998,
+                command_line: "npm run dev:client".into(),
+            }],
+        );
+        h.cwd = Some(PathBuf::from(
+            "/Volumes/DevSSD/projects/Clients/test-project",
+        ));
+        h.orphaned = false;
+        assert!(h.ties_to_project("/Volumes/DevSSD/projects/Clients/test-project"));
+        assert!(!h.is_reclaimable_orphan("/Volumes/DevSSD/projects/Clients/test-project"));
+    }
+
+    #[test]
+    fn descends_from_detects_supervisor_ancestor() {
+        let h = holder(
+            "next-server (v16.2.6)",
+            vec![
                 Ancestor {
-                    pid: 997,
-                    command_line: "pnpm dev".into(),
+                    pid: 998,
+                    command_line: "node .../next dev".into(),
+                },
+                Ancestor {
+                    pid: 555,
+                    command_line: "process-compose -f .../process-compose.yaml up".into(),
                 },
             ],
-        };
-        assert!(h.looks_like_portbay_orphan("/Volumes/DevSSD/projects/Clients/test-project",));
+        );
+        assert!(h.descends_from(555));
+        assert!(!h.descends_from(444));
     }
 
     #[test]
     fn kill_target_picks_topmost_matching_ancestor() {
-        // We want to SIGTERM the wrapper (`pnpm dev` here is the most
-        // distant matching ancestor), not the worker, so the whole
-        // tree dies cleanly via signal propagation.
-        let h = PortHolder {
-            pid: 999,
-            command: "node".into(),
-            binary: None,
-            command_line: Some("next-server (v16.2.6)".into()),
-            ancestors: vec![
+        // SIGTERM the wrapper (`pnpm …` here is the most distant matching
+        // ancestor), not the worker, so the whole tree dies via propagation.
+        let h = holder(
+            "next-server (v16.2.6)",
+            vec![
                 Ancestor {
                     pid: 998,
                     command_line:
@@ -373,7 +480,7 @@ node    99887 nour   22u  IPv4 0xdef       0t0  TCP *:3010 (LISTEN)
                         .into(),
                 },
             ],
-        };
+        );
         assert_eq!(
             h.kill_target("/Volumes/DevSSD/projects/Clients/test-project"),
             997

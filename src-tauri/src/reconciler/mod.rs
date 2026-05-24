@@ -144,18 +144,12 @@ impl Reconciler {
         let caddy_outcome =
             caddy::reconcile(&reg, logs_dir, &certs_result.lookup, &state, caddy_cache).await;
 
-        // When dnsmasq's `/etc/resolver/<suffix>` is in place and
-        // points at the running daemon, hostname → loopback routing
-        // is handled by DNS and `/etc/hosts` becomes redundant. Let
-        // the hosts sub-step Skip in that case.
-        let dns_routing_active = {
-            let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
-            // `reg` is the source of truth for the suffix — a just-migrated
-            // suffix routes through the right `/etc/resolver/<suffix>` file
-            // without waiting for an app restart.
-            crate::dnsmasq::resolver::is_installed(&reg.domain_suffix, port)
-        };
-        let hosts_outcome = hosts::reconcile(&reg, hosts_cache, dns_routing_active);
+        // Exact project hostnames are always kept in `/etc/hosts` — it's the
+        // bulletproof primary resolution path (no port, no daemon, no resolver
+        // file, no drift). dnsmasq's `/etc/resolver/<suffix>` wildcard, when
+        // installed, coexists fine: both resolve to 127.0.0.1, `/etc/hosts`
+        // wins for exact names, and dnsmasq covers arbitrary subdomains.
+        let hosts_outcome = hosts::reconcile(&reg, hosts_cache);
 
         let report = ReconcileReport {
             started_at_ms,
