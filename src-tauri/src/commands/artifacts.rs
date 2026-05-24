@@ -13,9 +13,10 @@
 //! project tree.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::projects::load_registry;
 use crate::error::{AppError, AppResult};
@@ -63,10 +64,42 @@ fn artifact_catalogue(kind: ProjectType) -> &'static [(&'static str, &'static st
     }
 }
 
-/// Whether `rel` is a known artifact dir for this project type. Pure, so the
-/// validation that guards deletion is unit-testable.
-fn is_known_artifact(kind: ProjectType, rel: &str) -> bool {
-    artifact_catalogue(kind).iter().any(|(r, _)| *r == rel)
+/// The built-in catalogue plus the user's custom extra dirs (from
+/// preferences), applied to every project type. Custom entries that duplicate a
+/// built-in key are skipped so a row never appears twice.
+fn effective_catalogue(kind: ProjectType, extra: &[String]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = artifact_catalogue(kind)
+        .iter()
+        .map(|(r, l)| (r.to_string(), l.to_string()))
+        .collect();
+    for rel in sanitize_extra_dirs(extra) {
+        if !out.iter().any(|(r, _)| *r == rel) {
+            out.push((rel, "Custom".to_string()));
+        }
+    }
+    out
+}
+
+/// Drop custom-dir entries that could escape the project tree or are
+/// meaningless as a relative key. `remove_within` re-checks containment as
+/// defence in depth, but rejecting these up front keeps bad keys out of scan
+/// results and the clean catalogue entirely.
+fn sanitize_extra_dirs(extra: &[String]) -> Vec<String> {
+    extra
+        .iter()
+        .map(|s| s.trim().trim_end_matches('/'))
+        .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.contains("..") && !s.contains('\\'))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Whether `rel` is a known artifact dir for this project type — including the
+/// user's custom dirs. Pure, so the validation that guards deletion is
+/// unit-testable.
+fn is_known_artifact(kind: ProjectType, rel: &str, extra: &[String]) -> bool {
+    effective_catalogue(kind, extra)
+        .iter()
+        .any(|(r, _)| r == rel)
 }
 
 /// `scan_artifacts(id)` — measure every catalogued artifact dir that exists in
@@ -79,12 +112,13 @@ pub async fn scan_artifacts(state: State<'_, AppState>, id: String) -> AppResult
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
     let base = project.path.clone();
     let kind = project.kind;
+    let extra = state.preferences_snapshot().auto_clean_extra_dirs;
 
-    let present: Vec<(String, String, PathBuf)> = artifact_catalogue(kind)
-        .iter()
+    let present: Vec<(String, String, PathBuf)> = effective_catalogue(kind, &extra)
+        .into_iter()
         .filter_map(|(rel, label)| {
-            let p = base.join(rel);
-            p.is_dir().then(|| (rel.to_string(), label.to_string(), p))
+            let p = base.join(&rel);
+            p.is_dir().then_some((rel, label, p))
         })
         .collect();
 
@@ -115,7 +149,8 @@ pub async fn scan_artifacts(state: State<'_, AppState>, id: String) -> AppResult
 #[tauri::command]
 pub async fn clean_artifact(state: State<'_, AppState>, id: String, rel: String) -> AppResult<u64> {
     let (base, kind) = project_base(&state, &id)?;
-    if !is_known_artifact(kind, &rel) {
+    let extra = state.preferences_snapshot().auto_clean_extra_dirs;
+    if !is_known_artifact(kind, &rel, &extra) {
         return Err(AppError::BadInput(format!(
             "`{rel}` is not a known artifact directory for this project"
         )));
@@ -131,21 +166,24 @@ pub async fn clean_artifact(state: State<'_, AppState>, id: String, rel: String)
 #[tauri::command]
 pub async fn clean_all_artifacts(state: State<'_, AppState>, id: String) -> AppResult<u64> {
     let (base, kind) = project_base(&state, &id)?;
-    let targets: Vec<PathBuf> = artifact_catalogue(kind)
-        .iter()
-        .map(|(rel, _)| base.join(rel))
-        .filter(|p| p.is_dir())
-        .collect();
+    let extra = state.preferences_snapshot().auto_clean_extra_dirs;
+    tokio::task::spawn_blocking(move || clean_project_artifacts(&base, kind, &extra))
+        .await
+        .map_err(|e| AppError::Internal(format!("artifact clean task failed: {e}")))?
+}
 
-    tokio::task::spawn_blocking(move || {
-        let mut freed = 0u64;
-        for target in targets {
-            freed += remove_within(&base, &target)?;
+/// Delete every catalogued (+ custom) artifact dir present under `base`,
+/// returning total bytes reclaimed. Blocking — call inside `spawn_blocking`.
+/// Shared by the per-project clean command and the background scheduler.
+fn clean_project_artifacts(base: &Path, kind: ProjectType, extra: &[String]) -> AppResult<u64> {
+    let mut freed = 0u64;
+    for (rel, _) in effective_catalogue(kind, extra) {
+        let target = base.join(&rel);
+        if target.is_dir() {
+            freed += remove_within(base, &target)?;
         }
-        Ok(freed)
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("artifact clean task failed: {e}")))?
+    }
+    Ok(freed)
 }
 
 /// Resolve a project's base path + type, erroring if the id is unknown.
@@ -222,6 +260,103 @@ fn measure_dir(root: &Path) -> (u64, u64, Option<u64>) {
     (size, count, newest)
 }
 
+// =============================================================================
+// Background auto-clean scheduler
+// =============================================================================
+
+/// Tauri event channel carrying the bytes reclaimed by an automatic pass, so
+/// the frontend can raise a "Freed N" toast.
+pub const AUTO_CLEAN_CHANNEL: &str = "portbay://artifacts-auto-cleaned";
+
+const WEEK_SECS: u64 = 7 * 86_400;
+const MONTH_SECS: u64 = 30 * 86_400;
+/// How often the running app re-checks whether a pass is due. The cadence gate
+/// inside [`run_auto_clean_if_due`] is the real throttle, so checking often is
+/// cheap — it mostly returns immediately.
+const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Whether an auto-clean is due. Pure, so "advance the clock" is unit-testable.
+/// `off` — and any unrecognised cadence — is never due.
+fn due_for_auto_clean(schedule: &str, last: u64, now: u64) -> bool {
+    let cadence = match schedule {
+        "weekly" => WEEK_SECS,
+        "monthly" => MONTH_SECS,
+        _ => return false,
+    };
+    now.saturating_sub(last) >= cadence
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Run an auto-clean across every registered project when the schedule is due.
+/// Stamps `last_auto_clean` whenever a pass runs (even on 0 bytes) so it can't
+/// re-fire every check interval, and emits a "freed N" event only when
+/// something was actually reclaimed.
+async fn run_auto_clean_if_due(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let prefs = state.preferences_snapshot();
+    let now = now_secs();
+    if !due_for_auto_clean(&prefs.auto_clean_schedule, prefs.last_auto_clean, now) {
+        return;
+    }
+
+    let Ok(registry) = load_registry(&state) else {
+        return;
+    };
+    let extra = prefs.auto_clean_extra_dirs.clone();
+    let projects: Vec<(PathBuf, ProjectType)> = registry
+        .projects
+        .iter()
+        .map(|p| (p.path.clone(), p.kind))
+        .collect();
+
+    let freed = tokio::task::spawn_blocking(move || {
+        let mut total = 0u64;
+        for (base, kind) in projects {
+            // One project's clean error must not abort the whole pass.
+            total += clean_project_artifacts(&base, kind, &extra).unwrap_or(0);
+        }
+        total
+    })
+    .await
+    .unwrap_or(0);
+
+    // Stamp the pass time regardless of bytes freed, then mirror into state.
+    let mut updated = prefs;
+    updated.last_auto_clean = now;
+    if let Err(e) = updated.save() {
+        tracing::warn!(error = %e, "auto-clean: failed to persist last_auto_clean");
+    }
+    if let Ok(mut guard) = state.preferences.lock() {
+        *guard = updated;
+    }
+
+    if freed > 0 {
+        tracing::info!(freed_bytes = freed, "auto-clean pass reclaimed disk");
+        let _ = app.emit(AUTO_CLEAN_CHANNEL, freed);
+    }
+}
+
+/// Spawn the background auto-clean scheduler for the app's lifetime. Checks once
+/// shortly after boot (so a long-overdue clean lands on cold start) and then
+/// every [`CHECK_INTERVAL`]. Default cadence is `off`, so this is a no-op until
+/// the user opts in from Settings.
+pub fn spawn_auto_clean_scheduler(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Let the rest of boot settle before walking project trees.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        loop {
+            run_auto_clean_if_due(&app).await;
+            tokio::time::sleep(CHECK_INTERVAL).await;
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,14 +364,81 @@ mod tests {
 
     #[test]
     fn catalogue_matches_known_dirs_only() {
-        assert!(is_known_artifact(ProjectType::Next, ".next"));
-        assert!(is_known_artifact(ProjectType::Next, "node_modules"));
-        assert!(is_known_artifact(ProjectType::Php, "public/build"));
+        assert!(is_known_artifact(ProjectType::Next, ".next", &[]));
+        assert!(is_known_artifact(ProjectType::Next, "node_modules", &[]));
+        assert!(is_known_artifact(ProjectType::Php, "public/build", &[]));
         // Not in the Next catalogue.
-        assert!(!is_known_artifact(ProjectType::Next, "vendor"));
+        assert!(!is_known_artifact(ProjectType::Next, "vendor", &[]));
         // Never a valid key — guards against path injection.
-        assert!(!is_known_artifact(ProjectType::Custom, "../../etc"));
-        assert!(!is_known_artifact(ProjectType::Vite, ""));
+        assert!(!is_known_artifact(ProjectType::Custom, "../../etc", &[]));
+        assert!(!is_known_artifact(ProjectType::Vite, "", &[]));
+    }
+
+    #[test]
+    fn due_for_auto_clean_respects_cadence_and_off() {
+        let now = 1_700_000_000u64;
+        // Off / unknown is never due, however long since the last pass.
+        assert!(!due_for_auto_clean("off", 0, now));
+        assert!(!due_for_auto_clean("nonsense", 0, now));
+        // Weekly: due at exactly 7d, not a second before.
+        assert!(due_for_auto_clean("weekly", now - WEEK_SECS, now));
+        assert!(!due_for_auto_clean("weekly", now - WEEK_SECS + 1, now));
+        // Monthly: a fortnight isn't enough; 30d is.
+        assert!(!due_for_auto_clean("monthly", now - WEEK_SECS * 2, now));
+        assert!(due_for_auto_clean("monthly", now - MONTH_SECS, now));
+    }
+
+    #[test]
+    fn sanitize_extra_dirs_rejects_escapes_and_blanks() {
+        let got = sanitize_extra_dirs(&[
+            ".turbo".into(),
+            "  .cache/ ".into(), // trimmed + trailing slash stripped
+            "".into(),
+            "../escape".into(),
+            "/abs".into(),
+            "a\\b".into(),
+        ]);
+        assert_eq!(got, vec![".turbo".to_string(), ".cache".to_string()]);
+    }
+
+    #[test]
+    fn effective_catalogue_appends_custom_without_duplicating() {
+        // `node_modules` is already a Next built-in; the custom entry must not
+        // duplicate it, while `.turbo` is genuinely added.
+        let extra = vec![".turbo".to_string(), "node_modules".to_string()];
+        let rels: Vec<String> = effective_catalogue(ProjectType::Next, &extra)
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect();
+        assert!(rels.contains(&".turbo".to_string()));
+        assert_eq!(rels.iter().filter(|r| *r == "node_modules").count(), 1);
+    }
+
+    #[test]
+    fn is_known_artifact_honours_custom_dirs() {
+        assert!(is_known_artifact(
+            ProjectType::Next,
+            ".turbo",
+            &[".turbo".to_string()]
+        ));
+        assert!(!is_known_artifact(ProjectType::Next, ".turbo", &[]));
+    }
+
+    #[test]
+    fn clean_project_artifacts_removes_known_and_custom_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_path_buf();
+        // `.next` is a built-in, `.turbo` a custom extra, `untracked` neither.
+        for d in [".next", ".turbo", "untracked"] {
+            fs::create_dir_all(base.join(d)).unwrap();
+            fs::write(base.join(d).join("f"), b"0123456789").unwrap(); // 10 bytes
+        }
+        let freed =
+            clean_project_artifacts(&base, ProjectType::Next, &[".turbo".to_string()]).unwrap();
+        assert_eq!(freed, 20); // .next + .turbo, not untracked
+        assert!(!base.join(".next").exists());
+        assert!(!base.join(".turbo").exists());
+        assert!(base.join("untracked").exists());
     }
 
     #[test]

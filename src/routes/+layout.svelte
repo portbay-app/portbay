@@ -37,6 +37,15 @@
   import { errorBus } from "$lib/stores/errors.svelte";
   import { installCrashReporter } from "$lib/stores/crashReporter.svelte";
 
+  /** Compact byte label for the auto-clean "freed N" toast. */
+  function formatBytes(n: number): string {
+    if (n <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+    const v = n / 1024 ** i;
+    return `${i === 0 || v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+  }
+
   onMount(() => {
     // The tray popover renders in its own webview — it must not start
     // tunnels, listen for nav, or redirect to onboarding. Those side
@@ -60,12 +69,32 @@
     // by any future tray item that should land on a specific page.
     let unlistenNav: UnlistenFn | null = null;
     let unlistenToast: UnlistenFn | null = null;
+    let unlistenClean: UnlistenFn | null = null;
     void (async () => {
       unlistenNav = await listen<string>("portbay://nav", async ({ payload }) => {
         if (typeof payload === "string" && payload.startsWith("/")) {
           await goto(payload);
         }
       });
+
+      // Background auto-clean finished a pass — surface the space reclaimed.
+      // The Rust scheduler only emits when bytes were actually freed.
+      unlistenClean = await listen<number>(
+        "portbay://artifacts-auto-cleaned",
+        ({ payload }) => {
+          const freed = typeof payload === "number" ? payload : 0;
+          if (freed <= 0) return;
+          errorBus.push({
+            code: "ARTIFACTS_AUTO_CLEANED",
+            whatHappened: `Freed ${formatBytes(freed)} of build artifacts.`,
+            whyItMatters:
+              "The scheduled auto-clean removed stale build output across your projects.",
+            whoCausedIt: "system",
+            severity: "success",
+            actions: [],
+          });
+        },
+      );
 
       // First-run "still running" hint when the user closes the window
       // while close-to-menu-bar is on. Fires at most once across the
@@ -103,6 +132,7 @@
       tunnels.stop();
       unlistenNav?.();
       unlistenToast?.();
+      unlistenClean?.();
     };
   });
 

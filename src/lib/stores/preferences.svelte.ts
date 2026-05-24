@@ -22,6 +22,7 @@ export type AccentColor =
 
 export type DefaultSort = "name-asc" | "name-desc" | "status" | "port";
 export type StartBehavior = "manual" | "auto";
+export type AutoCleanSchedule = "off" | "weekly" | "monthly";
 
 export interface Preferences {
   /** Install the menu-bar tray icon at launch. */
@@ -56,6 +57,14 @@ export interface Preferences {
   storeLogsLocally: boolean;
   logRetentionDays: number;
   cliPath: string;
+
+  // Artifacts
+  /** Background auto-clean cadence across every project. */
+  autoCleanSchedule: AutoCleanSchedule;
+  /** Unix seconds of the last completed pass; 0 = never. */
+  lastAutoClean: number;
+  /** Extra project-relative dir names to treat as artifacts. */
+  autoCleanExtraDirs: string[];
 }
 
 const DEFAULTS: Preferences = {
@@ -77,6 +86,9 @@ const DEFAULTS: Preferences = {
   storeLogsLocally: true,
   logRetentionDays: 7,
   cliPath: "/usr/local/bin/portbay",
+  autoCleanSchedule: "off",
+  lastAutoClean: 0,
+  autoCleanExtraDirs: [],
 };
 
 // Per-accent CSS variable values. Keyed off `accentColor`, applied to

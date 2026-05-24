@@ -43,6 +43,20 @@ pub async fn set_preferences(
 ) -> AppResult<Preferences> {
     let previous = state.preferences_snapshot();
 
+    let mut prefs = prefs;
+    // Starting (or restarting) the auto-clean clock: when the cadence flips on
+    // from "off" — or was never stamped — anchor `last_auto_clean` to now so
+    // the first automatic pass is one full cadence away, never an immediate
+    // surprise wipe the moment the toggle is enabled.
+    if prefs.auto_clean_schedule != "off"
+        && (previous.auto_clean_schedule == "off" || prefs.last_auto_clean == 0)
+    {
+        prefs.last_auto_clean = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+    }
+
     // Persist first; only then commit to in-memory state so a disk
     // failure leaves the running app coherent with what's on disk.
     prefs
