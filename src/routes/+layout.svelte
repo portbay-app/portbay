@@ -32,6 +32,9 @@
   import { tunnels } from "$lib/stores/tunnels.svelte";
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import { sidebar } from "$lib/stores/sidebar.svelte";
+  import { sidecars } from "$lib/stores/sidecars.svelte";
+  import { setupRequirements } from "$lib/stores/setup";
+  import Icon from "$lib/components/atoms/Icon.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
@@ -170,6 +173,11 @@
       : `${sidebar.width}px 1fr ${showRail ? "320px" : "0px"}`,
   );
   const currentTheme = $derived(theme.value);
+
+  // Same derivation the Settings "Setup required" surface uses, so the banner
+  // count and that list can never disagree.
+  const setupReqs = $derived(setupRequirements(sidecars.value));
+  const needsSetup = $derived(setupReqs.length > 0);
 </script>
 
 {#if isTrayPanel}
@@ -202,6 +210,24 @@
 
     <div class="flex flex-col min-w-0 min-h-0">
       <TopBar />
+      {#if needsSetup}
+        <div
+          class="shrink-0 flex items-center gap-2 px-4 py-2
+                 bg-amber-500/10 border-b border-amber-500/20
+                 text-amber-400 text-[12px]"
+        >
+          <Icon name="circle-alert" size={13} />
+          <span
+            >{setupReqs.length}
+            {setupReqs.length === 1 ? "tool needs" : "tools need"} setup: {setupReqs
+              .map((r) => r.title)
+              .join(", ")}.</span
+          >
+          <a href="/settings#setup" class="ml-auto font-medium hover:underline"
+            >Fix it →</a
+          >
+        </div>
+      {/if}
       <main class="flex-1 min-h-0 overflow-y-auto bg-bg">
         {@render children()}
       </main>
