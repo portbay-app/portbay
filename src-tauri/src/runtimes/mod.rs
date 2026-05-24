@@ -542,11 +542,12 @@ mod tests {
 
     #[test]
     fn default_runtime_has_no_editable_settings() {
-        // A runtime that doesn't override apply_config rejects any patch.
+        // Go doesn't override apply_config, so it falls back to the default
+        // impl that rejects every patch.
         let mut settings = crate::registry::RuntimeSettings::default();
-        let node = node::NodeRuntime;
-        let err = node
-            .apply_config("22", "info", &std::collections::BTreeMap::new(), &mut settings)
+        let go = go::GoRuntime;
+        let err = go
+            .apply_config("1.22", "info", &std::collections::BTreeMap::new(), &mut settings)
             .unwrap_err();
         assert!(err.contains("no editable settings"));
     }
