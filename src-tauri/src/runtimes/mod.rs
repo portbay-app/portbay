@@ -24,6 +24,7 @@
 //!   config dirs, and the registry v1→v2 migration are deferred to
 //!   follow-up commits on the same kanban card.
 
+pub mod bun;
 pub mod env;
 pub mod go;
 pub mod node;
@@ -362,6 +363,7 @@ fn registry() -> Vec<Box<dyn LanguageRuntime>> {
     vec![
         Box::new(php::PhpRuntime),
         Box::new(node::NodeRuntime),
+        Box::new(bun::BunRuntime),
         Box::new(python::PythonRuntime),
         Box::new(go::GoRuntime),
         Box::new(ruby::RubyRuntime),
@@ -536,6 +538,7 @@ mod tests {
         let ids: Vec<&str> = views.iter().map(|v| v.id.as_str()).collect();
         assert!(ids.contains(&"php"));
         assert!(ids.contains(&"node"));
+        assert!(ids.contains(&"bun"));
         assert!(ids.contains(&"python"));
         assert!(ids.contains(&"go"));
         assert!(ids.contains(&"ruby"));
