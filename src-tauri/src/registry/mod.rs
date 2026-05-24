@@ -242,10 +242,7 @@ impl Registry {
         self.databases.iter().find(|d| &d.id == id)
     }
 
-    pub fn get_database_mut(
-        &mut self,
-        id: &DatabaseInstanceId,
-    ) -> Option<&mut DatabaseInstance> {
+    pub fn get_database_mut(&mut self, id: &DatabaseInstanceId) -> Option<&mut DatabaseInstance> {
         self.databases.iter_mut().find(|d| &d.id == id)
     }
 

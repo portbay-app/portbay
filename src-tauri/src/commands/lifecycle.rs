@@ -103,10 +103,7 @@ fn preflight_port(
                 port = port,
                 "killing stale PortBay-managed dev server before restart",
             );
-            let _ = port_holder::kill_gracefully(
-                target,
-                std::time::Duration::from_secs(2),
-            );
+            let _ = port_holder::kill_gracefully(target, std::time::Duration::from_secs(2));
             // Re-check; if the slot is now free, keep going.
             if port_holder::find(port).is_none() {
                 continue;

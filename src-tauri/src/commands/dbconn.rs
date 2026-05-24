@@ -75,9 +75,7 @@ pub(crate) fn build_db_connections(pairs: &[(String, String)]) -> Vec<DbConnecti
     for key in map.keys() {
         for field in ["DB_HOST", "DB_DATABASE"] {
             if let Some(pref) = key.strip_suffix(field) {
-                if (pref.is_empty() || pref.ends_with('_'))
-                    && !prefixes.iter().any(|p| p == pref)
-                {
+                if (pref.is_empty() || pref.ends_with('_')) && !prefixes.iter().any(|p| p == pref) {
                     prefixes.push(pref.to_string());
                 }
             }
@@ -193,7 +191,10 @@ mod tests {
         assert_eq!(c.name, "Default");
         assert_eq!(c.driver, "mysql");
         assert_eq!(c.database, "myapp");
-        assert_eq!(c.url.as_deref(), Some("mysql://root:secret@127.0.0.1:3306/myapp"));
+        assert_eq!(
+            c.url.as_deref(),
+            Some("mysql://root:secret@127.0.0.1:3306/myapp")
+        );
     }
 
     #[test]
@@ -219,7 +220,11 @@ mod tests {
             ("DB_PORT", "5432"),
             ("DB_DATABASE", "store"),
         ]));
-        assert!(conns[0].url.as_deref().unwrap().starts_with("postgresql://db.local:5432/store"));
+        assert!(conns[0]
+            .url
+            .as_deref()
+            .unwrap()
+            .starts_with("postgresql://db.local:5432/store"));
     }
 
     #[test]

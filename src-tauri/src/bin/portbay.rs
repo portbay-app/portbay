@@ -388,7 +388,8 @@ impl CliContext {
     }
 
     fn load_registry(&self) -> Result<Registry, CliError> {
-        store::load_or_default(&self.registry_path, DEFAULT_DOMAIN_SUFFIX).map_err(CliError::Registry)
+        store::load_or_default(&self.registry_path, DEFAULT_DOMAIN_SUFFIX)
+            .map_err(CliError::Registry)
     }
 
     fn save_registry(&self, r: &Registry) -> Result<(), CliError> {

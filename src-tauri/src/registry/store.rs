@@ -272,8 +272,7 @@ mod tests {
 
         // The live file is rewritten in v2 shape, so a second load is a no-op
         // (no migration, identical result).
-        let on_disk: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(on_disk["version"], 2);
         let reg2 = load_from(&path).unwrap();
         assert_eq!(reg2, reg);

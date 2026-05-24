@@ -374,9 +374,8 @@ pub fn request_allowed(request: &HelperRequest) -> Result<()> {
             }
             Ok(())
         }
-        HelperRequest::InstallResolver { suffix, .. } | HelperRequest::RemoveResolver { suffix } => {
-            ensure_valid_resolver_suffix(suffix)
-        }
+        HelperRequest::InstallResolver { suffix, .. }
+        | HelperRequest::RemoveResolver { suffix } => ensure_valid_resolver_suffix(suffix),
     }
 }
 
@@ -474,7 +473,8 @@ pub fn serve(socket_path: &Path, manager: HostsManager) -> Result<()> {
             .map_err(|e| HelperError::io(socket_path, e))?
             .permissions();
         perms.set_mode(0o666);
-        std::fs::set_permissions(socket_path, perms).map_err(|e| HelperError::io(socket_path, e))?;
+        std::fs::set_permissions(socket_path, perms)
+            .map_err(|e| HelperError::io(socket_path, e))?;
     }
 
     for stream in listener.incoming() {

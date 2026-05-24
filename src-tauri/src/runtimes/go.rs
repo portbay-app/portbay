@@ -70,8 +70,10 @@ impl LanguageRuntime for GoRuntime {
         _settings: &mut RuntimeSettings,
     ) -> Result<ApplyResult, String> {
         let updates = validate_go_env_patch(tab_id, patches)?;
-        let refs: Vec<(&str, Option<String>)> =
-            updates.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        let refs: Vec<(&str, Option<String>)> = updates
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
         write_go_env(&refs)?;
         Ok(ApplyResult::default()) // Go has no daemon.
     }
@@ -222,14 +224,20 @@ mod tests {
     use super::*;
 
     fn patch(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn validate_accepts_known_keys_and_clears_blanks() {
         let updates = validate_go_env_patch(
             "env",
-            &patch(&[("GOPROXY", "https://proxy.example/,direct"), ("GOPATH", "  ")]),
+            &patch(&[
+                ("GOPROXY", "https://proxy.example/,direct"),
+                ("GOPATH", "  "),
+            ]),
         )
         .unwrap();
         assert!(updates.contains(&(

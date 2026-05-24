@@ -101,7 +101,9 @@ pub fn spawn_status_poller(app: AppHandle) {
                 };
                 if changed {
                     let last_error = match observed.status {
-                        ProjectStatus::Crashed => Some(crashed_summary(&state, &p.name, p.exit_code)),
+                        ProjectStatus::Crashed => {
+                            Some(crashed_summary(&state, &p.name, p.exit_code))
+                        }
                         ProjectStatus::PortConflict => Some(
                             "Port conflict — another process is using the assigned port.".into(),
                         ),
@@ -145,11 +147,8 @@ pub fn spawn_status_poller(app: AppHandle) {
                 .iter()
                 .map(|(id, observed)| (id.clone(), observed.status))
                 .collect();
-            let registry = store::load_or_default(
-                &state.registry_path,
-                state.domain_suffix.as_str(),
-            )
-            .ok();
+            let registry =
+                store::load_or_default(&state.registry_path, state.domain_suffix.as_str()).ok();
             if let Some(reg) = registry {
                 tray::refresh(&app, reg.list_projects(), &aggregate_input);
             }
@@ -305,9 +304,7 @@ mod tests {
 
     #[test]
     fn parse_eaddrinuse_handles_node_format() {
-        let lines = vec![
-            "Error: listen EADDRINUSE: address already in use :::3010".to_string(),
-        ];
+        let lines = vec!["Error: listen EADDRINUSE: address already in use :::3010".to_string()];
         assert_eq!(parse_eaddrinuse(&lines), Some(3010));
     }
 

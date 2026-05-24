@@ -132,7 +132,8 @@ fn icon_for(status: AggregateStatus) -> Image<'static> {
         AggregateStatus::Running => ICON_RUNNING,
         AggregateStatus::Error => ICON_ERROR,
     };
-    Image::from_bytes(bytes).expect("embedded tray icon PNG is malformed — rebuild from scripts/generate-tray-icons.sh")
+    Image::from_bytes(bytes)
+        .expect("embedded tray icon PNG is malformed — rebuild from scripts/generate-tray-icons.sh")
 }
 
 /// Snapshot held in `AppState` so the poller can recompute the icon
@@ -209,11 +210,12 @@ pub fn refresh(
     statuses: &std::collections::HashMap<String, ProjectStatus>,
 ) {
     let state: tauri::State<AppState> = app.state();
-    let aggregate = AggregateStatus::from_statuses(
-        projects
-            .iter()
-            .map(|p| statuses.get(p.id.as_str()).copied().unwrap_or(ProjectStatus::Stopped)),
-    );
+    let aggregate = AggregateStatus::from_statuses(projects.iter().map(|p| {
+        statuses
+            .get(p.id.as_str())
+            .copied()
+            .unwrap_or(ProjectStatus::Stopped)
+    }));
 
     // Lock just long enough to compare + decide; release before any
     // tray IPC. `TrayIcon` methods are documented as main-thread safe
@@ -444,5 +446,4 @@ mod tests {
         let s = [ProjectStatus::Running, ProjectStatus::Unhealthy];
         assert_eq!(AggregateStatus::from_statuses(s), AggregateStatus::Running);
     }
-
 }

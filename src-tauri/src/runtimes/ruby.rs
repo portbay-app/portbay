@@ -61,8 +61,10 @@ impl LanguageRuntime for RubyRuntime {
         _settings: &mut RuntimeSettings,
     ) -> Result<ApplyResult, String> {
         let updates = validate_gemrc_patch(tab_id, patches)?;
-        let refs: Vec<(&str, Option<String>)> =
-            updates.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        let refs: Vec<(&str, Option<String>)> = updates
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
         write_gemrc(&refs)?;
         Ok(ApplyResult::default()) // Ruby has no daemon.
     }
@@ -224,7 +226,10 @@ mod tests {
     use super::*;
 
     fn patch(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]

@@ -66,7 +66,9 @@ impl LanguageRuntime for NodeRuntime {
                 "Cache directory",
                 npmrc.get("cache").cloned().unwrap_or_default(),
             )
-            .with_hint("npm cache location (~/.npmrc `cache`). Blank uses npm's default (~/.npm).")],
+            .with_hint(
+                "npm cache location (~/.npmrc `cache`). Blank uses npm's default (~/.npm).",
+            )],
         );
 
         vec![registry, cache]
@@ -80,8 +82,10 @@ impl LanguageRuntime for NodeRuntime {
         _settings: &mut RuntimeSettings,
     ) -> Result<ApplyResult, String> {
         let updates = validate_npmrc_patch(tab_id, patches)?;
-        let refs: Vec<(&str, Option<String>)> =
-            updates.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        let refs: Vec<(&str, Option<String>)> = updates
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
         write_npmrc_keys(&refs)?;
         // Node has no daemon — nothing to restart; the next process that reads
         // ~/.npmrc picks the change up.
@@ -103,7 +107,13 @@ impl LanguageRuntime for NodeRuntime {
 
         if let Some(nvm) = env::nvm_root() {
             let versions_dir = nvm.join("versions").join("node");
-            scan_children(&versions_dir, "bin/node", &mut out, &mut seen, InstallSource::Nvm);
+            scan_children(
+                &versions_dir,
+                "bin/node",
+                &mut out,
+                &mut seen,
+                InstallSource::Nvm,
+            );
         }
         if let Some(asdf) = env::asdf_root() {
             scan_children(
@@ -257,14 +267,17 @@ mod tests {
     use super::*;
 
     fn patch(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn apply_npmrc_text_replaces_in_place_and_preserves_other_lines() {
         let existing = "; my npmrc\n//registry.npmjs.org/:_authToken=secret\nregistry=https://old.example/\nsave-exact=true\n";
         let out = apply_npmrc_text(
-            &existing,
+            existing,
             &[("registry", Some("https://new.example/".to_string()))],
         );
         // Auth token + unrelated setting + comment survive.
@@ -280,7 +293,7 @@ mod tests {
     #[test]
     fn apply_npmrc_text_removes_key_when_value_is_none() {
         let existing = "registry=https://x/\ncache=/tmp/c\n";
-        let out = apply_npmrc_text(&existing, &[("cache", None)]);
+        let out = apply_npmrc_text(existing, &[("cache", None)]);
         assert!(!out.contains("cache="));
         assert!(out.contains("registry=https://x/"));
     }
@@ -288,7 +301,7 @@ mod tests {
     #[test]
     fn apply_npmrc_text_collapses_duplicate_keys() {
         let existing = "registry=a\nregistry=b\n";
-        let out = apply_npmrc_text(&existing, &[("registry", Some("https://c/".to_string()))]);
+        let out = apply_npmrc_text(existing, &[("registry", Some("https://c/".to_string()))]);
         assert_eq!(out.matches("registry=").count(), 1);
         assert!(out.contains("registry=https://c/"));
     }
@@ -309,10 +322,14 @@ mod tests {
     #[test]
     fn validate_accepts_https_registry() {
         let updates =
-            validate_npmrc_patch("registry", &patch(&[("registry", "https://r.example/")])).unwrap();
+            validate_npmrc_patch("registry", &patch(&[("registry", "https://r.example/")]))
+                .unwrap();
         assert_eq!(
             updates,
-            vec![("registry".to_string(), Some("https://r.example/".to_string()))]
+            vec![(
+                "registry".to_string(),
+                Some("https://r.example/".to_string())
+            )]
         );
     }
 }

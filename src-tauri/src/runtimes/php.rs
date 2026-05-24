@@ -65,7 +65,11 @@ impl LanguageRuntime for PhpRuntime {
             .find(|p| p.version == install.version)
             .unwrap_or_else(|| placeholder_install(install));
 
-        let cfg = settings.php.get(&install.version).cloned().unwrap_or_default();
+        let cfg = settings
+            .php
+            .get(&install.version)
+            .cloned()
+            .unwrap_or_default();
 
         vec![
             fpm_tab(&php, &cfg.fpm),
@@ -131,7 +135,10 @@ fn apply_fpm(tuning: &mut FpmTuning, patches: &BTreeMap<String, String>) -> Resu
 /// override (so the system default applies). Keys outside [`INI_FIELDS`] are
 /// rejected, and values are checked for the characters that would let a patch
 /// inject extra pool directives.
-fn apply_ini(ini: &mut BTreeMap<String, String>, patches: &BTreeMap<String, String>) -> Result<(), String> {
+fn apply_ini(
+    ini: &mut BTreeMap<String, String>,
+    patches: &BTreeMap<String, String>,
+) -> Result<(), String> {
     for (key, raw) in patches {
         if !INI_FIELDS.iter().any(|(k, _)| k == key) {
             return Err(format!("unknown php.ini setting `{key}`"));
@@ -182,11 +189,38 @@ fn fpm_tab(p: &PhpInstall, t: &FpmTuning) -> ConfigTab {
     // as read-only context under static/ondemand rather than letting the user
     // edit values FPM would ignore.
     if dynamic {
-        rows.push(KvRow::number("start_servers", "Start servers", t.start_servers, Some(0), Some(512)));
-        rows.push(KvRow::number("min_spare_servers", "Min spare servers", t.min_spare_servers, Some(0), Some(512)));
-        rows.push(KvRow::number("max_spare_servers", "Max spare servers", t.max_spare_servers, Some(0), Some(512)));
+        rows.push(KvRow::number(
+            "start_servers",
+            "Start servers",
+            t.start_servers,
+            Some(0),
+            Some(512),
+        ));
+        rows.push(KvRow::number(
+            "min_spare_servers",
+            "Min spare servers",
+            t.min_spare_servers,
+            Some(0),
+            Some(512),
+        ));
+        rows.push(KvRow::number(
+            "max_spare_servers",
+            "Max spare servers",
+            t.max_spare_servers,
+            Some(0),
+            Some(512),
+        ));
     }
-    rows.push(KvRow::number("max_requests", "Max requests", t.max_requests, Some(0), Some(100_000)).with_hint("Requests a worker handles before respawning (0 = never)."));
+    rows.push(
+        KvRow::number(
+            "max_requests",
+            "Max requests",
+            t.max_requests,
+            Some(0),
+            Some(100_000),
+        )
+        .with_hint("Requests a worker handles before respawning (0 = never)."),
+    );
 
     // Read-only context: where FPM lives and how PortBay wires it.
     rows.push(
@@ -223,7 +257,9 @@ fn php_tab(p: &PhpInstall, ini: &BTreeMap<String, String>) -> ConfigTab {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "(none)".into()),
         )
-        .with_hint("Overrides above apply per-pool via php_admin_value — this system ini is never edited."),
+        .with_hint(
+            "Overrides above apply per-pool via php_admin_value — this system ini is never edited.",
+        ),
     );
     rows.push(KvRow::path(
         "Extension dir",
@@ -241,7 +277,11 @@ fn extensions_tab(p: &PhpInstall) -> ConfigTab {
         .iter()
         .map(|name| KvRow::info(name.clone(), "Loaded"))
         .collect();
-    ConfigTab::readonly("extensions", format!("Extensions ({})", p.loaded_extensions.len()), rows)
+    ConfigTab::readonly(
+        "extensions",
+        format!("Extensions ({})", p.loaded_extensions.len()),
+        rows,
+    )
 }
 
 /// Fallback when re-probing fails (rare — the binary moved between
@@ -265,7 +305,10 @@ mod tests {
     use super::*;
 
     fn patch(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -292,11 +335,21 @@ mod tests {
             .apply_config("8.3", "fpm", &patch(&[("pm", "turbo")]), &mut settings)
             .is_err());
         assert!(PhpRuntime
-            .apply_config("8.3", "fpm", &patch(&[("max_children", "lots")]), &mut settings)
+            .apply_config(
+                "8.3",
+                "fpm",
+                &patch(&[("max_children", "lots")]),
+                &mut settings
+            )
             .is_err());
         // zero children is nonsensical for a pool.
         assert!(PhpRuntime
-            .apply_config("8.3", "fpm", &patch(&[("max_children", "0")]), &mut settings)
+            .apply_config(
+                "8.3",
+                "fpm",
+                &patch(&[("max_children", "0")]),
+                &mut settings
+            )
             .is_err());
     }
 
@@ -318,7 +371,12 @@ mod tests {
     fn ini_patch_sets_and_clears_overrides() {
         let mut settings = RuntimeSettings::default();
         PhpRuntime
-            .apply_config("8.3", "php", &patch(&[("memory_limit", "256M")]), &mut settings)
+            .apply_config(
+                "8.3",
+                "php",
+                &patch(&[("memory_limit", "256M")]),
+                &mut settings,
+            )
             .unwrap();
         assert_eq!(settings.php["8.3"].ini["memory_limit"], "256M");
         // A blank value clears the override.

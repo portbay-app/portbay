@@ -162,7 +162,13 @@ impl KvRow {
     fn slug(label: &str) -> String {
         label
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
             .collect()
     }
 
@@ -188,7 +194,11 @@ impl KvRow {
     }
 
     /// Editable free-text row.
-    pub fn text(key: impl Into<String>, label: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn text(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         Self {
             key: key.into(),
             label: label.into(),
@@ -302,7 +312,11 @@ pub trait LanguageRuntime: Send + Sync {
     /// Per-version config tabs. Default: a single read-only "Info" tab that
     /// shows the binary path and source. PHP overrides this with editable
     /// FPM / php.ini / extensions tabs, reading saved values from `settings`.
-    fn tabs(&self, install: &RuntimeInstall, _settings: &crate::registry::RuntimeSettings) -> Vec<ConfigTab> {
+    fn tabs(
+        &self,
+        install: &RuntimeInstall,
+        _settings: &crate::registry::RuntimeSettings,
+    ) -> Vec<ConfigTab> {
         vec![ConfigTab::readonly(
             "info",
             "Info",
@@ -547,7 +561,9 @@ mod tests {
     #[test]
     fn default_version_is_surfaced_from_settings() {
         let mut settings = crate::registry::RuntimeSettings::default();
-        settings.defaults.insert("php".to_string(), "8.3".to_string());
+        settings
+            .defaults
+            .insert("php".to_string(), "8.3".to_string());
         let views = list_all(&settings);
         let php = views.iter().find(|v| v.id == "php").unwrap();
         assert_eq!(php.default_version.as_deref(), Some("8.3"));
@@ -570,8 +586,11 @@ mod tests {
         };
         let views = list_all(&settings);
         let php = views.iter().find(|v| v.id == "php").unwrap();
-        assert!(php.versions.iter().any(|v| v.install.version == "99.9"
-            && matches!(v.install.source, InstallSource::Manual)));
+        assert!(php
+            .versions
+            .iter()
+            .any(|v| v.install.version == "99.9"
+                && matches!(v.install.source, InstallSource::Manual)));
     }
 
     #[test]
@@ -595,7 +614,12 @@ mod tests {
         }
         let mut settings = crate::registry::RuntimeSettings::default();
         let err = NoConfig
-            .apply_config("1", "any", &std::collections::BTreeMap::new(), &mut settings)
+            .apply_config(
+                "1",
+                "any",
+                &std::collections::BTreeMap::new(),
+                &mut settings,
+            )
             .unwrap_err();
         assert!(err.contains("no editable settings"));
     }
