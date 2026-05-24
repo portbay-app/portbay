@@ -10,6 +10,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { safeInvoke } from "$lib/ipc";
+  import { startProject } from "$lib/actions/startProject";
+  import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { dns } from "$lib/stores/dns.svelte";
@@ -108,7 +110,9 @@
     if (e.key === "s" || e.key === "S") {
       void (async () => {
         await dns.ensureReady();
-        await safeInvoke("start_project", { id: sel });
+        const name = projects.value.find((p) => p.id === sel)?.name ?? sel;
+        const conflict = await startProject(sel, name);
+        if (conflict) errorBus.push(conflict);
       })();
     } else if (e.key === "x" || e.key === "X") {
       void safeInvoke("stop_project", { id: sel });
