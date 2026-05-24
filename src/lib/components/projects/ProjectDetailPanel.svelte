@@ -17,6 +17,7 @@
   import ArtifactsSection from "./ArtifactsSection.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
+  import { startProject } from "$lib/actions/startProject";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { logViewer } from "$lib/stores/logViewer.svelte";
@@ -246,10 +247,14 @@
     if (!project) return;
     try {
       switch (op) {
-        case "start":
+        case "start": {
           await dns.ensureReady();
-          await safeInvoke("start_project", { id: project.id });
+          // Resolves a port conflict via confirm + force-quit; toasts the
+          // unresolved error (if any).
+          const conflict = await startProject(project.id, project.name);
+          if (conflict) errorBus.push(conflict);
           break;
+        }
         case "stop":
           await safeInvoke("stop_project", { id: project.id });
           break;

@@ -21,6 +21,7 @@
   import ErrorEnvelope from "$lib/components/errors/ErrorEnvelope.svelte";
 
   import { safeInvoke } from "$lib/ipc";
+  import { startProject } from "$lib/actions/startProject";
   import { groups } from "$lib/stores/groups.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { dns } from "$lib/stores/dns.svelte";
@@ -76,10 +77,14 @@
     busy = op;
     try {
       switch (op) {
-        case "start":
+        case "start": {
           await dns.ensureReady();
-          await safeInvoke("start_project", { id: project.id });
+          // Resolves a port conflict via a confirm + force-quit; returns the
+          // unresolved error (if any) to surface as this row's inline error.
+          const conflict = await startProject(project.id, project.name);
+          if (conflict) throw conflict;
           break;
+        }
         case "stop":
           await safeInvoke("stop_project", { id: project.id });
           break;

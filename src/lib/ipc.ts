@@ -35,6 +35,23 @@ export async function safeInvoke<T>(
 }
 
 /**
+ * Like {@link safeInvoke} but does NOT push a toast on failure — it just
+ * throws the normalised {@link CommandError}. For callers that want to inspect
+ * a specific error code inline (e.g. offer a confirmation on a port conflict)
+ * and decide themselves whether to surface a toast.
+ */
+export async function invokeQuiet<T>(
+  command: string,
+  args?: InvokeArgs,
+): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (raw) {
+    throw normalise(raw);
+  }
+}
+
+/**
  * Try to coerce an arbitrary rejection value into a `CommandError`. Used
  * by `safeInvoke` and also exported for tests / callers that want to
  * surface non-IPC errors (e.g. a network call) through the same UI.
