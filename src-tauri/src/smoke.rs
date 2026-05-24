@@ -169,7 +169,7 @@ mod tests {
             assert!(p.start_command.is_none());
             assert_eq!(p.hostname, "portbay-smoke.portbay.test");
             // Second call is a no-op — never clobbers an existing project.
-            assert_eq!(seed_if_absent(&mut reg).unwrap(), false);
+            assert!(!seed_if_absent(&mut reg).unwrap());
         }
     }
 

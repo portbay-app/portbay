@@ -24,7 +24,7 @@ export interface Readiness {
 }
 
 /** Package manager / task runner used to scope a single-app run in a monorepo. */
-export type WorkspaceTool = "pnpm" | "npm" | "yarn" | "turbo";
+export type WorkspaceTool = "pnpm" | "npm" | "yarn" | "bun" | "turbo";
 
 /**
  * Set on a project that runs ONE app of a monorepo via a workspace filter.

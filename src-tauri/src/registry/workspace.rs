@@ -48,7 +48,7 @@ pub struct WorkspacePackage {
 /// treating the folder as a single standalone project.
 pub fn detect(root: &Path) -> Option<WorkspaceLayout> {
     let globs = workspace_globs(root)?;
-    let tool = detect_tool(root);
+    let tool = detect_package_manager(root);
 
     let mut packages: Vec<WorkspacePackage> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -147,10 +147,22 @@ fn string_array(v: Option<&serde_json::Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Infer the scoping tool from the lockfile present at `root`. Defaults to
-/// pnpm — matching `detect_kind`'s `pnpm dev` bias — when none is found.
-fn detect_tool(root: &Path) -> WorkspaceTool {
-    if root.join("pnpm-lock.yaml").exists() {
+/// Detect the package manager that should run this project's scripts, in
+/// priority order: the `package.json` `packageManager` field (the most
+/// authoritative signal), then the lockfile, then pnpm — PortBay's historical
+/// default — when nothing is present. Shared by [`detect`] for monorepo run
+/// scoping and by `commands::projects::detect_kind` for the single-project run
+/// command, so the two paths can't drift onto different managers.
+///
+/// Never returns [`WorkspaceTool::Turbo`]: Turbo is a task-runner layered on a
+/// package manager, not a manager that installs/runs scripts itself.
+pub fn detect_package_manager(root: &Path) -> WorkspaceTool {
+    if let Some(tool) = package_manager_field(root) {
+        return tool;
+    }
+    if root.join("bun.lockb").exists() || root.join("bun.lock").exists() {
+        WorkspaceTool::Bun
+    } else if root.join("pnpm-lock.yaml").exists() {
         WorkspaceTool::Pnpm
     } else if root.join("yarn.lock").exists() {
         WorkspaceTool::Yarn
@@ -158,6 +170,23 @@ fn detect_tool(root: &Path) -> WorkspaceTool {
         WorkspaceTool::Npm
     } else {
         WorkspaceTool::Pnpm
+    }
+}
+
+/// Parse the `packageManager` field (`"bun@1.1.0"`, `"pnpm@9.0.0"`, …) out of
+/// the root `package.json`. Returns `None` when the field is absent, malformed,
+/// or names a manager PortBay doesn't model. The `@version` suffix is ignored —
+/// only the manager name selects the command shape.
+fn package_manager_field(root: &Path) -> Option<WorkspaceTool> {
+    let text = std::fs::read_to_string(root.join("package.json")).ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let field = doc.get("packageManager")?.as_str()?;
+    match field.split('@').next().unwrap_or_default().trim() {
+        "bun" => Some(WorkspaceTool::Bun),
+        "pnpm" => Some(WorkspaceTool::Pnpm),
+        "yarn" => Some(WorkspaceTool::Yarn),
+        "npm" => Some(WorkspaceTool::Npm),
+        _ => None,
     }
 }
 
@@ -369,5 +398,35 @@ mod tests {
         assert_eq!(expand_glob(root, "standalone"), vec!["standalone"]);
         assert!(expand_glob(root, "missing").is_empty());
         assert!(expand_glob(root, "apps/*/web").is_empty()); // complex glob skipped
+    }
+
+    #[test]
+    fn detect_package_manager_reads_bun_lockfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("bun.lockb"), "").unwrap();
+        assert_eq!(detect_package_manager(root), WorkspaceTool::Bun);
+    }
+
+    #[test]
+    fn detect_package_manager_field_wins_over_lockfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // A stray npm lockfile, but the field declares yarn — the field wins.
+        fs::write(root.join("package-lock.json"), "{}").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{ "name": "root", "packageManager": "yarn@4.1.0" }"#,
+        )
+        .unwrap();
+        assert_eq!(detect_package_manager(root), WorkspaceTool::Yarn);
+    }
+
+    #[test]
+    fn detect_package_manager_defaults_to_pnpm_with_no_signal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("package.json"), r#"{ "name": "root" }"#).unwrap();
+        assert_eq!(detect_package_manager(root), WorkspaceTool::Pnpm);
     }
 }
