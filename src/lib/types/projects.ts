@@ -23,6 +23,41 @@ export interface Readiness {
   timeout_seconds?: number;
 }
 
+/** Package manager / task runner used to scope a single-app run in a monorepo. */
+export type WorkspaceTool = "pnpm" | "npm" | "yarn" | "turbo";
+
+/**
+ * Set on a project that runs ONE app of a monorepo via a workspace filter.
+ * The project's `path` is the monorepo root. Mirrors `registry::types::Workspace`.
+ */
+export interface Workspace {
+  /** Package name — the workspace filter token (e.g. `@bookslash/web`). */
+  package: string;
+  /** App directory relative to the monorepo root (e.g. `apps/web`). */
+  relDir: string;
+  tool: WorkspaceTool;
+}
+
+/** Result of `detect_workspace_apps` — `null` when the folder isn't a monorepo. */
+export interface WorkspaceScan {
+  tool: WorkspaceTool;
+  apps: WorkspaceApp[];
+}
+
+/** One runnable monorepo app, pre-filled with standalone-project defaults. */
+export interface WorkspaceApp {
+  package: string;
+  relDir: string;
+  /** Absolute path to the app's directory (root + relDir). */
+  path: string;
+  kind: ProjectType;
+  suggestedId: string;
+  suggestedName: string;
+  suggestedHostname: string;
+  suggestedPort: number;
+  suggestedStartCommand?: string;
+}
+
 export interface RuntimeInfo {
   pid: number;
   restarts: number;
@@ -53,6 +88,7 @@ export interface ProjectView {
   tags: string[];
   documentRoot?: string;
   phpVersion?: string;
+  workspace?: Workspace;
   status: PortbayStatus;
   runtime?: RuntimeInfo;
 }

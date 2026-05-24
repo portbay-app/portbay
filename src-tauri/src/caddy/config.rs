@@ -414,6 +414,7 @@ mod tests {
             document_root: None,
             php_version: None,
             runtime: None,
+            workspace: None,
         }
     }
 
@@ -436,6 +437,7 @@ mod tests {
             document_root: Some("public".into()),
             php_version: Some(php.into()),
             runtime: None,
+            workspace: None,
         }
     }
 

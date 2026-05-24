@@ -100,7 +100,14 @@ fn preflight_port(
         return Ok(None);
     }
 
-    let working_dir = project.path.to_string_lossy().into_owned();
+    // The directory a leaked dev server for THIS project would run in. For a
+    // monorepo app pinned by a workspace filter, that's the app's sub-directory
+    // (root/apps/web), not the repo root — so two apps sharing one root don't
+    // both claim each other's orphans. Standalone projects use their own path.
+    let working_dir = match &project.workspace {
+        Some(ws) => ws.app_dir(&project.path).to_string_lossy().into_owned(),
+        None => project.path.to_string_lossy().into_owned(),
+    };
     // PID of our own process-compose, so we can tell PortBay's own running
     // dev server apart from a foreign holder of the same port.
     let pc_pid = state.pc.lock().unwrap_or_else(|e| e.into_inner()).pid();

@@ -178,6 +178,9 @@ fn build_project(site: &ImportedSite) -> std::result::Result<Project, String> {
             lang: "php".into(),
             version,
         }),
+        // Imported sites are always standalone folders; monorepo apps are set
+        // up through the add-project workspace flow, not import.
+        workspace: None,
     })
 }
 

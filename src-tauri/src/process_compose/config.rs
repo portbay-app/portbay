@@ -286,9 +286,15 @@ fn project_to_pc_process(
     mail_env: Option<&MailpitEnv>,
     databases: &[DatabaseInstance],
 ) -> Option<PcProcess> {
-    // Projects without a start_command (pure Caddy-served sites) don't
-    // produce a PC entry.
-    let command = p.start_command.clone()?;
+    // The command to launch. An explicit `start_command` always wins. Failing
+    // that, a monorepo project derives a workspace-filtered command from its
+    // `workspace` binding (e.g. `pnpm --filter @app/web dev`) so it runs one
+    // app from the repo root instead of fanning out. A project with neither
+    // (a pure Caddy-served site) produces no PC entry.
+    let command = match &p.start_command {
+        Some(cmd) => cmd.clone(),
+        None => p.workspace.as_ref().map(|ws| ws.derive_dev_command())?,
+    };
 
     let log_path = logs_dir.join(format!("{}.log", p.id));
     let readiness_probe = p
@@ -414,6 +420,7 @@ mod tests {
             document_root: None,
             php_version: None,
             runtime: None,
+            workspace: None,
         }
     }
 
@@ -436,6 +443,7 @@ mod tests {
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
             runtime: None,
+            workspace: None,
         }
     }
 
@@ -480,6 +488,30 @@ mod tests {
         let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
         assert!(!yaml.contains("api-gateway"));
         assert!(yaml.contains("marketing-site"));
+    }
+
+    #[test]
+    fn workspace_project_without_start_command_derives_filtered_command() {
+        use crate::registry::{Workspace, WorkspaceTool};
+        // A monorepo app pinned by workspace filter, no explicit start_command:
+        // the PC entry should run the filtered dev command from the repo root.
+        let mut p = next_project("bookslash-web", 3000);
+        p.start_command = None;
+        p.path = PathBuf::from("/repos/BookSlash");
+        p.workspace = Some(Workspace {
+            package: "@bookslash/web".into(),
+            rel_dir: "apps/web".into(),
+            tool: WorkspaceTool::Pnpm,
+        });
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
+        assert!(
+            yaml.contains("pnpm --filter @bookslash/web dev"),
+            "expected the derived filter command in:\n{yaml}"
+        );
+        // working_dir stays the monorepo root, not the sub-app dir.
+        assert!(yaml.contains("/repos/BookSlash"));
     }
 
     #[test]

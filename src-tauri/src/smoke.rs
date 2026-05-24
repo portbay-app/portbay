@@ -64,6 +64,7 @@ pub fn seed_if_absent(reg: &mut Registry) -> std::io::Result<bool> {
         document_root: None,
         php_version: None,
         runtime: None,
+        workspace: None,
     };
     // `add_project` only errors on a duplicate id, which we just ruled out.
     let _ = reg.add_project(project);
