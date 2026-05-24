@@ -215,6 +215,7 @@ pub enum WorkspaceTool {
     Pnpm,
     Npm,
     Yarn,
+    Bun,
     Turbo,
 }
 
@@ -245,6 +246,7 @@ impl Workspace {
             WorkspaceTool::Pnpm => format!("pnpm --filter {} dev", self.package),
             WorkspaceTool::Npm => format!("npm run dev --workspace {}", self.package),
             WorkspaceTool::Yarn => format!("yarn workspace {} dev", self.package),
+            WorkspaceTool::Bun => format!("bun --filter {} dev", self.package),
             WorkspaceTool::Turbo => format!("turbo run dev --filter={}", self.package),
         }
     }
@@ -752,6 +754,10 @@ mod tests {
         assert_eq!(
             mk(WorkspaceTool::Yarn).derive_dev_command(),
             "yarn workspace @bookslash/web dev"
+        );
+        assert_eq!(
+            mk(WorkspaceTool::Bun).derive_dev_command(),
+            "bun --filter @bookslash/web dev"
         );
         assert_eq!(
             mk(WorkspaceTool::Turbo).derive_dev_command(),
