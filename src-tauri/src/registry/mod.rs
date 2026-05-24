@@ -15,8 +15,9 @@ pub mod types;
 
 pub use error::{RegistryError, Result};
 pub use types::{
-    DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, Group, ManualRuntime,
-    Project, ProjectId, ProjectType, Readiness, Runtime, RuntimeSettings,
+    DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, FpmTuning, Group,
+    ManualRuntime, PhpVersionConfig, Project, ProjectId, ProjectType, Readiness, Runtime,
+    RuntimeSettings,
 };
 
 /// The registry-file schema version this build reads and writes.

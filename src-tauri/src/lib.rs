@@ -381,6 +381,7 @@ pub fn run() {
             commands::runtimes::add_runtime_by_path,
             commands::runtimes::remove_runtime_path,
             commands::runtimes::set_default_runtime,
+            commands::runtimes::update_runtime_config,
             commands::databases::list_database_engines,
             commands::databases::install_database_engine,
             commands::databases::list_database_instances,

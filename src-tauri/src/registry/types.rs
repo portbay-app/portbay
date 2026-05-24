@@ -433,9 +433,10 @@ impl DnsmasqSettings {
 }
 
 /// PortBay-managed language-runtime settings persisted in the registry:
-/// installs the user added by hand (that auto-detection didn't surface) and
-/// the default version per language. Both default to empty, so pre-runtimes
-/// registry files keep loading cleanly (this is additive — no version bump).
+/// installs the user added by hand (that auto-detection didn't surface),
+/// the default version per language, and per-version PHP tuning. All fields
+/// default to empty, so pre-runtimes registry files keep loading cleanly
+/// (this is additive — no version bump).
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettings {
@@ -446,6 +447,61 @@ pub struct RuntimeSettings {
     /// inherit this when their runtime can't be auto-detected.
     #[serde(default)]
     pub defaults: BTreeMap<String, String>,
+    /// Per-version PHP config the `/languages` editable tabs write
+    /// (FPM pool tuning + php.ini overrides), keyed by version label
+    /// (e.g. `"8.3"`). The reconciler folds these into the generated,
+    /// PortBay-owned FPM pool config — the system php.ini is never touched.
+    #[serde(default)]
+    pub php: BTreeMap<String, PhpVersionConfig>,
+}
+
+/// PortBay-owned PHP config for a single detected version. Edited from the
+/// `/languages` FPM and PHP tabs; consumed by the reconciler when it renders
+/// the per-version FPM pool config.
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhpVersionConfig {
+    /// FPM process-manager pool tuning.
+    #[serde(default)]
+    pub fpm: FpmTuning,
+    /// php.ini override key → value (e.g. `{"memory_limit": "256M"}`).
+    /// Emitted as `php_admin_value[key] = value` in the pool's `[www]`
+    /// section, so it applies per-pool without editing the system ini.
+    #[serde(default)]
+    pub ini: BTreeMap<String, String>,
+}
+
+/// FPM process-pool tuning. Defaults mirror the historical hardcoded pool
+/// config in [`crate::php::lifecycle::render_pool_config`], so a version with
+/// no saved tuning renders byte-for-byte the same pool it always did.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FpmTuning {
+    /// Process-manager mode: `dynamic`, `static`, or `ondemand`.
+    pub pm: String,
+    /// Hard ceiling on child processes (`pm.max_children`).
+    pub max_children: u32,
+    /// Children spawned at start (`pm.start_servers`; `dynamic` only).
+    pub start_servers: u32,
+    /// Lower bound on idle children (`pm.min_spare_servers`; `dynamic` only).
+    pub min_spare_servers: u32,
+    /// Upper bound on idle children (`pm.max_spare_servers`; `dynamic` only).
+    pub max_spare_servers: u32,
+    /// Requests a child handles before respawning (`pm.max_requests`).
+    pub max_requests: u32,
+}
+
+impl Default for FpmTuning {
+    fn default() -> Self {
+        Self {
+            pm: "dynamic".into(),
+            max_children: 8,
+            start_servers: 2,
+            min_spare_servers: 1,
+            max_spare_servers: 3,
+            max_requests: 500,
+        }
+    }
 }
 
 /// One manually-added runtime install. PortBay reuses the binary in place —

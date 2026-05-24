@@ -83,14 +83,68 @@ pub struct RuntimeInstall {
 pub struct ConfigTab {
     pub id: String,
     pub label: String,
-    /// Key-value rows shown in this tab. For now everything is
-    /// readonly metadata; editing surfaces ship in a follow-up.
+    /// Key-value rows shown in this tab.
     pub rows: Vec<KvRow>,
+    /// When true the tab has at least one editable row; the frontend shows
+    /// a Save button that posts the dirty rows to `update_runtime_config`.
+    #[serde(default)]
+    pub editable: bool,
+}
+
+impl ConfigTab {
+    /// A read-only info tab (no Save button). Used for metadata panes.
+    pub fn readonly(id: impl Into<String>, label: impl Into<String>, rows: Vec<KvRow>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            rows,
+            editable: false,
+        }
+    }
+
+    /// An editable tab — its rows carry input field kinds and the frontend
+    /// renders a Save button.
+    pub fn editable(id: impl Into<String>, label: impl Into<String>, rows: Vec<KvRow>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            rows,
+            editable: true,
+        }
+    }
+}
+
+/// How a [`KvRow`] renders and whether it accepts edits. Read-only rows use
+/// [`FieldKind::Readonly`] (value + copy/reveal affordances, the historical
+/// behaviour); the rest render as the matching input control and are sent
+/// back on save keyed by [`KvRow::key`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FieldKind {
+    /// Display only — value shown with copy/reveal, never edited.
+    Readonly,
+    /// Single-line free text.
+    Text,
+    /// Numeric input. Optional bounds clamp the stepper in the UI.
+    #[serde(rename_all = "camelCase")]
+    Number {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        min: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max: Option<i64>,
+    },
+    /// One-of a fixed option list (rendered as a `<select>`).
+    Select { options: Vec<String> },
+    /// Boolean toggle. `value` is `"true"` / `"false"`.
+    Bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KvRow {
+    /// Stable key edits are posted under. For read-only info rows this is a
+    /// label slug and is ignored on save.
+    pub key: String,
     pub label: String,
     pub value: String,
     /// Optional hint shown beneath the value (e.g. install path, doc link).
@@ -100,6 +154,102 @@ pub struct KvRow {
     /// can click to reveal in Finder.
     #[serde(default)]
     pub is_path: bool,
+    /// How this row renders + whether it's editable.
+    pub field: FieldKind,
+}
+
+impl KvRow {
+    fn slug(label: &str) -> String {
+        label
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect()
+    }
+
+    /// Read-only metadata row (the default for info panes).
+    pub fn info(label: impl Into<String>, value: impl Into<String>) -> Self {
+        let label = label.into();
+        Self {
+            key: Self::slug(&label),
+            label,
+            value: value.into(),
+            hint: None,
+            is_path: false,
+            field: FieldKind::Readonly,
+        }
+    }
+
+    /// Read-only row whose value is a filesystem path (gets a reveal button).
+    pub fn path(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            is_path: true,
+            ..Self::info(label, value)
+        }
+    }
+
+    /// Editable free-text row.
+    pub fn text(key: impl Into<String>, label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            value: value.into(),
+            hint: None,
+            is_path: false,
+            field: FieldKind::Text,
+        }
+    }
+
+    /// Editable numeric row with optional bounds.
+    pub fn number(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        value: impl std::fmt::Display,
+        min: Option<i64>,
+        max: Option<i64>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            value: value.to_string(),
+            hint: None,
+            is_path: false,
+            field: FieldKind::Number { min, max },
+        }
+    }
+
+    /// Editable single-choice row.
+    pub fn select(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        value: impl Into<String>,
+        options: Vec<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            value: value.into(),
+            hint: None,
+            is_path: false,
+            field: FieldKind::Select { options },
+        }
+    }
+
+    /// Attach a hint shown beneath the field (builder-style).
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+}
+
+/// What applying a config patch implies for the running stack. Returned by
+/// [`LanguageRuntime::apply_config`] so the IPC layer can restart only the
+/// services the change actually affects.
+#[derive(Debug, Clone, Default)]
+pub struct ApplyResult {
+    /// Process-compose process ids to restart so the change takes effect now
+    /// (e.g. the version's FPM pool). Best-effort — the caller ignores
+    /// restarts for processes that aren't currently running.
+    pub restart_processes: Vec<String>,
 }
 
 /// One detected version, ready for the frontend. Couples an
@@ -134,7 +284,10 @@ pub struct LanguageView {
 /// Trait every supported language implements. Pulling the surface
 /// behind a trait makes adding a new language a one-file addition
 /// without touching the IPC layer.
-pub trait LanguageRuntime {
+///
+/// `Send + Sync` because the boxed trait object is carried across `.await`
+/// points in the async IPC commands (every impl is a stateless unit struct).
+pub trait LanguageRuntime: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
     fn install_hint(&self) -> &'static str;
@@ -146,28 +299,32 @@ pub trait LanguageRuntime {
     fn probe_version(&self, binary: &std::path::Path) -> Option<String> {
         version_from(binary, "--version")
     }
-    /// Per-version config tabs. Default: a single "Info" tab that
-    /// shows the binary path and source. PHP overrides this with
-    /// FPM / php.ini / extensions tabs.
-    fn tabs(&self, install: &RuntimeInstall) -> Vec<ConfigTab> {
-        vec![ConfigTab {
-            id: "info".into(),
-            label: "Info".into(),
-            rows: vec![
-                KvRow {
-                    label: "Binary".into(),
-                    value: install.binary.to_string_lossy().into_owned(),
-                    hint: None,
-                    is_path: true,
-                },
-                KvRow {
-                    label: "Source".into(),
-                    value: source_label(install.source).into(),
-                    hint: None,
-                    is_path: false,
-                },
+    /// Per-version config tabs. Default: a single read-only "Info" tab that
+    /// shows the binary path and source. PHP overrides this with editable
+    /// FPM / php.ini / extensions tabs, reading saved values from `settings`.
+    fn tabs(&self, install: &RuntimeInstall, _settings: &crate::registry::RuntimeSettings) -> Vec<ConfigTab> {
+        vec![ConfigTab::readonly(
+            "info",
+            "Info",
+            vec![
+                KvRow::path("Binary", install.binary.to_string_lossy().into_owned()),
+                KvRow::info("Source", source_label(install.source)),
             ],
-        }]
+        )]
+    }
+
+    /// Apply a patch from an editable tab, persisting into `settings`. Returns
+    /// the services that must restart for the change to take effect. The
+    /// default has no editable settings and rejects any patch — only runtimes
+    /// that expose editable tabs override this.
+    fn apply_config(
+        &self,
+        _version: &str,
+        _tab_id: &str,
+        _patches: &std::collections::BTreeMap<String, String>,
+        _settings: &mut crate::registry::RuntimeSettings,
+    ) -> Result<ApplyResult, String> {
+        Err(format!("{} has no editable settings", self.display_name()))
     }
 }
 
@@ -204,16 +361,13 @@ pub fn runtime_by_id(id: &str) -> Option<Box<dyn LanguageRuntime>> {
 
 /// Top-level IPC entry point: scan every language, fold in the user's
 /// manually-added installs, and mark each language's default version.
-/// Per-version `tabs` are pre-computed so the frontend renders the whole
-/// panel without an extra round-trip.
+/// Per-version `tabs` are pre-computed (reading any saved per-version config
+/// from `settings`) so the frontend renders the whole panel without an extra
+/// round-trip.
 ///
-/// `manual` and `defaults` come from the registry's [`RuntimeSettings`]; a
-/// manual install whose binary the detector already surfaced is skipped (no
+/// A manual install whose binary the detector already surfaced is skipped (no
 /// duplicate row).
-pub fn list_all(
-    manual: &[crate::registry::ManualRuntime],
-    defaults: &std::collections::BTreeMap<String, String>,
-) -> Vec<LanguageView> {
+pub fn list_all(settings: &crate::registry::RuntimeSettings) -> Vec<LanguageView> {
     registry()
         .into_iter()
         .map(|lang| {
@@ -226,7 +380,7 @@ pub fn list_all(
                 .iter()
                 .map(|i| i.binary.canonicalize().unwrap_or_else(|_| i.binary.clone()))
                 .collect();
-            for m in manual.iter().filter(|m| m.lang == id) {
+            for m in settings.manual.iter().filter(|m| m.lang == id) {
                 let canon = m.binary.canonicalize().unwrap_or_else(|_| m.binary.clone());
                 if detected.contains(&canon) {
                     continue;
@@ -242,7 +396,7 @@ pub fn list_all(
             let mut versions = installs
                 .into_iter()
                 .map(|install| VersionView {
-                    tabs: lang.tabs(&install),
+                    tabs: lang.tabs(&install, settings),
                     install,
                 })
                 .collect::<Vec<_>>();
@@ -254,7 +408,7 @@ pub fn list_all(
                 id: id.into(),
                 display_name: lang.display_name().into(),
                 install_hint: lang.install_hint().into(),
-                default_version: defaults.get(id).cloned(),
+                default_version: settings.defaults.get(id).cloned(),
                 versions,
             }
         })
@@ -330,7 +484,7 @@ mod tests {
 
     #[test]
     fn list_all_returns_one_view_per_registered_language() {
-        let views = list_all(&[], &std::collections::BTreeMap::new());
+        let views = list_all(&crate::registry::RuntimeSettings::default());
         let ids: Vec<&str> = views.iter().map(|v| v.id.as_str()).collect();
         assert!(ids.contains(&"php"));
         assert!(ids.contains(&"node"));
@@ -358,9 +512,9 @@ mod tests {
 
     #[test]
     fn default_version_is_surfaced_from_settings() {
-        let mut defaults = std::collections::BTreeMap::new();
-        defaults.insert("php".to_string(), "8.3".to_string());
-        let views = list_all(&[], &defaults);
+        let mut settings = crate::registry::RuntimeSettings::default();
+        settings.defaults.insert("php".to_string(), "8.3".to_string());
+        let views = list_all(&settings);
         let php = views.iter().find(|v| v.id == "php").unwrap();
         assert_eq!(php.default_version.as_deref(), Some("8.3"));
     }
@@ -372,14 +526,28 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("php");
         std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
-        let manual = vec![crate::registry::ManualRuntime {
-            lang: "php".into(),
-            version: "99.9".into(),
-            binary: bin,
-        }];
-        let views = list_all(&manual, &std::collections::BTreeMap::new());
+        let settings = crate::registry::RuntimeSettings {
+            manual: vec![crate::registry::ManualRuntime {
+                lang: "php".into(),
+                version: "99.9".into(),
+                binary: bin,
+            }],
+            ..Default::default()
+        };
+        let views = list_all(&settings);
         let php = views.iter().find(|v| v.id == "php").unwrap();
         assert!(php.versions.iter().any(|v| v.install.version == "99.9"
             && matches!(v.install.source, InstallSource::Manual)));
+    }
+
+    #[test]
+    fn default_runtime_has_no_editable_settings() {
+        // A runtime that doesn't override apply_config rejects any patch.
+        let mut settings = crate::registry::RuntimeSettings::default();
+        let node = node::NodeRuntime;
+        let err = node
+            .apply_config("22", "info", &std::collections::BTreeMap::new(), &mut settings)
+            .unwrap_err();
+        assert!(err.contains("no editable settings"));
     }
 }
