@@ -15,6 +15,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { Channel } from "@tauri-apps/api/core";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
@@ -30,8 +31,18 @@
   } from "$lib/types/runtimes";
   import { sourceLabel } from "$lib/types/runtimes";
 
+  /** Streamed progress from the `install_runtime` backend command. */
+  type InstallEvent =
+    | { kind: "log"; line: string }
+    | { kind: "done"; success: boolean };
+
   let languages = $state<LanguageView[]>([]);
   let loading = $state<boolean>(true);
+
+  // The language currently being brew-installed, and the latest line of
+  // brew's output (shown inline on the install button).
+  let installingLang = $state<string | null>(null);
+  let installLine = $state<string>("");
 
   let selectedKey = $state<{ langId: string; version: string } | null>(null);
   let activeTab = $state<string | null>(null);
@@ -154,6 +165,33 @@
       }
     } catch {
       /* toast */
+    }
+  }
+
+  /**
+   * Install a missing runtime by delegating to Homebrew. PortBay never bundles
+   * a runtime — this streams `brew install`'s output (the latest line shows on
+   * the button) and re-lists runtimes on success so the new version appears.
+   */
+  async function installViaBrew(langId: string) {
+    if (installingLang) return;
+    installingLang = langId;
+    installLine = "Starting Homebrew…";
+    const channel = new Channel<InstallEvent>();
+    channel.onmessage = (ev) => {
+      if (ev.kind === "log") installLine = ev.line;
+    };
+    try {
+      await safeInvoke<void>("install_runtime", {
+        lang: langId,
+        onEvent: channel,
+      });
+      await refresh();
+    } catch {
+      /* safeInvoke toasted the envelope */
+    } finally {
+      installingLang = null;
+      installLine = "";
     }
   }
 
@@ -314,6 +352,29 @@
             {#if !isCollapsed}
               <div class="mt-0.5 space-y-0.5 pl-1">
                 {#if !installed}
+                  {#if lang.installHint.startsWith("brew install ")}
+                    <button
+                      type="button"
+                      onclick={() => installViaBrew(lang.id)}
+                      disabled={installingLang !== null}
+                      class="w-full flex items-center gap-2 px-2.5 py-2 ml-1 rounded-md
+                             text-left text-[11px] text-accent hover:bg-accent/10
+                             border border-dashed border-accent/40
+                             disabled:opacity-50 transition-colors"
+                      title="Install this runtime via Homebrew"
+                    >
+                      <Icon
+                        name={installingLang === lang.id ? "refresh-cw" : "package"}
+                        size={11}
+                        class={installingLang === lang.id ? "animate-spin" : ""}
+                      />
+                      <span class="min-w-0 truncate">
+                        {installingLang === lang.id
+                          ? installLine || "Installing…"
+                          : "Install via Homebrew"}
+                      </span>
+                    </button>
+                  {/if}
                   <button
                     type="button"
                     onclick={() => copyHint(lang.installHint)}
