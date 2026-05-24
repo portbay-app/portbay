@@ -1,40 +1,31 @@
 <!--
-  TopBar — global search, page title, and the three primary action buttons:
-  Add Project, Universal Stop-All, Settings.
+  TopBar — search palette + primary actions + chrome cluster.
 
-  Most of the bar is `data-tauri-drag-region` so the user can drag the
-  window from anywhere except the interactive controls. Buttons stop the
-  drag region via their own elements (Tauri's drag region is opt-in per
-  element, not inherited).
+  Redesign:
+    - Page title moves out of the bar; the route component owns its own
+      heading (centred main area, larger type).
+    - Search palette trigger stretches to fill the available space —
+      it's the dominant element.
+    - Primary actions: "+ Add Project" (filled accent) and "Stop All"
+      (filled status-crashed). The two land side by side as peer CTAs.
+    - Right cluster: theme toggle, notifications bell (with unread
+      badge), and a deterministic-avatar user-menu trigger. Tunnels
+      pill appears between Stop All and the cluster when active.
 -->
 <script lang="ts">
-  import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import { palette } from "$lib/stores/palette.svelte";
   import { tunnels } from "$lib/stores/tunnels.svelte";
-  import { tunnelModal } from "$lib/stores/tunnelModal.svelte";
+  import { theme } from "$lib/stores/theme.svelte";
+  import { notifications } from "$lib/stores/notifications.svelte";
   import StopAllButton from "./StopAllButton.svelte";
+  import NotificationsPanel from "./NotificationsPanel.svelte";
+  import UserMenu from "./UserMenu.svelte";
 
-  // Map route paths to page titles. Falls back to a humanised path segment
-  // if the route isn't in the map (defensive — every Phase 2 route is here).
-  const pageTitles: Record<string, string> = {
-    "/": "Projects",
-    "/services": "Services",
-    "/domains": "Domains",
-    "/logs": "Logs",
-    "/settings": "Settings",
-    "/preview": "Atoms preview",
-  };
-
-  const currentTitle = $derived.by(() => {
-    const path = page.url.pathname;
-    if (pageTitles[path]) return pageTitles[path];
-    const head = "/" + (path.split("/")[1] ?? "");
-    if (pageTitles[head]) return pageTitles[head];
-    return "PortBay";
-  });
+  let notificationsOpen = $state<boolean>(false);
+  let userMenuOpen = $state<boolean>(false);
 
   function openAddProject() {
     addProjectWizard.show();
@@ -43,85 +34,175 @@
   function openPalette() {
     palette.show();
   }
+
+  function toggleNotifications(e: MouseEvent) {
+    // The panels listen on window-click to close on outside-click. Without
+    // stopping propagation here, opening the panel and closing it would
+    // race in the same click — the bell's click would bubble to the
+    // panel's just-attached window listener and immediately close it.
+    e.stopPropagation();
+    notificationsOpen = !notificationsOpen;
+    if (notificationsOpen) userMenuOpen = false;
+  }
+
+  function toggleUserMenu(e: MouseEvent) {
+    e.stopPropagation();
+    userMenuOpen = !userMenuOpen;
+    if (userMenuOpen) notificationsOpen = false;
+  }
+
+  // Avatar gradient is deterministic — PortBay is single-user, but we
+  // still want the topbar's chip to read as "an account UI" so the
+  // affordance is unmistakable. "P" initial sits on a brand-flavoured
+  // teal→indigo gradient.
+  const avatarGradient = "linear-gradient(135deg, #4d9cff 0%, #7b5cff 100%)";
 </script>
 
 <header
   data-tauri-drag-region
-  class="h-14 shrink-0 flex items-center gap-3 px-4 border-b border-border bg-bg select-none"
+  class="relative h-14 shrink-0 flex items-center gap-3 px-4
+         border-b border-border/60 bg-bg/95 backdrop-blur-sm select-none"
 >
-  <h1 data-tauri-drag-region class="text-base font-semibold tracking-tight">
-    {currentTitle}
-  </h1>
-
-  <!-- Search — opens the command palette. -->
-  <div class="ml-auto flex items-center">
+  <!--
+    Search / command palette trigger — hero of the bar. Grows to fill
+    horizontal space; the actions on the right are tight clusters.
+  -->
+  <div class="flex-1 min-w-0">
     <button
       type="button"
       onclick={openPalette}
       aria-label="Open command palette"
-      class="flex items-center gap-2 w-64 h-8 px-2.5 rounded-md
-             bg-surface border border-border hover:border-accent/60
-             text-fg-subtle hover:text-fg-muted transition-colors"
+      class="group flex items-center gap-2.5 w-full max-w-xl h-9 px-3
+             rounded-lg
+             bg-surface/60 hover:bg-surface
+             text-fg-subtle hover:text-fg-muted
+             border border-border/50 hover:border-border
+             focus-visible:outline-none focus-visible:ring-1
+             focus-visible:ring-accent/60 transition-all duration-150"
     >
-      <Icon name="search" size={14} />
-      <span class="flex-1 text-left text-sm">Search or run a command</span>
+      <Icon name="search" size={13} class="shrink-0" />
+      <span class="flex-1 text-left text-[13px] truncate">
+        Search projects, domains, groups…
+      </span>
       <kbd
-        class="text-[10px] font-mono px-1.5 py-0.5 rounded
-               border border-border text-fg-subtle"
+        class="text-[10px] font-mono leading-none px-1.5 py-1 rounded
+               border border-border/60 text-fg-subtle bg-bg/40
+               group-hover:border-border group-hover:text-fg-muted
+               transition-colors"
       >
         ⌘K
       </kbd>
     </button>
   </div>
 
-  <!-- Action cluster: Add Project, Stop-All, Settings -->
-  <div class="flex items-center gap-2">
+  <!-- Primary action cluster -->
+  <div class="flex items-center gap-2 shrink-0">
     {#if tunnels.count > 0}
       <button
         type="button"
-        onclick={() => {
-          // Single tunnel → jump straight to it. Multiple → open the
-          // first one and rely on the user to navigate from there;
-          // a dedicated "All tunnels" list is a follow-up.
-          const first = tunnels.value[0];
-          if (first) tunnelModal.show(first.projectId);
-        }}
+        onclick={() => void goto("/tunnels")}
         title="{tunnels.count} active public tunnel{tunnels.count === 1 ? '' : 's'}"
         aria-label="View active tunnels"
-        class="inline-flex items-center gap-1.5 h-8 px-2 rounded-md
-               text-accent border border-accent/40 hover:bg-accent/10
-               transition-colors text-xs font-medium"
+        class="inline-flex items-center gap-1.5 h-9 px-2.5 rounded-lg
+               text-accent bg-accent/10 hover:bg-accent/15
+               text-[12px] font-medium tabular-nums transition-colors"
       >
-        <Icon name="globe" size={13} />
-        <span class="tabular-nums">{tunnels.count}</span>
+        <Icon name="cloud" size={12} />
+        {tunnels.count}
       </button>
     {/if}
+
     <button
       type="button"
       onclick={openAddProject}
       title="Add project (⌘N)"
       aria-label="Add project"
-      class="inline-flex items-center justify-center w-8 h-8 rounded-md
-             text-status-running border border-status-running/30
-             hover:bg-status-running/10 hover:border-status-running/60
-             transition-colors"
+      class="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg
+             text-[13px] font-medium tracking-tight
+             bg-accent text-on-accent shadow-sm
+             hover:brightness-110 active:brightness-95
+             focus-visible:outline-none focus-visible:ring-2
+             focus-visible:ring-accent/40 transition"
     >
-      <Icon name="plus" size={16} />
+      <Icon name="plus" size={14} />
+      Add Project
     </button>
 
     <StopAllButton />
+  </div>
 
+  <!-- Divider -->
+  <div class="w-px h-5 bg-border/60 mx-1 shrink-0" aria-hidden="true"></div>
+
+  <!-- Chrome cluster: theme, notifications, user -->
+  <div class="relative flex items-center gap-1 shrink-0">
     <button
       type="button"
-      onclick={() => goto("/settings")}
-      title="Settings"
-      aria-label="Settings"
-      class="inline-flex items-center justify-center w-8 h-8 rounded-md
-             text-fg-muted border border-border
-             hover:text-fg hover:bg-surface-2 hover:border-border-strong
-             transition-colors"
+      onclick={() => theme.toggle()}
+      title="Toggle theme"
+      aria-label="Toggle theme ({theme.value === 'dark' ? 'currently dark' : 'currently light'})"
+      class="inline-flex items-center justify-center w-9 h-9 rounded-lg
+             text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
     >
-      <Icon name="settings" size={16} />
+      <Icon name={theme.value === "dark" ? "sun" : "moon"} size={15} />
     </button>
+
+    <div class="relative">
+      <button
+        type="button"
+        onclick={toggleNotifications}
+        title="Notifications"
+        aria-label="Notifications ({notifications.unreadCount} unread)"
+        aria-expanded={notificationsOpen}
+        class="inline-flex items-center justify-center w-9 h-9 rounded-lg
+               text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+      >
+        <Icon name="bell" size={15} />
+        {#if notifications.unreadCount > 0}
+          <span
+            class="absolute top-1 right-1.5 min-w-[14px] h-3.5 px-1
+                   rounded-full bg-status-crashed text-on-accent
+                   text-[9px] leading-[14px] font-semibold text-center
+                   tabular-nums shadow"
+          >
+            {notifications.unreadCount > 9 ? "9+" : notifications.unreadCount}
+          </span>
+        {/if}
+      </button>
+      <NotificationsPanel
+        open={notificationsOpen}
+        onclose={() => (notificationsOpen = false)}
+      />
+    </div>
+
+    <div class="relative">
+      <button
+        type="button"
+        onclick={toggleUserMenu}
+        title="User menu"
+        aria-label="User menu"
+        aria-expanded={userMenuOpen}
+        class="inline-flex items-center gap-1 h-9 pl-1 pr-1.5 rounded-lg
+               hover:bg-surface-2 transition-colors"
+      >
+        <span
+          class="inline-flex items-center justify-center w-7 h-7 rounded-full
+                 text-on-accent text-[11px] font-semibold tracking-tight
+                 shadow-inner"
+          style:background={avatarGradient}
+        >
+          P
+        </span>
+        <Icon
+          name="chevron-down"
+          size={12}
+          class="text-fg-subtle"
+        />
+      </button>
+      <UserMenu
+        open={userMenuOpen}
+        onclose={() => (userMenuOpen = false)}
+      />
+    </div>
   </div>
 </header>

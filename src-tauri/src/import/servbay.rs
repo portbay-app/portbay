@@ -22,9 +22,26 @@ use std::path::{Path, PathBuf};
 
 use crate::import::error::{ImportError, Result};
 use crate::import::{DetectedSource, ImportSource, ImportedSite};
+use crate::registry::ProjectType;
 
-/// Directories the importer scans for ServBay vhost files, in order
-/// of likelihood. The first one found wins.
+/// Conventional document-root sub-directory names. When a vhost's `root` ends
+/// in one of these, the *project* is the parent directory and the leaf is its
+/// document root — so a site at `…/tribal-house-cms/public` imports as the
+/// project "tribal-house-cms" with document root "public", not as "public".
+const DOC_ROOT_DIRS: &[&str] = &[
+    "public",
+    "web",
+    "html",
+    "public_html",
+    "www",
+    "dist",
+    "build",
+    "out",
+];
+
+/// Directories the importer scans for ServBay vhost files. All existing ones
+/// are scanned (not just the first) so user-added and auto-generated sites both
+/// come through.
 fn candidate_vhost_dirs() -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
     if let Some(mut home_data) = dirs::data_dir() {
@@ -32,10 +49,16 @@ fn candidate_vhost_dirs() -> Vec<PathBuf> {
         paths.push(home_data.join("vhosts"));
         paths.push(home_data.join("disabled-vhosts"));
     }
-    paths.push(PathBuf::from("/Applications/ServBay/etc/nginx/sites"));
-    paths.push(PathBuf::from(
-        "/Applications/ServBay/etc/nginx/sites-enabled",
-    ));
+    // ServBay's real on-disk layout (stock install): `manual-vhosts` holds the
+    // sites the user added, `enabled-dev-vhosts` the auto-generated dev mirrors.
+    // The older `sites` / `sites-enabled` names are kept as probes for other
+    // ServBay versions. Without `manual-vhosts` the importer found nothing on a
+    // current install — the cause of the missing Tribal House CMS import.
+    let nginx = PathBuf::from("/Applications/ServBay/etc/nginx");
+    paths.push(nginx.join("manual-vhosts"));
+    paths.push(nginx.join("enabled-dev-vhosts"));
+    paths.push(nginx.join("sites"));
+    paths.push(nginx.join("sites-enabled"));
     paths
 }
 
@@ -91,16 +114,30 @@ pub fn read_sites() -> Result<Vec<ImportedSite>> {
             for site in parse_vhost(&contents) {
                 let hostname = site.server_name;
                 let root = site.root.unwrap_or_default();
-                if hostname.is_empty() || root.is_empty() {
+                // Skip vhosts we can't turn into a real PortBay project:
+                //   - no `root` → a reverse-proxy dev site (proxy_pass); PortBay
+                //     runs the dev server itself, so there's nothing to import.
+                //   - wildcard `server_name` (e.g. `*.servbay.demo`) → ServBay's
+                //     catch-all, not a project.
+                if hostname.is_empty() || root.is_empty() || hostname.contains('*') {
                     continue;
                 }
-                out.push(ImportedSite::from_parts(
+                let (project_path, document_root) = split_document_root(&root);
+                let kind_hint = Some(if site.is_php {
+                    ProjectType::Php
+                } else {
+                    ProjectType::Static
+                });
+                let mut imported = ImportedSite::from_parts(
                     ImportSource::ServBay,
-                    root,
+                    project_path,
                     hostname,
                     None,
                     site.https,
-                ));
+                );
+                imported.document_root = document_root;
+                imported.kind_hint = kind_hint;
+                out.push(imported);
             }
         }
     }
@@ -112,6 +149,44 @@ struct ParsedVhost {
     server_name: String,
     root: Option<String>,
     https: bool,
+    /// The vhost includes a PHP-FPM config or routes through a `.php` front
+    /// controller — i.e. it's a PHP app, not a plain static site.
+    is_php: bool,
+}
+
+/// Split a conventional document-root sub-dir off a vhost `root`. Returns
+/// `(project_path, document_root)`: when `root` ends in a known doc-root name
+/// (`public`, `web`, …) the project is the parent and the leaf becomes the
+/// document root; otherwise the project is served straight from `root`.
+fn split_document_root(root: &str) -> (String, Option<String>) {
+    let trimmed = root.trim_end_matches('/');
+    let path = Path::new(trimmed);
+    if let Some(leaf) = path.file_name().and_then(|s| s.to_str()) {
+        if DOC_ROOT_DIRS.contains(&leaf) {
+            if let Some(parent) = path.parent().and_then(|p| p.to_str()) {
+                if !parent.is_empty() {
+                    return (parent.to_string(), Some(leaf.to_string()));
+                }
+            }
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
+/// Strip a trailing `;` and a single pair of surrounding single/double quotes.
+/// ServBay quotes roots that contain spaces (e.g. `'…/Tribal House/…'`); left
+/// unquoted the literal quotes would become part of the path.
+fn unquote(s: &str) -> String {
+    let s = s.trim().trim_end_matches(';').trim();
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
 }
 
 /// Lightweight NGINX vhost parser. Walks each `server { … }` block and
@@ -199,16 +274,16 @@ fn parse_block(block: &str) -> ParsedVhost {
             continue;
         }
         if let Some(rest) = line.strip_prefix("server_name") {
-            out.server_name = rest
-                .trim()
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
+            out.server_name = rest.split_whitespace().next().unwrap_or("").to_string();
         } else if let Some(rest) = line.strip_prefix("root") {
-            out.root = Some(rest.trim().trim_matches(';').trim().to_string());
+            out.root = Some(unquote(rest));
         } else if line.contains("listen") && line.contains("ssl") {
             out.https = true;
+        }
+        // A PHP-FPM include or a `.php` front controller (try_files/index)
+        // marks this as a PHP app rather than a static site.
+        if (line.starts_with("include") && line.contains("php-fpm")) || line.contains(".php") {
+            out.is_php = true;
         }
     }
     out
@@ -285,5 +360,79 @@ server {
         assert!(!s.contains("inline"));
         assert!(!s.contains("trailing"));
         assert!(s.contains("/p"));
+    }
+
+    // The exact shape of a ServBay `manual-vhosts/*.conf` PHP site (Tribal
+    // House CMS): single-quoted root with a space, php-fpm include, router.php.
+    const TRIBAL: &str = r#"
+server {
+    listen 80;
+    server_name tribal-house.localhost;
+    access_log /Applications/ServBay/logs/nginx/tribal-house.localhost.log;
+    index index.php index.html index.htm;
+    root '/Volumes/DevSSD/Projects/Clients/Tribal House/tribal-house-cms/public';
+    include enable-php-fpm-default-pathinfo.conf;
+    location / {
+        try_files $uri /router.php?$query_string;
+    }
+}
+"#;
+
+    #[test]
+    fn parses_quoted_root_with_spaces_and_detects_php() {
+        let blocks = parse_vhost(TRIBAL);
+        assert_eq!(blocks.len(), 1);
+        let b = &blocks[0];
+        assert_eq!(b.server_name, "tribal-house.localhost");
+        // Quotes stripped, space preserved.
+        assert_eq!(
+            b.root.as_deref(),
+            Some("/Volumes/DevSSD/Projects/Clients/Tribal House/tribal-house-cms/public")
+        );
+        assert!(b.is_php, "php-fpm include + router.php should flag PHP");
+        assert!(!b.https);
+    }
+
+    #[test]
+    fn split_document_root_peels_public() {
+        let (path, doc) = split_document_root(
+            "/Volumes/DevSSD/Projects/Clients/Tribal House/tribal-house-cms/public",
+        );
+        assert_eq!(
+            path,
+            "/Volumes/DevSSD/Projects/Clients/Tribal House/tribal-house-cms"
+        );
+        assert_eq!(doc.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn split_document_root_leaves_plain_root_alone() {
+        let (path, doc) = split_document_root("/Users/x/Sites/plain-static");
+        assert_eq!(path, "/Users/x/Sites/plain-static");
+        assert!(doc.is_none());
+    }
+
+    #[test]
+    fn unquote_strips_single_and_double_quotes() {
+        assert_eq!(unquote("'/a/b c'"), "/a/b c");
+        assert_eq!(unquote("\"/a/b\""), "/a/b");
+        assert_eq!(unquote("/a/b"), "/a/b");
+        assert_eq!(unquote(" '/a' "), "/a");
+    }
+
+    #[test]
+    fn wildcard_and_proxy_vhosts_are_excluded_by_field_shape() {
+        // Catch-all: wildcard server_name, no root → would be filtered in
+        // read_sites (hostname.contains('*') || root.is_empty()).
+        let catchall = "server {\n  listen 80;\n  server_name *.servbay.demo;\n  return 404;\n}";
+        let b = &parse_vhost(catchall)[0];
+        assert!(b.server_name.contains('*'));
+        assert!(b.root.is_none());
+
+        // Reverse-proxy dev site: has a server_name but no root.
+        let proxy = "server {\n  server_name bookslash.localhost;\n  location / { proxy_pass http://127.0.0.1:3000; }\n}";
+        let pb = &parse_vhost(proxy)[0];
+        assert_eq!(pb.server_name, "bookslash.localhost");
+        assert!(pb.root.is_none());
     }
 }

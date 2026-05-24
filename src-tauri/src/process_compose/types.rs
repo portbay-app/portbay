@@ -53,10 +53,19 @@ impl Process {
 
     /// PortBay's status taxonomy (`ASSESSMENT_AND_PLAN.md` §5.3) derived
     /// from PC's raw fields. Maps to GUI badges + CLI colors.
+    ///
+    /// Signal-exit handling: any exit code in the 128..=192 range comes
+    /// from a UNIX signal (128 + signal number) — SIGINT/SIGTERM/SIGKILL
+    /// are normal stop paths, not crashes. The runtime also reports -1
+    /// when PC kills the child during a clean shutdown. We treat all of
+    /// those as Stopped so clicking "Stop" never paints the row red.
+    /// True crashes have small positive exit codes from the program
+    /// itself (Node's `exit(1)`, panic, etc.).
     pub fn portbay_status(&self) -> ProjectStatus {
         match (self.is_running, self.status.as_str(), self.has_ready_probe) {
             (false, "Pending", _) => ProjectStatus::Stopped,
             (false, "Completed", _) if self.exit_code == 0 => ProjectStatus::Stopped,
+            (false, _, _) if is_signal_exit(self.exit_code) => ProjectStatus::Stopped,
             (false, _, _) if self.exit_code != 0 && self.exit_code != -1 => ProjectStatus::Crashed,
             (false, _, _) => ProjectStatus::Stopped,
             (true, _, false) => ProjectStatus::Running,
@@ -67,6 +76,14 @@ impl Process {
             (true, _, true) => ProjectStatus::Unhealthy,
         }
     }
+}
+
+/// True when the exit code looks like a signal-induced exit on UNIX.
+/// 128..=192 covers signals 0..=64; we also accept the raw small
+/// values for SIGINT/SIGTERM/SIGKILL that some runtimes report
+/// directly (Node, Python).
+fn is_signal_exit(code: i32) -> bool {
+    matches!(code, 130 | 137 | 143) || (128..=192).contains(&code)
 }
 
 /// PortBay-side status taxonomy. Lives here instead of the registry so the

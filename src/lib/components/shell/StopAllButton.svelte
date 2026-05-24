@@ -130,14 +130,16 @@
 <svelte:window onkeydown={handleKey} />
 
 {#if state === "confirming"}
-  <div class="flex items-center gap-1.5 h-8 px-2 rounded-md border border-status-crashed/40 bg-status-crashed/10">
-    <span class="text-xs text-status-crashed pr-1">
+  <div
+    class="flex items-center gap-1.5 h-9 px-2 rounded-lg border border-status-crashed/40 bg-status-crashed/10"
+  >
+    <span class="text-[12px] text-status-crashed pr-1">
       Stop {runningCount} running?
     </span>
     <button
       type="button"
       onclick={commit}
-      class="inline-flex items-center justify-center w-6 h-6 rounded-md text-status-crashed hover:bg-status-crashed/20 transition-colors"
+      class="inline-flex items-center justify-center w-7 h-7 rounded-md text-status-crashed hover:bg-status-crashed/20 transition-colors"
       aria-label="Confirm stop all"
     >
       <Icon name="check" size={14} />
@@ -145,32 +147,48 @@
     <button
       type="button"
       onclick={cancel}
-      class="inline-flex items-center justify-center w-6 h-6 rounded-md text-fg-muted hover:bg-surface-2 transition-colors"
+      class="inline-flex items-center justify-center w-7 h-7 rounded-md text-fg-muted hover:bg-surface-2 transition-colors"
       aria-label="Cancel stop all"
     >
       <Icon name="x" size={14} />
     </button>
   </div>
 {:else}
+  <!--
+    Idle / running state — primary destructive button. The redesign
+    promotes this from the previous icon-only treatment to a filled
+    pill so it reads as a peer to the "+ Add Project" action. The
+    button stays filled even when nothing is running (just dimmed +
+    disabled) so the top bar's visual rhythm doesn't shift as
+    projects spin up.
+  -->
   <button
     type="button"
     onclick={enterConfirming}
-    disabled={state === "running"}
+    disabled={state === "running" || runningCount === 0}
     title={runningCount === 0
       ? "Nothing to stop"
       : `Stop all ${runningCount} running projects (⇧⌘.)`}
     aria-label="Stop all running projects"
-    class="inline-flex items-center justify-center w-8 h-8 rounded-md
-           text-status-crashed border border-status-crashed/30
-           hover:bg-status-crashed/10 hover:border-status-crashed/60
-           disabled:opacity-50 disabled:cursor-not-allowed
-           transition-colors"
-    class:opacity-50={runningCount === 0}
+    class="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg
+           text-[13px] font-medium tracking-tight
+           bg-status-crashed text-on-accent
+           shadow-sm hover:brightness-110 active:brightness-95
+           transition disabled:opacity-50 disabled:cursor-not-allowed
+           focus-visible:outline-none focus-visible:ring-2
+           focus-visible:ring-status-crashed/40"
   >
     {#if state === "running"}
-      <Icon name="refresh-cw" size={16} class="animate-spin" />
+      <Icon name="refresh-cw" size={13} class="animate-spin" />
+      Stopping…
     {:else}
-      <Icon name="circle-stop" size={16} />
+      <span
+        class="inline-flex items-center justify-center w-3.5 h-3.5 rounded-[3px]
+               bg-on-accent/95 text-status-crashed"
+      >
+        <Icon name="square" size={9} class="fill-current" />
+      </span>
+      Stop All
     {/if}
   </button>
 {/if}

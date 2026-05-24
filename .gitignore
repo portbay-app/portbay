@@ -16,6 +16,8 @@ dist/
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+docs-site/.vitepress/cache/
+docs-site/.vitepress/dist/
 
 # Node
 node_modules/
@@ -38,6 +40,9 @@ npm-debug.log*
 *.swp
 *.swo
 
+# Agent / local tooling state (internal, not for the public repo)
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -46,4 +51,6 @@ src-tauri/binaries/caddy-*
 src-tauri/binaries/mkcert-*
 src-tauri/binaries/mailpit-*
 src-tauri/binaries/cloudflared-*
+# Built from source by scripts/build-hosts-helper.sh, not committed.
+src-tauri/binaries/portbay-hosts-helper-*
 .playwright-mcp/

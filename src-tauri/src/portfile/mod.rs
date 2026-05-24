@@ -184,6 +184,11 @@ pub fn materialise_project(
         tags: plan.file.tags.clone(),
         document_root: plan.file.document_root.clone(),
         php_version: plan.file.php_version.clone(),
+        runtime: None,
+        // Portfile import doesn't carry a workspace binding yet — a monorepo
+        // app round-trips as a root-path project. Re-set via the add-project
+        // workspace flow if needed.
+        workspace: None,
     })
 }
 
@@ -226,6 +231,8 @@ mod tests {
             tags: vec!["client:demo".into()],
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
+            runtime: None,
+            workspace: None,
         }
     }
 

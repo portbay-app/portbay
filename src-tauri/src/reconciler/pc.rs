@@ -6,8 +6,6 @@
 //! running daemon — every YAML mutation costs one restart. This is a
 //! known upstream constraint, called out in the kanban Outcome.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use tauri::AppHandle;
@@ -44,11 +42,17 @@ pub(super) async fn reconcile(
     let mail_env = mail_env_from_state(state);
     let data_dir = data_dir_from_logs(logs_dir);
     let php_fpm_specs = php_fpm_specs_for(reg, data_dir);
-    let yaml =
-        match process_compose::config::to_yaml(reg, logs_dir, mail_env.as_ref(), &php_fpm_specs) {
-            Ok(y) => y,
-            Err(e) => return StepOutcome::failed(format!("yaml generation: {e}")),
-        };
+    let db_specs = db_daemon_specs_for(reg, data_dir);
+    let yaml = match process_compose::config::to_yaml(
+        reg,
+        logs_dir,
+        mail_env.as_ref(),
+        &php_fpm_specs,
+        &db_specs,
+    ) {
+        Ok(y) => y,
+        Err(e) => return StepOutcome::failed(format!("yaml generation: {e}")),
+    };
 
     let hash = hash_string(&yaml);
     if cache.last_applied == Some(hash) {
@@ -75,7 +79,7 @@ pub(super) async fn reconcile(
 /// after Mailpit comes up will regenerate the YAML with the
 /// injections and restart PC once.
 pub fn build_initial_yaml(reg: &Registry, logs_dir: &Path) -> Result<String, String> {
-    process_compose::config::to_yaml(reg, logs_dir, None, &[]).map_err(|e| e.to_string())
+    process_compose::config::to_yaml(reg, logs_dir, None, &[], &[]).map_err(|e| e.to_string())
 }
 
 /// The PortBay app-data directory — `<logs_dir>/..`. Used to derive
@@ -99,10 +103,13 @@ fn data_dir_from_logs(logs_dir: &Path) -> &Path {
 fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::config::PhpFpmSpec> {
     use std::collections::HashSet;
 
+    // Resolve each project's PHP version through `php_version_effective`
+    // (runtime pin first, legacy `php_version` fallback) — the same source the
+    // Caddy FastCGI route dials, so every spawned pool has a matching upstream.
     let used_versions: HashSet<String> = reg
         .list_projects()
         .iter()
-        .filter_map(|p| p.php_version.clone())
+        .filter_map(|p| p.php_version_effective().map(str::to_owned))
         .collect();
     if used_versions.is_empty() {
         return Vec::new();
@@ -150,7 +157,16 @@ fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::co
                 continue;
             }
         }
-        let pool_body = crate::php::lifecycle::render_pool_config(install, &socket_path);
+        // Per-version PortBay tuning + php.ini overrides from the registry
+        // (set via the /languages FPM and PHP tabs). Absent → defaults, which
+        // render the same pool config as before any tuning was saved.
+        let php_cfg = reg.runtimes.php.get(ver).cloned().unwrap_or_default();
+        let pool_body = crate::php::lifecycle::render_pool_config(
+            install,
+            &socket_path,
+            &php_cfg.fpm,
+            &php_cfg.ini,
+        );
         if let Err(e) = std::fs::write(&pool_path, &pool_body) {
             tracing::warn!(
                 target: "reconciler",
@@ -166,6 +182,52 @@ fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::co
             php_fpm_bin: fpm_bin,
             pool_config: pool_path,
             working_dir,
+        });
+    }
+    specs.sort_by(|a, b| a.process_id.cmp(&b.process_id));
+    specs
+}
+
+/// Build a [`DatabaseDaemonSpec`] for every database instance whose daemon
+/// binary resolves and whose data dir is initialized. `app_data` is the
+/// PortBay data dir (the parent of `logs_dir`), which is where instance
+/// data directories live.
+///
+/// Instances whose engine binary is missing, or whose data dir hasn't been
+/// provisioned, are skipped with a warning — PC would only fail to launch
+/// them, and a missing daemon shouldn't poison the whole YAML.
+fn db_daemon_specs_for(
+    reg: &Registry,
+    app_data: &Path,
+) -> Vec<process_compose::config::DatabaseDaemonSpec> {
+    let mut specs = Vec::new();
+    for inst in reg.list_databases() {
+        let Some(daemon) = crate::databases::daemon_binary(inst.engine) else {
+            tracing::warn!(
+                target: "reconciler",
+                "database `{}` ({}) skipped — daemon binary not found. Install the engine via the Databases panel.",
+                inst.id, inst.engine.label(),
+            );
+            continue;
+        };
+        let data = crate::databases::data_dir(app_data, inst.id.as_str());
+        if !crate::databases::is_initialized(inst.engine, &data) {
+            tracing::warn!(
+                target: "reconciler",
+                "database `{}` skipped — data dir {} not initialized yet.",
+                inst.id, data.display(),
+            );
+            continue;
+        }
+        let command = crate::databases::run_command(inst, &daemon, app_data);
+        let working_dir = crate::databases::instance_dir(app_data, inst.id.as_str());
+        specs.push(process_compose::config::DatabaseDaemonSpec {
+            process_id: inst.process_id(),
+            description: format!("{} {} — {}", inst.engine.label(), inst.version, inst.name),
+            command,
+            working_dir,
+            port: inst.port,
+            auto_start: inst.auto_start,
         });
     }
     specs.sort_by(|a, b| a.process_id.cmp(&b.process_id));
@@ -199,9 +261,7 @@ pub fn default_yaml_path() -> std::io::Result<PathBuf> {
 }
 
 fn hash_string(s: &str) -> u64 {
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
+    crate::util::stable_hash(s.as_bytes())
 }
 
 /// Crate-internal hash helper exposed so `Reconciler::prime_pc_cache_from_yaml`
@@ -242,6 +302,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            runtime: None,
+            workspace: None,
         }
     }
 
@@ -253,8 +315,8 @@ mod tests {
         let mut b = Registry::new("test");
         b.add_project(next_project("y", 3011)).unwrap();
         b.add_project(next_project("x", 3010)).unwrap();
-        let y_a = process_compose::config::to_yaml(&a, Path::new("/tmp"), None, &[]).unwrap();
-        let y_b = process_compose::config::to_yaml(&b, Path::new("/tmp"), None, &[]).unwrap();
+        let y_a = process_compose::config::to_yaml(&a, Path::new("/tmp"), None, &[], &[]).unwrap();
+        let y_b = process_compose::config::to_yaml(&b, Path::new("/tmp"), None, &[], &[]).unwrap();
         // YAML emit may be ordering-stable already; we don't depend on
         // that. We do depend on the hash being deterministic given a
         // string input.
@@ -269,11 +331,11 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
         let h1 = hash_string(
-            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap(),
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap(),
         );
         r.add_project(next_project("b", 3011)).unwrap();
         let h2 = hash_string(
-            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap(),
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap(),
         );
         assert_ne!(h1, h2);
     }

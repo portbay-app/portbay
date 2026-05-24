@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::process_compose::error::Result;
-use crate::registry::{Project, Readiness, Registry};
+use crate::registry::{DatabaseInstance, Project, Readiness, Registry};
 
 /// Top-level YAML document for Process Compose.
 #[derive(Debug, Serialize)]
@@ -41,6 +41,15 @@ struct PcProcess {
     working_dir: String,
 
     command: String,
+
+    /// When true, Process Compose loads the process definition but
+    /// does NOT auto-start it on boot — the user must explicitly call
+    /// /processes/start. We set this to `!project.auto_start` so the
+    /// PortBay app boots in a quiet state: projects appear in the
+    /// list, nothing runs until the user clicks Play. Without this
+    /// field, PC's default behaviour is to launch every process it
+    /// sees, which surprised users on fresh boots.
+    disabled: bool,
 
     availability: PcAvailability,
 
@@ -135,6 +144,26 @@ pub struct PhpFpmSpec {
     pub working_dir: std::path::PathBuf,
 }
 
+/// One database daemon the reconciler wants Process Compose to supervise.
+/// The `command` is fully built by `crate::databases::run_command` (binary
+/// resolved, paths quoted) so this layer stays engine-agnostic — same
+/// contract as [`PhpFpmSpec`].
+#[derive(Debug, Clone)]
+pub struct DatabaseDaemonSpec {
+    /// Stable PC process name, e.g. `db-myapp-pg`.
+    pub process_id: String,
+    /// Human description, e.g. `PostgreSQL 16 — myapp-pg`.
+    pub description: String,
+    /// Fully-built launch command.
+    pub command: String,
+    /// Directory PC `cd`s into before launching.
+    pub working_dir: std::path::PathBuf,
+    /// Listening port — drives the TCP readiness probe.
+    pub port: u16,
+    /// Honour the instance's auto_start flag.
+    pub auto_start: bool,
+}
+
 /// Build a YAML string from the registry.
 ///
 /// `logs_dir` is the directory each per-process log file is written to
@@ -145,17 +174,21 @@ pub struct PhpFpmSpec {
 /// running; pass `Some(MailpitEnv::with_smtp_port(port))` otherwise.
 ///
 /// `php_fpm_specs` adds one PC process entry per running PHP version.
-/// Passing an empty slice (the default for cold-boot / non-PHP setups)
-/// is fine; the function only emits what's requested.
+///
+/// `db_specs` adds one PC process per supervised database instance.
+/// Database connection env vars are also injected into any project the
+/// instance is linked to (read from `reg.databases`), the same way Mailpit
+/// env is injected — project-level `env` always overrides.
 pub fn to_yaml(
     reg: &Registry,
     logs_dir: &Path,
     mail_env: Option<&MailpitEnv>,
     php_fpm_specs: &[PhpFpmSpec],
+    db_specs: &[DatabaseDaemonSpec],
 ) -> Result<String> {
     let mut processes = BTreeMap::new();
     for p in &reg.projects {
-        if let Some(entry) = project_to_pc_process(p, logs_dir, mail_env) {
+        if let Some(entry) = project_to_pc_process(p, logs_dir, mail_env, &reg.databases) {
             processes.insert(p.id.to_string(), entry);
         }
     }
@@ -163,6 +196,12 @@ pub fn to_yaml(
         processes.insert(
             spec.process_id.clone(),
             php_fpm_to_pc_process(spec, logs_dir),
+        );
+    }
+    for spec in db_specs {
+        processes.insert(
+            spec.process_id.clone(),
+            db_daemon_to_pc_process(spec, logs_dir),
         );
     }
 
@@ -193,6 +232,10 @@ fn php_fpm_to_pc_process(spec: &PhpFpmSpec, logs_dir: &Path) -> PcProcess {
         description: Some(format!("PHP-FPM {}", spec.version)),
         working_dir: spec.working_dir.to_string_lossy().into_owned(),
         command,
+        // PHP-FPM pools are infrastructure — they're only ever in the
+        // PC list when at least one PHP project pins their version,
+        // and they must be running for that project to serve. Auto-start.
+        disabled: false,
         availability: PcAvailability { restart: "no" },
         readiness_probe: None,
         log_location: log_path.to_string_lossy().into_owned(),
@@ -204,14 +247,54 @@ fn php_fpm_to_pc_process(spec: &PhpFpmSpec, logs_dir: &Path) -> PcProcess {
     }
 }
 
+/// Emit a PC process for a supervised database daemon. The daemon gets a
+/// TCP readiness probe on its port so the project's readiness gate (and
+/// the GUI status pill) reflect "actually accepting connections", not
+/// merely "process spawned".
+fn db_daemon_to_pc_process(spec: &DatabaseDaemonSpec, logs_dir: &Path) -> PcProcess {
+    let log_path = logs_dir.join(format!("{}.log", spec.process_id));
+    PcProcess {
+        description: Some(spec.description.clone()),
+        working_dir: spec.working_dir.to_string_lossy().into_owned(),
+        command: spec.command.clone(),
+        disabled: !spec.auto_start,
+        availability: PcAvailability { restart: "no" },
+        readiness_probe: Some(PcReadinessProbe {
+            http_get: None,
+            tcp_socket: Some(PcTcpSocket {
+                host: "127.0.0.1",
+                port: spec.port,
+            }),
+            initial_delay_seconds: 1,
+            period_seconds: 2,
+            timeout_seconds: 5,
+            success_threshold: 1,
+            failure_threshold: 30,
+        }),
+        log_location: log_path.to_string_lossy().into_owned(),
+        environment: BTreeMap::new(),
+        shutdown: PcShutdown {
+            signal: 15,
+            timeout_seconds: 10,
+        },
+    }
+}
+
 fn project_to_pc_process(
     p: &Project,
     logs_dir: &Path,
     mail_env: Option<&MailpitEnv>,
+    databases: &[DatabaseInstance],
 ) -> Option<PcProcess> {
-    // Projects without a start_command (pure Caddy-served sites) don't
-    // produce a PC entry.
-    let command = p.start_command.clone()?;
+    // The command to launch. An explicit `start_command` always wins. Failing
+    // that, a monorepo project derives a workspace-filtered command from its
+    // `workspace` binding (e.g. `pnpm --filter @app/web dev`) so it runs one
+    // app from the repo root instead of fanning out. A project with neither
+    // (a pure Caddy-served site) produces no PC entry.
+    let command = match &p.start_command {
+        Some(cmd) => cmd.clone(),
+        None => p.workspace.as_ref().map(|ws| ws.derive_dev_command())?,
+    };
 
     let log_path = logs_dir.join(format!("{}.log", p.id));
     let readiness_probe = p
@@ -229,6 +312,18 @@ fn project_to_pc_process(
         environment.insert("MAIL_MAILER".into(), "smtp".into());
         environment.insert("MAIL_ENCRYPTION".into(), "null".into());
     }
+    // Inject connection env for any database instance linked to this
+    // project. If multiple instances link the same project, the last one
+    // wins for the shared keys (DATABASE_URL, DB_*) — the per-instance
+    // values are still reachable, but a project should normally bind one
+    // primary database. Project-level env (below) overrides everything.
+    for db in databases {
+        if db.linked_projects.iter().any(|pid| pid == &p.id) {
+            for (k, v) in db.connection_env() {
+                environment.insert(k, v);
+            }
+        }
+    }
     for (k, v) in &p.env {
         environment.insert(k.clone(), v.clone());
     }
@@ -237,6 +332,12 @@ fn project_to_pc_process(
         description: Some(p.name.clone()),
         working_dir: p.path.to_string_lossy().into_owned(),
         command,
+        // Honour the registry's `auto_start` flag literally: when the
+        // user hasn't opted in, the process exists in PC's list but
+        // is dormant until they click Play. Defaults to false so a
+        // fresh app boot is quiet — projects show up but nothing
+        // runs.
+        disabled: !p.auto_start,
         availability: PcAvailability { restart: "no" },
         readiness_probe,
         log_location: log_path.to_string_lossy().into_owned(),
@@ -269,7 +370,7 @@ fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadiness
                 success_threshold: 1,
                 // Failure threshold expressed in probe periods, derived
                 // from the user's timeout. 75s / 2s ≈ 38 attempts.
-                failure_threshold: ((timeout_seconds / 2).max(5)).min(120),
+                failure_threshold: (timeout_seconds / 2).clamp(5, 120),
             })
         }
         Readiness::Tcp { timeout_seconds } => {
@@ -284,7 +385,7 @@ fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadiness
                 period_seconds: 2,
                 timeout_seconds: 5,
                 success_threshold: 1,
-                failure_threshold: ((timeout_seconds / 2).max(5)).min(120),
+                failure_threshold: (timeout_seconds / 2).clamp(5, 120),
             })
         }
         Readiness::Process => None,
@@ -318,6 +419,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            runtime: None,
+            workspace: None,
         }
     }
 
@@ -339,13 +442,15 @@ mod tests {
             tags: vec![],
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
+            runtime: None,
+            workspace: None,
         }
     }
 
     #[test]
     fn empty_registry_produces_minimal_yaml() {
         let r = Registry::new("test");
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
         assert!(yaml.contains("version: '0.5'") || yaml.contains("version: \"0.5\""));
         assert!(yaml.contains("processes: {}"));
     }
@@ -354,7 +459,7 @@ mod tests {
     fn next_project_produces_process_with_http_probe() {
         let mut r = Registry::new("test");
         r.add_project(next_project("marketing-site", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[]).unwrap();
         assert!(
             yaml.contains("marketing-site"),
             "process name missing: {yaml}"
@@ -380,9 +485,33 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(php_project("api-gateway")).unwrap();
         r.add_project(next_project("marketing-site", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
         assert!(!yaml.contains("api-gateway"));
         assert!(yaml.contains("marketing-site"));
+    }
+
+    #[test]
+    fn workspace_project_without_start_command_derives_filtered_command() {
+        use crate::registry::{Workspace, WorkspaceTool};
+        // A monorepo app pinned by workspace filter, no explicit start_command:
+        // the PC entry should run the filtered dev command from the repo root.
+        let mut p = next_project("bookslash-web", 3000);
+        p.start_command = None;
+        p.path = PathBuf::from("/repos/BookSlash");
+        p.workspace = Some(Workspace {
+            package: "@bookslash/web".into(),
+            rel_dir: "apps/web".into(),
+            tool: WorkspaceTool::Pnpm,
+        });
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
+        assert!(
+            yaml.contains("pnpm --filter @bookslash/web dev"),
+            "expected the derived filter command in:\n{yaml}"
+        );
+        // working_dir stays the monorepo root, not the sub-app dir.
+        assert!(yaml.contains("/repos/BookSlash"));
     }
 
     #[test]
@@ -392,7 +521,7 @@ mod tests {
         p.env.insert("NODE_ENV".into(), "development".into());
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
         assert!(yaml.contains("DATABASE_URL"));
         assert!(yaml.contains("postgres://x"));
         assert!(yaml.contains("NODE_ENV"));
@@ -403,7 +532,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("withmail", 3010)).unwrap();
         let mail = MailpitEnv::with_smtp_port(1025);
-        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[]).unwrap();
         assert!(yaml.contains("MAIL_HOST: 127.0.0.1"));
         assert!(yaml.contains("MAIL_PORT: '1025'") || yaml.contains("MAIL_PORT: \"1025\""));
         assert!(yaml.contains("MAIL_MAILER: smtp"));
@@ -418,7 +547,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
         let mail = MailpitEnv::with_smtp_port(1025);
-        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[]).unwrap();
         // Project's explicit override wins; the default loopback is gone.
         assert!(yaml.contains("MAIL_HOST: mail.production.test"));
         assert!(!yaml.contains("MAIL_HOST: 127.0.0.1"));
@@ -428,7 +557,7 @@ mod tests {
     fn no_mail_env_leaves_yaml_without_mail_vars() {
         let mut r = Registry::new("test");
         r.add_project(next_project("nomail", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
         assert!(!yaml.contains("MAIL_HOST"));
         assert!(!yaml.contains("MAIL_PORT"));
     }
@@ -439,7 +568,7 @@ mod tests {
         p.readiness = Some(Readiness::Process);
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
         assert!(!yaml.contains("readiness_probe"));
     }
 
@@ -448,7 +577,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
         r.add_project(next_project("b", 3011)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
         let back: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         // Just confirm structural validity — content was checked above.
         assert!(back.get("processes").is_some());
@@ -475,7 +604,7 @@ mod tests {
                 working_dir: PathBuf::from("/tmp/portbay/php/7.4"),
             },
         ];
-        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &specs).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &specs, &[]).unwrap();
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         let procs = &doc["processes"];
 
@@ -512,7 +641,7 @@ mod tests {
             pool_config: PathBuf::from("/x/conf"),
             working_dir: PathBuf::from("/x"),
         };
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[spec]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[spec], &[]).unwrap();
         // The spec inserts AFTER the project loop, so it overwrites —
         // documenting that here. If we later want the project to win,
         // swap the iteration order.

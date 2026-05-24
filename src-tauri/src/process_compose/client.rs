@@ -200,10 +200,9 @@ mod tests {
     #[tokio::test]
     async fn processes_returns_at_least_zero() {
         let c = PcClient::new(9999);
-        let list = c.processes().await.unwrap();
         // Just confirms the round-trip parses; concrete content depends on
-        // what the user has loaded.
-        assert!(list.len() >= 0);
+        // what the user has loaded. The `.unwrap()` is the assertion.
+        let _list = c.processes().await.unwrap();
     }
 
     #[test]

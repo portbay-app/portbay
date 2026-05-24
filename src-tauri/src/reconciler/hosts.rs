@@ -7,11 +7,10 @@
 //! system without the privileged helper installed, the 30 s safety tick
 //! does not spam sudo prompts forever.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::net::Ipv4Addr;
 
 use crate::hosts::{HostsError, HostsManager};
+use crate::hosts_helper::HostsHelperClient;
 use crate::reconciler::report::StepOutcome;
 use crate::registry::Registry;
 
@@ -28,19 +27,49 @@ pub(super) struct HostsCache {
     last_perm_denied: Option<u64>,
 }
 
-pub(super) fn reconcile(
-    reg: &Registry,
-    cache: &mut HostsCache,
-    dns_routing_active: bool,
-) -> StepOutcome {
-    if dns_routing_active {
-        // dnsmasq + /etc/resolver/<suffix> is doing the routing.
-        // /etc/hosts is redundant; skip with a clear reason and leave
-        // the existing block alone (the user can remove it via the
-        // "Clean up old hosts entries" flow if they want).
-        return StepOutcome::skipped("dnsmasq resolver-file is installed; /etc/hosts not needed");
+pub(super) fn reconcile(reg: &Registry, cache: &mut HostsCache) -> StepOutcome {
+    // Prefer PortBay's own privileged helper (a root LaunchDaemon) so the
+    // GUI can write /etc/hosts without a per-write sudo prompt and without
+    // depending on any third-party tool. Fall back to a direct write when
+    // the helper isn't installed (e.g. the user is running as root, or
+    // hasn't installed it yet) so behaviour degrades rather than breaks.
+    let helper = HostsHelperClient::system();
+    if helper.is_available() {
+        if let Some(outcome) = reconcile_via_helper(reg, cache, &helper) {
+            return outcome;
+        }
+        // Helper present but the request failed — fall through to a direct
+        // attempt so a transient helper error doesn't strand the hosts file.
     }
     reconcile_with(reg, cache, &HostsManager::system())
+}
+
+/// Apply the expected pairs through the privileged helper. Returns `None` if
+/// the helper call failed (so the caller can fall back to a direct write);
+/// `Some(outcome)` when the helper handled it (applied or skipped-unchanged).
+fn reconcile_via_helper(
+    reg: &Registry,
+    cache: &mut HostsCache,
+    helper: &HostsHelperClient,
+) -> Option<StepOutcome> {
+    let pairs = expected_pairs(reg);
+    let hash = hash_pairs(&pairs);
+
+    if cache.last_applied == Some(hash) {
+        return Some(StepOutcome::skipped("unchanged"));
+    }
+
+    match helper.replace_all(pairs.iter().cloned(), &reg.domain_suffix) {
+        Ok(()) => {
+            cache.last_applied = Some(hash);
+            cache.last_perm_denied = None;
+            Some(StepOutcome::applied(format!(
+                "{} hostname(s) via privileged helper",
+                pairs.len()
+            )))
+        }
+        Err(_) => None,
+    }
 }
 
 /// Same as [`reconcile`] but with an injectable manager — used by tests
@@ -92,9 +121,16 @@ fn expected_pairs(reg: &Registry) -> Vec<(String, Ipv4Addr)> {
 }
 
 fn hash_pairs(pairs: &[(String, Ipv4Addr)]) -> u64 {
-    let mut h = DefaultHasher::new();
-    pairs.hash(&mut h);
-    h.finish()
+    // Canonical, order-preserving byte encoding so the cache key is stable
+    // across Rust toolchains (DefaultHasher's algorithm is not guaranteed to be).
+    let mut buf = String::new();
+    for (host, ip) in pairs {
+        buf.push_str(host);
+        buf.push('=');
+        buf.push_str(&ip.to_string());
+        buf.push('\n');
+    }
+    crate::util::stable_hash(buf.as_bytes())
 }
 
 #[cfg(test)]
@@ -122,6 +158,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            runtime: None,
+            workspace: None,
         }
     }
 

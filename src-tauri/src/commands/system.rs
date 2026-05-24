@@ -3,7 +3,7 @@
 //! `doctor` mirrors the CLI's `cmd_doctor` JSON output shape so the GUI
 //! and CLI report the same findings to the same support requests.
 
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::commands::dto::{DoctorFinding, DoctorReport, DoctorVerdict};
 use crate::commands::projects::load_registry;
@@ -214,6 +214,19 @@ pub(crate) fn parse_dotenv(text: &str) -> Vec<(String, String)> {
         out.push((key.to_string(), value));
     }
     out
+}
+
+/// `quit_app` — explicit "Quit PortBay" from the user menu.
+///
+/// Mirrors the tray's quit path (`app.exit(0)`) so window-close-to-tray
+/// stays separate from a true exit. The Rust window-close handler is
+/// responsible for the menu-bar-hint toast, not this command — calling
+/// `exit(0)` bypasses that hint, which is the right behaviour for an
+/// explicit quit from the user menu.
+#[tauri::command]
+pub async fn quit_app(app: AppHandle) -> AppResult<()> {
+    app.exit(0);
+    Ok(())
 }
 
 /// `tail_logs(id, limit, offset)` — static log tail from PC's buffer.

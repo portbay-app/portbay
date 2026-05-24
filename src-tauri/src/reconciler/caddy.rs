@@ -8,9 +8,7 @@
 //! a future optimisation card if measurement shows full-load latency
 //! becomes a problem (sub-100 ms in the spike at <50 routes).
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use crate::caddy::{
@@ -52,13 +50,21 @@ pub(super) async fn reconcile(
         .expect("caddy mutex poisoned")
         .admin_port();
     let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
+    // Plain-HTTP projects are served on the standard :80. PortBay must own it
+    // (no other local web server can be holding it).
+    let http_port = 80;
 
     // PHP FastCGI sockets live under `<data_dir>/php/<version>/...`.
     // The pc sub-reconciler writes the same path; both must agree.
     let php_socket_dir = logs_dir.parent().unwrap_or(logs_dir).join("php");
-    let cfg = match build_config(reg, admin_port, https_port, &php_socket_dir, |id| {
-        cert_lookup.get(id).cloned()
-    }) {
+    let cfg = match build_config(
+        reg,
+        admin_port,
+        http_port,
+        https_port,
+        &php_socket_dir,
+        |id| cert_lookup.get(id).cloned(),
+    ) {
         Ok(c) => c,
         Err(e) => return StepOutcome::failed(format!("build config: {e}")),
     };
@@ -78,14 +84,14 @@ pub(super) async fn reconcile(
     }
 
     cache.last_applied = Some(hash);
-    let routes = reg.list_projects().iter().filter(|p| p.https).count();
-    StepOutcome::applied(format!("{routes} https route(s) loaded"))
+    let projects = reg.list_projects();
+    let https = projects.iter().filter(|p| p.https).count();
+    let http = projects.len() - https;
+    StepOutcome::applied(format!("{https} https + {http} http route(s) loaded"))
 }
 
 fn hash_bytes(b: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    b.hash(&mut h);
-    h.finish()
+    crate::util::stable_hash(b)
 }
 
 #[cfg(test)]
@@ -114,11 +120,13 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            runtime: None,
+            workspace: None,
         }
     }
 
     fn hash_of(reg: &Registry, lookup: &HashMap<String, CertPaths>) -> u64 {
-        let cfg = build_config(reg, 2019, 8443, Path::new("/tmp/portbay-php"), |id| {
+        let cfg = build_config(reg, 2019, 80, 8443, Path::new("/tmp/portbay-php"), |id| {
             lookup.get(id).cloned()
         })
         .unwrap();
@@ -152,7 +160,6 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010, true)).unwrap();
         let h_https = hash_of(&r, &HashMap::new());
-        r.list_projects(); // borrow-checker placeholder; replace project below
         let mut r2 = Registry::new("test");
         r2.add_project(next_project("a", 3010, false)).unwrap();
         let h_http = hash_of(&r2, &HashMap::new());

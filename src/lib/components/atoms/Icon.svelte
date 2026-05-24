@@ -45,7 +45,23 @@
     | "file-code"
     | "rocket"
     | "sparkles"
-    | "arrow-right";
+    | "arrow-right"
+    | "bell"
+    | "sun"
+    | "moon"
+    | "more-horizontal"
+    | "lock"
+    | "users"
+    | "activity"
+    | "layers"
+    | "list"
+    | "grid-2x2"
+    | "chevrons-up-down"
+    | "chevron-up"
+    | "log-out"
+    | "database"
+    | "cloud"
+    | "eye";
 </script>
 
 <script lang="ts">
@@ -82,6 +98,22 @@
     Rocket,
     Sparkles,
     ArrowRight,
+    Bell,
+    Sun,
+    Moon,
+    MoreHorizontal,
+    Lock,
+    Users,
+    Activity,
+    Layers,
+    List,
+    Grid2x2,
+    ChevronsUpDown,
+    ChevronUp,
+    LogOut,
+    Database,
+    Cloud,
+    Eye,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -133,6 +165,22 @@
     rocket: Rocket,
     sparkles: Sparkles,
     "arrow-right": ArrowRight,
+    bell: Bell,
+    sun: Sun,
+    moon: Moon,
+    "more-horizontal": MoreHorizontal,
+    lock: Lock,
+    users: Users,
+    activity: Activity,
+    layers: Layers,
+    list: List,
+    "grid-2x2": Grid2x2,
+    "chevrons-up-down": ChevronsUpDown,
+    "chevron-up": ChevronUp,
+    "log-out": LogOut,
+    database: Database,
+    cloud: Cloud,
+    eye: Eye,
   };
 
   const Component = $derived(iconMap[name]);

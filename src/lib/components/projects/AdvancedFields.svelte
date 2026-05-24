@@ -15,8 +15,8 @@
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
-  import { php } from "$lib/stores/php.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { runtimes } from "$lib/stores/runtimes.svelte";
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView } from "$lib/types/projects";
 
@@ -37,7 +37,7 @@
   const KNOWN_PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"];
 
   onMount(() => {
-    void php.refresh();
+    void runtimes.refresh();
   });
 
   // ────────── Tags ──────────
@@ -182,6 +182,7 @@
         whatHappened: `${project.name} updated.`,
         whyItMatters: "Restart the project for changes to take effect.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
     } catch (e) {
@@ -366,7 +367,7 @@
         <div class="flex flex-wrap gap-1.5 items-center">
           {#each KNOWN_PHP_VERSIONS as v (v)}
             {@const on = phpVersionDraft === v}
-            {@const installed = php.isInstalled(v)}
+            {@const installed = runtimes.isInstalled("php", v)}
             <button
               type="button"
               onclick={() => (phpVersionDraft = v)}
@@ -398,12 +399,12 @@
                    focus:border-accent/60 outline-none w-24 font-mono"
           />
         </div>
-        {#if phpVersionDraft && !php.isInstalled(phpVersionDraft)}
+        {#if phpVersionDraft && !runtimes.isInstalled("php", phpVersionDraft)}
           <span></span>
           <p class="text-[11px] text-status-unhealthy">
             PHP {phpVersionDraft} isn't installed. Run
             <code class="font-mono">brew install php@{phpVersionDraft}</code>
-            then re-detect from the PHP panel.
+            then re-detect from the Languages panel.
           </p>
         {/if}
       </div>
@@ -411,6 +412,24 @@
         Document root is the subfolder Caddy serves (typically
         <code>public</code> for Laravel). PHP version selects which PHP-FPM
         binary handles requests.
+      </p>
+    </section>
+  {/if}
+
+  {#if project.workspace}
+    <section class="space-y-2">
+      <span class="text-xs uppercase tracking-wide text-fg-subtle">Monorepo</span>
+      <div class="grid grid-cols-[110px,1fr] gap-x-3 gap-y-1 text-xs">
+        <span class="text-fg-subtle">Package</span>
+        <span class="font-mono text-fg-muted break-all">{project.workspace.package}</span>
+        <span class="text-fg-subtle">App dir</span>
+        <span class="font-mono text-fg-muted break-all">{project.workspace.relDir}</span>
+        <span class="text-fg-subtle">Filter</span>
+        <span class="font-mono text-fg-muted">{project.workspace.tool}</span>
+      </div>
+      <p class="text-[10px] text-fg-subtle">
+        Runs one app of a monorepo from the repo root via a workspace filter.
+        Set when the project is added; remove and re-add to change it.
       </p>
     </section>
   {/if}

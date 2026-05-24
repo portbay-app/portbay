@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "PortBay",
         "width": 1240,
         "height": 800,
@@ -19,15 +20,30 @@
         "minHeight": 560,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
+      },
+      {
+        "label": "tray-panel",
+        "url": "/tray-panel",
+        "width": 360,
+        "height": 480,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "focus": false,
+        "acceptFirstMouse": true,
+        "shadow": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "app",
+    "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -40,10 +56,13 @@
       "binaries/caddy",
       "binaries/mkcert",
       "binaries/mailpit",
-      "binaries/cloudflared"
+      "binaries/cloudflared",
+      "binaries/dnsmasq",
+      "binaries/portbay-hosts-helper"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "${APPLE_SIGNING_IDENTITY}"
     }
   }
 }

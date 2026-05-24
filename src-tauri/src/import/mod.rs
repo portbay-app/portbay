@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 
 pub use error::{ImportError, Result};
 
+use crate::registry::ProjectType;
+
 /// Stable identifier for each known source tool. Surface in the GUI and
 /// in the registry's `tags` on imported projects (`source:herd` etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +65,14 @@ pub struct ImportedSite {
     pub php_version: Option<String>,
     /// True if the source tool serves this site over HTTPS.
     pub https: bool,
+    /// Document root relative to `path`, when the source serves files out of a
+    /// sub-directory (e.g. `public` for a Laravel/PHP front-controller app).
+    /// `None` when the project is served straight from `path`.
+    pub document_root: Option<String>,
+    /// Project type the source clearly implies (e.g. PHP for an FPM vhost,
+    /// Static for a plain file-server vhost). `None` lets the import command
+    /// fall back to its php-version heuristic.
+    pub kind_hint: Option<ProjectType>,
     /// Suggested project id derived from the path's final component.
     pub suggested_id: String,
     /// Suggested project name (human-readable; falls back to id).
@@ -86,6 +96,8 @@ impl ImportedSite {
             hostname,
             php_version,
             https,
+            document_root: None,
+            kind_hint: None,
         }
     }
 }

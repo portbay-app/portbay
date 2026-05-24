@@ -2,24 +2,34 @@
 
 pub mod caddy;
 pub mod commands;
+pub mod databases;
 pub mod dnsmasq;
+pub mod domain;
 pub mod error;
 pub mod hosts;
+pub mod hosts_helper;
 pub mod import;
 pub mod mailpit;
 pub mod mkcert;
 pub mod php;
+pub mod port_holder;
 pub mod portfile;
+pub mod preferences;
 pub mod process_compose;
 pub mod reconciler;
 pub mod registry;
+pub mod runtimes;
+pub mod smoke;
 pub mod state;
+pub mod telemetry;
+pub mod tray;
 pub mod tunnel;
+pub mod util;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::mkcert::Mkcert;
 use crate::reconciler::Reconciler;
@@ -28,7 +38,9 @@ use crate::state::AppState;
 
 /// Domain suffix used when the registry doesn't yet exist on disk.
 /// Matches the CLI's default (`bin/portbay.rs::CliContext::load_registry`).
-const DEFAULT_DOMAIN_SUFFIX: &str = "test";
+/// Branded `portbay.test`, so a fresh install's projects resolve at
+/// `<project>.portbay.test`. `.test` is RFC 6761-reserved for local use.
+const DEFAULT_DOMAIN_SUFFIX: &str = "portbay.test";
 
 /// Cadence for the reconcile loop's safety tick. Most ticks fire on the
 /// dirty-notify channel from CRUD commands; this is the fallback that
@@ -108,6 +120,15 @@ fn resolve_logs_dir() -> std::io::Result<PathBuf> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
+    telemetry::install_panic_hook(env!("CARGO_PKG_VERSION"));
+
+    // Merge the user's login-shell PATH into the process environment
+    // before *anything* else spawns. GUI launches on macOS inherit a
+    // minimal PATH (no shell rc files run), so brew/asdf/mise/nvm
+    // installs are invisible until we ask the user's shell for its
+    // actual PATH. Must run before sidecar boot (which spawns
+    // process-compose) and before runtime detection.
+    crate::runtimes::env::bootstrap_user_env();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -124,18 +145,41 @@ pub fn run() {
             let logs_dir = resolve_logs_dir().map_err(boxed)?;
             let yaml_path = reconciler::default_yaml_path().map_err(boxed)?;
 
+            // First run = the registry file doesn't exist yet. Detect it
+            // before the load (which would create an in-memory default).
+            let first_run = !registry_path.exists();
+
             // Build the initial PC YAML from the registry so PC boots
             // against the real config rather than the deleted bootstrap
             // placeholder. Empty registry → empty `processes: {}`, PC
             // starts and waits.
-            let initial_registry =
+            let mut initial_registry =
                 store::load_or_default(&registry_path, DEFAULT_DOMAIN_SUFFIX).map_err(boxed)?;
+
+            // On a brand-new install, seed the "PortBay smoke" canary so the
+            // user can press Play once and confirm DNS → Caddy → file serving
+            // all work, before wiring up a real project. Persist it so it
+            // shows up like any other project.
+            if first_run {
+                match crate::smoke::seed_if_absent(&mut initial_registry) {
+                    Ok(true) => {
+                        if let Err(e) = store::save_to(&initial_registry, &registry_path) {
+                            tracing::warn!(error = %e, "failed to persist seeded smoke canary");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(error = %e, "smoke canary scaffold failed"),
+                }
+            }
+            // Materialise the canary's files on every boot so it survives a
+            // /tmp wipe or a deleted site dir. Cheap + idempotent.
+            crate::smoke::ensure_site_files(&initial_registry);
             let initial_yaml =
                 reconciler::build_initial_yaml(&initial_registry, &logs_dir).map_err(boxed)?;
             std::fs::write(&yaml_path, &initial_yaml).map_err(boxed)?;
 
             // Resolve mkcert; None is a tolerable degraded state.
-            let mkcert_binary = resolve_mkcert_binary(&app.handle());
+            let mkcert_binary = resolve_mkcert_binary(app.handle());
             let mkcert = mkcert_binary
                 .as_ref()
                 .and_then(|p| Mkcert::default_in_data_dir(p.clone()));
@@ -144,7 +188,10 @@ pub fn run() {
 
             app.manage(AppState::new(
                 registry_path,
-                DEFAULT_DOMAIN_SUFFIX,
+                // Seed the first-run fallback from the registry we just
+                // loaded so `state.domain_suffix` reflects on-disk reality
+                // rather than the compiled-in default.
+                initial_registry.domain_suffix.clone(),
                 logs_dir,
                 mkcert,
                 reconciler,
@@ -157,7 +204,27 @@ pub fn run() {
             // readiness) so we drive it with a block_on; the wait is
             // bounded by `CADDY_READINESS_TIMEOUT`.
             let state: tauri::State<AppState> = app.state();
-            state.boot_pc(&app.handle(), &yaml_path).map_err(boxed)?;
+
+            // Reap any process-compose left over from a previous run before we
+            // boot our own. A crash or force-quit can orphan PC (and the dev
+            // servers it supervised) to launchd; on a clean boot none of ours
+            // should be running yet, so anything carrying our config path is
+            // stale. Without this, stale instances accumulate across sessions
+            // and squat on the PC admin port. SIGTERM-shutdown on quit handles
+            // the prevent-leak half; this is the recover-on-boot half.
+            let reaped = process_compose::lifecycle::sweep_stale(
+                &yaml_path,
+                None,
+                process_compose::lifecycle::SweepMode::All,
+            );
+            if reaped > 0 {
+                tracing::info!(
+                    count = reaped,
+                    "reaped stale process-compose instances at boot"
+                );
+            }
+
+            state.boot_pc(app.handle(), &yaml_path).map_err(boxed)?;
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::block_on(async {
@@ -171,7 +238,7 @@ pub fn run() {
             // noise — no production queries route through it yet — so
             // a binary-missing or spawn failure is logged but does
             // not block startup.
-            if let Err(e) = state.boot_dnsmasq(&app.handle()) {
+            if let Err(e) = state.boot_dnsmasq(app.handle()) {
                 tracing::warn!(error = %e, "dnsmasq sidecar did not start");
             }
 
@@ -179,7 +246,7 @@ pub fn run() {
             // dnsmasq: useful for catching outgoing SMTP from local
             // projects, but not on the critical path of any other
             // sidecar.
-            if let Err(e) = state.boot_mailpit(&app.handle()) {
+            if let Err(e) = state.boot_mailpit(app.handle()) {
                 tracing::warn!(error = %e, "mailpit sidecar did not start");
             }
 
@@ -210,22 +277,79 @@ pub fn run() {
             // lifetime of the app.
             commands::events::spawn_status_poller(app.handle().clone());
             commands::metrics::spawn_metrics_poller(app.handle().clone());
+
+            // Background build-artifact auto-clean. No-op unless the user opted
+            // into a weekly/monthly cadence in Settings; the cadence gate lives
+            // inside the scheduler.
+            commands::artifacts::spawn_auto_clean_scheduler(app.handle().clone());
+
+            // Install the menu-bar tray if the user hasn't disabled it.
+            // Failures degrade gracefully — the dashboard still works
+            // without a tray — so a tray-install error is warn-logged
+            // rather than treated as a setup failure.
+            let prefs = {
+                let state: tauri::State<AppState> = app.state();
+                state.preferences_snapshot()
+            };
+            if prefs.show_tray_icon {
+                if let Err(e) = crate::tray::install(app.handle()) {
+                    tracing::warn!(error = %e, "menu-bar tray failed to initialise");
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                let state: tauri::State<AppState> = window.state();
-                state.shutdown_pc();
-                state.shutdown_caddy();
-                state.shutdown_dnsmasq();
-                state.shutdown_mailpit();
-                // Drop every live tunnel so cloudflared children
-                // don't outlive the window. The Drop impl on
-                // TunnelManager handles the kill loop.
-                {
-                    let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned");
-                    *tunnels = crate::tunnel::TunnelManager::new();
+            let label = window.label();
+
+            // Tray popover: hide on blur so a click outside dismisses
+            // the panel (sticky-popover behaviour macOS users expect).
+            // Other events on this window are ignored — its close/quit
+            // semantics never reach the user (it's frameless + hidden).
+            if label == crate::tray::PANEL_WINDOW_LABEL {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    let _ = window.hide();
                 }
+                return;
+            }
+
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // "Close to menu bar" semantics: when the toggle is on
+                    // and the tray is installed, intercept the window's
+                    // close and hide it instead of letting Tauri tear it
+                    // down. The tray stays the user's escape hatch — Quit
+                    // from there fires `app.exit(0)` which destroys the
+                    // window for real and triggers the shutdown sweep.
+                    let state: tauri::State<AppState> = window.state();
+                    let prefs = state.preferences_snapshot();
+                    if prefs.close_to_menu_bar && prefs.show_tray_icon {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        // First-run hint: tell the user the app is still
+                        // alive in the menu bar. The frontend marks the
+                        // flag persistently once the toast is acknowledged.
+                        if !prefs.close_to_menu_bar_toast_seen {
+                            let _ = window
+                                .app_handle()
+                                .emit(crate::tray::CLOSE_TOAST_CHANNEL, ());
+                        }
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    let state: tauri::State<AppState> = window.state();
+                    state.shutdown_pc();
+                    state.shutdown_caddy();
+                    state.shutdown_dnsmasq();
+                    state.shutdown_mailpit();
+                    // Drop every live tunnel so cloudflared children
+                    // don't outlive the window. The Drop impl on
+                    // TunnelManager handles the kill loop.
+                    {
+                        let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned");
+                        *tunnels = crate::tunnel::TunnelManager::new();
+                    }
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -235,12 +359,14 @@ pub fn run() {
             commands::projects::update_project,
             commands::projects::remove_project,
             commands::projects::detect_project,
+            commands::projects::detect_workspace_apps,
             commands::projects::validate_project_folder,
             commands::lifecycle::start_project,
             commands::lifecycle::stop_project,
             commands::lifecycle::restart_project,
             commands::lifecycle::stop_all,
             commands::lifecycle::open_project,
+            commands::lifecycle::preview_port_conflict,
             commands::integrations::installed_dev_tools,
             commands::integrations::open_in_ide,
             commands::sidecars::sidecar_status,
@@ -254,6 +380,11 @@ pub fn run() {
             commands::system::doctor,
             commands::system::tail_logs,
             commands::system::read_dotenv,
+            commands::dbconn::project_db_connections,
+            commands::artifacts::scan_artifacts,
+            commands::artifacts::clean_artifact,
+            commands::artifacts::clean_all_artifacts,
+            commands::system::quit_app,
             commands::log_stream::subscribe_logs,
             commands::import::detect_sources,
             commands::import::preview_import,
@@ -266,6 +397,13 @@ pub fn run() {
             commands::dnsmasq::dnsmasq_install_resolver,
             commands::dnsmasq::dnsmasq_uninstall_resolver,
             commands::dnsmasq::restart_dnsmasq,
+            commands::dnsmasq::get_dnsmasq_settings,
+            commands::dnsmasq::set_dnsmasq_settings,
+            commands::dnsmasq::list_dns_records,
+            commands::dnsmasq::list_managed_hosts,
+            commands::dnsmasq::dns_preflight,
+            commands::dnsmasq::install_privileged_helper,
+            commands::dnsmasq::setup_local_dns,
             commands::tunnel::start_tunnel,
             commands::tunnel::stop_tunnel,
             commands::tunnel::list_tunnels,
@@ -281,9 +419,38 @@ pub fn run() {
             commands::groups::start_group,
             commands::groups::stop_group,
             commands::groups::restart_group,
-            commands::php::list_php_installs,
-            commands::php::set_xdebug_mode,
+            commands::projects::set_xdebug_mode,
             commands::metrics::system_metrics,
+            commands::preferences::get_preferences,
+            commands::preferences::set_preferences,
+            commands::preferences::get_domain_settings,
+            commands::preferences::update_domain_suffix,
+            commands::preferences::mark_close_toast_seen,
+            commands::runtimes::list_runtimes,
+            commands::runtimes::add_runtime_by_path,
+            commands::runtimes::remove_runtime_path,
+            commands::runtimes::set_default_runtime,
+            commands::runtimes::update_runtime_config,
+            commands::runtimes::install_runtime,
+            commands::databases::list_database_engines,
+            commands::databases::install_database_engine,
+            commands::databases::list_database_instances,
+            commands::databases::create_database_instance,
+            commands::databases::remove_database_instance,
+            commands::databases::start_database_instance,
+            commands::databases::stop_database_instance,
+            commands::databases::restart_database_instance,
+            commands::databases::link_database_to_project,
+            commands::databases::unlink_database_from_project,
+            commands::databases::set_database_auto_start,
+            commands::databases::open_database_client,
+            commands::telemetry::telemetry_settings,
+            commands::telemetry::list_crash_reports,
+            commands::telemetry::read_crash_report,
+            commands::telemetry::discard_crash_report,
+            commands::telemetry::send_crash_report,
+            commands::telemetry::record_js_error,
+            commands::telemetry::record_telemetry_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

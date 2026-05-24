@@ -6,6 +6,8 @@
  * (`P2 — Error envelope renderer`). The type lives here so other modules
  * can be wired against it from day one.
  */
+export type Severity = "success" | "info" | "warning" | "error";
+
 export interface CommandError {
   code: string;
   whatHappened: string;
@@ -15,6 +17,11 @@ export interface CommandError {
   /** Optional inner detail (stack trace, error chain) for the "Show details"
       expander. Rust side may omit this. */
   details?: string;
+  /** Optional severity override. When unset, falls back to mapping by
+      `whoCausedIt` (user → warning, system → error) so existing call
+      sites keep their previous look. Set explicitly for informational /
+      success notifications so the toast doesn't read as a failure. */
+  severity?: Severity;
 }
 
 export interface ErrorAction {

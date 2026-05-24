@@ -25,7 +25,7 @@
 //!   the task exits cleanly and the pool thread is released.
 
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tauri::ipc::Channel;
@@ -60,7 +60,40 @@ pub fn subscribe_logs(
 ) -> AppResult<()> {
     let log_path = state.logs_dir.join(format!("{id}.log"));
 
-    tokio::task::spawn_blocking(move || tail_into(&log_path, &on_line));
+    // Tauri runs sync commands on its own worker pool, *not* on the
+    // tokio runtime. Calling `tokio::task::spawn_blocking` from
+    // there panics with "no reactor running" — which is what crashed
+    // the app the first time the user clicked Follow. Use Tauri's
+    // own helper, which dispatches against the runtime Tauri
+    // manages internally for us.
+    //
+    // The catch_unwind below is defence-in-depth: it caught nothing
+    // before because the panic was in *this line*, not inside the
+    // closure. Now that the closure can actually start, the unwind
+    // armor protects everything tail_into does.
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tail_into(&log_path, &on_line);
+        }));
+        if let Err(payload) = result {
+            // The panic payload is usually a &str or String. Pull the
+            // message out for the log entry; never re-panic.
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "(non-string panic payload)".to_string());
+            tracing::error!(
+                project_id = %id,
+                error = %msg,
+                "subscribe_logs tail thread panicked — subscription ended",
+            );
+            // Try to notify the frontend so the UI can clear its
+            // follow state, but ignore failure (the channel may
+            // already be torn down).
+            let _ = on_line.send(format!("--- log stream ended ({msg}) ---"));
+        }
+    });
 
     Ok(())
 }
@@ -127,7 +160,7 @@ fn tail_into(path: &PathBuf, on_line: &Channel<String>) {
 
 /// Block until the log file appears or `FILE_WAIT_TIMEOUT` elapses.
 /// Returns `false` on timeout (caller exits silently).
-fn wait_for_file(path: &PathBuf, on_line: &Channel<String>) -> bool {
+fn wait_for_file(path: &Path, on_line: &Channel<String>) -> bool {
     let deadline = std::time::Instant::now() + FILE_WAIT_TIMEOUT;
     while !path.exists() {
         if std::time::Instant::now() >= deadline {

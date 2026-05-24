@@ -7,18 +7,23 @@
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";
+  import { trapFocus } from "$lib/actions/trapFocus";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
   import EnvEditor from "./EnvEditor.svelte";
   import AdvancedFields from "./AdvancedFields.svelte";
+  import ProjectDbConnections from "./ProjectDbConnections.svelte";
+  import ArtifactsSection from "./ArtifactsSection.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { logViewer } from "$lib/stores/logViewer.svelte";
+  import { parseLogLine, levelClass } from "$lib/components/logs/ansi";
   import { projects } from "$lib/stores/projects.svelte";
-  import type { CertInfo } from "$lib/types/certs";
+  import { dns } from "$lib/stores/dns.svelte";
+  import { createCertInfo } from "$lib/stores/certInfo.svelte";
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView, ProjectType } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
@@ -44,10 +49,14 @@
 
   let logTail = $state<string[]>([]);
   let logLoading = $state<boolean>(false);
+  // Unwrap PC's JSON log envelope + tag each line with a level for colouring.
+  const logTailParsed = $derived(logTail.map(parseLogLine));
 
-  let certInfo = $state<CertInfo | null>(null);
-  let certLoading = $state<boolean>(false);
-  let certError = $state<string | null>(null);
+  // Shared cert loader (same semantics as the detail rail).
+  const cert = createCertInfo();
+  const certInfo = $derived(cert.info);
+  const certLoading = $derived(cert.loading);
+  const certError = $derived(cert.error);
   let reissuing = $state<boolean>(false);
 
   let rawConfigOpen = $state<boolean>(false);
@@ -180,27 +189,8 @@
     }
   }
 
-  async function loadCert() {
-    if (!project || !project.https) {
-      certInfo = null;
-      certError = null;
-      return;
-    }
-    certLoading = true;
-    certError = null;
-    try {
-      certInfo = await safeInvoke<CertInfo>("cert_info", { id: project.id });
-    } catch (e) {
-      certInfo = null;
-      const err = e as CommandError | undefined;
-      // PROJECT_NOT_FOUND from cert_info means "no cert issued yet" —
-      // that's the empty state, not a hard error.
-      certError = err && err.code !== "PROJECT_NOT_FOUND"
-        ? err.whatHappened
-        : null;
-    } finally {
-      certLoading = false;
-    }
+  function loadCert() {
+    return cert.load(project);
   }
 
   async function reissue() {
@@ -257,6 +247,7 @@
     try {
       switch (op) {
         case "start":
+          await dns.ensureReady();
           await safeInvoke("start_project", { id: project.id });
           break;
         case "stop":
@@ -329,6 +320,7 @@
         whatHappened: `${label} copied.`,
         whyItMatters: "Paste anywhere.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
     } catch {
@@ -351,14 +343,16 @@
 <svelte:window onkeydown={onKeydown} />
 
 {#if project}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- Backdrop is a mouse convenience; Escape (window handler) and the
+       header close button cover keyboard users. -->
   <div
     class="fixed inset-0 z-40 bg-bg/60 backdrop-blur-sm"
     onclick={() => !dirty && projectDetailPanel.hide()}
+    role="presentation"
   ></div>
 
   <aside
+    use:trapFocus
     class="fixed inset-y-0 right-0 z-50 w-[640px] max-w-[90vw] bg-surface border-l border-border shadow-2xl flex flex-col"
     aria-label="Project detail"
   >
@@ -690,6 +684,12 @@
         <EnvEditor {project} />
       </DashboardCard>
 
+      <!-- Database connection(s) parsed from the project's .env (if any) -->
+      <ProjectDbConnections {project} />
+
+      <!-- Build artifacts (disk usage + clean), if any are present -->
+      <ArtifactsSection {project} />
+
       <!-- Advanced — tags / extra ports / services / PHP -->
       <DashboardCard title="Advanced" flush>
         <AdvancedFields {project} />
@@ -718,14 +718,20 @@
             </button>
           </div>
         {/snippet}
-        {#if logTail.length === 0}
+        {#if logTailParsed.length === 0}
           <p class="text-xs text-fg-subtle">
             {logLoading ? "Loading…" : "No log output yet."}
           </p>
         {:else}
-          <pre
+          <div
             class="text-[11px] font-mono leading-relaxed text-fg-muted bg-bg/60 border border-border rounded-md p-2 overflow-x-auto max-h-48"
-          >{logTail.join("\n")}</pre>
+          >
+            {#each logTailParsed as pl, i (i)}
+              <div class="whitespace-pre-wrap break-words {levelClass(pl.level)}">
+                {@html pl.html}
+              </div>
+            {/each}
+          </div>
         {/if}
       </DashboardCard>
 

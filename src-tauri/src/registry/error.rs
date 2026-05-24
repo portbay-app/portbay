@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::registry::types::ProjectId;
+use crate::registry::types::{DatabaseInstanceId, ProjectId};
 
 /// Errors surfaced by the registry layer.
 ///
@@ -18,6 +18,9 @@ pub enum RegistryError {
     #[error("registry version {found} is unsupported (this build supports up to v{supported})")]
     UnsupportedVersion { found: u32, supported: u32 },
 
+    #[error("registry migration from v{from} failed: {reason}")]
+    Migration { from: u32, reason: String },
+
     #[error("project id `{0}` not found")]
     ProjectNotFound(ProjectId),
 
@@ -29,6 +32,12 @@ pub enum RegistryError {
 
     #[error("group id `{0}` already exists")]
     DuplicateGroupId(String),
+
+    #[error("database instance `{0}` not found")]
+    DatabaseNotFound(DatabaseInstanceId),
+
+    #[error("database instance `{0}` already exists")]
+    DuplicateDatabaseId(DatabaseInstanceId),
 
     #[error("no data directory available on this OS — cannot resolve the default registry path")]
     NoDataDir,

@@ -12,9 +12,10 @@
 //! this matches the CLI's pattern so the two binaries can never drift.
 //! See `bin/portbay.rs`'s `CliContext` for the parallel.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::AppHandle;
 
@@ -31,8 +32,11 @@ use crate::mailpit::{
     PORT_SCAN_RANGE as MAILPIT_PORT_SCAN_RANGE,
 };
 use crate::mkcert::Mkcert;
+use crate::preferences::Preferences;
 use crate::process_compose::{PcClient, SidecarManager};
 use crate::reconciler::Reconciler;
+use crate::registry::store;
+use crate::tray::TrayState;
 use crate::tunnel::TunnelManager;
 
 /// How long `boot_caddy` polls the admin endpoint for readiness before
@@ -91,7 +95,31 @@ pub struct AppState {
     /// Convergence engine — owns hash caches for the four sub-steps and
     /// the dirty-notify primitive the background loop awaits.
     pub reconciler: Reconciler,
+
+    /// User-visible behavioural toggles (tray visibility, close-to-menubar).
+    /// Held in a mutex so the close-window handler and the Tauri commands
+    /// can both read/write without crossing await points.
+    pub preferences: Mutex<Preferences>,
+
+    /// Menu-bar tray icon handle + change-gate metadata. `None` when the
+    /// user has disabled the tray via preferences.
+    pub tray: TrayState,
+
+    /// Recently-requested explicit Stop operations, keyed by project id.
+    /// When the user clicks Stop, we record the timestamp here; the
+    /// status poller checks this map before classifying an exit as a
+    /// crash. Wrapping tools (npm, turbo) often translate SIGTERM into
+    /// `exit(1)`, which would otherwise paint a clean stop as a red
+    /// Crashed badge. Entries older than `STOP_INTENT_WINDOW` are
+    /// considered stale and ignored.
+    pub stop_intents: Mutex<HashMap<String, Instant>>,
 }
+
+/// How long after a Stop request a non-zero exit is still considered
+/// the result of that stop. Long enough for the child to fully wind
+/// down (npm post-hooks, file watchers), short enough that a genuine
+/// crash a minute later isn't misclassified as a clean stop.
+pub const STOP_INTENT_WINDOW: Duration = Duration::from_secs(15);
 
 impl AppState {
     pub fn new(
@@ -114,7 +142,41 @@ impl AppState {
             mailpit: Mutex::new(MailpitSidecar::new()),
             tunnels: Mutex::new(TunnelManager::new()),
             reconciler,
+            preferences: Mutex::new(Preferences::load()),
+            tray: Mutex::new(Default::default()),
+            stop_intents: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Snapshot the current preferences. Returns by value so the lock
+    /// is released before the caller does anything async.
+    pub fn preferences_snapshot(&self) -> Preferences {
+        self.preferences
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Record that the user just asked PortBay to stop this project.
+    /// The status poller consults this map before classifying the next
+    /// exit as a crash, so a clean Stop never gets painted red even
+    /// when the child runtime exits with a non-zero code.
+    pub fn mark_stop_requested(&self, project_id: &str) {
+        let mut guard = self.stop_intents.lock().unwrap_or_else(|e| e.into_inner());
+        guard.insert(project_id.to_string(), Instant::now());
+        // Garbage-collect entries older than the intent window so the
+        // map can't grow unboundedly in long-running sessions.
+        guard.retain(|_, ts| ts.elapsed() < STOP_INTENT_WINDOW);
+    }
+
+    /// True if Stop was requested for this project recently enough that
+    /// the next observed exit should still be attributed to that Stop.
+    pub fn recently_stop_requested(&self, project_id: &str) -> bool {
+        let guard = self.stop_intents.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(project_id)
+            .map(|ts| ts.elapsed() < STOP_INTENT_WINDOW)
+            .unwrap_or(false)
     }
 
     /// Borrow a cloned client. Returns `SidecarDown` when PC hasn't come up.
@@ -122,7 +184,7 @@ impl AppState {
     pub fn pc_client(&self) -> Result<PcClient, crate::error::AppError> {
         self.pc_client
             .lock()
-            .expect("pc_client mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or(crate::error::AppError::SidecarDown("process-compose"))
     }
@@ -133,7 +195,7 @@ impl AppState {
     pub fn caddy_client(&self) -> Result<CaddyClient, crate::error::AppError> {
         self.caddy_client
             .lock()
-            .expect("caddy_client mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or(crate::error::AppError::SidecarDown("caddy"))
     }
@@ -151,16 +213,16 @@ impl AppState {
         let client = self
             .pc
             .lock()
-            .expect("pc mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .start(app, config_path)?;
-        *self.pc_client.lock().expect("pc_client mutex poisoned") = Some(client);
+        *self.pc_client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
         Ok(())
     }
 
     /// Stop the bundled process-compose sidecar and clear the cached client.
     pub fn shutdown_pc(&self) {
-        self.pc.lock().expect("pc mutex poisoned").stop();
-        *self.pc_client.lock().expect("pc_client mutex poisoned") = None;
+        self.pc.lock().unwrap_or_else(|e| e.into_inner()).stop();
+        *self.pc_client.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Start (or restart) the bundled Caddy sidecar against the bootstrap
@@ -182,15 +244,12 @@ impl AppState {
         let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
         let config_path = write_caddy_bootstrap_config(admin_port, https_port)?;
 
-        let client = self.caddy.lock().expect("caddy mutex poisoned").start(
+        let client = self.caddy.lock().unwrap_or_else(|e| e.into_inner()).start(
             app,
             &config_path,
             admin_port,
         )?;
-        *self
-            .caddy_client
-            .lock()
-            .expect("caddy_client mutex poisoned") = Some(client.clone());
+        *self.caddy_client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
 
         // Poll admin endpoint until the daemon responds. The sidecar
         // command line was already accepted; the child may still be in
@@ -210,11 +269,8 @@ impl AppState {
 
     /// Stop the bundled Caddy sidecar and clear the cached client.
     pub fn shutdown_caddy(&self) {
-        self.caddy.lock().expect("caddy mutex poisoned").stop();
-        *self
-            .caddy_client
-            .lock()
-            .expect("caddy_client mutex poisoned") = None;
+        self.caddy.lock().unwrap_or_else(|e| e.into_inner()).stop();
+        *self.caddy_client.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Start the dnsmasq sidecar against the registry's domain suffix.
@@ -231,17 +287,39 @@ impl AppState {
                 start: DNSMASQ_DEFAULT_PORT,
             },
         )?;
-        let config_path = dnsmasq::write_config(&self.domain_suffix, port)?;
+        // The registry is the source of truth for both the wildcard suffix
+        // and the tunable dnsmasq settings; `self.domain_suffix` is only the
+        // first-run fallback. Reading it here means a suffix migration or a
+        // settings change is picked up on the next boot/restart.
+        let reg = store::load_or_default(&self.registry_path, &self.domain_suffix)?;
+        let config_path = dnsmasq::write_config(&reg.domain_suffix, port, &reg.dnsmasq)?;
         self.dnsmasq
             .lock()
-            .expect("dnsmasq mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .start(app, &config_path, port)?;
+
+        // Drift guard: dnsmasq picks a fresh free port on every boot, but
+        // `/etc/resolver/<suffix>` is written once and would otherwise keep
+        // pointing at a now-dead port after a restart. If DNS routing was
+        // previously set up (the file exists) and our privileged helper is
+        // reachable, silently re-point the file at the port we just bound.
+        // Best-effort — /etc/hosts is the primary path, so a failure here
+        // never blocks boot.
+        if crate::dnsmasq::resolver::read_installed(&reg.domain_suffix).is_some() {
+            let helper = crate::hosts_helper::HostsHelperClient::system();
+            if helper.is_available() {
+                let _ = helper.install_resolver(&reg.domain_suffix, port);
+            }
+        }
         Ok(())
     }
 
     /// Stop the dnsmasq sidecar. Idempotent.
     pub fn shutdown_dnsmasq(&self) {
-        self.dnsmasq.lock().expect("dnsmasq mutex poisoned").stop();
+        self.dnsmasq
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stop();
     }
 
     /// Start the Mailpit sidecar with SMTP + web UI listeners on
@@ -264,14 +342,17 @@ impl AppState {
         let db_path = mailpit::lifecycle::default_db_path()?;
         self.mailpit
             .lock()
-            .expect("mailpit mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .start(app, smtp, ui, &db_path)?;
         Ok(())
     }
 
     /// Stop the Mailpit sidecar. Idempotent.
     pub fn shutdown_mailpit(&self) {
-        self.mailpit.lock().expect("mailpit mutex poisoned").stop();
+        self.mailpit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stop();
     }
 }
 

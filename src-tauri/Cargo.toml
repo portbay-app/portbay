@@ -20,11 +20,15 @@ path = "src/main.rs"
 name = "portbay"
 path = "src/bin/portbay.rs"
 
+[[bin]]
+name = "portbay-hosts-helper"
+path = "src/bin/portbay-hosts-helper.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
@@ -38,12 +42,14 @@ dirs = "5"
 thiserror = "1"
 url = "2"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 which = "6"
 console = "0.15"
 sysinfo = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x509-parser = "0.16"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

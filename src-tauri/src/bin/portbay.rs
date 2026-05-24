@@ -36,16 +36,22 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use console::{style, Term};
 use std::net::Ipv4Addr;
 
 use portbay_lib::caddy::CertPaths;
 use portbay_lib::hosts::{HostsError, HostsManager};
+use portbay_lib::hosts_helper::HostsHelperClient;
 use portbay_lib::process_compose::{
     PcClient, Process, ProjectStatus, DEFAULT_PORT as PC_DEFAULT_PORT,
 };
 use portbay_lib::registry::{self, store, Project, ProjectId, ProjectType, Readiness, Registry};
+
+/// Domain suffix used when no registry exists yet. Kept in sync with the
+/// GUI's `lib.rs::DEFAULT_DOMAIN_SUFFIX` so the CLI and app agree.
+const DEFAULT_DOMAIN_SUFFIX: &str = "portbay.test";
 
 // =============================================================================
 // CLI shape
@@ -72,8 +78,16 @@ struct Cli {
     #[arg(long, global = true, value_name = "PORT")]
     pc_port: Option<u16>,
 
+    /// Hidden helper used by shell completion scripts to list project ids.
+    #[arg(long, hide = true, global = true)]
+    complete_projects: bool,
+
+    /// Hidden helper used by shell completion scripts to list running project ids.
+    #[arg(long, hide = true, global = true)]
+    complete_running_projects: bool,
+
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -122,6 +136,12 @@ enum Cmd {
     Export {
         /// Project id.
         id: String,
+    },
+
+    /// Generate shell completion scripts.
+    Completions {
+        /// Shell to generate completions for.
+        shell: Shell,
     },
 }
 
@@ -270,8 +290,22 @@ fn main() -> ExitCode {
 }
 
 async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
+    if cli.complete_projects {
+        return cmd_complete_projects(&cli, false).await;
+    }
+    if cli.complete_running_projects {
+        return cmd_complete_projects(&cli, true).await;
+    }
     let ctx = CliContext::from_args(&cli)?;
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        let mut command = Cli::command();
+        command
+            .print_help()
+            .map_err(|e| CliError::Other(e.to_string()))?;
+        println!();
+        return Ok(ExitCode::SUCCESS);
+    };
+    match cmd {
         Cmd::List => cmd_list(&ctx).await,
         Cmd::Status { id } => cmd_status(&ctx, id.as_deref()).await,
         Cmd::Add(args) => cmd_add(&ctx, args).await,
@@ -284,7 +318,43 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Doctor => cmd_doctor(&ctx).await,
         Cmd::Hosts(sub) => cmd_hosts(&ctx, sub).await,
         Cmd::Export { id } => cmd_export(&ctx, &id).await,
+        Cmd::Completions { shell } => cmd_completions(shell),
     }
+}
+
+fn cmd_completions(shell: Shell) -> Result<ExitCode, CliError> {
+    let mut command = Cli::command();
+    let mut stdout = std::io::stdout();
+    generate(shell, &mut command, "portbay", &mut stdout);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_complete_projects(cli: &Cli, running_only: bool) -> Result<ExitCode, CliError> {
+    let ctx = CliContext::from_args(cli)?;
+    let reg = ctx.load_registry()?;
+    let running = if running_only {
+        fetch_pc_state(&ctx).await
+    } else {
+        None
+    };
+    let mut ids: Vec<String> = reg
+        .list_projects()
+        .iter()
+        .filter(|p| {
+            if !running_only {
+                return true;
+            }
+            running
+                .as_ref()
+                .and_then(|m| m.get(p.id.as_str()))
+                .map(|p| p.is_running)
+                .unwrap_or(false)
+        })
+        .map(|p| p.id.as_str().to_owned())
+        .collect();
+    ids.sort();
+    println!("{}", ids.join(" "));
+    Ok(ExitCode::SUCCESS)
 }
 
 // =============================================================================
@@ -318,7 +388,8 @@ impl CliContext {
     }
 
     fn load_registry(&self) -> Result<Registry, CliError> {
-        store::load_or_default(&self.registry_path, "test").map_err(CliError::Registry)
+        store::load_or_default(&self.registry_path, DEFAULT_DOMAIN_SUFFIX)
+            .map_err(CliError::Registry)
     }
 
     fn save_registry(&self, r: &Registry) -> Result<(), CliError> {
@@ -486,11 +557,23 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         timeout_seconds: 75,
     });
 
+    // Inherit the language's default runtime version (set in the Languages
+    // panel) exactly as the GUI's `add_project` does, so a project added from
+    // the CLI honours the same defaults. For PHP, mirror it into `php_version`
+    // too, since the FPM reconciler still reads that field.
+    let kind: ProjectType = args.kind.into();
+    let runtime = reg.runtimes.default_for(kind);
+    let php_version = if kind == ProjectType::Php {
+        runtime.as_ref().map(|r| r.version.clone())
+    } else {
+        None
+    };
+
     let project = Project {
         id,
         name,
         path: canonical,
-        kind: args.kind.into(),
+        kind,
         start_command: args.start_command,
         port: args.port,
         extra_ports: vec![],
@@ -506,7 +589,9 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         auto_start: args.auto_start,
         tags: vec![],
         document_root: None,
-        php_version: None,
+        php_version,
+        runtime,
+        workspace: None,
     };
 
     reg.add_project(project.clone())
@@ -516,7 +601,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
     // Best-effort hosts write. Permission-denied is reported as a hint, not
     // an error — the project is registered either way, and the user can
     // catch up with `sudo portbay hosts add <hostname>`.
-    let hosts_outcome = HostsManager::system().add(&project.hostname, Ipv4Addr::LOCALHOST);
+    let hosts_outcome = add_host_best_effort(ctx, &project.hostname, Ipv4Addr::LOCALHOST);
 
     if ctx.json {
         let warnings = hosts_warnings(&hosts_outcome);
@@ -598,7 +683,7 @@ async fn cmd_add_from_portfile(
     ctx.save_registry(&reg)?;
 
     // Best-effort hosts add. Same UX as cmd_add's main path.
-    let hosts_outcome = HostsManager::system().add(&project.hostname, Ipv4Addr::LOCALHOST);
+    let hosts_outcome = add_host_best_effort(ctx, &project.hostname, Ipv4Addr::LOCALHOST);
 
     if ctx.json {
         let warnings = hosts_warnings(&hosts_outcome);
@@ -707,7 +792,7 @@ async fn cmd_remove(ctx: &CliContext, args: RemoveArgs) -> Result<ExitCode, CliE
 
         // Best-effort hosts entry removal — permission-denied reported as
         // a hint, not an error. The registry change has already landed.
-        hosts_outcome = Some(HostsManager::system().remove(&removed.hostname));
+        hosts_outcome = Some(remove_host_best_effort(ctx, &removed.hostname));
 
         // Live Caddy routes are left alone — the reconciler drops orphans
         // on next daemon boot.
@@ -1011,9 +1096,19 @@ async fn cmd_doctor(ctx: &CliContext) -> Result<ExitCode, CliError> {
 
 async fn cmd_hosts(ctx: &CliContext, sub: HostsCmd) -> Result<ExitCode, CliError> {
     let mgr = HostsManager::system();
+    let helper = HostsHelperClient::system();
     match sub {
         HostsCmd::List => {
-            let entries = mgr.list_managed().map_err(CliError::Hosts)?;
+            let entries = match helper.list() {
+                Ok(entries) => entries
+                    .into_iter()
+                    .map(|entry| portbay_lib::hosts::HostsEntry {
+                        ip: entry.ip,
+                        hostname: entry.hostname,
+                    })
+                    .collect(),
+                Err(_) => mgr.list_managed().map_err(CliError::Hosts)?,
+            };
             if ctx.json {
                 let out: Vec<_> = entries
                     .iter()
@@ -1033,15 +1128,18 @@ async fn cmd_hosts(ctx: &CliContext, sub: HostsCmd) -> Result<ExitCode, CliError
             }
         }
         HostsCmd::Add { hostname, ip } => {
-            mgr.add(&hostname, ip).map_err(CliError::Hosts)?;
+            add_host_best_effort(ctx, &hostname, ip).map_err(CliError::Hosts)?;
             cli_say(ctx, &format!("added {hostname} → {ip}"));
         }
         HostsCmd::Remove { hostname } => {
-            mgr.remove(&hostname).map_err(CliError::Hosts)?;
+            remove_host_best_effort(ctx, &hostname).map_err(CliError::Hosts)?;
             cli_say(ctx, &format!("removed {hostname}"));
         }
         HostsCmd::Clear => {
-            mgr.clear().map_err(CliError::Hosts)?;
+            match helper.clear() {
+                Ok(()) => {}
+                Err(_) => mgr.clear().map_err(CliError::Hosts)?,
+            }
             cli_say(ctx, "cleared all PortBay-managed hosts entries");
         }
         HostsCmd::Reconcile => {
@@ -1052,11 +1150,49 @@ async fn cmd_hosts(ctx: &CliContext, sub: HostsCmd) -> Result<ExitCode, CliError
                 .map(|p| (p.hostname.clone(), Ipv4Addr::LOCALHOST))
                 .collect();
             let n = pairs.len();
-            mgr.replace_all(pairs).map_err(CliError::Hosts)?;
+            match helper.replace_all(pairs.clone(), &reg.domain_suffix) {
+                Ok(()) => {}
+                Err(_) => mgr.replace_all(pairs).map_err(CliError::Hosts)?,
+            }
             cli_say(ctx, &format!("reconciled {n} entry(ies) from registry"));
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn add_host_best_effort(
+    ctx: &CliContext,
+    hostname: &str,
+    ip: Ipv4Addr,
+) -> std::result::Result<(), HostsError> {
+    let suffix = ctx
+        .load_registry()
+        .map(|reg| reg.domain_suffix)
+        .unwrap_or_else(|_| DEFAULT_DOMAIN_SUFFIX.into());
+    if HostsHelperClient::system()
+        .add(hostname, ip, &suffix)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    HostsManager::system().add(hostname, ip)
+}
+
+fn remove_host_best_effort(
+    ctx: &CliContext,
+    hostname: &str,
+) -> std::result::Result<(), HostsError> {
+    let suffix = ctx
+        .load_registry()
+        .map(|reg| reg.domain_suffix)
+        .unwrap_or_else(|_| DEFAULT_DOMAIN_SUFFIX.into());
+    if HostsHelperClient::system()
+        .remove(hostname, &suffix)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    HostsManager::system().remove(hostname)
 }
 
 fn cli_say(ctx: &CliContext, msg: &str) {
@@ -1141,20 +1277,8 @@ fn certs_root() -> Option<PathBuf> {
     Some(p)
 }
 
-fn slugify(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_dash = true;
-    for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
+// Shared slugifier — same ids as the GUI's project/group commands.
+use portbay_lib::util::slugify;
 
 // Allows the linker to see this even though the file isn't referenced
 // from main(); silences "dead code" on the CertPaths reexport above.
@@ -1238,30 +1362,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slugify_lowercases_and_hyphenates() {
-        assert_eq!(slugify("Marketing Site"), "marketing-site");
-        assert_eq!(slugify("API Gateway"), "api-gateway");
-        assert_eq!(slugify("__weird___name__"), "weird-name");
-        assert_eq!(slugify("UPPER"), "upper");
-    }
-
-    #[test]
-    fn slugify_handles_unicode_by_dropping_it() {
-        // Phase 1: ASCII-only IDs. Anything else turns into hyphens.
-        assert_eq!(slugify("Café"), "caf");
-    }
-
-    #[test]
     fn cli_parses_list() {
         let cli = Cli::try_parse_from(["portbay", "list"]).unwrap();
-        assert!(matches!(cli.cmd, Cmd::List));
+        assert!(matches!(cli.cmd, Some(Cmd::List)));
         assert!(!cli.json);
     }
 
     #[test]
     fn cli_parses_add_with_defaults() {
         let cli = Cli::try_parse_from(["portbay", "add", "/tmp/x"]).unwrap();
-        let Cmd::Add(args) = cli.cmd else {
+        let Some(Cmd::Add(args)) = cli.cmd else {
             panic!("expected Add")
         };
         assert_eq!(args.path, PathBuf::from("/tmp/x"));
@@ -1272,7 +1382,7 @@ mod tests {
     #[test]
     fn cli_parses_stop_all() {
         let cli = Cli::try_parse_from(["portbay", "stop", "--all"]).unwrap();
-        let Cmd::Stop(args) = cli.cmd else {
+        let Some(Cmd::Stop(args)) = cli.cmd else {
             panic!("expected Stop")
         };
         assert!(args.all);

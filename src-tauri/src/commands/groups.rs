@@ -226,6 +226,11 @@ async fn fanout(
             });
             continue;
         }
+        // Mark stop intent so wrapper-translated SIGTERM exits don't
+        // surface as crashes in the dashboard for batched ops.
+        if matches!(op, GroupOp::Stop | GroupOp::Restart) {
+            state.mark_stop_requested(&id_str);
+        }
         let res = match op {
             GroupOp::Start => client.start(&id_str).await,
             GroupOp::Stop => client.stop(&id_str).await,
@@ -279,37 +284,6 @@ fn view_from(registry: &crate::registry::Registry, group: &Group) -> GroupView {
     }
 }
 
-/// ASCII-slug helper used to derive a group id from its display name.
-/// Lowercase, non-alphanumeric → `-`, trimmed and de-duplicated.
-fn slugify(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut prev_dash = true;
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() {
-            for low in ch.to_lowercase() {
-                out.push(low);
-            }
-            prev_dash = false;
-        } else if !prev_dash {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::slugify;
-
-    #[test]
-    fn slugify_lowercases_and_hyphenates() {
-        assert_eq!(slugify("Citizen Suite"), "citizen-suite");
-        assert_eq!(slugify("  Agency  Apps  "), "agency-apps");
-        assert_eq!(slugify("WEIRD__chars!"), "weird-chars");
-        assert_eq!(slugify(""), "");
-    }
-}
+/// Group ids are derived from the display name with the shared slugifier —
+/// the same one the project commands and CLI use, so ids never diverge.
+use crate::util::slugify;

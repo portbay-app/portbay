@@ -251,13 +251,11 @@ pub async fn scaffold_template(
                     let _ = on_event.send(ScaffoldEvent::Log { line });
                 }
             }
-            CommandEvent::Terminated(payload) => {
-                if payload.code != Some(0) {
-                    return Err(AppError::Internal(format!(
-                        "{program} exited with code {:?}",
-                        payload.code
-                    )));
-                }
+            CommandEvent::Terminated(payload) if payload.code != Some(0) => {
+                return Err(AppError::Internal(format!(
+                    "{program} exited with code {:?}",
+                    payload.code
+                )));
             }
             _ => {}
         }
@@ -294,6 +292,7 @@ async fn finalize(
         start_command: kind.default_start_command().map(str::to_string),
         https: true,
         auto_start: false,
+        workspace: None,
     };
 
     let view = add_project(state.clone(), input).await?;

@@ -10,6 +10,7 @@
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";
+  import { trapFocus } from "$lib/actions/trapFocus";
   import { Channel, invoke } from "@tauri-apps/api/core";
 
   import { Icon, StatusPill } from "$lib/components/atoms";
@@ -18,7 +19,7 @@
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
-  import { formatLogLine } from "./ansi";
+  import { parseLogLine, levelClass, type LogLine } from "./ansi";
 
   /** Cap on rendered lines. Keeps DOM size bounded under chatty servers. */
   const MAX_LINES = 5_000;
@@ -30,7 +31,11 @@
       : (projects.value.find((p) => p.id === logViewer.id) ?? null),
   );
 
-  let lines = $state<string[]>([]);
+  // `parsed` is the render/search/copy source: each raw line is unwrapped from
+  // Process Compose's JSON envelope, ANSI-rendered, and tagged with a level.
+  // Parsed once on arrival (here + in follow) rather than re-derived, so a
+  // chatty follow stream stays O(1) per line instead of re-parsing the buffer.
+  let parsed = $state<LogLine[]>([]);
   let loading = $state<boolean>(false);
   let follow = $state<boolean>(false);
   let searchQuery = $state<string>("");
@@ -44,12 +49,13 @@
     if (!project) return;
     loading = true;
     try {
-      lines = await safeInvoke<string[]>("tail_logs", {
+      const raw = await safeInvoke<string[]>("tail_logs", {
         id: project.id,
         limit: 1000,
       });
+      parsed = raw.map(parseLogLine);
     } catch {
-      lines = [];
+      parsed = [];
     } finally {
       loading = false;
       if (autoScroll) requestAnimationFrame(scrollToBottom);
@@ -66,10 +72,10 @@
     const id = project.id;
     const ch = new Channel<string>();
     ch.onmessage = (line) => {
-      lines = lines.concat(line);
+      parsed = parsed.concat(parseLogLine(line));
       // Trim the head when over cap so the DOM stays bounded.
-      if (lines.length > MAX_LINES) {
-        lines = lines.slice(TRIM_CHUNK);
+      if (parsed.length > MAX_LINES) {
+        parsed = parsed.slice(TRIM_CHUNK);
       }
       if (autoScroll) requestAnimationFrame(scrollToBottom);
     };
@@ -95,15 +101,20 @@
     }
   }
 
-  // Re-init when the viewer opens for a different project.
+  // Re-init only when the viewer opens for a *different* project.
+  // We gate on the project id (a string) rather than the derived
+  // `project` object — the projects store mints new object references
+  // on every 1.5 s status tick, which would otherwise re-trigger this
+  // effect and wipe the log/reset Follow mode mid-stream.
+  const openedId = $derived(logViewer.id);
   $effect(() => {
-    const p = project;
-    if (!p) {
+    const id = openedId;
+    if (id === null) {
       stopFollow();
       return;
     }
     untrack(() => {
-      lines = [];
+      parsed = [];
       searchQuery = "";
       matchIndex = 0;
       autoScroll = true;
@@ -123,8 +134,8 @@
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [] as number[];
     const found: number[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].toLowerCase().includes(q)) found.push(i);
+    for (let i = 0; i < parsed.length; i++) {
+      if (parsed[i].text.toLowerCase().includes(q)) found.push(i);
     }
     return found;
   });
@@ -148,12 +159,13 @@
 
   async function copyAll() {
     try {
-      await navigator.clipboard.writeText(lines.join("\n"));
+      await navigator.clipboard.writeText(parsed.map((p) => p.text).join("\n"));
       errorBus.push({
         code: "COPIED",
         whatHappened: "Log copied.",
         whyItMatters: "Paste anywhere.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
     } catch {
@@ -195,16 +207,18 @@
 <svelte:window onkeydown={onKeydown} />
 
 {#if project}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- Backdrop closes only on a direct click (target === backdrop), so a
+       click inside the dialog doesn't bubble out and dismiss it — no inner
+       stopPropagation needed. Escape (window handler) covers keyboard. -->
   <div
     class="fixed inset-0 z-50 bg-bg/70 backdrop-blur-sm flex items-center justify-center p-6"
-    onclick={() => logViewer.hide()}
+    onclick={(e) => {
+      if (e.target === e.currentTarget) logViewer.hide();
+    }}
+    role="presentation"
   >
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
-      onclick={(e) => e.stopPropagation()}
+      use:trapFocus
       class="w-[1100px] max-w-[95vw] h-[85vh] bg-surface border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
       role="dialog"
       aria-label="Log viewer"
@@ -222,6 +236,7 @@
         <!-- Follow toggle -->
         <label
           class="ml-auto flex items-center gap-1.5 text-xs text-fg-muted cursor-pointer"
+          title="Live tail — new log lines stream in as the project writes them. Like `tail -f`."
         >
           <input
             type="checkbox"
@@ -300,27 +315,33 @@
         </button>
       </header>
 
-      <!-- Body -->
+      <!--
+        Body. The previous implementation wrapped each line in a
+        <div> *inside* a <pre>, which preserved every newline /
+        indent from the source template as rendered whitespace — the
+        cause of the huge gaps the user reported. We use a plain
+        container with `whitespace-pre` on each row so ANSI-rendered
+        spaces still align, without the source-template noise.
+      -->
       <div
         bind:this={scrollerEl}
         onscroll={onScroll}
-        class="flex-1 min-h-0 overflow-y-auto bg-bg p-3"
+        class="flex-1 min-h-0 overflow-y-auto bg-bg py-2 font-mono text-[12px] leading-[1.4] text-fg-muted"
       >
-        {#if lines.length === 0}
-          <p class="text-xs text-fg-subtle italic px-2 py-4">
+        {#if parsed.length === 0}
+          <p class="text-xs text-fg-subtle italic px-4 py-4">
             {loading ? "Loading log…" : "No log output yet."}
           </p>
         {:else}
-          <pre class="text-[12px] font-mono leading-relaxed text-fg-muted">
-{#each lines as line, i (i)}
-<div
-  data-line={i}
-  class="px-2 py-0.5 -mx-2 rounded
-         {matches.includes(i) ? 'bg-accent/10 text-fg' : ''}
-         {matches[matchIndex] === i ? 'ring-1 ring-accent' : ''}"
->{@html formatLogLine(line)}</div>
-{/each}
-          </pre>
+          {#each parsed as pl, i (i)}
+            <div
+              data-line={i}
+              class="px-4 whitespace-pre-wrap break-words {levelClass(pl.level)}
+                     {pl.level === 'error' ? 'bg-status-crashed/5' : ''}
+                     {matches.includes(i) ? 'bg-accent/10 text-fg' : ''}
+                     {matches[matchIndex] === i ? 'ring-1 ring-accent' : ''}"
+            >{@html pl.html}</div>
+          {/each}
         {/if}
       </div>
 
@@ -328,7 +349,7 @@
       <footer
         class="shrink-0 px-4 py-2 border-t border-border flex items-center gap-3 text-[11px] text-fg-subtle"
       >
-        <span>{lines.length} lines</span>
+        <span>{parsed.length} lines</span>
         {#if follow}
           <span class="text-status-running">● following (live stream)</span>
         {/if}

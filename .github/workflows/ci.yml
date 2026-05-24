@@ -38,6 +38,10 @@ env:
   # Force colour in cargo / pnpm output so CI logs stay readable.
   CARGO_TERM_COLOR: "always"
   CLICOLOR_FORCE: "1"
+  # Run JS actions (checkout, setup-node, cache, action-setup) on Node 24.
+  # Node 20 is deprecated on GitHub runners and forced off after 2026-06-02;
+  # opting in now silences the deprecation warnings ahead of that cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   # Versions pinned here so CI is reproducible. Bump when bumping
   # locally too.
   RUST_TOOLCHAIN: "stable"
@@ -71,10 +75,12 @@ jobs:
 
       - name: Fetch sidecar binaries
         run: |
+          ./scripts/fetch-process-compose.sh
           ./scripts/fetch-caddy.sh
           ./scripts/fetch-mkcert.sh
           ./scripts/fetch-mailpit.sh
           ./scripts/fetch-cloudflared.sh
+          ./scripts/fetch-dnsmasq.sh
 
       - name: cargo fmt --check
         working-directory: src-tauri
@@ -158,10 +164,18 @@ jobs:
 
       - name: Fetch sidecar binaries
         run: |
+          ./scripts/fetch-process-compose.sh
           ./scripts/fetch-caddy.sh
           ./scripts/fetch-mkcert.sh
           ./scripts/fetch-mailpit.sh
           ./scripts/fetch-cloudflared.sh
+          ./scripts/fetch-dnsmasq.sh
+
+      - name: Build privileged hosts helper (bundled sidecar)
+        # tauri.conf.json lists binaries/portbay-hosts-helper as an externalBin,
+        # so the file must exist (built from our own source) before the bundle
+        # step can resolve it. Host triple — this smoke build is native.
+        run: ./scripts/build-hosts-helper.sh
 
       - name: cargo tauri build --debug
         # Skips notarisation + signing; verifies the bundle layout is

@@ -11,27 +11,45 @@
 
   import { DashboardCard, Icon, StatusDot } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
+  import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { projects } from "$lib/stores/projects.svelte";
-
-  interface ResolverStatus {
-    suffix: string;
-    installed: boolean;
-    path: string;
-    currentContents: string | null;
-    currentPort: number;
-  }
+  import type { ResolverStatus } from "$lib/types/dns";
 
   let dnsStatus = $state<ResolverStatus | null>(null);
+  let dnsBusy = $state<boolean>(false);
+
+  async function refreshDns() {
+    try {
+      dnsStatus = await safeInvoke<ResolverStatus>("dnsmasq_resolver_status");
+    } catch {
+      dnsStatus = null;
+    }
+  }
+
+  async function installDns() {
+    dnsBusy = true;
+    try {
+      await safeInvoke("dnsmasq_install_resolver");
+      errorBus.push({
+        code: "DNS_INSTALLED",
+        whatHappened: `DNS routing for .${dnsStatus?.suffix ?? "test"} installed.`,
+        whyItMatters:
+          "Subdomains of this suffix now resolve to 127.0.0.1 via dnsmasq. /etc/hosts edits are no longer needed.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
+      await refreshDns();
+    } catch {
+      /* toast already pushed by safeInvoke */
+    } finally {
+      dnsBusy = false;
+    }
+  }
 
   onMount(() => {
-    void (async () => {
-      try {
-        dnsStatus = await safeInvoke<ResolverStatus>("dnsmasq_resolver_status");
-      } catch {
-        dnsStatus = null;
-      }
-    })();
+    void refreshDns();
   });
 
   /** True when dnsmasq's /etc/resolver/<suffix> is in place — the
@@ -80,9 +98,22 @@
             <code class="font-mono">/etc/hosts</code> entries.
           </div>
           <div class="text-xs text-fg-muted">
-            Install the resolver file from Settings → DNS routing for
-            one-time wildcard routing of
-            <code class="font-mono">*.{dnsStatus.suffix}</code>.
+            Without resolver routing, browsers can't reach
+            <code class="font-mono">*.{dnsStatus.suffix}</code> hostnames
+            (they show <code>DNS_PROBE_POSSIBLE</code>). Install the
+            resolver file now — one macOS authorisation prompt, no further
+            <code>/etc/hosts</code> edits needed.
+          </div>
+          <div class="pt-2">
+            <button
+              type="button"
+              onclick={installDns}
+              disabled={dnsBusy}
+              class="px-3 py-1.5 text-xs rounded-md text-accent border border-accent/40
+                     hover:bg-accent/10 transition-colors disabled:opacity-50"
+            >
+              {dnsBusy ? "Installing…" : `Install DNS routing for *.${dnsStatus.suffix}`}
+            </button>
           </div>
         {:else}
           <div class="text-xs text-fg-muted">Checking resolver state…</div>

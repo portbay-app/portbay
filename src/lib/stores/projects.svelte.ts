@@ -40,11 +40,11 @@ function createProjectsStore() {
     loading = true;
     try {
       items = await safeInvoke<ProjectView[]>("list_projects");
-      // Preserve selection if the project still exists; clear otherwise.
+      // Selection is opt-in: only the user clicking a row opens the detail
+      // rail. Drop a stale selection if the project disappeared, but never
+      // auto-select on refresh.
       if (selectedId !== null && !items.some((p) => p.id === selectedId)) {
-        selectedId = items[0]?.id ?? null;
-      } else if (selectedId === null && items.length > 0) {
-        selectedId = items[0].id;
+        selectedId = null;
       }
     } catch {
       // safeInvoke already pushed the toast.

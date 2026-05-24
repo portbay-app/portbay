@@ -6,7 +6,11 @@
 //! reconcile loop calls [`fpm_process_id`] to derive the process id
 //! that gets written into the generated process-compose YAML.
 
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
 use crate::php::PhpInstall;
+use crate::registry::FpmTuning;
 
 /// Stable process-compose id for a given PHP version's FPM pool.
 /// Used by both the YAML generator and (eventually) Caddy's reverse-
@@ -29,12 +33,23 @@ pub fn fpm_socket_path(data_dir: &std::path::Path, version: &str) -> std::path::
     data_dir.join("php").join(version).join("php-fpm.sock")
 }
 
-/// Render the minimum-viable FPM pool config for a version. One
-/// `[www]` pool listening on the socket path. The user can drop
-/// additional `.ini` files in the version's `extension_dir` to tune
-/// extensions (Xdebug, OPcache, etc.) without touching this file.
-pub fn render_pool_config(install: &PhpInstall, socket_path: &std::path::Path) -> String {
-    format!(
+/// Render the FPM pool config for a version. One `[www]` pool listening on
+/// the socket path, with process-manager tuning from `tuning` and any php.ini
+/// overrides from `ini` layered in as `php_admin_value` directives.
+///
+/// The `pm.*` lines are gated by the manager mode: FPM rejects
+/// `pm.start_servers` / `pm.*_spare_servers` under `static`/`ondemand`, so we
+/// only emit the directives the selected mode actually accepts. `ini`
+/// overrides apply per-pool — the system php.ini is never edited. The user can
+/// still drop additional `.ini` files in the version's `extension_dir` for
+/// settings PortBay doesn't surface.
+pub fn render_pool_config(
+    install: &PhpInstall,
+    socket_path: &std::path::Path,
+    tuning: &FpmTuning,
+    ini: &BTreeMap<String, String>,
+) -> String {
+    let mut out = format!(
         "; PortBay-managed FPM pool for PHP {ver}\n\
          [global]\n\
          daemonize = no\n\
@@ -47,17 +62,60 @@ pub fn render_pool_config(install: &PhpInstall, socket_path: &std::path::Path) -
          listen.owner = $USER\n\
          listen.group = staff\n\
          listen.mode = 0660\n\
-         pm = dynamic\n\
-         pm.max_children = 8\n\
-         pm.start_servers = 2\n\
-         pm.min_spare_servers = 1\n\
-         pm.max_spare_servers = 3\n\
-         pm.max_requests = 500\n\
-         clear_env = no\n",
+         pm = {pm}\n\
+         pm.max_children = {max_children}\n",
         ver = install.version,
         ver_safe = install.version.replace('.', "-"),
         sock = socket_path.display(),
-    )
+        pm = pm_mode(&tuning.pm),
+        max_children = tuning.max_children.max(1),
+    );
+
+    // start/spare servers are dynamic-only; ondemand uses an idle timeout.
+    match pm_mode(&tuning.pm) {
+        "dynamic" => {
+            let _ = write!(
+                out,
+                "pm.start_servers = {start}\n\
+                 pm.min_spare_servers = {min}\n\
+                 pm.max_spare_servers = {max}\n",
+                start = tuning.start_servers,
+                min = tuning.min_spare_servers,
+                max = tuning.max_spare_servers,
+            );
+        }
+        "ondemand" => {
+            out.push_str("pm.process_idle_timeout = 10s\n");
+        }
+        _ => {} // static: max_children only.
+    }
+
+    let _ = writeln!(out, "pm.max_requests = {}", tuning.max_requests);
+    out.push_str("clear_env = no\n");
+
+    // php.ini overrides, applied per-pool. `php_admin_value` is read by FPM
+    // and not overridable from userland, which is what we want for a managed
+    // dev environment. Keys are sorted (BTreeMap) for a stable, diff-friendly
+    // file the reconciler can rewrite idempotently.
+    for (key, value) in ini {
+        if key.trim().is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "php_admin_value[{key}] = {value}");
+    }
+
+    out
+}
+
+/// Normalise an FPM process-manager mode to a value FPM accepts, falling back
+/// to `dynamic` for anything unrecognised (defends against a hand-edited
+/// registry).
+fn pm_mode(pm: &str) -> &'static str {
+    match pm {
+        "static" => "static",
+        "ondemand" => "ondemand",
+        _ => "dynamic",
+    }
 }
 
 #[cfg(test)]
@@ -83,9 +141,8 @@ mod tests {
         assert_eq!(s, Path::new("/tmp/data/php/8.3/php-fpm.sock"));
     }
 
-    #[test]
-    fn render_pool_config_includes_version_and_socket() {
-        let install = PhpInstall {
+    fn sample_install() -> PhpInstall {
+        PhpInstall {
             version: "8.3".into(),
             php_bin: "/opt/homebrew/opt/php@8.3/bin/php".into(),
             php_fpm_bin: Some("/opt/homebrew/opt/php@8.3/sbin/php-fpm".into()),
@@ -94,10 +151,111 @@ mod tests {
             extension_dir: None,
             loaded_extensions: vec![],
             source: crate::php::PhpSource::Homebrew,
-        };
-        let cfg = render_pool_config(&install, Path::new("/tmp/data/php/8.3/php-fpm.sock"));
+        }
+    }
+
+    #[test]
+    fn render_pool_config_includes_version_and_socket() {
+        let cfg = render_pool_config(
+            &sample_install(),
+            Path::new("/tmp/data/php/8.3/php-fpm.sock"),
+            &FpmTuning::default(),
+            &BTreeMap::new(),
+        );
         assert!(cfg.contains("PHP 8.3"));
         assert!(cfg.contains("/tmp/data/php/8.3/php-fpm.sock"));
         assert!(cfg.contains("[www]"));
+    }
+
+    #[test]
+    fn default_tuning_renders_the_historical_dynamic_pool() {
+        let cfg = render_pool_config(
+            &sample_install(),
+            Path::new("/tmp/s.sock"),
+            &FpmTuning::default(),
+            &BTreeMap::new(),
+        );
+        assert!(cfg.contains("pm = dynamic"));
+        assert!(cfg.contains("pm.max_children = 8"));
+        assert!(cfg.contains("pm.start_servers = 2"));
+        assert!(cfg.contains("pm.min_spare_servers = 1"));
+        assert!(cfg.contains("pm.max_spare_servers = 3"));
+        assert!(cfg.contains("pm.max_requests = 500"));
+    }
+
+    #[test]
+    fn static_mode_omits_spare_server_directives() {
+        let tuning = FpmTuning {
+            pm: "static".into(),
+            max_children: 4,
+            ..FpmTuning::default()
+        };
+        let cfg = render_pool_config(
+            &sample_install(),
+            Path::new("/tmp/s.sock"),
+            &tuning,
+            &BTreeMap::new(),
+        );
+        assert!(cfg.contains("pm = static"));
+        assert!(cfg.contains("pm.max_children = 4"));
+        // FPM rejects these under static — they must not be emitted.
+        assert!(!cfg.contains("pm.start_servers"));
+        assert!(!cfg.contains("pm.min_spare_servers"));
+        assert!(!cfg.contains("pm.max_spare_servers"));
+        // max_requests stays valid for every mode.
+        assert!(cfg.contains("pm.max_requests"));
+    }
+
+    #[test]
+    fn ondemand_mode_uses_idle_timeout_not_spare_servers() {
+        let tuning = FpmTuning {
+            pm: "ondemand".into(),
+            ..FpmTuning::default()
+        };
+        let cfg = render_pool_config(
+            &sample_install(),
+            Path::new("/tmp/s.sock"),
+            &tuning,
+            &BTreeMap::new(),
+        );
+        assert!(cfg.contains("pm = ondemand"));
+        assert!(cfg.contains("pm.process_idle_timeout"));
+        assert!(!cfg.contains("pm.start_servers"));
+    }
+
+    #[test]
+    fn ini_overrides_render_as_sorted_php_admin_values() {
+        let mut ini = BTreeMap::new();
+        ini.insert("upload_max_filesize".to_string(), "64M".to_string());
+        ini.insert("memory_limit".to_string(), "256M".to_string());
+        ini.insert("".to_string(), "ignored".to_string()); // blank key skipped
+        let cfg = render_pool_config(
+            &sample_install(),
+            Path::new("/tmp/s.sock"),
+            &FpmTuning::default(),
+            &ini,
+        );
+        assert!(cfg.contains("php_admin_value[memory_limit] = 256M"));
+        assert!(cfg.contains("php_admin_value[upload_max_filesize] = 64M"));
+        assert!(!cfg.contains("php_admin_value[] ="));
+        // BTreeMap iteration is sorted: memory_limit precedes upload_max_filesize.
+        let mem = cfg.find("memory_limit").unwrap();
+        let upload = cfg.find("upload_max_filesize").unwrap();
+        assert!(mem < upload);
+    }
+
+    #[test]
+    fn unknown_pm_mode_falls_back_to_dynamic() {
+        let tuning = FpmTuning {
+            pm: "bogus".into(),
+            ..FpmTuning::default()
+        };
+        let cfg = render_pool_config(
+            &sample_install(),
+            Path::new("/tmp/s.sock"),
+            &tuning,
+            &BTreeMap::new(),
+        );
+        assert!(cfg.contains("pm = dynamic"));
     }
 }

@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import { trapFocus } from "$lib/actions/trapFocus";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { groupEditor } from "$lib/stores/groupEditor.svelte";
@@ -72,6 +73,7 @@
           whatHappened: `Group "${name.trim()}" updated.`,
           whyItMatters: "Member changes apply on the next group action.",
           whoCausedIt: "system",
+          severity: "success",
           actions: [],
         });
       }
@@ -107,6 +109,7 @@
     role="presentation"
   ></div>
   <aside
+    use:trapFocus
     class="fixed inset-y-0 right-0 z-50 w-[min(440px,100vw)] bg-bg
            border-l border-border shadow-2xl flex flex-col"
     aria-label={groupEditor.mode.kind === "edit" ? "Edit group" : "New group"}
@@ -140,15 +143,15 @@
           id="group-name"
           type="text"
           bind:value={name}
-          placeholder="Citizen Suite"
+          placeholder="Enter group name"
           spellcheck="false"
           class="w-full px-3 py-2 rounded-md bg-bg border border-border
                  focus:border-accent/60 outline-none text-fg"
         />
         {#if groupEditor.mode.kind === "create"}
           <p class="text-[11px] text-fg-subtle">
-            The group's id is derived from the name (e.g. "Citizen Suite" →
-            <code class="font-mono">citizen-suite</code>).
+            The group's id is derived from the name — spaces become hyphens
+            and uppercase becomes lowercase.
           </p>
         {/if}
       </section>

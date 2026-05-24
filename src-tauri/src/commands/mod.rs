@@ -11,7 +11,10 @@
 //! `AppError` serialises into the §5.4 envelope shape. See
 //! `src/error.rs` for the exact wire format.
 
+pub mod artifacts;
 pub mod certs;
+pub mod databases;
+pub mod dbconn;
 pub mod dnsmasq;
 pub mod dto;
 pub mod events;
@@ -22,9 +25,11 @@ pub mod lifecycle;
 pub mod log_stream;
 pub mod metrics;
 pub mod onboarding;
-pub mod php;
 pub mod portfile;
+pub mod preferences;
 pub mod projects;
+pub mod runtimes;
 pub mod sidecars;
 pub mod system;
+pub mod telemetry;
 pub mod tunnel;

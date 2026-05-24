@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::process_compose::{Process, ProjectStatus};
-use crate::registry::{Project, ProjectType, Readiness};
+use crate::registry::{Project, ProjectType, Readiness, Workspace, WorkspaceTool};
 
 /// A merged registry + runtime view of one project.
 ///
@@ -42,6 +42,8 @@ pub struct ProjectView {
     pub tags: Vec<String>,
     pub document_root: Option<String>,
     pub php_version: Option<String>,
+    /// Monorepo workspace binding, when this project runs one app of a repo.
+    pub workspace: Option<Workspace>,
 
     /// PortBay status taxonomy (`docs/UX_DESIGN.md` §5.3).
     pub status: ProjectStatus,
@@ -72,6 +74,7 @@ impl ProjectView {
             tags: project.tags.clone(),
             document_root: project.document_root.clone(),
             php_version: project.php_version.clone(),
+            workspace: project.workspace.clone(),
             status: proc
                 .map(|p| p.portbay_status())
                 .unwrap_or(ProjectStatus::Stopped),
@@ -219,6 +222,10 @@ pub struct AddProjectInput {
     pub https: bool,
     #[serde(default)]
     pub auto_start: bool,
+    /// Monorepo workspace binding for a Tier-2 "run one app from the repo root"
+    /// project. When set, `path` is the monorepo root and `start_command` is
+    /// normally omitted so the reconciler runs the derived filter command.
+    pub workspace: Option<Workspace>,
 }
 
 fn default_kind() -> ProjectType {
@@ -234,6 +241,41 @@ fn default_https() -> bool {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectedProject {
+    pub kind: ProjectType,
+    pub suggested_id: String,
+    pub suggested_name: String,
+    pub suggested_hostname: String,
+    pub suggested_port: u16,
+    pub suggested_start_command: Option<String>,
+}
+
+/// Result of `detect_workspace_apps` — the monorepo apps a folder exposes that
+/// the Add Project wizard can offer to run individually. `None` from the
+/// command (not an empty scan) means "not a monorepo" — the wizard falls back
+/// to the normal single-folder flow.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceScan {
+    /// Tool inferred from the lockfile, used to scope a single-app run. The
+    /// detail panel lets the user switch this (e.g. to Turbo) after import.
+    pub tool: WorkspaceTool,
+    /// Runnable apps, each pre-filled with standalone-project defaults.
+    pub apps: Vec<WorkspaceAppDto>,
+}
+
+/// One runnable app inside a monorepo, pre-filled so selecting it populates the
+/// wizard exactly like a standalone folder would. `package` + `relDir` are also
+/// what a Tier-2 workspace-filter project would persist.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAppDto {
+    /// Package name — the workspace filter token (`@bookslash/web`).
+    pub package: String,
+    /// Directory relative to the monorepo root (`apps/web`).
+    pub rel_dir: String,
+    /// Absolute path to the app's directory (root + relDir). Used as the
+    /// standalone project `path` in the Tier-1 flow.
+    pub path: String,
     pub kind: ProjectType,
     pub suggested_id: String,
     pub suggested_name: String,
@@ -260,6 +302,11 @@ pub struct UpdateProjectPatch {
     pub env: Option<BTreeMap<String, String>>,
     pub document_root: Option<String>,
     pub php_version: Option<String>,
+    /// Monorepo workspace binding. When present, sets/replaces the project's
+    /// workspace filter (Tier-2 "run one app from the repo root"). Patch
+    /// semantics: absent leaves it unchanged — clear it by removing and
+    /// re-adding the project, which is rare enough not to warrant a tri-state.
+    pub workspace: Option<Workspace>,
 }
 
 #[cfg(test)]
@@ -286,6 +333,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            runtime: None,
+            workspace: None,
         }
     }
 
