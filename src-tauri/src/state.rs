@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -113,6 +114,11 @@ pub struct AppState {
     /// Crashed badge. Entries older than `STOP_INTENT_WINDOW` are
     /// considered stale and ignored.
     pub stop_intents: Mutex<HashMap<String, Instant>>,
+
+    /// Set once [`AppState::shutdown_all`] has run, so the teardown is
+    /// idempotent across the multiple quit signals Tauri can deliver (the
+    /// window `Destroyed` event AND the app-level `RunEvent::Exit`).
+    shutdown_done: AtomicBool,
 }
 
 /// How long after a Stop request a non-zero exit is still considered
@@ -145,6 +151,7 @@ impl AppState {
             preferences: Mutex::new(Preferences::load()),
             tray: Mutex::new(Default::default()),
             stop_intents: Mutex::new(HashMap::new()),
+            shutdown_done: AtomicBool::new(false),
         }
     }
 
@@ -353,6 +360,32 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .stop();
+    }
+
+    /// Tear down everything PortBay started — Process Compose (which stops
+    /// every project it supervises), Caddy, dnsmasq, Mailpit, and all
+    /// Cloudflare tunnels — in one place. Idempotent: the first call wins and
+    /// flips `shutdown_done`; later calls are no-ops. This matters because a
+    /// single quit can deliver more than one teardown signal (the main
+    /// window's `Destroyed` event AND the app-level `RunEvent::Exit`), and we
+    /// must guarantee the sweep runs exactly once on *every* quit path —
+    /// ⌘Q, the tray "Quit" item, or the last window closing — not only the
+    /// one the old window-event handler caught.
+    pub fn shutdown_all(&self) {
+        if self.shutdown_done.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::info!("shutdown: stopping process-compose, sidecars, and tunnels");
+        // PC first: its SIGTERM cascades to the dev servers it supervises, so
+        // they wind down before we cut the routing layer out from under them.
+        self.shutdown_pc();
+        self.shutdown_caddy();
+        self.shutdown_dnsmasq();
+        self.shutdown_mailpit();
+        // Replace the tunnel manager so its `Drop` kills every cloudflared
+        // child — nothing PortBay spawned should outlive the app.
+        *self.tunnels.lock().unwrap_or_else(|e| e.into_inner()) =
+            crate::tunnel::TunnelManager::new();
     }
 }
 
