@@ -251,13 +251,12 @@ pub async fn scaffold_template(
                     let _ = on_event.send(ScaffoldEvent::Log { line });
                 }
             }
-            CommandEvent::Terminated(payload)
-                if payload.code != Some(0) => {
-                    return Err(AppError::Internal(format!(
-                        "{program} exited with code {:?}",
-                        payload.code
-                    )));
-                }
+            CommandEvent::Terminated(payload) if payload.code != Some(0) => {
+                return Err(AppError::Internal(format!(
+                    "{program} exited with code {:?}",
+                    payload.code
+                )));
+            }
             _ => {}
         }
     }

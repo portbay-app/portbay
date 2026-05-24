@@ -33,9 +33,9 @@ use crate::mailpit::{
 };
 use crate::mkcert::Mkcert;
 use crate::preferences::Preferences;
-use crate::registry::store;
 use crate::process_compose::{PcClient, SidecarManager};
 use crate::reconciler::Reconciler;
+use crate::registry::store;
 use crate::tray::TrayState;
 use crate::tunnel::TunnelManager;
 
@@ -249,10 +249,7 @@ impl AppState {
             &config_path,
             admin_port,
         )?;
-        *self
-            .caddy_client
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
+        *self.caddy_client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
 
         // Poll admin endpoint until the daemon responds. The sidecar
         // command line was already accepted; the child may still be in
@@ -273,10 +270,7 @@ impl AppState {
     /// Stop the bundled Caddy sidecar and clear the cached client.
     pub fn shutdown_caddy(&self) {
         self.caddy.lock().unwrap_or_else(|e| e.into_inner()).stop();
-        *self
-            .caddy_client
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self.caddy_client.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Start the dnsmasq sidecar against the registry's domain suffix.
@@ -308,7 +302,10 @@ impl AppState {
 
     /// Stop the dnsmasq sidecar. Idempotent.
     pub fn shutdown_dnsmasq(&self) {
-        self.dnsmasq.lock().unwrap_or_else(|e| e.into_inner()).stop();
+        self.dnsmasq
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stop();
     }
 
     /// Start the Mailpit sidecar with SMTP + web UI listeners on
@@ -338,7 +335,10 @@ impl AppState {
 
     /// Stop the Mailpit sidecar. Idempotent.
     pub fn shutdown_mailpit(&self) {
-        self.mailpit.lock().unwrap_or_else(|e| e.into_inner()).stop();
+        self.mailpit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stop();
     }
 }
 

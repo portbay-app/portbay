@@ -130,8 +130,14 @@ mod tests {
             disable_negative_cache: false,
         };
         let cfg = build_config("test", 53053, &settings);
-        assert!(cfg.contains(&format!("cache-size={}", crate::registry::types::MAX_DNS_CACHE_SIZE)));
-        assert!(cfg.contains(&format!("local-ttl={}", crate::registry::types::MAX_DNS_LOCAL_TTL)));
+        assert!(cfg.contains(&format!(
+            "cache-size={}",
+            crate::registry::types::MAX_DNS_CACHE_SIZE
+        )));
+        assert!(cfg.contains(&format!(
+            "local-ttl={}",
+            crate::registry::types::MAX_DNS_LOCAL_TTL
+        )));
     }
 
     #[test]

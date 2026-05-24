@@ -75,7 +75,11 @@ const SPECS: &[EngineSpec] = &[
     },
     EngineSpec {
         engine: DatabaseEngine::Mongo,
-        formulae: &["mongodb-community", "mongodb-community@7.0", "mongodb-community@6.0"],
+        formulae: &[
+            "mongodb-community",
+            "mongodb-community@7.0",
+            "mongodb-community@6.0",
+        ],
         daemons: &["mongod"],
         clients: &["mongosh", "mongo"],
         init_bins: &[],
@@ -200,7 +204,11 @@ pub fn detect(engine: DatabaseEngine) -> EngineDetection {
 }
 
 fn probe_version(binary: &Path) -> String {
-    let Ok(out) = run_capture(&binary.to_path_buf(), &["--version"], Duration::from_secs(3)) else {
+    let Ok(out) = run_capture(
+        &binary.to_path_buf(),
+        &["--version"],
+        Duration::from_secs(3),
+    ) else {
         return String::new();
     };
     extract_version(&out)
@@ -216,7 +224,11 @@ pub fn extract_version(s: &str) -> String {
             .unwrap_or(token)
             .trim_matches(|c: char| c == ')' || c == '(' || c == ';');
         if trimmed.contains('.')
-            && trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            && trimmed
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
         {
             let clean: String = trimmed
                 .chars()
@@ -341,13 +353,10 @@ fn init_mysql(daemon: &Path, data: &Path) -> Result<(), String> {
         .map_err(|e| format!("mysqld --initialize-insecure failed: {}", truncate(&e, 800)))
 }
 
-fn init_mariadb(
-    engine: DatabaseEngine,
-    data: &Path,
-    prefix: Option<&Path>,
-) -> Result<(), String> {
-    let init = init_binary(engine, prefix)
-        .ok_or_else(|| "mariadb-install-db not found — reinstall MariaDB via Homebrew.".to_string())?;
+fn init_mariadb(engine: DatabaseEngine, data: &Path, prefix: Option<&Path>) -> Result<(), String> {
+    let init = init_binary(engine, prefix).ok_or_else(|| {
+        "mariadb-install-db not found — reinstall MariaDB via Homebrew.".to_string()
+    })?;
     let datadir_arg = format!("--datadir={}", data.display());
     let args = vec![
         datadir_arg.as_str(),
@@ -359,11 +368,7 @@ fn init_mariadb(
         .map_err(|e| format!("mariadb-install-db failed: {}", truncate(&e, 800)))
 }
 
-fn init_postgres(
-    engine: DatabaseEngine,
-    data: &Path,
-    prefix: Option<&Path>,
-) -> Result<(), String> {
+fn init_postgres(engine: DatabaseEngine, data: &Path, prefix: Option<&Path>) -> Result<(), String> {
     let initdb = init_binary(engine, prefix)
         .ok_or_else(|| "initdb not found — reinstall PostgreSQL via Homebrew.".to_string())?;
     let pgdata = format!("--pgdata={}", data.display());
@@ -434,8 +439,7 @@ fn write_config(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create config dir {}: {e}", parent.display()))?;
     }
-    std::fs::write(&cfg_path, body)
-        .map_err(|e| format!("write config {}: {e}", cfg_path.display()))
+    std::fs::write(&cfg_path, body).map_err(|e| format!("write config {}: {e}", cfg_path.display()))
 }
 
 // ===========================================================================
@@ -560,8 +564,7 @@ fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".into();
     }
-    if s
-        .chars()
+    if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@' | '='))
     {
         return s.to_string();
@@ -608,7 +611,10 @@ mod tests {
     #[test]
     fn paths_are_namespaced_under_databases() {
         let app = Path::new("/tmp/pb");
-        assert_eq!(data_dir(app, "x"), PathBuf::from("/tmp/pb/databases/x/data"));
+        assert_eq!(
+            data_dir(app, "x"),
+            PathBuf::from("/tmp/pb/databases/x/data")
+        );
         assert_eq!(
             config_path(DatabaseEngine::Mysql, app, "x").unwrap(),
             PathBuf::from("/tmp/pb/databases/x/my.cnf")
@@ -622,7 +628,11 @@ mod tests {
     #[test]
     fn mysql_run_command_uses_defaults_file() {
         let inst = instance(DatabaseEngine::Mysql, 3307);
-        let cmd = run_command(&inst, Path::new("/opt/homebrew/opt/mysql/bin/mysqld"), Path::new("/tmp/pb"));
+        let cmd = run_command(
+            &inst,
+            Path::new("/opt/homebrew/opt/mysql/bin/mysqld"),
+            Path::new("/tmp/pb"),
+        );
         assert!(cmd.contains("mysqld"));
         assert!(cmd.contains("--defaults-file="));
         assert!(cmd.contains("/tmp/pb/databases/myapp/my.cnf"));
@@ -641,7 +651,11 @@ mod tests {
     #[test]
     fn redis_run_command_points_at_conf() {
         let inst = instance(DatabaseEngine::Redis, 6380);
-        let cmd = run_command(&inst, Path::new("/usr/bin/redis-server"), Path::new("/tmp/pb"));
+        let cmd = run_command(
+            &inst,
+            Path::new("/usr/bin/redis-server"),
+            Path::new("/tmp/pb"),
+        );
         assert!(cmd.contains("redis-server"));
         assert!(cmd.contains("/tmp/pb/databases/myapp/redis.conf"));
     }

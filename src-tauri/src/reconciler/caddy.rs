@@ -57,9 +57,14 @@ pub(super) async fn reconcile(
     // PHP FastCGI sockets live under `<data_dir>/php/<version>/...`.
     // The pc sub-reconciler writes the same path; both must agree.
     let php_socket_dir = logs_dir.parent().unwrap_or(logs_dir).join("php");
-    let cfg = match build_config(reg, admin_port, http_port, https_port, &php_socket_dir, |id| {
-        cert_lookup.get(id).cloned()
-    }) {
+    let cfg = match build_config(
+        reg,
+        admin_port,
+        http_port,
+        https_port,
+        &php_socket_dir,
+        |id| cert_lookup.get(id).cloned(),
+    ) {
         Ok(c) => c,
         Err(e) => return StepOutcome::failed(format!("build config: {e}")),
     };
