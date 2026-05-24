@@ -291,6 +291,40 @@ pub async fn remove_project(state: State<'_, AppState>, id: String) -> AppResult
     Ok(())
 }
 
+/// `set_xdebug_mode(id, mode)` — flip a PHP project's `XDEBUG_MODE` env
+/// var. Passing `"off"` (or an empty string) deletes the var entirely;
+/// any other value sets it. This is a project-env mutation, not PHP
+/// detection — it persists through the same dirty-and-reconcile flow as
+/// `update_project`, so the next PC tick re-spawns the project's entry.
+#[tauri::command]
+pub async fn set_xdebug_mode(
+    state: State<'_, AppState>,
+    id: String,
+    mode: String,
+) -> AppResult<ProjectView> {
+    let mut registry = load_registry(&state)?;
+    let pid = ProjectId::new(id.clone());
+
+    let project = registry
+        .get_project_mut(&pid)
+        .ok_or_else(|| AppError::NotFound(id.clone()))?;
+
+    let mut env: BTreeMap<String, String> = project.env.clone();
+    let mode = mode.trim();
+    if mode.is_empty() || mode.eq_ignore_ascii_case("off") {
+        env.remove("XDEBUG_MODE");
+    } else {
+        env.insert("XDEBUG_MODE".into(), mode.to_string());
+    }
+    project.env = env;
+
+    let snapshot = project.clone();
+    save_registry(&state, &registry)?;
+    state.reconciler.mark_dirty();
+
+    Ok(ProjectView::from_project(&snapshot, None))
+}
+
 // =============================================================================
 // Helpers shared with other command modules
 // =============================================================================
