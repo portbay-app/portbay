@@ -27,6 +27,7 @@
     AccentColor,
     DefaultSort,
     StartBehavior,
+    AutoCleanSchedule,
   } from "$lib/stores/preferences.svelte";
   import { safeInvoke } from "$lib/ipc";
   // Canonical wire shapes — imported so they can't drift from the Rust side.
@@ -389,6 +390,32 @@
     { value: "auto", label: "Start automatically" },
   ];
 
+  const cleanScheduleOptions: { value: AutoCleanSchedule; label: string }[] = [
+    { value: "off", label: "Off" },
+    { value: "weekly", label: "Weekly" },
+    { value: "monthly", label: "Monthly" },
+  ];
+
+  /** Human "last cleaned" label from a Unix-seconds stamp (0 → never run). */
+  function formatLastClean(secs: number): string {
+    if (!secs) return "Never";
+    return new Date(secs * 1000).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  }
+
+  /** Parse the comma/whitespace-separated extra-dirs input into a clean list
+      and persist it. Drops blanks; the backend re-sanitises for safety. */
+  function saveExtraDirs(raw: string): void {
+    const dirs = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    void preferences.update({ autoCleanExtraDirs: dirs });
+  }
+
   const retentionOptions = [
     { value: 1, label: "1 day" },
     { value: 7, label: "7 days" },
@@ -671,6 +698,71 @@
           label="Auto-renew local certificates"
           onchange={(v) => preferences.update({ autoRenewCertificates: v })}
         />
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== Artifacts ============== -->
+  <section
+    class="bg-surface border border-border rounded-2xl p-5
+           grid grid-cols-[180px,1fr] gap-x-6"
+  >
+    <div class="flex items-start gap-2.5">
+      <span
+        class="inline-flex items-center justify-center w-8 h-8 rounded-lg
+               bg-fg-muted/10 text-fg-muted"
+      >
+        <Icon name="package" size={15} />
+      </span>
+      <span class="text-[14px] font-semibold text-fg pt-1">Artifacts</span>
+    </div>
+
+    <div class="divide-y divide-border/60">
+      <div class="flex items-center justify-between gap-3 py-2.5 first:pt-0">
+        <div class="flex flex-col">
+          <span class="text-[13px] text-fg">Auto-clean schedule</span>
+          <span class="text-[11px] text-fg-subtle"
+            >Periodically delete build output (node_modules, .next, vendor…)
+            across all projects.</span
+          >
+        </div>
+        <select
+          value={preferences.value.autoCleanSchedule}
+          onchange={(e) =>
+            preferences.update({
+              autoCleanSchedule: (e.currentTarget as HTMLSelectElement)
+                .value as AutoCleanSchedule,
+            })}
+          class="h-8 w-56 rounded-md bg-bg border border-border px-2.5 text-[12px] text-fg focus:outline-none focus:border-accent/60"
+        >
+          {#each cleanScheduleOptions as opt (opt.value)}
+            <option value={opt.value}>{opt.label}</option>
+          {/each}
+        </select>
+      </div>
+
+      <div class="flex items-center justify-between gap-3 py-2.5">
+        <div class="flex flex-col">
+          <span class="text-[13px] text-fg">Extra directories</span>
+          <span class="text-[11px] text-fg-subtle"
+            >Comma-separated, added to every project (e.g. .turbo, .cache).</span
+          >
+        </div>
+        <input
+          type="text"
+          value={preferences.value.autoCleanExtraDirs.join(", ")}
+          onchange={(e) =>
+            saveExtraDirs((e.currentTarget as HTMLInputElement).value)}
+          placeholder=".turbo, .cache"
+          class="h-8 w-56 rounded-md bg-bg border border-border px-2.5 text-[12px] text-fg font-mono focus:outline-none focus:border-accent/60"
+        />
+      </div>
+
+      <div class="flex items-center justify-between gap-3 py-2.5 last:pb-0">
+        <span class="text-[13px] text-fg">Last cleaned</span>
+        <span class="text-[12px] text-fg-muted"
+          >{formatLastClean(preferences.value.lastAutoClean)}</span
+        >
       </div>
     </div>
   </section>

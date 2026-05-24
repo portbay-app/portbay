@@ -127,6 +127,26 @@ pub struct Preferences {
     /// when SIP forbids symlink). Exposed read-only with a copy button.
     #[serde(default = "default_cli_path")]
     pub cli_path: String,
+
+    // -------- Artifacts --------
+    /// Background auto-clean cadence for build artifacts across every
+    /// registered project: "off" | "weekly" | "monthly". Off by default —
+    /// auto-deleting `node_modules`/`vendor` is strictly opt-in.
+    #[serde(default = "default_auto_clean_schedule")]
+    pub auto_clean_schedule: String,
+
+    /// Unix seconds of the last completed auto-clean pass; 0 = never. The
+    /// scheduler stamps this after each pass, and enabling a schedule also
+    /// stamps it, so the first auto pass is one cadence away — never an
+    /// immediate surprise wipe the moment the user flips it on.
+    #[serde(default)]
+    pub last_auto_clean: u64,
+
+    /// Extra project-relative directory names treated as artifacts on top of
+    /// the built-in per-type catalogue (e.g. `.turbo`, `.cache`). Applied to
+    /// every project type; honoured by both scan and clean.
+    #[serde(default)]
+    pub auto_clean_extra_dirs: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -153,6 +173,10 @@ fn default_cli_path() -> String {
     "/usr/local/bin/portbay".to_string()
 }
 
+fn default_auto_clean_schedule() -> String {
+    "off".to_string()
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -174,6 +198,9 @@ impl Default for Preferences {
             store_logs_locally: true,
             log_retention_days: default_log_retention_days(),
             cli_path: default_cli_path(),
+            auto_clean_schedule: default_auto_clean_schedule(),
+            last_auto_clean: 0,
+            auto_clean_extra_dirs: Vec::new(),
         }
     }
 }
@@ -273,6 +300,9 @@ mod tests {
             store_logs_locally: false,
             log_retention_days: 30,
             cli_path: "/opt/local/bin/portbay".to_string(),
+            auto_clean_schedule: "weekly".to_string(),
+            last_auto_clean: 1_700_000_000,
+            auto_clean_extra_dirs: vec![".turbo".to_string(), ".cache".to_string()],
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"showTrayIcon\":false"));
@@ -280,7 +310,17 @@ mod tests {
         assert!(json.contains("\"launchAtLogin\":true"));
         assert!(json.contains("\"accentColor\":\"purple\""));
         assert!(json.contains("\"logRetentionDays\":30"));
+        assert!(json.contains("\"autoCleanSchedule\":\"weekly\""));
+        assert!(json.contains("\"lastAutoClean\":1700000000"));
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn auto_clean_defaults_are_off_and_unscheduled() {
+        let p = Preferences::default();
+        assert_eq!(p.auto_clean_schedule, "off");
+        assert_eq!(p.last_auto_clean, 0);
+        assert!(p.auto_clean_extra_dirs.is_empty());
     }
 }
