@@ -24,6 +24,8 @@ import type {
 } from "$lib/types/databases";
 import type { DnsPreflight, DnsRecord, ResolverStatus } from "$lib/types/dns";
 import type { WebServerInfo } from "$lib/types/webservers";
+import type { SystemMetrics } from "$lib/types/metrics";
+import type { DevToolInfo } from "$lib/types/devTools";
 
 /** Everything the mock IPC layer can serve, in one bag. */
 export interface DemoFixtures {
@@ -39,6 +41,9 @@ export interface DemoFixtures {
   dnsPreflight: DnsPreflight;
   resolverStatus: ResolverStatus;
   webServers: WebServerInfo[];
+  metrics: SystemMetrics;
+  devTools: DevToolInfo[];
+  logs: Record<string, string[]>;
 }
 
 /** A healthy-looking process snapshot for a running project. */
@@ -128,6 +133,14 @@ const PROJECTS: ProjectView[] = [
     autoStart: true,
     tags: ["static"],
     sandboxed: false,
+    domain: {
+      notes: "Marketing + per-campaign landing pages.",
+      pathPrefix: null,
+      resolverMode: "auto",
+      autoManageCert: true,
+      includeWildcardSubdomains: true,
+      exposeWhenRunning: false,
+    },
     status: "running",
     runtime: runtimeOf(48402, 18, 0.0),
   },
@@ -169,6 +182,156 @@ const PROJECTS: ProjectView[] = [
     sandbox: { enabled: true, network: "loopback_only", ephemeral: true },
     status: "running",
     runtime: runtimeOf(48511, 64, 0.9),
+  },
+  {
+    id: "vendor-portal",
+    name: "Vendor Portal (eval)",
+    path: "/Users/dev/Sites/vendor-portal",
+    type: "node",
+    startCommand: "npm start",
+    port: 3000,
+    extraPorts: [8000],
+    hostname: "vendor-portal.test",
+    url: "https://vendor-portal.test",
+    https: true,
+    services: ["web", "worker", "postgres"],
+    env: {
+      NODE_ENV: "production",
+      DATABASE_URL: "postgres://app:s3cr3t@127.0.0.1:5432/vendor",
+      REDIS_URL: "redis://127.0.0.1:6379",
+      OCR_LANGUAGES: "eng+deu",
+    },
+    autoStart: false,
+    tags: ["sandbox", "eval", "node"],
+    sandboxed: true,
+    sandbox: { enabled: true, network: "outbound", ephemeral: false },
+    status: "running",
+    runtime: runtimeOf(48533, 188, 1.2),
+  },
+  {
+    id: "hatchway-cms",
+    name: "Hatchway CMS",
+    path: "/Users/dev/Sites/hatchway-cms",
+    type: "next",
+    startCommand: "pnpm dev",
+    port: 3100,
+    extraPorts: [],
+    hostname: "hatchway.test",
+    url: "https://hatchway.test",
+    https: true,
+    services: [],
+    env: { NODE_ENV: "development" },
+    autoStart: false,
+    tags: ["cms", "next"],
+    sandboxed: false,
+    domain: {
+      notes: "Headless CMS admin + preview.",
+      pathPrefix: null,
+      resolverMode: "auto",
+      autoManageCert: true,
+      includeWildcardSubdomains: false,
+      exposeWhenRunning: false,
+    },
+    status: "running",
+    runtime: runtimeOf(48560, 204, 1.1),
+  },
+  {
+    id: "pinpoint-maps",
+    name: "Pinpoint Maps",
+    path: "/Users/dev/Sites/pinpoint-maps",
+    type: "vite",
+    startCommand: "pnpm dev",
+    port: 5180,
+    extraPorts: [],
+    hostname: "pinpoint.test",
+    url: "https://pinpoint.test",
+    https: true,
+    services: [],
+    env: {},
+    autoStart: false,
+    tags: ["vite", "maps"],
+    sandboxed: false,
+    status: "running",
+    runtime: runtimeOf(48574, 96, 0.5),
+  },
+  {
+    id: "quill-docs",
+    name: "Quill Docs",
+    path: "/Users/dev/Sites/quill-docs",
+    type: "static",
+    extraPorts: [],
+    hostname: "docs.quill.test",
+    url: "https://docs.quill.test",
+    https: true,
+    services: [],
+    env: {},
+    autoStart: true,
+    tags: ["docs", "static"],
+    sandboxed: false,
+    domain: {
+      notes: "Versioned docs; each release gets its own subdomain.",
+      pathPrefix: null,
+      resolverMode: "dnsmasq",
+      autoManageCert: true,
+      includeWildcardSubdomains: true,
+      exposeWhenRunning: false,
+    },
+    status: "running",
+    runtime: runtimeOf(48588, 14, 0.0),
+  },
+  {
+    id: "relay-api",
+    name: "Relay API",
+    path: "/Users/dev/Sites/relay-api",
+    type: "node",
+    startCommand: "node server.js",
+    port: 4200,
+    extraPorts: [],
+    hostname: "api.relay.test",
+    url: "https://api.relay.test",
+    https: true,
+    services: ["postgres"],
+    env: { NODE_ENV: "development" },
+    autoStart: false,
+    tags: ["api", "node"],
+    sandboxed: false,
+    domain: {
+      notes: "Public API gateway, mounted under /v1.",
+      pathPrefix: "/v1",
+      resolverMode: "auto",
+      autoManageCert: true,
+      includeWildcardSubdomains: false,
+      exposeWhenRunning: true,
+    },
+    status: "running",
+    runtime: runtimeOf(48601, 132, 0.8),
+  },
+  {
+    id: "cobalt-admin",
+    name: "Cobalt Admin",
+    path: "/Users/dev/Sites/cobalt-admin",
+    type: "next",
+    startCommand: "pnpm dev",
+    port: 3200,
+    extraPorts: [],
+    hostname: "cobalt-admin.test",
+    url: "https://cobalt-admin.test",
+    https: true,
+    services: [],
+    env: {},
+    autoStart: false,
+    tags: ["admin", "next"],
+    sandboxed: false,
+    domain: {
+      notes: "Internal admin — only routed while running.",
+      pathPrefix: null,
+      resolverMode: "auto",
+      autoManageCert: true,
+      includeWildcardSubdomains: false,
+      exposeWhenRunning: true,
+    },
+    status: "running",
+    runtime: runtimeOf(48615, 168, 0.9),
   },
 ];
 
@@ -489,6 +652,84 @@ const WEB_SERVERS: WebServerInfo[] = [
   },
 ];
 
+const SYSTEM_METRICS: SystemMetrics = {
+  cpu: { total: 18 },
+  memory: {
+    usedBytes: 11.4 * 1024 ** 3,
+    totalBytes: 32 * 1024 ** 3,
+  },
+  disk: {
+    usedBytes: 356 * 1024 ** 3,
+    totalBytes: 994 * 1024 ** 3,
+  },
+};
+
+const DEV_TOOLS: DevToolInfo[] = [
+  { id: "vscode", label: "Visual Studio Code", kind: "editor" },
+  { id: "cursor", label: "Cursor", kind: "editor" },
+  { id: "phpstorm", label: "PhpStorm", kind: "editor" },
+  { id: "codex", label: "Codex", kind: "agent" },
+  { id: "warp", label: "Warp", kind: "terminal" },
+  { id: "terminal", label: "Terminal", kind: "terminal" },
+  { id: "finder", label: "Finder", kind: "file-manager" },
+];
+
+function log(process: string, message: string, level = "info"): string {
+  return JSON.stringify({ level, process, replica: 0, message });
+}
+
+const LOGS: Record<string, string[]> = {
+  "acme-storefront": [
+    log("web", "> acme-storefront@0.8.0 dev"),
+    log("web", "> next dev --turbo"),
+    log("web", "▲ Next.js 15.3.1"),
+    log("web", "Local:        https://acme-storefront.test"),
+    log("web", "Network:      http://192.168.1.195:3000"),
+    log("web", "✓ Starting..."),
+    log("web", "✓ Ready in 812ms"),
+    log("web", "GET / 200 in 42ms"),
+    log("web", "GET /_next/static/chunks/main.js 304 in 3ms"),
+    log("web", "Compiled /products/[slug] in 184ms"),
+    log("web", "GET /products/lighthouse-tee 200 in 57ms"),
+  ],
+  "billing-api": [
+    log("php-fpm", "PHP 8.3.6 Development Server started"),
+    log("nginx", "nginx/1.27.0 started; upstream php-fpm listening on 127.0.0.1:9074"),
+    log("laravel", "INFO  Route cache loaded"),
+    log("laravel", "INFO  GET /health 200 9ms"),
+    log("laravel", "INFO  POST /api/invoices 201 88ms"),
+    log("laravel", "WARN  Slow query detected: invoices.index took 421ms", "warn"),
+    log("laravel", "INFO  Queue worker processing SendInvoiceEmail"),
+  ],
+  "dashboard-ui": [
+    log("web", "> dashboard-ui@0.4.0 dev"),
+    log("web", "> vite --host 127.0.0.1"),
+    log("web", "VITE v6.4.2  ready in 318 ms"),
+    log("web", "➜  Local:   https://dashboard.test"),
+    log("web", "hmr update /src/routes/+page.svelte"),
+  ],
+  "marketing-site": [
+    log("static", "Serving /Users/dev/Sites/marketing-site on https://marketing.test"),
+    log("caddy", "certificate loaded for marketing.test"),
+    log("caddy", "GET / 200 18ms"),
+    log("caddy", "GET /assets/hero.webp 200 24ms"),
+  ],
+  "legacy-importer": [
+    log("node", "> node server.js"),
+    log("node", "Legacy Importer listening on http://127.0.0.1:4000"),
+    log("node", "WARN  Deprecated API token format detected", "warn"),
+    log("node", "GET /import/run 500 1204ms", "error"),
+    log("node", "ERROR Migration step failed: missing customer_id on row 1842", "error"),
+  ],
+  "untrusted-demo": [
+    log("sandbox", "Sandbox profile applied: loopback_only, ephemeral filesystem"),
+    log("node", "> npm start"),
+    log("node", "Demo server listening on https://sandbox.test"),
+    log("sandbox", "Blocked outbound network attempt to api.example.com:443", "warn"),
+    log("node", "GET / 200 31ms"),
+  ],
+};
+
 /** The canonical fixture bag. Deep-cloned by the mock before mutation. */
 export const DEMO_FIXTURES: DemoFixtures = {
   projects: PROJECTS,
@@ -503,4 +744,7 @@ export const DEMO_FIXTURES: DemoFixtures = {
   dnsPreflight: DNS_PREFLIGHT,
   resolverStatus: RESOLVER_STATUS,
   webServers: WEB_SERVERS,
+  metrics: SYSTEM_METRICS,
+  devTools: DEV_TOOLS,
+  logs: LOGS,
 };
