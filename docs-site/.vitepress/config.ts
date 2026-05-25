@@ -68,6 +68,7 @@ export default defineConfig({
           { text: "HTTP Inspector", link: "/guides/http-inspector" },
           { text: "Databases", link: "/guides/databases" },
           { text: "Languages & Runtimes", link: "/guides/languages" },
+          { text: "Stack Recipes", link: "/guides/recipes" },
           { text: "Mailpit", link: "/guides/mailpit" },
           { text: "Cloudflare Tunnels", link: "/guides/tunnels" },
           { text: "Sandboxed Projects", link: "/guides/sandbox" },
