@@ -86,6 +86,15 @@ jobs:
           TARGET_TRIPLE: aarch64-apple-darwin
         run: ./scripts/build-mcp.sh
 
+      - name: Generate Cargo SBOM
+        run: |
+          cargo install cargo-cyclonedx --locked
+          mkdir -p src-tauri/artifacts
+          cd src-tauri
+          cargo cyclonedx --format json --override-filename portbay-cargo-sbom.cdx
+          mv portbay-cargo-sbom.cdx.json artifacts/portbay-cargo-sbom.cdx.json
+          find crates -name portbay-cargo-sbom.cdx.json -delete
+
       - name: Build signed app
         env:
           # Developer ID Application cert (base64-encoded .p12), unwrapped
@@ -110,6 +119,7 @@ jobs:
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/artifacts/portbay-cargo-sbom.cdx.json
           retention-days: 14
           if-no-files-found: warn
 
@@ -133,9 +143,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/dmg/*.dmg
-            artifacts/macos/*.app.tar.gz
-            artifacts/macos/*.app.tar.gz.sig
+            artifacts/**/*.dmg
+            artifacts/**/*.app.tar.gz
+            artifacts/**/*.app.tar.gz.sig
+            artifacts/**/portbay-cargo-sbom.cdx.json
           draft: true
           generate_release_notes: true
 
@@ -144,3 +155,104 @@ jobs:
       # { version, notes, pub_date, platforms: { "darwin-aarch64": { url, signature } } }
       # The Updater integration card writes the consumer side; this
       # workflow writes the producer side.
+
+  update-homebrew-tap:
+    name: publish · Homebrew cask PR
+    needs: [publish-release]
+    runs-on: ubuntu-latest
+    if: vars.RELEASE_SIGNING_ENABLED == 'true'
+    permissions:
+      contents: read
+    env:
+      TAP_REPO: portbay-app/homebrew-portbay
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: portbay-macos-arm64
+          path: artifacts/
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          dmg="$(find artifacts -type f -name '*.dmg' | head -n 1)"
+          if [ -z "$dmg" ]; then
+            echo "::error::No DMG artifact found for Homebrew cask update."
+            exit 1
+          fi
+          asset="$(basename "$dmg")"
+          sha="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+          {
+            echo "version=$version"
+            echo "asset=$asset"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPO }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-portbay
+
+      - name: Render Cask
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p homebrew-portbay/Casks
+          cat > homebrew-portbay/Casks/portbay.rb <<'RUBY'
+          cask "portbay" do
+            version "__VERSION__"
+            sha256 "__SHA256__"
+
+            url "https://github.com/portbay-app/portbay/releases/download/v#{version}/__ASSET__"
+            name "PortBay"
+            desc "Lightweight local development environment manager"
+            homepage "https://portbay.app"
+
+            app "PortBay.app"
+            binary "#{appdir}/PortBay.app/Contents/MacOS/portbay"
+
+            zap trash: [
+              "~/Library/Application Support/com.portbay-app.portbay",
+              "~/Library/Application Support/PortBay",
+              "~/Library/Caches/com.portbay-app.portbay",
+              "~/Library/Logs/PortBay",
+              "~/Library/Preferences/com.portbay-app.portbay.plist",
+              "~/Library/WebKit/com.portbay-app.portbay",
+            ]
+          end
+          RUBY
+          sed -i \
+            -e "s/__VERSION__/${{ steps.meta.outputs.version }}/g" \
+            -e "s/__SHA256__/${{ steps.meta.outputs.sha }}/g" \
+            -e "s/__ASSET__/${{ steps.meta.outputs.asset }}/g" \
+            homebrew-portbay/Casks/portbay.rb
+
+      - name: Create tap update PR
+        id: cpr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-portbay
+          branch: release/portbay-${{ steps.meta.outputs.version }}
+          commit-message: "Update PortBay cask to ${{ steps.meta.outputs.version }}"
+          title: "Update PortBay cask to ${{ steps.meta.outputs.version }}"
+          body: |
+            Automated release update from `${{ github.repository }}@${{ github.ref_name }}`.
+
+            - DMG: `${{ steps.meta.outputs.asset }}`
+            - SHA-256: `${{ steps.meta.outputs.sha }}`
+          labels: release, automated
+
+      - name: Enable automerge for tap PR
+        if: steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        working-directory: homebrew-portbay
+        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --auto --squash
