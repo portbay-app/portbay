@@ -82,6 +82,12 @@ jobs:
           ./scripts/fetch-cloudflared.sh
           ./scripts/fetch-dnsmasq.sh
 
+      - name: Build privileged hosts helper
+        # tauri.conf.json lists binaries/portbay-hosts-helper as an externalBin,
+        # so the crate's build.rs fails the existence check unless it's present.
+        # The bundle-smoke job does the same; clippy/test need it here too.
+        run: ./scripts/build-hosts-helper.sh
+
       - name: cargo fmt --check
         working-directory: src-tauri
         run: cargo fmt --all -- --check
