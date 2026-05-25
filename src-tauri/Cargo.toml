@@ -59,7 +59,7 @@ console = "0.15"
 sysinfo = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-x509-parser = "0.16"
+x509-parser = "0.18"
 libc = "0.2"
 ed25519-dalek = "2"
 base64 = "0.22"
