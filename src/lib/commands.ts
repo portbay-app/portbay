@@ -8,7 +8,7 @@
  * updates (e.g. a project flips to running mid-search).
  */
 import { goto } from "$app/navigation";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "$lib/security/openUrl";
 
 import { safeInvoke } from "$lib/ipc";
 import { addProjectWizard } from "$lib/stores/wizard.svelte";

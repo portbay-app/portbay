@@ -8,7 +8,7 @@
   poll until the session lands — all without tokens ever touching the webview.
 -->
 <script lang="ts">
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import LighthouseLogo from "$lib/components/atoms/LighthouseLogo.svelte";

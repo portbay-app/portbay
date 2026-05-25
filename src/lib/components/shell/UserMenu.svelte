@@ -10,7 +10,7 @@
 -->
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { safeInvoke } from "$lib/ipc";

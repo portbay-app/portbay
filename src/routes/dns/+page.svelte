@@ -12,7 +12,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";

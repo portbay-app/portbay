@@ -7,7 +7,7 @@
   focused upgrade CTA; this is the "what is Pro / how does licensing work" view.
 -->
 <script lang="ts">
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import LighthouseLogo from "$lib/components/atoms/LighthouseLogo.svelte";

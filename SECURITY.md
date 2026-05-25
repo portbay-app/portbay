@@ -40,7 +40,9 @@ Do not file public issues for vulnerabilities.
 
 ## Threat Model
 
-PortBay trusts the user and the project folders they explicitly add. It does not sandbox arbitrary project code. A project `startCommand` runs on the user's machine with the user's privileges through Process Compose.
+PortBay trusts the user and the project folders they explicitly add. A normal project `startCommand` runs on the user's machine with the user's privileges through Process Compose.
+
+PortBay Pro adds a Sandboxed Run path for untrusted external projects. That mode wraps the supervised process in a PortBay-generated macOS `sandbox-exec` profile, constrains writes to the selected project folder plus temp/cache locations, supports loopback/outbound/full/blocked network policies, and surfaces sandbox denial lines from process logs. Treat Sandbox as a containment and inspection layer, not as a guarantee that malicious code is safe to promote to unrestricted local execution.
 
 PortBay must not leak or upload:
 
@@ -54,9 +56,13 @@ PortBay must not leak or upload:
 ## Out Of Scope
 
 - Bugs requiring physical access to an unlocked machine.
-- Vulnerabilities in third-party project code launched by PortBay.
+- Vulnerabilities in third-party project code launched outside PortBay's Sandboxed Run containment.
 - Social engineering against maintainers or users.
 - Denial of service by intentionally malformed local project commands.
+
+## Webview And URL Opening
+
+Frontend-triggered URL opening is restricted to `http:`, `https:`, and `file:` URLs by `$lib/security/openUrl`. Custom schemes are deliberately blocked in the webview. Native-only flows that must open macOS settings or trusted local developer tools route through Rust command handlers where the allowed scheme or executable is selected by PortBay code, not by arbitrary webview input.
 
 ## Secret Handling And Scanning
 

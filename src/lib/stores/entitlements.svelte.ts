@@ -9,7 +9,7 @@
  */
 
 import { browser } from "$app/environment";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "$lib/security/openUrl";
 import { invokeQuiet, safeInvoke } from "$lib/ipc";
 import {
   ANONYMOUS_FALLBACK,

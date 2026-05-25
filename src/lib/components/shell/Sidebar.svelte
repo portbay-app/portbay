@@ -16,7 +16,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
   import { getVersion } from "@tauri-apps/api/app";
 
   import SidebarItem from "./SidebarItem.svelte";
