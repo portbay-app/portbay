@@ -159,6 +159,7 @@ mod tests {
     fn https_project(id: &str) -> Project {
         Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),

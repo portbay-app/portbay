@@ -18,7 +18,8 @@ pub use error::{RegistryError, Result};
 pub use types::{
     CorsConfig, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, FpmTuning,
     Group, ManualRuntime, MobileRunConfig, PhpVersionConfig, Project, ProjectId, ProjectType,
-    Readiness, Runtime, RuntimeSettings, WebServer, Workspace, WorkspaceTool,
+    Readiness, Runtime, RuntimeSettings, SandboxConfig, SandboxNetworkPolicy, WebServer, Workspace,
+    WorkspaceTool,
 };
 
 /// The registry-file schema version this build reads and writes.
@@ -299,6 +300,7 @@ mod tests {
     fn sample_project(id: &str) -> Project {
         Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),

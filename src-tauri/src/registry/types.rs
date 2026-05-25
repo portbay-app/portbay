@@ -225,6 +225,12 @@ pub struct Project {
     /// pre-existing registries (deserialises to `None`); no schema bump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors: Option<CorsConfig>,
+
+    /// Pro sandbox runner configuration. `None` means normal unrestricted
+    /// local execution. Additive field for registries written before sandbox
+    /// mode existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxConfig>,
 }
 
 impl Project {
@@ -266,6 +272,61 @@ pub struct CorsConfig {
     /// Send `Access-Control-Allow-Credentials: true` for matched origins.
     #[serde(default)]
     pub allow_credentials: bool,
+}
+
+/// Per-project sandbox runner configuration. This is intentionally explicit
+/// instead of a tag so UI, import, and lifecycle code share one auditable
+/// security contract.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxConfig {
+    /// Whether the next supervised run is wrapped by the generated sandbox
+    /// profile. Keeping the object while disabled lets the UI preserve policy
+    /// choices between runs.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Network access granted inside the profile.
+    #[serde(default)]
+    pub network: SandboxNetworkPolicy,
+    /// Remove mutable sandbox cache/temp dirs before each sandboxed start.
+    #[serde(default = "default_true")]
+    pub ephemeral: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            network: SandboxNetworkPolicy::LoopbackOnly,
+            ephemeral: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxNetworkPolicy {
+    /// Allow loopback bind/connect only. This is the safest useful default for
+    /// local dev servers once dependencies are already installed.
+    #[default]
+    LoopbackOnly,
+    /// Allow outbound package-manager access plus loopback dev-server bind.
+    Outbound,
+    /// Allow all networking. Useful for projects that legitimately need LAN
+    /// devices or multicast during inspection.
+    Full,
+    /// Block networking. The process can still run local scripts.
+    Blocked,
+}
+
+impl SandboxConfig {
+    pub fn enabled(network: SandboxNetworkPolicy, ephemeral: bool) -> Self {
+        Self {
+            enabled: true,
+            network,
+            ephemeral,
+        }
+    }
 }
 
 impl CorsConfig {
@@ -670,6 +731,12 @@ pub struct PhpVersionConfig {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FpmTuning {
+    /// FPM listen transport: `socket` (PortBay-owned unix socket) or `tcp`.
+    #[serde(default = "default_fpm_listen")]
+    pub listen: String,
+    /// Loopback port used when `listen == "tcp"`.
+    #[serde(default = "default_fpm_tcp_port")]
+    pub tcp_port: u16,
     /// Process-manager mode: `dynamic`, `static`, or `ondemand`.
     pub pm: String,
     /// Hard ceiling on child processes (`pm.max_children`).
@@ -682,19 +749,59 @@ pub struct FpmTuning {
     pub max_spare_servers: u32,
     /// Requests a child handles before respawning (`pm.max_requests`).
     pub max_requests: u32,
+    /// FPM `request_slowlog_timeout`; `0` disables slow logging.
+    #[serde(default)]
+    pub request_slowlog_timeout: String,
+    /// Optional FPM `slowlog` path. Blank resolves to PortBay's per-version
+    /// config dir at render time.
+    #[serde(default)]
+    pub slowlog: String,
+    /// Forward worker stdout/stderr into the FPM error log.
+    #[serde(default)]
+    pub catch_workers_output: bool,
+    /// Prefix forwarded worker output with FPM metadata.
+    #[serde(default = "default_true")]
+    pub decorate_workers_output: bool,
+    /// Emit FPM access logs into the per-version config dir.
+    #[serde(default)]
+    pub access_log: bool,
+    /// Free-form pool directives appended after PortBay-managed settings.
+    /// Only a constrained allowlist is accepted by the runtime apply path.
+    #[serde(default)]
+    pub raw_params: String,
 }
 
 impl Default for FpmTuning {
     fn default() -> Self {
         Self {
+            listen: default_fpm_listen(),
+            tcp_port: default_fpm_tcp_port(),
             pm: "dynamic".into(),
             max_children: 8,
             start_servers: 2,
             min_spare_servers: 1,
             max_spare_servers: 3,
             max_requests: 500,
+            request_slowlog_timeout: String::new(),
+            slowlog: String::new(),
+            catch_workers_output: false,
+            decorate_workers_output: true,
+            access_log: false,
+            raw_params: String::new(),
         }
     }
+}
+
+fn default_fpm_listen() -> String {
+    "socket".into()
+}
+
+fn default_fpm_tcp_port() -> u16 {
+    9000
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One manually-added runtime install. PortBay reuses the binary in place —
@@ -776,6 +883,7 @@ mod tests {
         // Mirrors the Next.js example in ASSESSMENT_AND_PLAN.md §7.1.
         let p = Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new("marketing-site"),
             name: "Marketing Site".into(),
             path: PathBuf::from("/Volumes/DEVSSD/Projects/Clients/Marketing Site"),
@@ -813,6 +921,7 @@ mod tests {
     fn bare_php_project() -> Project {
         Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new("legacy-php"),
             name: "Legacy PHP".into(),
             path: PathBuf::from("/tmp/legacy-php"),

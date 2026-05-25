@@ -44,6 +44,7 @@ const SEED_PROJECT = {
   env: {},
   autoStart: false,
   tags: [],
+  sandboxed: false,
   status: "stopped",
 };
 

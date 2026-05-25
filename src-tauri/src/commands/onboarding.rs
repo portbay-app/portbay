@@ -297,6 +297,7 @@ async fn finalize(
         https: true,
         auto_start: false,
         workspace: None,
+        sandbox: None,
     };
 
     let view = add_project(state.clone(), input).await?;

@@ -25,6 +25,7 @@ pub mod project_runtime;
 pub mod reconciler;
 pub mod registry;
 pub mod runtimes;
+pub mod sandbox;
 pub mod smoke;
 pub mod state;
 pub mod sync;
@@ -376,15 +377,19 @@ pub fn run() {
             commands::projects::list_projects,
             commands::projects::get_project,
             commands::projects::add_project,
+            commands::projects::clone_git_project_sandboxed,
             commands::projects::update_project,
             commands::projects::remove_project,
             commands::projects::detect_project,
             commands::projects::detect_workspace_apps,
             commands::projects::validate_project_folder,
             commands::lifecycle::start_project,
+            commands::lifecycle::start_project_sandboxed,
             commands::lifecycle::force_start_project,
             commands::lifecycle::stop_project,
             commands::lifecycle::restart_project,
+            commands::lifecycle::promote_project_to_local,
+            commands::lifecycle::sandbox_violations,
             commands::lifecycle::stop_all,
             commands::lifecycle::open_project,
             commands::lifecycle::preview_port_conflict,

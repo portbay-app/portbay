@@ -351,10 +351,14 @@ fn project_to_pc_process(
     // `workspace` binding (e.g. `pnpm --filter @app/web dev`) so it runs one
     // app from the repo root instead of fanning out. A project with neither
     // (a pure Caddy-served site) produces no PC entry.
-    let command = match &p.start_command {
+    let mut command = match &p.start_command {
         Some(cmd) => cmd.clone(),
         None => p.workspace.as_ref().map(|ws| ws.derive_dev_command())?,
     };
+    if crate::sandbox::is_enabled(p) {
+        let data_dir = logs_dir.parent().unwrap_or(logs_dir);
+        command = crate::sandbox::wrap_command(data_dir, p, &command);
+    }
 
     let log_path = logs_dir.join(format!("{}.log", p.id));
     let readiness_probe = p
@@ -388,6 +392,13 @@ fn project_to_pc_process(
         environment.insert(k.clone(), v.clone());
     }
     inject_runtime_path(p, runtimes, &mut environment);
+    if crate::sandbox::is_enabled(p) {
+        environment.insert("PORTBAY_SANDBOX".into(), "1".into());
+        environment.insert(
+            "PORTBAY_SANDBOX_NETWORK".into(),
+            crate::sandbox::network_policy_key(crate::sandbox::config(p).network).into(),
+        );
+    }
 
     Some(PcProcess {
         description: Some(p.name.clone()),
@@ -483,12 +494,16 @@ fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadiness
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{ManualRuntime, Project, ProjectId, ProjectType, Readiness, Runtime};
+    use crate::registry::{
+        ManualRuntime, Project, ProjectId, ProjectType, Readiness, Runtime, SandboxConfig,
+        SandboxNetworkPolicy,
+    };
     use std::path::PathBuf;
 
     fn next_project(id: &str, port: u16) -> Project {
         Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
@@ -518,6 +533,7 @@ mod tests {
     fn php_project(id: &str) -> Project {
         Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
@@ -572,6 +588,21 @@ mod tests {
                 || yaml.contains("restart: \"no\""),
             "expected `restart: no` in YAML, got: {yaml}"
         );
+    }
+
+    #[test]
+    fn sandboxed_project_wraps_command_and_exports_policy() {
+        let mut r = Registry::new("test");
+        let mut p = next_project("untrusted-app", 3011);
+        p.sandbox = Some(SandboxConfig::enabled(SandboxNetworkPolicy::Outbound, true));
+        r.add_project(p).unwrap();
+
+        let yaml = to_yaml(&r, Path::new("/tmp/portbay/logs"), None, &[], &[], &[]).unwrap();
+
+        assert!(yaml.contains("sandbox-exec -f"));
+        assert!(yaml.contains("untrusted-app.sb"));
+        assert!(yaml.contains("PORTBAY_SANDBOX: '1'"));
+        assert!(yaml.contains("PORTBAY_SANDBOX_NETWORK: outbound"));
     }
 
     #[test]

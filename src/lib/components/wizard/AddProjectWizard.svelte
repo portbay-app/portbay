@@ -22,6 +22,7 @@
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { entitlements } from "$lib/stores/entitlements.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import type { CommandError } from "$lib/types/error";
@@ -34,6 +35,7 @@
     Workspace,
     WorkspaceApp,
     WorkspaceScan,
+    SandboxNetworkPolicy,
   } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
   import type { DetectedProject } from "$lib/types/wizard";
@@ -60,6 +62,10 @@
   let rawDraft = $state<string>("");
   let dropActive = $state<boolean>(false);
   let dropHint = $state<string>("");
+  let gitUrl = $state<string>("");
+  let gitParentDir = $state<string>("");
+  let gitCloneRunning = $state<boolean>(false);
+  let gitNetwork = $state<SandboxNetworkPolicy>("outbound");
 
   /**
    * Inline port-conflict warning. Backed by a debounced lsof probe so
@@ -159,6 +165,10 @@
     rawDraft = "";
     dropActive = false;
     dropHint = "";
+    gitUrl = "";
+    gitParentDir = "";
+    gitCloneRunning = false;
+    gitNetwork = "outbound";
     portfile = null;
     portfileSecrets = {};
     portfileIdCollision = false;
@@ -186,6 +196,16 @@
     });
     if (!picked || Array.isArray(picked)) return;
     await detect(picked as string);
+  }
+
+  async function browseSandboxInstallFolder() {
+    const picked = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "Select sandbox install folder",
+    });
+    if (!picked || Array.isArray(picked)) return;
+    gitParentDir = picked as string;
   }
 
   async function detect(folderPath: string) {
@@ -534,6 +554,47 @@
     }
   }
 
+  async function cloneSandboxed() {
+    if (!gitUrl.trim()) {
+      formError = {
+        code: "BAD_INPUT",
+        whatHappened: "Paste a Git URL first.",
+        whyItMatters: "PortBay needs a repository URL to clone into the sandbox imports folder.",
+        whoCausedIt: "user",
+        actions: [],
+      };
+      return;
+    }
+    gitCloneRunning = true;
+    formError = null;
+    try {
+      const project = await safeInvoke<ProjectView>("clone_git_project_sandboxed", {
+        input: {
+          url: gitUrl,
+          parentDir: gitParentDir.trim() || null,
+          network: gitNetwork,
+          ephemeral: true,
+          startAfterImport: true,
+        },
+      });
+      await projects.refresh();
+      void onboarding.markOnboarded();
+      errorBus.push({
+        code: "SANDBOX_IMPORT_OK",
+        whatHappened: `${project.name} cloned and started in Sandbox.`,
+        whyItMatters: "Inspect logs and promote it to local when you trust it.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
+      close();
+    } catch (e) {
+      formError = e as CommandError;
+    } finally {
+      gitCloneRunning = false;
+    }
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (!addProjectWizard.isOpen) return;
     if (e.key === "Escape") close();
@@ -639,6 +700,77 @@
           Pick a folder; PortBay auto-detects the framework, picks a port,
           and generates a <span class="font-mono">.test</span> hostname.
         </p>
+      </DashboardCard>
+
+      <DashboardCard title="Clone in Sandbox" flush>
+        {#snippet badge()}
+          <span class="text-[11px] text-fg-subtle">Pro</span>
+        {/snippet}
+        <div class="space-y-3">
+          <div class="flex items-center gap-2">
+            <input
+              type="url"
+              bind:value={gitUrl}
+              placeholder="https://github.com/org/repo.git"
+              disabled={!entitlements.isPro || gitCloneRunning}
+              class="flex-1 px-3 py-2 rounded-md text-sm bg-bg border border-border
+                     focus:border-accent/60 outline-none text-fg placeholder-fg-subtle
+                     font-mono disabled:opacity-55"
+            />
+            <select
+              bind:value={gitNetwork}
+              disabled={!entitlements.isPro || gitCloneRunning}
+              class="px-3 py-2 rounded-md text-xs bg-bg border border-border text-fg
+                     disabled:opacity-55"
+              title="Sandbox network policy"
+            >
+              <option value="outbound">Outbound</option>
+              <option value="loopback_only">Loopback</option>
+              <option value="blocked">Blocked</option>
+              <option value="full">Full</option>
+            </select>
+            <button
+              type="button"
+              onclick={cloneSandboxed}
+              disabled={!entitlements.isPro || gitCloneRunning}
+              class="inline-flex items-center gap-1.5 px-3 py-2 text-xs rounded-md
+                     text-accent border border-accent/40 hover:bg-accent/10
+                     disabled:opacity-50 transition-colors whitespace-nowrap"
+            >
+              <Icon
+                name={gitCloneRunning ? "refresh-cw" : "shield"}
+                size={12}
+                class={gitCloneRunning ? "animate-spin" : ""}
+              />
+              {gitCloneRunning ? "Cloning…" : "Clone & run"}
+            </button>
+          </div>
+          <div class="flex items-center gap-2">
+            <input
+              type="text"
+              bind:value={gitParentDir}
+              placeholder="Install folder (defaults to PortBay sandbox imports)"
+              disabled={!entitlements.isPro || gitCloneRunning}
+              class="flex-1 px-3 py-2 rounded-md text-xs bg-bg border border-border
+                     focus:border-accent/60 outline-none text-fg placeholder-fg-subtle
+                     font-mono disabled:opacity-55"
+            />
+            <button
+              type="button"
+              onclick={browseSandboxInstallFolder}
+              disabled={!entitlements.isPro || gitCloneRunning}
+              class="px-3 py-2 text-xs rounded-md border border-border text-fg-muted
+                     hover:text-fg hover:border-border-strong disabled:opacity-50
+                     transition-colors whitespace-nowrap"
+            >
+              Folder…
+            </button>
+          </div>
+          <p class="text-xs text-fg-subtle">
+            External repos are cloned into the selected install folder, registered
+            with sandbox mode enabled, and started under the selected policy.
+          </p>
+        </div>
       </DashboardCard>
 
       {#if portfile}

@@ -33,7 +33,8 @@ export type FieldKind =
   | { kind: "text" }
   | { kind: "number"; min?: number; max?: number }
   | { kind: "select"; options: string[] }
-  | { kind: "bool" };
+  | { kind: "bool" }
+  | { kind: "textarea" };
 
 export interface KvRow {
   /** Stable key edits are posted under (ignored for readonly rows). */

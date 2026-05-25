@@ -210,6 +210,7 @@ pub fn materialise_project(
         // workspace flow if needed.
         workspace: None,
         cors: None,
+        sandbox: None,
     })
 }
 
@@ -237,6 +238,7 @@ mod tests {
 
         Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new("demo-cms"),
             name: "Demo CMS".into(),
             path: PathBuf::from("/Users/me/code/demo-cms"),

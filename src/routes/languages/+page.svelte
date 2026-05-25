@@ -711,6 +711,20 @@
                           />
                           {fieldValue(row) === "true" ? "Enabled" : "Disabled"}
                         </label>
+                      {:else if row.field.kind === "textarea"}
+                        <textarea
+                          value={fieldValue(row)}
+                          rows="7"
+                          spellcheck="false"
+                          oninput={(e) =>
+                            setDraft(row.key, e.currentTarget.value)}
+                          class="w-full px-3 py-2 rounded-md bg-surface-2/60 text-[12px]
+                                 font-mono text-fg border transition-colors resize-y
+                                 focus:outline-none focus:ring-1 focus:ring-accent/50
+                                 {isDirty
+                            ? 'border-accent/60'
+                            : 'border-border/60'}"
+                        ></textarea>
                       {:else}
                         <!-- text / number -->
                         <input

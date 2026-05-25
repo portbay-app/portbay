@@ -113,11 +113,40 @@ fn apply_fpm(tuning: &mut FpmTuning, patches: &BTreeMap<String, String>) -> Resu
                 }
                 tuning.pm = val.to_string();
             }
+            "listen" => {
+                if !matches!(val, "socket" | "tcp") {
+                    return Err(format!("listen mode must be socket or tcp (got `{val}`)"));
+                }
+                tuning.listen = val.to_string();
+            }
+            "tcp_port" => {
+                let port: u16 = val
+                    .parse()
+                    .map_err(|_| format!("`tcp_port` must be a TCP port (got `{val}`)"))?;
+                if port == 0 {
+                    return Err("`tcp_port` must be at least 1".into());
+                }
+                tuning.tcp_port = port;
+            }
             "max_children" => tuning.max_children = parse_count(key, val, 1)?,
             "start_servers" => tuning.start_servers = parse_count(key, val, 0)?,
             "min_spare_servers" => tuning.min_spare_servers = parse_count(key, val, 0)?,
             "max_spare_servers" => tuning.max_spare_servers = parse_count(key, val, 0)?,
             "max_requests" => tuning.max_requests = parse_count(key, val, 0)?,
+            "request_slowlog_timeout" => {
+                validate_timeout(val)?;
+                tuning.request_slowlog_timeout = val.to_string();
+            }
+            "slowlog" => {
+                if val.contains(['\n', '\r']) {
+                    return Err("`slowlog` must be a single filesystem path".into());
+                }
+                tuning.slowlog = val.to_string();
+            }
+            "catch_workers_output" => tuning.catch_workers_output = parse_bool(key, val)?,
+            "decorate_workers_output" => tuning.decorate_workers_output = parse_bool(key, val)?,
+            "access_log" => tuning.access_log = parse_bool(key, val)?,
+            "raw_params" => tuning.raw_params = validate_raw_params(val)?.to_string(),
             other => return Err(format!("unknown FPM setting `{other}`")),
         }
     }
@@ -129,6 +158,56 @@ fn apply_fpm(tuning: &mut FpmTuning, patches: &BTreeMap<String, String>) -> Resu
         ));
     }
     Ok(())
+}
+
+fn parse_bool(key: &str, val: &str) -> Result<bool, String> {
+    match val {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("`{key}` must be true or false")),
+    }
+}
+
+fn validate_timeout(val: &str) -> Result<(), String> {
+    if val.is_empty() || val == "0" {
+        return Ok(());
+    }
+    let digits = val.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = &val[digits.len()..];
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err("slow-log timeout must be 0 or a duration like 5s".into());
+    }
+    if !matches!(suffix, "" | "s" | "m" | "h" | "d") {
+        return Err("slow-log timeout suffix must be s, m, h, or d".into());
+    }
+    Ok(())
+}
+
+fn validate_raw_params(raw: &str) -> Result<&str, String> {
+    for (idx, line) in raw.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            return Err(format!("raw FPM line {line_no} must contain `=`"));
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(format!("raw FPM line {line_no} has an empty value"));
+        }
+        let allowed = key.starts_with("php_admin_value[")
+            || key.starts_with("php_value[")
+            || key.starts_with("env[");
+        if !allowed || !key.ends_with(']') || key.contains('\r') || value.contains('\r') {
+            return Err(format!(
+                "raw FPM line {line_no} must be php_admin_value[...], php_value[...], or env[...]"
+            ));
+        }
+    }
+    Ok(raw.trim_end())
 }
 
 /// Validate + apply php.ini override patches. A blank value clears the
@@ -179,6 +258,14 @@ fn fpm_tab(p: &PhpInstall, t: &FpmTuning) -> ConfigTab {
     let dynamic = t.pm == "dynamic";
     let mut rows = vec![
         KvRow::select(
+            "listen",
+            "Listen mode",
+            t.listen.clone(),
+            vec!["socket".into(), "tcp".into()],
+        )
+        .with_hint("Socket is the default. TCP listens on 127.0.0.1 for tools that can't dial unix sockets."),
+        KvRow::number("tcp_port", "TCP port", t.tcp_port, Some(1), Some(65_535)),
+        KvRow::select(
             "pm",
             "Process manager",
             t.pm.clone(),
@@ -222,6 +309,34 @@ fn fpm_tab(p: &PhpInstall, t: &FpmTuning) -> ConfigTab {
             Some(100_000),
         )
         .with_hint("Requests a worker handles before respawning (0 = never)."),
+    );
+    rows.push(
+        KvRow::text(
+            "request_slowlog_timeout",
+            "Slow-log timeout",
+            t.request_slowlog_timeout.clone(),
+        )
+        .with_hint("Use 0 or blank to disable; examples: 5s, 1m."),
+    );
+    rows.push(
+        KvRow::text("slowlog", "Slow-log path", t.slowlog.clone())
+            .with_hint("Blank uses PortBay's per-version PHP config dir."),
+    );
+    rows.push(KvRow::bool(
+        "catch_workers_output",
+        "Catch worker output",
+        t.catch_workers_output,
+    ));
+    rows.push(KvRow::bool(
+        "decorate_workers_output",
+        "Decorate worker output",
+        t.decorate_workers_output,
+    ));
+    rows.push(KvRow::bool("access_log", "Access log", t.access_log));
+    rows.push(
+        KvRow::textarea("raw_params", "Raw pool directives", t.raw_params.clone()).with_hint(
+            "Only php_admin_value[...], php_value[...], and env[...] directives are accepted.",
+        ),
     );
 
     // Read-only context: where FPM lives and how PortBay wires it.

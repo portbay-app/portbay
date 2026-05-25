@@ -163,6 +163,26 @@ fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::co
         // (set via the /languages FPM and PHP tabs). Absent → defaults, which
         // render the same pool config as before any tuning was saved.
         let php_cfg = reg.runtimes.php.get(ver).cloned().unwrap_or_default();
+        let slowlog_path = if php_cfg.fpm.slowlog.trim().is_empty() {
+            crate::php::lifecycle::fpm_slowlog_path(data_dir, ver)
+        } else {
+            std::path::PathBuf::from(php_cfg.fpm.slowlog.trim())
+        };
+        if !php_cfg.fpm.request_slowlog_timeout.trim().is_empty()
+            && php_cfg.fpm.request_slowlog_timeout.trim() != "0"
+            && php_cfg.fpm.request_slowlog_timeout.trim() != "0s"
+        {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&slowlog_path);
+        }
+        if php_cfg.fpm.access_log {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(crate::php::lifecycle::fpm_access_log_path(data_dir, ver));
+        }
         let pool_body = crate::php::lifecycle::render_pool_config(
             install,
             &socket_path,
@@ -301,6 +321,7 @@ mod tests {
     fn next_project(id: &str, port: u16) -> Project {
         Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),

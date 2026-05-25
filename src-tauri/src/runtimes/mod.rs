@@ -143,6 +143,8 @@ pub enum FieldKind {
     Select { options: Vec<String> },
     /// Boolean toggle. `value` is `"true"` / `"false"`.
     Bool,
+    /// Multi-line free text.
+    Textarea,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,6 +214,34 @@ impl KvRow {
             hint: None,
             is_path: false,
             field: FieldKind::Text,
+        }
+    }
+
+    /// Editable multi-line text row.
+    pub fn textarea(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            value: value.into(),
+            hint: None,
+            is_path: false,
+            field: FieldKind::Textarea,
+        }
+    }
+
+    /// Editable boolean row.
+    pub fn bool(key: impl Into<String>, label: impl Into<String>, value: bool) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            value: value.to_string(),
+            hint: None,
+            is_path: false,
+            field: FieldKind::Bool,
         }
     }
 

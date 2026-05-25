@@ -189,6 +189,15 @@
           {webServerLabel[server]}
         </span>
       {/if}
+      {#if project.sandboxed}
+        <span
+          class="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded
+                 bg-accent/10 text-accent text-[10.5px] border border-accent/30"
+          title="Running with PortBay sandbox profile"
+        >
+          <Icon name="shield" size={11} /> Sandbox
+        </span>
+      {/if}
     </div>
   </td>
 

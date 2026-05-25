@@ -62,7 +62,8 @@
     | "database"
     | "cloud"
     | "copy"
-    | "eye";
+    | "eye"
+    | "shield";
 </script>
 
 <script lang="ts">
@@ -116,6 +117,7 @@
     Cloud,
     Copy,
     Eye,
+    Shield,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -184,6 +186,7 @@
     cloud: Cloud,
     copy: Copy,
     eye: Eye,
+    shield: Shield,
   };
 
   const Component = $derived(iconMap[name]);

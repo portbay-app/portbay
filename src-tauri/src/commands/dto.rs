@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::process_compose::{Process, ProjectStatus};
 use crate::registry::{
-    CorsConfig, MobileRunConfig, Project, ProjectType, Readiness, WebServer, Workspace,
-    WorkspaceTool,
+    CorsConfig, MobileRunConfig, Project, ProjectType, Readiness, SandboxConfig, WebServer,
+    Workspace, WorkspaceTool,
 };
 
 /// A merged registry + runtime view of one project.
@@ -53,6 +53,12 @@ pub struct ProjectView {
     /// Per-project CORS policy (Pro). `None` = no custom policy (free default).
     pub cors: Option<CorsConfig>,
 
+    /// True when the project command is currently wrapped by PortBay's
+    /// sandbox profile.
+    pub sandboxed: bool,
+    /// Persisted sandbox policy, when configured.
+    pub sandbox: Option<SandboxConfig>,
+
     /// PortBay status taxonomy (`docs/UX_DESIGN.md` §5.3).
     pub status: ProjectStatus,
 
@@ -86,6 +92,8 @@ impl ProjectView {
             mobile_run: project.mobile_run.clone(),
             workspace: project.workspace.clone(),
             cors: project.cors.clone(),
+            sandboxed: crate::sandbox::is_enabled(project),
+            sandbox: project.sandbox.clone(),
             status: proc
                 .map(|p| p.portbay_status())
                 .unwrap_or(ProjectStatus::Stopped),
@@ -241,6 +249,7 @@ pub struct AddProjectInput {
     /// project. When set, `path` is the monorepo root and `start_command` is
     /// normally omitted so the reconciler runs the derived filter command.
     pub workspace: Option<Workspace>,
+    pub sandbox: Option<SandboxConfig>,
 }
 
 fn default_kind() -> ProjectType {
@@ -334,6 +343,7 @@ pub struct UpdateProjectPatch {
     /// policy without the `custom_port_cors` entitlement is rejected core-side
     /// (`ProRequired`); an existing policy is preserved on downgrade.
     pub cors: Option<CorsConfig>,
+    pub sandbox: Option<SandboxConfig>,
 }
 
 #[cfg(test)]
@@ -365,6 +375,7 @@ mod tests {
             runtime: None,
             workspace: None,
             cors: None,
+            sandbox: None,
         }
     }
 

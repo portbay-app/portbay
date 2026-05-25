@@ -203,6 +203,7 @@ fn build_project(site: &ImportedSite) -> std::result::Result<Project, String> {
         // up through the add-project workspace flow, not import.
         workspace: None,
         cors: None,
+        sandbox: None,
     })
 }
 

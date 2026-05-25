@@ -110,6 +110,7 @@ mod tests {
     fn next_project(id: &str, port: u16, https: bool) -> Project {
         Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),

@@ -853,6 +853,7 @@ impl McpContext {
             runtime,
             workspace: None,
             cors: None,
+            sandbox: None,
         })
     }
 }

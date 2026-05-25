@@ -214,7 +214,7 @@ where
 
     for p in &reg.projects {
         if p.https {
-            https_routes.push(project_to_route(p, php_socket_dir));
+            https_routes.push(project_to_route(p, php_socket_dir, reg));
             http_routes.push(https_redirect_route(p));
             if let Some(paths) = cert_lookup(p.id.as_str()) {
                 cert_files.push(TlsCertFile {
@@ -224,7 +224,7 @@ where
                 });
             }
         } else {
-            http_routes.push(project_to_route(p, php_socket_dir));
+            http_routes.push(project_to_route(p, php_socket_dir, reg));
         }
     }
 
@@ -319,9 +319,9 @@ pub fn with_access_log(mut cfg: CaddyConfig, log_path: &std::path::Path) -> Cadd
 /// `php_socket_dir` is the parent directory under which PortBay
 /// expects per-version FPM sockets at `<dir>/<version>/php-fpm.sock`
 /// (matching [`crate::php::lifecycle::fpm_socket_path`]).
-pub fn project_to_route(p: &Project, php_socket_dir: &std::path::Path) -> Route {
+pub fn project_to_route(p: &Project, php_socket_dir: &std::path::Path, reg: &Registry) -> Route {
     let id = format!("route_{}", p.id);
-    let handler = build_handler(p, php_socket_dir);
+    let handler = build_handler(p, php_socket_dir, reg);
     // Pro: wrap in a CORS subroute when the project has an active policy. The
     // basic listen port is never gated; only this custom cross-origin policy
     // is (see `Project::cors`). Inactive/absent → the handler is untouched, so
@@ -394,7 +394,11 @@ fn cors_wrap(inner: serde_json::Value, cors: &crate::registry::CorsConfig) -> se
     })
 }
 
-fn build_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::Value {
+fn build_handler(
+    p: &Project,
+    php_socket_dir: &std::path::Path,
+    reg: &Registry,
+) -> serde_json::Value {
     match p.kind {
         // PHP can run in two modes:
         // - command + port: a framework/router dev server that PortBay starts
@@ -410,7 +414,7 @@ fn build_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::V
         {
             reverse_proxy_handler(p)
         }
-        ProjectType::Php => php_handler(p, php_socket_dir),
+        ProjectType::Php => php_handler(p, php_socket_dir, reg),
         // Static sites have no dev server — serve their files straight off
         // disk. Routing them through reverse_proxy (the old `_` arm) dialed
         // 127.0.0.1:80, i.e. Caddy itself, and never served anything.
@@ -468,7 +472,7 @@ fn reverse_proxy_handler(p: &Project) -> serde_json::Value {
     })
 }
 
-fn php_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::Value {
+fn php_handler(p: &Project, php_socket_dir: &std::path::Path, reg: &Registry) -> serde_json::Value {
     let doc_root = p
         .document_root
         .as_deref()
@@ -484,7 +488,14 @@ fn php_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::Val
     // so a future "default PHP" lookup still finds the socket via the scheme.
     let version = p.php_version_effective().unwrap_or("default");
     let socket_path = php_socket_dir.join(version).join("php-fpm.sock");
-    let php_socket = format!("unix/{}", socket_path.to_string_lossy());
+    let tuning = reg
+        .runtimes
+        .php
+        .get(version)
+        .map(|cfg| &cfg.fpm)
+        .cloned()
+        .unwrap_or_default();
+    let php_socket = crate::php::lifecycle::fpm_fastcgi_dial(&tuning, &socket_path);
 
     // Nested subroute:
     // 1. rewrite extensionless/directory URLs to a project front controller
@@ -554,6 +565,7 @@ mod tests {
             runtime: None,
             workspace: None,
             cors: None,
+            sandbox: None,
         }
     }
 
@@ -580,6 +592,7 @@ mod tests {
             runtime: None,
             workspace: None,
             cors: None,
+            sandbox: None,
         }
     }
 
@@ -627,7 +640,9 @@ mod tests {
         // A project with no CORS policy must route exactly as before — no CORS
         // headers anywhere in the emitted route.
         let p = next_project("plain", 3010, true);
-        let route = project_to_route(&p, Path::new("/tmp/portbay-php"));
+        let mut r = Registry::new("test");
+        r.add_project(p.clone()).unwrap();
+        let route = project_to_route(&p, Path::new("/tmp/portbay-php"), &r);
         let json = serde_json::to_string(&route).unwrap();
         assert!(!json.contains("Access-Control-Allow-Origin"));
     }
@@ -639,7 +654,9 @@ mod tests {
             allowed_origins: vec!["https://app.example.test".into()],
             allow_credentials: true,
         });
-        let route = project_to_route(&p, Path::new("/tmp/portbay-php"));
+        let mut r = Registry::new("test");
+        r.add_project(p.clone()).unwrap();
+        let route = project_to_route(&p, Path::new("/tmp/portbay-php"), &r);
         let v = serde_json::to_value(&route).unwrap();
         let sub = &v["handle"][0];
         assert_eq!(sub["handler"], "subroute");
@@ -856,6 +873,30 @@ mod tests {
     }
 
     #[test]
+    fn php_fastcgi_dial_follows_tcp_fpm_tuning() {
+        let mut r = Registry::new("test");
+        r.runtimes.php.insert(
+            "8.3".into(),
+            crate::registry::PhpVersionConfig {
+                fpm: crate::registry::FpmTuning {
+                    listen: "tcp".into(),
+                    tcp_port: 9103,
+                    ..Default::default()
+                },
+                ini: Default::default(),
+            },
+        );
+        r.add_project(php_project("api-gateway", "8.3")).unwrap();
+        let c = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let s = c.apps.http.servers.get("portbay").unwrap();
+        let sub = &s.routes[0].handle[0]["routes"];
+        assert_eq!(
+            sub[1]["handle"][0]["upstreams"][0]["dial"],
+            "127.0.0.1:9103"
+        );
+    }
+
+    #[test]
     fn php_project_with_dev_command_reverse_proxies_to_port() {
         let mut r = Registry::new("test");
         let mut p = php_project("cms", "8.3");
@@ -909,9 +950,11 @@ mod tests {
     #[test]
     fn project_to_route_id_matches_format() {
         let p = next_project("abc", 3000, true);
-        let r = project_to_route(&p, Path::new("/tmp/portbay-php"));
-        assert_eq!(r.id, "route_abc");
-        assert!(r.terminal);
+        let mut reg = Registry::new("test");
+        reg.add_project(p.clone()).unwrap();
+        let route = project_to_route(&p, Path::new("/tmp/portbay-php"), &reg);
+        assert_eq!(route.id, "route_abc");
+        assert!(route.terminal);
     }
 
     #[test]

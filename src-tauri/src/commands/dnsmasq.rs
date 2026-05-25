@@ -413,6 +413,7 @@ mod tests {
     fn project(id: &str, host: &str) -> Project {
         Project {
             cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),

@@ -6,9 +6,12 @@
 //! (Caddy reconcile, hosts file write, cert issuance) in one place later.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::State;
+use serde::Deserialize;
+use tauri::{AppHandle, State};
 
 use crate::commands::dto::{
     AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch, WorkspaceAppDto,
@@ -18,7 +21,7 @@ use crate::error::{AppError, AppResult};
 use crate::process_compose::Process;
 use crate::registry::{
     store, MobileRunConfig, Project, ProjectId, ProjectType, Readiness, Registry, Runtime,
-    WebServer,
+    SandboxConfig, SandboxNetworkPolicy, WebServer,
 };
 use crate::state::AppState;
 
@@ -89,6 +92,13 @@ pub async fn add_project(
     if let Err(cap) = crate::entitlements::check_can_add(registry.projects.len()) {
         return Err(AppError::ProjectCapReached { cap });
     }
+    if input.sandbox.as_ref().is_some_and(|cfg| cfg.enabled)
+        && !crate::entitlements::current().entitlements.early_access
+    {
+        return Err(AppError::ProRequired {
+            feature: "Sandboxed Run",
+        });
+    }
 
     let hostname = input
         .hostname
@@ -124,7 +134,6 @@ pub async fn add_project(
         None
     };
     let has_start_command = input.start_command.is_some();
-
     let project = Project {
         id,
         name,
@@ -147,6 +156,7 @@ pub async fn add_project(
         runtime,
         workspace: input.workspace,
         cors: None,
+        sandbox: input.sandbox,
     };
 
     registry.add_project(project.clone())?;
@@ -227,6 +237,17 @@ pub async fn update_project(
     }
     if let Some(ws) = patch.workspace {
         project.workspace = Some(ws);
+    }
+    if let Some(sandbox) = patch.sandbox {
+        if sandbox.enabled && !crate::entitlements::current().entitlements.early_access {
+            return Err(AppError::ProRequired {
+                feature: "Sandboxed Run",
+            });
+        }
+        project.sandbox = Some(sandbox);
+        project
+            .tags
+            .retain(|tag| tag != crate::sandbox::SANDBOX_TAG);
     }
     if let Some(cors) = patch.cors {
         // Pro gate (honest split): the basic listen port stays free; only a
@@ -376,6 +397,275 @@ fn standalone_dev_command(tool: crate::registry::WorkspaceTool) -> String {
 #[tauri::command]
 pub async fn validate_project_folder(path: String) -> AppResult<String> {
     Ok(canonical_project_folder(&path)?.display().to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneSandboxedInput {
+    pub url: String,
+    pub parent_dir: Option<String>,
+    #[serde(default)]
+    pub network: SandboxNetworkPolicy,
+    #[serde(default = "default_true")]
+    pub ephemeral: bool,
+    #[serde(default = "default_true")]
+    pub start_after_import: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Clone a Git project from an external URL, register it with sandbox enabled,
+/// and optionally start it immediately in that sandbox. This is the one-click
+/// untrusted-source flow: normal local runs remain available, but imported
+/// code starts inside the restricted profile until promoted.
+#[tauri::command]
+pub async fn clone_git_project_sandboxed(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: CloneSandboxedInput,
+) -> AppResult<ProjectView> {
+    if !crate::entitlements::current().entitlements.early_access {
+        return Err(AppError::ProRequired {
+            feature: "Sandboxed Run",
+        });
+    }
+    let url = validate_git_url(&input.url)?;
+    let parent = input
+        .parent_dir
+        .as_deref()
+        .map(canonical_or_create_dir)
+        .transpose()?
+        .unwrap_or_else(|| {
+            state
+                .logs_dir
+                .parent()
+                .unwrap_or(&state.logs_dir)
+                .join("sandbox")
+                .join("imports")
+        });
+    std::fs::create_dir_all(&parent)
+        .map_err(|e| AppError::Internal(format!("couldn't create import dir: {e}")))?;
+    let dest = unique_clone_dir(&parent, repo_slug(&url));
+    let clone_url = url.clone();
+    let clone_dest = dest.clone();
+    let clone_result: AppResult<()> = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "/bin/false")
+            .args(["-c", "protocol.file.allow=never"])
+            .args(["clone", "--depth", "1", "--filter=blob:none", "--"])
+            .arg(&clone_url)
+            .arg(&clone_dest)
+            .status()
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("git clone task failed: {e}")))?
+    .map_err(|e| AppError::Internal(format!("couldn't start git clone: {e}")))
+    .and_then(|status| {
+        if status.success() {
+            Ok(())
+        } else {
+            Err(AppError::Internal(format!(
+                "git clone exited with status {status}"
+            )))
+        }
+    });
+    if let Err(err) = clone_result {
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err(err);
+    }
+
+    let det = detect_kind(&dest);
+    let dir_name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("project")
+        .to_string();
+    let id_str = slugify(&dir_name);
+    let mut registry = load_registry(&state)?;
+    if let Err(cap) = crate::entitlements::check_can_add(registry.projects.len()) {
+        return Err(AppError::ProjectCapReached { cap });
+    }
+    let runtime = crate::project_runtime::detect(&dest)
+        .or_else(|| registry.runtimes.default_for(det.kind))
+        .or_else(|| detected_runtime_for(det.kind));
+    let php_version = if det.kind == ProjectType::Php {
+        det.php_version
+            .clone()
+            .or_else(|| runtime.as_ref().map(|r| r.version.clone()))
+    } else {
+        None
+    };
+    let has_start_command = det.start_command.is_some();
+    let project = Project {
+        id: ProjectId::new(id_str.clone()),
+        name: dir_name,
+        path: dest,
+        kind: det.kind,
+        start_command: det.start_command,
+        port: det.port,
+        extra_ports: vec![],
+        hostname: format!("{id_str}.{}", registry.domain_suffix),
+        https: true,
+        services: default_services(det.kind, true, has_start_command),
+        env: Default::default(),
+        readiness: det.port.map(|_| Readiness::Http {
+            path: "/".into(),
+            timeout_seconds: 75,
+        }),
+        auto_start: false,
+        tags: vec![],
+        document_root: det.document_root,
+        php_version,
+        web_server: det.web_server,
+        mobile_run: det.mobile_run,
+        runtime,
+        workspace: None,
+        cors: None,
+        sandbox: Some(SandboxConfig::enabled(input.network, input.ephemeral)),
+    };
+    registry.add_project(project.clone())?;
+    save_registry(&state, &registry)?;
+    state.reconciler.mark_dirty();
+    if input.start_after_import && has_start_command {
+        let _ = state.reconciler.tick(&app).await;
+        state.pc_client()?.start(project.id.as_str()).await?;
+    }
+    Ok(ProjectView::from_project(&project, None))
+}
+
+fn validate_git_url(raw: &str) -> AppResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadInput("Git URL is required".into()));
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(AppError::BadInput(
+            "Git URL cannot contain control characters".into(),
+        ));
+    }
+    if trimmed.starts_with("git@") {
+        if !trimmed.contains(':') || trimmed.ends_with(':') {
+            return Err(AppError::BadInput(
+                "SSH Git URLs must look like git@host:owner/repo.git".into(),
+            ));
+        }
+        return Ok(trimmed.to_string());
+    }
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|_| AppError::BadInput("Enter an https:// or git@ Git URL".into()))?;
+    match parsed.scheme() {
+        "https" | "ssh" => Ok(trimmed.to_string()),
+        other => Err(AppError::BadInput(format!(
+            "unsupported Git URL scheme `{other}`"
+        ))),
+    }
+}
+
+fn canonical_or_create_dir(path: &str) -> AppResult<PathBuf> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(AppError::BadInput("parentDir is required".into()));
+    }
+    let p = PathBuf::from(path);
+    std::fs::create_dir_all(&p)
+        .map_err(|e| AppError::Internal(format!("couldn't create parent dir: {e}")))?;
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| AppError::BadInput(format!("parentDir: {e}")))?;
+    validate_sandbox_import_parent(&canonical)?;
+    assert_writable_directory(&canonical)?;
+    Ok(canonical)
+}
+
+fn validate_sandbox_import_parent(path: &Path) -> AppResult<()> {
+    let blocked = [
+        Path::new("/"),
+        Path::new("/Applications"),
+        Path::new("/bin"),
+        Path::new("/dev"),
+        Path::new("/etc"),
+        Path::new("/Library"),
+        Path::new("/private"),
+        Path::new("/private/etc"),
+        Path::new("/private/var"),
+        Path::new("/sbin"),
+        Path::new("/System"),
+        Path::new("/usr"),
+        Path::new("/var"),
+        Path::new("/Volumes"),
+    ];
+    if blocked.contains(&path) {
+        return Err(AppError::BadInput(format!(
+            "choose a normal writable project folder, not system root `{}`",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn assert_writable_directory(path: &Path) -> AppResult<()> {
+    if !path.is_dir() {
+        return Err(AppError::BadInput(format!(
+            "parentDir is not a folder: {}",
+            path.display()
+        )));
+    }
+    let marker = path.join(format!(
+        ".portbay-write-test-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(marker);
+            Ok(())
+        }
+        Err(e) => Err(AppError::BadInput(format!(
+            "parentDir is not writable: {e}"
+        ))),
+    }
+}
+
+fn repo_slug(url: &str) -> String {
+    let leaf = match url::Url::parse(url) {
+        Ok(parsed) => parsed
+            .path_segments()
+            .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
+            .unwrap_or("project")
+            .to_string(),
+        Err(_) => url
+            .trim_end_matches('/')
+            .rsplit(['/', ':'])
+            .next()
+            .unwrap_or("project")
+            .to_string(),
+    };
+    let leaf = leaf.trim_end_matches(".git");
+    let slug = slugify(leaf);
+    if slug.is_empty() {
+        "project".into()
+    } else {
+        slug
+    }
+}
+
+fn unique_clone_dir(parent: &Path, base: String) -> PathBuf {
+    let mut candidate = parent.join(&base);
+    let mut n = 2;
+    while candidate.exists() {
+        candidate = parent.join(format!("{base}-{n}"));
+        n += 1;
+    }
+    candidate
 }
 
 fn canonical_project_folder(path: &str) -> AppResult<PathBuf> {
@@ -857,6 +1147,30 @@ mod tests {
         assert_eq!(slugify("API Gateway"), "api-gateway");
         assert_eq!(slugify("__weird___name__"), "weird-name");
         assert_eq!(slugify("UPPER"), "upper");
+    }
+
+    #[test]
+    fn sandbox_clone_rejects_local_or_malformed_git_urls() {
+        assert!(validate_git_url("https://github.com/portbay-app/portbay.git").is_ok());
+        assert!(validate_git_url("git@github.com:portbay-app/portbay.git").is_ok());
+        assert!(validate_git_url("file:///tmp/repo.git").is_err());
+        assert!(validate_git_url("/tmp/repo").is_err());
+        assert!(validate_git_url("git@github.com:").is_err());
+        assert!(validate_git_url("https://github.com/org/repo.git\n--upload-pack=sh").is_err());
+    }
+
+    #[test]
+    fn sandbox_clone_rejects_system_install_roots() {
+        assert!(validate_sandbox_import_parent(Path::new("/")).is_err());
+        assert!(validate_sandbox_import_parent(Path::new("/System")).is_err());
+        assert!(validate_sandbox_import_parent(Path::new("/Volumes")).is_err());
+        assert!(validate_sandbox_import_parent(Path::new("/Volumes/DevSSD/Projects")).is_ok());
+    }
+
+    #[test]
+    fn repo_slug_falls_back_for_empty_repo_names() {
+        assert_eq!(repo_slug("https://github.com/"), "project");
+        assert_eq!(repo_slug("https://github.com/org/my-app.git"), "my-app");
     }
 
     #[test]

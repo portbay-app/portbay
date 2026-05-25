@@ -94,6 +94,18 @@ export interface CorsConfig {
   allowCredentials: boolean;
 }
 
+export type SandboxNetworkPolicy =
+  | "loopback_only"
+  | "outbound"
+  | "full"
+  | "blocked";
+
+export interface SandboxConfig {
+  enabled: boolean;
+  network: SandboxNetworkPolicy;
+  ephemeral: boolean;
+}
+
 export interface ProjectView {
   id: string;
   name: string;
@@ -116,6 +128,8 @@ export interface ProjectView {
   mobileRun?: MobileRunConfig | null;
   workspace?: Workspace;
   cors?: CorsConfig | null;
+  sandboxed: boolean;
+  sandbox?: SandboxConfig | null;
   status: PortbayStatus;
   runtime?: RuntimeInfo;
 }
