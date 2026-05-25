@@ -130,12 +130,54 @@ jobs:
       - name: pnpm test (vitest)
         # Unit tests for the optimistic-lifecycle core — guards the
         # interaction-latency budget's stale-event resolution logic
-        # (docs/PERFORMANCE.md). End-to-end timing assertion is owned by the
-        # P4 performance-regression-CI card's WebDriver harness.
+        # (docs/PERFORMANCE.md). The end-to-end click-to-paint timing assertion
+        # lives in the `e2e` job below.
         run: pnpm test
 
       - name: pnpm build
         run: pnpm build
+
+  e2e:
+    name: e2e · interaction latency (optimistic lifecycle)
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install chromium
+
+      - name: pnpm test:e2e
+        # Drives the real frontend build (the SPA the Tauri webview loads) in
+        # headless Chromium and asserts the optimistic Play overlay paints
+        # "Starting…" before the deliberately-slow mocked start_project IPC
+        # resolves — the interaction-latency budget guard (docs/PERFORMANCE.md).
+        # Tauri-binary WebDriver is Linux/Windows-only (no WKWebView driver on
+        # macOS), and the optimistic flip is pure frontend, so the SPA build is
+        # the faithful target here.
+        run: pnpm test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
 
   bundle-smoke:
     name: bundle · debug build
@@ -189,6 +231,11 @@ jobs:
         # so the file must exist (built from our own source) before the bundle
         # step can resolve it. Host triple — this smoke build is native.
         run: ./scripts/build-hosts-helper.sh
+
+      - name: Build MCP server (bundled sidecar)
+        # Same reason — binaries/portbay-mcp is an externalBin. Building it here
+        # also verifies the crates/mcp workspace member + rmcp stack compile.
+        run: ./scripts/build-mcp.sh
 
       - name: cargo tauri build --debug
         # Skips notarisation + signing; verifies the bundle layout is

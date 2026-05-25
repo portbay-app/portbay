@@ -59,7 +59,8 @@
       "binaries/mailpit",
       "binaries/cloudflared",
       "binaries/dnsmasq",
-      "binaries/portbay-hosts-helper"
+      "binaries/portbay-hosts-helper",
+      "binaries/portbay-mcp"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0",

@@ -78,6 +78,14 @@ jobs:
           TARGET_TRIPLE: aarch64-apple-darwin
         run: ./scripts/build-hosts-helper.sh
 
+      - name: Build MCP server (bundled sidecar)
+        env:
+          # tauri.conf.json lists binaries/portbay-mcp as an externalBin, so the
+          # real binary must exist before the bundle step copies it into the
+          # .app. Same arch as the signed build below.
+          TARGET_TRIPLE: aarch64-apple-darwin
+        run: ./scripts/build-mcp.sh
+
       - name: Build signed app
         env:
           # Developer ID Application cert (base64-encoded .p12), unwrapped

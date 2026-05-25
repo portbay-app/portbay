@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs-site/public/logo.svg" alt="PortBay" width="88" height="88" />
+<img src="src/lib/assets/portbay-logo.png" alt="PortBay" width="100" height="100" />
 
 # PortBay
 

@@ -3394,6 +3394,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "portbay-hosts-helper"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "portbay",
+]
+
+[[package]]
+name = "portbay-mcp"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "portbay",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

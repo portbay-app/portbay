@@ -21,21 +21,17 @@ path = "src/main.rs"
 name = "portbay"
 path = "src/bin/portbay.rs"
 
-[[bin]]
-name = "portbay-hosts-helper"
-path = "src/bin/portbay-hosts-helper.rs"
-
-# MCP server — speaks Model Context Protocol over stdio so any MCP-aware
-# agent (Claude Code, Cursor, Continue, Zed, …) can drive PortBay. Gated
-# behind the `mcp` feature so the default GUI/CLI builds don't compile the
-# rmcp/schemars stack. Build with `cargo build --release --features mcp`.
-[[bin]]
-name = "portbay-mcp"
-path = "src/bin/portbay-mcp.rs"
-required-features = ["mcp"]
+# Companion binaries (portbay-mcp, portbay-hosts-helper) are NOT bins of this
+# package — they live in their own workspace crates under crates/ and ship as
+# Tauri sidecars (see [workspace] below and scripts/build-*.sh). Keeping them
+# out of this package means the Tauri bundler only auto-includes the GUI bin,
+# and the rmcp/schemars stack is compiled only when crates/mcp is built.
+[workspace]
+members = ["crates/mcp", "crates/hosts-helper"]
 
 [features]
-# Opt-in MCP server bin + its protocol stack. Off by default.
+# Enables `portbay_lib::mcp` + its protocol stack (rmcp). Off by default for
+# GUI/CLI builds; turned on by the crates/mcp dependency on this package.
 mcp = ["dep:rmcp"]
 
 [build-dependencies]
@@ -70,8 +66,9 @@ base64 = "0.22"
 keyring = { version = "3", features = ["apple-native"] }
 aes-gcm = "0.10"
 
-# Official Rust MCP SDK. Optional — only pulled in for the `portbay-mcp`
-# bin via the `mcp` feature. `schemars` is enabled so we can derive the
+# Official Rust MCP SDK. Optional — gated behind the `mcp` feature and only
+# compiled when the crates/mcp workspace member (which enables that feature)
+# is built, never for the GUI/CLI. `schemars` is enabled so we can derive the
 # JSON Schema agents read; rmcp re-exports it (`rmcp::schemars`) so the
 # version always matches the SDK's expectation. stdio transport only —
 # no HTTP/axum surface.

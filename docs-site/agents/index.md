@@ -23,7 +23,7 @@ brew install portbay-app/portbay/portbay
 which portbay-mcp
 ```
 ```bash [From source]
-cargo build --release --features mcp --bin portbay-mcp
+cargo build --release -p portbay-mcp
 # binary at target/release/portbay-mcp
 ```
 :::

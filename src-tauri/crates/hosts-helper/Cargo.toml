@@ -1,0 +1,20 @@
+# portbay-hosts-helper — privileged hosts-file helper, shipped as a Tauri
+# sidecar (src-tauri/binaries/portbay-hosts-helper-<triple>, see
+# scripts/build-hosts-helper.sh). Its own crate so the Tauri app package holds
+# a single bin and the bundler never double-includes the helper. Depends on the
+# app crate's lib (`portbay_lib`) for hosts management.
+[package]
+name = "portbay-hosts-helper"
+version = "0.1.0"
+description = "PortBay privileged hosts-file helper"
+authors = ["Tribal House"]
+license = "Apache-2.0"
+edition = "2021"
+
+[[bin]]
+name = "portbay-hosts-helper"
+path = "src/main.rs"
+
+[dependencies]
+portbay = { path = "../.." }
+clap = { version = "4", features = ["derive"] }
