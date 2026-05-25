@@ -233,7 +233,7 @@
 </script>
 
 <div class="h-full overflow-y-auto">
-  <div class="max-w-5xl mx-auto px-6 py-6 space-y-5">
+  <div class="px-6 py-6 space-y-5">
     <!-- Header -->
     <header class="flex items-start gap-4 flex-wrap">
       <div class="min-w-0 flex-1">

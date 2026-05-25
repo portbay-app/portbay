@@ -503,7 +503,7 @@
         </div>
       {:else}
         {@const d = draft}
-        <div class="max-w-xl mx-auto px-6 py-6">
+        <div class="px-6 py-6">
           <div class="flex items-center justify-between gap-3">
             <h2 class="text-[15px] font-semibold text-fg">Edit Domain</h2>
             <span class="flex items-center gap-1.5 text-[11.5px] text-fg-subtle">
