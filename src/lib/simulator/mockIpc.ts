@@ -23,6 +23,13 @@ export interface SimulatorOptions {
   autoRunOnStart?: boolean;
   /** Delay before the simulated `running` event fires (ms, default 1200). */
   runDelayMs?: number;
+  /**
+   * Commands that should reject with a `CommandError`-shaped payload instead of
+   * resolving. Lets the e2e harness exercise the error-toast path (e.g.
+   * `failCommands: ["stop_project"]`). Empty/unset in the screenshot + web
+   * simulator builds, so their behaviour is unchanged.
+   */
+  failCommands?: string[];
 }
 
 /**
@@ -40,6 +47,7 @@ export function installSimulatorIpcBrowser(payload: {
   const startDelayMs = opts.startDelayMs ?? 300;
   const runDelayMs = opts.runDelayMs ?? 1200;
   const autoRun = opts.autoRunOnStart !== false;
+  const failCommands = opts.failCommands ?? [];
 
   const w = window as any;
   // Mutable working copy so lifecycle transitions persist across calls within
@@ -269,6 +277,17 @@ export function installSimulatorIpcBrowser(payload: {
   }
 
   function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+    // Injected-failure hook for the e2e error-path test (no-op unless the
+    // caller opted a command into `failCommands`).
+    if (failCommands.indexOf(cmd) !== -1) {
+      return Promise.reject({
+        code: "SIMULATED_FAILURE",
+        whatHappened: `The ${cmd} command failed (simulated).`,
+        whyItMatters: "Injected failure for the e2e error-path test.",
+        whoCausedIt: "system",
+        actions: [],
+      });
+    }
     switch (cmd) {
       case "list_projects":
         return Promise.resolve(projects);
@@ -388,6 +407,61 @@ export function installSimulatorIpcBrowser(payload: {
       case "open_project":
       case "open_in_ide":
         return Promise.resolve(null);
+      case "detect_project": {
+        // Framework auto-detection for the Add-project wizard. Derives a
+        // plausible id/name/host from the folder's last path segment so the
+        // wizard's L2 fields fill in just like the real backend.
+        const p = String((args && args.path) || "");
+        const seg = p.split("/").filter(Boolean).pop() || "project";
+        const slug =
+          seg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") ||
+          "project";
+        const title = seg
+          .replace(/[-_]+/g, " ")
+          .replace(/\b\w/g, (c) => c.toUpperCase());
+        return Promise.resolve({
+          kind: "node",
+          suggestedId: slug,
+          suggestedName: title,
+          suggestedHostname: `${slug}.test`,
+          suggestedPort: 3000,
+          suggestedStartCommand: "npm run dev",
+        });
+      }
+      case "add_project": {
+        // Register a new project from the wizard's input and return it; the
+        // wizard then calls list_projects (projects.refresh) and the new row
+        // appears. Mirrors the backend's id-derivation + url-from-hostname.
+        const input = (args && (args.input as Record<string, unknown>)) || {};
+        const p = String(input.path || "");
+        const seg = p.split("/").filter(Boolean).pop() || "new-project";
+        const slug =
+          seg.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") ||
+          "new-project";
+        const id = String(input.id || slug);
+        const hostname = String(input.hostname || `${id}.test`);
+        const https = input.https !== false;
+        const created: any = {
+          id,
+          name: String(input.name || seg),
+          path: p,
+          type: input.kind || "custom",
+          startCommand: input.startCommand || undefined,
+          port: input.port ?? null,
+          extraPorts: [],
+          hostname,
+          url: `${https ? "https" : "http"}://${hostname}`,
+          https,
+          services: [],
+          env: {},
+          autoStart: input.autoStart === true,
+          tags: [],
+          sandboxed: false,
+          status: "stopped",
+        };
+        if (!project(id)) projects.push(created);
+        return Promise.resolve(created);
+      }
       case "update_project": {
         const p = project(args && args.id);
         const patch = (args && (args.patch as Record<string, unknown>)) || {};
