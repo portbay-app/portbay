@@ -29,10 +29,34 @@ npm-debug.log*
 *.log
 *.pid
 
-# Local development
+# Local development — environment files (the committed template is .env.example)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
+# Secrets, credentials, and private config — never commit these. Proprietary
+# Cloud/Pro configuration belongs in the private portbay-cloud repo, not here.
+secrets/
+.secrets-local/
+*.secret
+*.secret.*
+config.local.*
+.dev.vars
+
+# Generated keys and certificates (local HTTPS is minted at runtime by mkcert)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.keystore
+!src-tauri/**/fixtures/**/*.pem
+rootCA*.pem
+
+# Private / unsigned build artifacts
+*.dmg
+*.app.zip
+release-notes-private.*
 
 # Editor
 .vscode/

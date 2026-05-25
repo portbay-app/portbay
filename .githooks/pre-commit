@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# PortBay pre-commit hook — blocks a commit that would put Cloud/Pro code,
+# secrets, or forbidden files into the public repo. This runs on the STAGED
+# content, so a bad commit is stopped before it is ever created — there is
+# nothing to force-clean afterwards.
+#
+# Installed via core.hooksPath=.githooks (run scripts/setup-hooks.sh once, or
+# just `pnpm install`). Emergency bypass: `git commit --no-verify` — don't.
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+fail=0
+
+# 1) Boundary + forbidden-path check on staged content.
+if ! bash scripts/check-repo-boundaries.sh --staged; then
+  fail=1
+fi
+
+# 2) Secret scan on staged content (if gitleaks is installed locally).
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks protect --staged --no-banner --config .gitleaks.toml; then
+    echo "✗ gitleaks found a secret in staged changes." >&2
+    fail=1
+  fi
+else
+  echo "ℹ gitleaks not installed — local secret scan skipped (CI still runs it)." >&2
+  echo "  recommended: brew install gitleaks" >&2
+fi
+
+# 3) Gentle DCO reminder (CI/the DCO check enforces this on the PR).
+if git diff --cached --quiet; then :; fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "" >&2
+  echo "Commit blocked. If something belongs in the cloud, put it in the private" >&2
+  echo "portbay-cloud repo. See docs/architecture/repo-boundaries.md." >&2
+  exit 1
+fi

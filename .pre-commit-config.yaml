@@ -1,0 +1,35 @@
+# PortBay pre-commit hooks (optional but recommended for contributors).
+#
+# Install once:
+#   pipx install pre-commit   # or: brew install pre-commit
+#   pre-commit install
+#
+# Thereafter every `git commit` runs a secret scan and the repo-boundary check
+# before the commit is created. Run against everything on demand with:
+#   pre-commit run --all-files
+
+repos:
+  # Secret scanning — blocks credentials/keys from being committed.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # PortBay-specific guards (run from the repo, no external download).
+  - repo: local
+    hooks:
+      - id: repo-boundaries
+        name: repo boundary check (no Pro/Cloud code in the public repo)
+        entry: scripts/check-repo-boundaries.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  # General hygiene.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: detect-private-key

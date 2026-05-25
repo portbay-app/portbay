@@ -1,0 +1,26 @@
+# .repo-boundary-allow
+#
+# Path globs that scripts/check-repo-boundaries.sh skips when scanning for
+# denylisted strings. These files legitimately *quote* forbidden terms — they
+# document the boundary or use a fake credential as a teaching example.
+#
+# Keep this list short and specific. A new entry means "I have read this file
+# and confirmed the match is documentation, not a leak." The denylist policy
+# files and the checker script itself are always skipped automatically.
+#
+# Globs are matched against the repo-relative path (shell `case` semantics).
+
+# Boundary / licensing / security documentation that names the forbidden terms:
+docs/architecture/repo-boundaries.md
+docs/contributing/license-policy.md
+docs/maintainers/review-checklist.md
+docs/maintainers/license-review.md
+CONTRIBUTING.md
+SECURITY.md
+docs/pages/security.md
+
+# Teaching example: shows a developer how to mark a project secret as required.
+docs-site/guides/environment-variables.md
+
+# The committed env template — safe placeholders only. Exempt from `path:.env.*`.
+.env.example

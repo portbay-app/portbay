@@ -1,0 +1,34 @@
+# PortBay gitleaks configuration.
+#
+# gitleaks is the recommended secret scanner for this repo: a single static
+# binary (no Python/runtime to manage like detect-secrets), a strong default
+# ruleset, fast on every commit, and trivial to run in CI and as a pre-commit
+# hook. git-secrets was considered but is AWS-credential-focused; detect-secrets
+# needs a tracked baseline file that drifts. gitleaks wins on maintainability.
+#
+# Run:  gitleaks detect --no-banner            (full history)
+#       gitleaks protect --staged --no-banner  (staged changes, pre-commit)
+
+title = "PortBay gitleaks config"
+
+[extend]
+# Inherit gitleaks' built-in rules (Stripe, AWS, GitHub, private keys, etc.).
+useDefault = true
+
+[allowlist]
+description = "PortBay false positives: published public keys and doc examples"
+
+# The Ed25519 entitlement *public* key is shipped on purpose so the client can
+# verify signed licenses offline. The matching private key lives only in the
+# portbay-cloud LICENSE_SIGNING_KEY secret. Public keys are not secrets.
+regexes = [
+  '''LvM9qZwq1tH0gv871R1qPCTIN9WsUyeKHWcacHLKs/w=''',
+]
+
+# Paths whose "secrets" are deliberate teaching examples or test fixtures.
+paths = [
+  '''docs-site/guides/environment-variables\.md''',
+  '''src-tauri/src/portfile/.*\.rs''',
+  '''pnpm-lock\.yaml''',
+  '''src-tauri/Cargo\.lock''',
+]
