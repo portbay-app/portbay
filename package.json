@@ -9,6 +9,8 @@
     "url": "https://github.com/portbay-app/portbay.git"
   },
   "scripts": {
+    "prepare": "bash scripts/setup-hooks.sh || true",
+    "boundaries": "bash scripts/check-repo-boundaries.sh",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
@@ -19,7 +21,7 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri"
   },
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",
     "@codemirror/state": "^6.6.0",
