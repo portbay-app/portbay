@@ -157,6 +157,7 @@ pub async fn add_project(
         workspace: input.workspace,
         cors: None,
         sandbox: input.sandbox,
+        domain: None,
     };
 
     registry.add_project(project.clone())?;
@@ -267,6 +268,12 @@ pub async fn update_project(
             });
         }
         project.cors = if cors.is_active() { Some(cors) } else { None };
+    }
+    if let Some(domain) = patch.domain {
+        // The editor always sends the full config; store an all-default config
+        // as `None` so projects that never touch domain settings keep a clean
+        // registry entry and behave identically to before the field existed.
+        project.domain = (domain != crate::registry::DomainConfig::default()).then_some(domain);
     }
 
     let snapshot = project.clone();

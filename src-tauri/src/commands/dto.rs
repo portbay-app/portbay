@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::process_compose::{Process, ProjectStatus};
 use crate::registry::{
-    CorsConfig, MobileRunConfig, Project, ProjectType, Readiness, SandboxConfig, WebServer,
-    Workspace, WorkspaceTool,
+    CorsConfig, DomainConfig, MobileRunConfig, Project, ProjectType, Readiness, SandboxConfig,
+    WebServer, Workspace, WorkspaceTool,
 };
 
 /// A merged registry + runtime view of one project.
@@ -59,6 +59,10 @@ pub struct ProjectView {
     /// Persisted sandbox policy, when configured.
     pub sandbox: Option<SandboxConfig>,
 
+    /// Per-project domain / routing settings (Domains page). `None` = every
+    /// setting at its default (PortBay's pre-`DomainConfig` behaviour).
+    pub domain: Option<DomainConfig>,
+
     /// PortBay status taxonomy (`docs/UX_DESIGN.md` §5.3).
     pub status: ProjectStatus,
 
@@ -94,6 +98,7 @@ impl ProjectView {
             cors: project.cors.clone(),
             sandboxed: crate::sandbox::is_enabled(project),
             sandbox: project.sandbox.clone(),
+            domain: project.domain.clone(),
             status: proc
                 .map(|p| p.portbay_status())
                 .unwrap_or(ProjectStatus::Stopped),
@@ -259,6 +264,15 @@ fn default_https() -> bool {
     true
 }
 
+fn deserialize_nullable_string_patch<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
 /// Output of `detect_project` — what the Add Project wizard's L1 step
 /// fills the L2 fields with. Heuristics live in
 /// `src-tauri/src/commands/projects.rs::detect`.
@@ -322,7 +336,8 @@ pub struct UpdateProjectPatch {
     pub hostname: Option<String>,
     pub port: Option<u16>,
     pub extra_ports: Option<Vec<u16>>,
-    pub start_command: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string_patch")]
+    pub start_command: Option<Option<String>>,
     pub https: Option<bool>,
     pub auto_start: Option<bool>,
     pub tags: Option<Vec<String>>,
@@ -344,6 +359,11 @@ pub struct UpdateProjectPatch {
     /// (`ProRequired`); an existing policy is preserved on downgrade.
     pub cors: Option<CorsConfig>,
     pub sandbox: Option<SandboxConfig>,
+
+    /// Per-project domain / routing settings. `Some` replaces the whole config
+    /// (the editor always sends every field); an all-default config is stored
+    /// as `None` by `update_project` to keep registries clean.
+    pub domain: Option<DomainConfig>,
 }
 
 #[cfg(test)]
@@ -376,6 +396,7 @@ mod tests {
             workspace: None,
             cors: None,
             sandbox: None,
+            domain: None,
         }
     }
 
@@ -416,6 +437,16 @@ mod tests {
         let p: UpdateProjectPatch = serde_json::from_str("{}").unwrap();
         assert!(p.name.is_none());
         assert!(p.port.is_none());
+    }
+
+    #[test]
+    fn update_project_patch_accepts_null_start_command_to_clear() {
+        let p: UpdateProjectPatch = serde_json::from_str(r#"{ "startCommand": null }"#).unwrap();
+        assert!(matches!(p.start_command, Some(None)));
+
+        let p: UpdateProjectPatch =
+            serde_json::from_str(r#"{ "startCommand": "pnpm dev" }"#).unwrap();
+        assert_eq!(p.start_command.flatten().as_deref(), Some("pnpm dev"));
     }
 
     #[test]

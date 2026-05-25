@@ -231,6 +231,12 @@ pub struct Project {
     /// mode existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxConfig>,
+
+    /// Per-project domain / routing settings (Domains page). Additive — see
+    /// [`DomainConfig`]. `None` means every setting takes its default, which
+    /// reproduces PortBay's behaviour from before these knobs existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<DomainConfig>,
 }
 
 impl Project {
@@ -254,6 +260,62 @@ impl Project {
 
     pub fn web_server_effective(&self) -> WebServer {
         self.web_server.unwrap_or(WebServer::Caddy)
+    }
+
+    /// Whether PortBay should issue / renew this project's mkcert certificate.
+    /// Defaults `true` so HTTPS projects predating [`DomainConfig`] keep their
+    /// managed cert.
+    pub fn auto_manage_cert(&self) -> bool {
+        self.domain.as_ref().is_none_or(|d| d.auto_manage_cert)
+    }
+
+    /// Effective resolver mode for this project's hostname.
+    pub fn resolver_mode(&self) -> ResolverMode {
+        self.domain
+            .as_ref()
+            .map(|d| d.resolver_mode)
+            .unwrap_or_default()
+    }
+
+    /// Path prefix to strip before proxying upstream, if a meaningful one is
+    /// set. Empty and `"/"` are treated as "serve from root" → `None`.
+    pub fn path_prefix(&self) -> Option<&str> {
+        self.domain
+            .as_ref()
+            .and_then(|d| d.path_prefix.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "/")
+    }
+
+    /// Whether to also route + certify `*.hostname`.
+    pub fn include_wildcard_subdomains(&self) -> bool {
+        self.domain
+            .as_ref()
+            .is_some_and(|d| d.include_wildcard_subdomains)
+    }
+
+    /// Whether this project's route should exist only while it's running.
+    pub fn expose_when_running(&self) -> bool {
+        self.domain.as_ref().is_some_and(|d| d.expose_when_running)
+    }
+
+    /// Process Compose id that represents this project at runtime, when one
+    /// exists. Normal command-backed projects use the project id directly.
+    /// PHP projects served by generated Nginx/Apache configs use a derived
+    /// backend process id. Pure Caddy/PHP-FPM and static file-server projects
+    /// have no project-specific Process Compose process.
+    pub fn process_compose_id(&self) -> Option<String> {
+        if self.start_command.is_some() {
+            return Some(self.id.as_str().to_string());
+        }
+        if self.kind == ProjectType::Php {
+            return match self.web_server_effective() {
+                WebServer::Caddy => None,
+                WebServer::Nginx => Some(format!("web-nginx-{}", self.id)),
+                WebServer::Apache => Some(format!("web-apache-{}", self.id)),
+            };
+        }
+        None
     }
 }
 
@@ -325,6 +387,75 @@ impl SandboxConfig {
             enabled: true,
             network,
             ephemeral,
+        }
+    }
+}
+
+/// How a single project's hostname is published to the local resolver.
+///
+/// `Auto` keeps PortBay's global behaviour (an `/etc/hosts` row unless the
+/// dnsmasq wildcard resolver is installed for the suffix). The explicit modes
+/// override that per project: `Hosts` always writes the `/etc/hosts` row even
+/// when the wildcard would cover it; `Dnsmasq` never writes one, trusting the
+/// wildcard resolver (so the host won't resolve until that resolver exists).
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolverMode {
+    #[default]
+    Auto,
+    Hosts,
+    Dnsmasq,
+}
+
+/// Per-project routing / domain settings surfaced on the Domains page.
+///
+/// Additive — absent on projects and registries written before it landed
+/// (deserialises to `None` on [`Project::domain`]); no schema-version bump,
+/// matching how `workspace`/`cors`/`sandbox` were introduced. Every field
+/// defaults to today's behaviour, so an absent config and an all-default
+/// config are indistinguishable at reconcile time.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainConfig {
+    /// Free-text note shown on the Domains page. No runtime effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+
+    /// URL path prefix stripped before proxying upstream (Caddy `handle_path`).
+    /// `None` / empty / `"/"` = serve from the root (today's behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+
+    /// How this hostname is published to the local resolver.
+    #[serde(default)]
+    pub resolver_mode: ResolverMode,
+
+    /// Whether PortBay issues / renews this hostname's mkcert certificate.
+    /// Defaults `true` — every HTTPS project got a managed cert before this
+    /// field existed.
+    #[serde(default = "default_true")]
+    pub auto_manage_cert: bool,
+
+    /// Also route and certify `*.hostname`. The subdomains only resolve under
+    /// the dnsmasq wildcard resolver — an `/etc/hosts` row can't express a
+    /// wildcard.
+    #[serde(default)]
+    pub include_wildcard_subdomains: bool,
+
+    /// Only publish the Caddy route while the project's process is running.
+    #[serde(default)]
+    pub expose_when_running: bool,
+}
+
+impl Default for DomainConfig {
+    fn default() -> Self {
+        Self {
+            notes: None,
+            path_prefix: None,
+            resolver_mode: ResolverMode::Auto,
+            auto_manage_cert: true,
+            include_wildcard_subdomains: false,
+            expose_when_running: false,
         }
     }
 }
@@ -884,6 +1015,7 @@ mod tests {
         let p = Project {
             cors: None,
             sandbox: None,
+            domain: None,
             id: ProjectId::new("marketing-site"),
             name: "Marketing Site".into(),
             path: PathBuf::from("/Volumes/DEVSSD/Projects/Clients/Marketing Site"),
@@ -922,6 +1054,7 @@ mod tests {
         Project {
             cors: None,
             sandbox: None,
+            domain: None,
             id: ProjectId::new("legacy-php"),
             name: "Legacy PHP".into(),
             path: PathBuf::from("/tmp/legacy-php"),
@@ -973,6 +1106,27 @@ mod tests {
 
         // Nothing set at all.
         assert_eq!(bare_php_project().php_version_effective(), None);
+    }
+
+    #[test]
+    fn process_compose_id_maps_generated_php_backends() {
+        let mut p = bare_php_project();
+        assert_eq!(p.process_compose_id(), None);
+
+        p.web_server = Some(WebServer::Nginx);
+        assert_eq!(
+            p.process_compose_id().as_deref(),
+            Some("web-nginx-legacy-php")
+        );
+
+        p.web_server = Some(WebServer::Apache);
+        assert_eq!(
+            p.process_compose_id().as_deref(),
+            Some("web-apache-legacy-php")
+        );
+
+        p.start_command = Some("php artisan serve".into());
+        assert_eq!(p.process_compose_id().as_deref(), Some("legacy-php"));
     }
 
     #[test]
@@ -1046,6 +1200,44 @@ mod tests {
         let round: Project = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
         assert_eq!(round.workspace.as_ref().unwrap().package, "@bookslash/web");
         assert_eq!(round.workspace.as_ref().unwrap().tool, WorkspaceTool::Pnpm);
+    }
+
+    #[test]
+    fn domain_config_is_additive_and_defaults_to_todays_behaviour() {
+        // A registry blob written before `domain` existed still loads, with the
+        // field defaulting to None — what makes it need no schema bump.
+        let older = serde_json::json!({
+            "id": "legacy", "name": "Legacy", "path": "/tmp/legacy",
+            "type": "static", "hostname": "legacy.test", "https": true
+        });
+        let loaded: Project = serde_json::from_value(older).unwrap();
+        assert!(loaded.domain.is_none());
+        // Absent config reproduces the old behaviour through the accessors.
+        assert!(loaded.auto_manage_cert(), "cert auto-manage defaults on");
+        assert_eq!(loaded.resolver_mode(), ResolverMode::Auto);
+        assert!(loaded.path_prefix().is_none());
+        assert!(!loaded.include_wildcard_subdomains());
+        assert!(!loaded.expose_when_running());
+
+        // A partial config fills the rest from defaults (notably cert=true).
+        let cfg: DomainConfig =
+            serde_json::from_str(r#"{ "includeWildcardSubdomains": true }"#).unwrap();
+        assert!(cfg.auto_manage_cert);
+        assert!(cfg.include_wildcard_subdomains);
+        assert_eq!(cfg.resolver_mode, ResolverMode::Auto);
+
+        // "/" and blank path prefixes are treated as "serve from root".
+        let mut p = bare_php_project();
+        p.domain = Some(DomainConfig {
+            path_prefix: Some("/".into()),
+            ..DomainConfig::default()
+        });
+        assert!(p.path_prefix().is_none());
+        p.domain = Some(DomainConfig {
+            path_prefix: Some("/api".into()),
+            ..DomainConfig::default()
+        });
+        assert_eq!(p.path_prefix(), Some("/api"));
     }
 
     #[test]

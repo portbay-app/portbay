@@ -8,13 +8,14 @@
 //! a future optimisation card if measurement shows full-load latency
 //! becomes a problem (sub-100 ms in the spike at <50 routes).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::caddy::{
-    build_config, find_free_https_port, with_access_log, CaddyClient, CertPaths, ACCESS_LOG_FILE,
-    DEFAULT_HTTPS_PORT,
+    build_config_filtered, find_free_https_port, with_access_log, CaddyClient, CertPaths,
+    ACCESS_LOG_FILE, DEFAULT_HTTPS_PORT,
 };
+use crate::process_compose::{Process, ProjectStatus};
 use crate::reconciler::report::StepOutcome;
 use crate::registry::Registry;
 use crate::state::AppState;
@@ -58,12 +59,16 @@ pub(super) async fn reconcile(
     // PHP FastCGI sockets live under `<data_dir>/php/<version>/...`.
     // The pc sub-reconciler writes the same path; both must agree.
     let php_socket_dir = logs_dir.parent().unwrap_or(logs_dir).join("php");
-    let cfg = match build_config(
+    // Drop the routes of `expose_when_running` projects that aren't currently
+    // up. The common case (nobody opted in) skips the PC round-trip.
+    let suppressed = suppressed_routes(reg, state).await;
+    let cfg = match build_config_filtered(
         reg,
         admin_port,
         http_port,
         https_port,
         &php_socket_dir,
+        &suppressed,
         |id| cert_lookup.get(id).cloned(),
     ) {
         Ok(c) => c,
@@ -99,6 +104,40 @@ fn hash_bytes(b: &[u8]) -> u64 {
     crate::util::stable_hash(b)
 }
 
+/// Project ids whose route should be omitted this tick: those that opted into
+/// `expose_when_running` and whose supervised process isn't currently up.
+///
+/// Fail-open: if no project opts in we skip the Process Compose round-trip
+/// entirely, and if PC can't be read we suppress nothing (better to keep a
+/// route up briefly than to hide it on a transient PC hiccup — the next tick,
+/// nudged by the status poller, corrects it). Projects with no supervised
+/// process (pure-Caddy / static / PHP-FPM) can't be "down", so they're never
+/// suppressed.
+async fn suppressed_routes(reg: &Registry, state: &AppState) -> HashSet<String> {
+    if !reg.list_projects().iter().any(|p| p.expose_when_running()) {
+        return HashSet::new();
+    }
+    let procs: HashMap<String, Process> = match state.pc_client() {
+        Ok(client) => match client.processes().await {
+            Ok(v) => v.into_iter().map(|p| (p.name.clone(), p)).collect(),
+            Err(_) => return HashSet::new(),
+        },
+        Err(_) => return HashSet::new(),
+    };
+    reg.list_projects()
+        .iter()
+        .filter(|p| p.expose_when_running())
+        .filter(|p| match p.process_compose_id() {
+            None => false,
+            Some(pid) => !matches!(
+                procs.get(&pid).map(Process::portbay_status),
+                Some(ProjectStatus::Running) | Some(ProjectStatus::Unhealthy)
+            ),
+        })
+        .map(|p| p.id.to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +170,7 @@ mod tests {
             mobile_run: None,
             runtime: None,
             workspace: None,
+            domain: None,
         }
     }
 

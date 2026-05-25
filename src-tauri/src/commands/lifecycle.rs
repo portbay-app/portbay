@@ -540,6 +540,7 @@ mod tests {
             mobile_run: None,
             runtime: None,
             workspace: ws,
+            domain: None,
         }
     }
 

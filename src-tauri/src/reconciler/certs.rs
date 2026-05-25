@@ -58,17 +58,37 @@ pub(super) fn reconcile(
         };
     }
 
-    let https_projects: Vec<_> = reg.list_projects().iter().filter(|p| p.https).collect();
+    // Only HTTPS projects PortBay is asked to manage get a minted cert.
+    // `auto_manage_cert()` defaults true, so this matches the historical
+    // "every HTTPS project" behaviour unless a project opts out.
+    let https_projects: Vec<_> = reg
+        .list_projects()
+        .iter()
+        .filter(|p| p.https && p.auto_manage_cert())
+        .collect();
 
-    // 1) Issue missing certs.
+    // 1) Issue (or reissue) certs so each project's cert covers exactly the
+    //    hostnames it needs. A project that opts into wildcard subdomains gets
+    //    `*.hostname` added to the SAN list (mkcert accepts wildcard hosts).
+    //    We skip only when a cert already covers every desired name, so
+    //    toggling wildcard on — or renaming a hostname — is picked up here on
+    //    the next tick without the UI having to force a reissue.
     let mut issued: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for p in &https_projects {
-        if mkcert.cert_paths(p.id.as_str()).is_some() {
-            continue;
+        let wildcard = format!("*.{}", p.hostname);
+        let desired: Vec<&str> = if p.include_wildcard_subdomains() {
+            vec![p.hostname.as_str(), wildcard.as_str()]
+        } else {
+            vec![p.hostname.as_str()]
+        };
+        if let Some(paths) = mkcert.cert_paths(p.id.as_str()) {
+            let have = crate::commands::certs::cert_dns_sans(&paths.certificate);
+            if cert_covers(&have, &desired) {
+                continue;
+            }
         }
-        let hosts = [p.hostname.as_str()];
-        match mkcert.issue_cert(p.id.as_str(), &hosts) {
+        match mkcert.issue_cert(p.id.as_str(), &desired) {
             Ok(_) => issued.push(p.id.to_string()),
             Err(e) => errors.push(format!("{}: {}", p.id.as_str(), e)),
         }
@@ -149,12 +169,34 @@ fn lookup_set_hash(lookup: &HashMap<String, CertPaths>) -> u64 {
     crate::util::stable_hash(joined.as_bytes())
 }
 
+/// Whether an existing cert's DNS SANs (`have`) cover every name a project
+/// needs (`desired`). An empty `have` (cert missing or unparseable) covers
+/// nothing, so the caller reissues.
+fn cert_covers(have: &[String], desired: &[&str]) -> bool {
+    desired.iter().all(|d| have.iter().any(|h| h == d))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::registry::{Project, ProjectId, ProjectType};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn cert_covers_requires_every_desired_name() {
+        let single = vec!["app.test".to_string()];
+        let both = vec!["app.test".to_string(), "*.app.test".to_string()];
+        // A plain cert covers the bare host but not a newly-requested wildcard.
+        assert!(cert_covers(&single, &["app.test"]));
+        assert!(!cert_covers(&single, &["app.test", "*.app.test"]));
+        // A wildcard cert covers both.
+        assert!(cert_covers(&both, &["app.test", "*.app.test"]));
+        // Missing / unparseable cert (empty SANs) covers nothing → reissue.
+        assert!(!cert_covers(&[], &["app.test"]));
+        // A stale cert for a renamed host doesn't cover the new hostname.
+        assert!(!cert_covers(&single, &["renamed.test"]));
+    }
 
     fn https_project(id: &str) -> Project {
         Project {
@@ -180,6 +222,7 @@ mod tests {
             mobile_run: None,
             runtime: None,
             workspace: None,
+            domain: None,
         }
     }
 

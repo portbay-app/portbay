@@ -204,6 +204,7 @@ fn build_project(site: &ImportedSite) -> std::result::Result<Project, String> {
         workspace: None,
         cors: None,
         sandbox: None,
+        domain: None,
     })
 }
 

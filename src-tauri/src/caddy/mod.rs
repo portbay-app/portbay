@@ -23,8 +23,8 @@ pub mod types;
 
 pub use client::CaddyClient;
 pub use config::{
-    bootstrap_config, build_config, project_to_route, with_access_log, CertPaths, ACCESS_LOGGER,
-    ACCESS_LOG_FILE,
+    bootstrap_config, build_config, build_config_filtered, project_to_route, with_access_log,
+    CertPaths, ACCESS_LOGGER, ACCESS_LOG_FILE,
 };
 pub use error::{CaddyError, Result};
 pub use lifecycle::{
