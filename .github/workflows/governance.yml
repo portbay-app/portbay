@@ -1,0 +1,161 @@
+# PortBay governance gates — runs on every push to main and every PR.
+#
+# These are cheap, fast checks that protect the project's licensing and the
+# public/private boundary. The build/test gates live in ci.yml; this workflow
+# is intentionally separate so a docs-only PR still gets the boundary + secret
+# scan without spinning up the macOS build matrix.
+
+name: governance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: governance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boundaries:
+    name: repo boundaries (no Pro/Cloud leakage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run boundary check
+        run: bash scripts/check-repo-boundaries.sh
+
+  secrets:
+    name: secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the scan covers the whole repo, not just the diff.
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+          # gitleaks-action is free for public repos; no license key needed.
+
+  license:
+    name: license check (SPDX + dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Repo declares AGPL-3.0-only consistently
+        run: |
+          set -e
+          grep -q "GNU AFFERO GENERAL PUBLIC LICENSE" LICENSE \
+            || { echo "LICENSE is not the AGPL-3.0 text"; exit 1; }
+          grep -q '"license": "AGPL-3.0-only"' package.json \
+            || { echo 'package.json license must be "AGPL-3.0-only"'; exit 1; }
+          echo "License declaration: AGPL-3.0-only ✓"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Dependency licenses (deny GPL-incompatible)
+        # Fails if a production dependency carries a license that is incompatible
+        # with AGPL-3.0-only. Conservative deny-set; widen as needed. Dev-only
+        # deps are excluded since they aren't distributed with the app.
+        run: |
+          npx --yes license-checker-rseidelsohn \
+            --production \
+            --excludePrivatePackages \
+            --failOn 'GPL-2.0-only;GPL-2.0;LGPL-2.0-only;SSPL-1.0;BUSL-1.1;CC-BY-NC-4.0;Commons-Clause'
+
+  audit:
+    name: dependency audit (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Advisory only: a freshly disclosed CVE in a transitive dep should surface
+    # here without blocking unrelated merges. Dependabot (.github/dependabot.yml)
+    # opens the actual upgrade PRs.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - name: pnpm audit (prod)
+        run: pnpm audit --prod || true
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked || true
+          cd src-tauri && cargo audit || true
+
+  required-files:
+    name: required governance files present
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the project's governance files all exist
+        run: |
+          set -e
+          missing=0
+          for f in \
+            LICENSE NOTICE README.md \
+            CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md GOVERNANCE.md DCO.md \
+            .github/CODEOWNERS .github/pull_request_template.md \
+            .repo-boundary-denylist .repo-boundary-allow \
+            scripts/check-repo-boundaries.sh \
+            docs/architecture/repo-boundaries.md docs/legal/licensing.md; do
+            if [ ! -e "$f" ]; then echo "::error::required file missing: $f"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] && echo "All required governance files present ✓"
+          exit $missing
+
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Every commit must be Signed-off-by (git commit -s)
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          head='${{ github.event.pull_request.head.sha }}'
+          missing=0
+          for c in $(git rev-list "$base".."$head"); do
+            if ! git show -s --format=%B "$c" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "::error::commit $c is missing a Signed-off-by line."
+              echo "  Fix: git rebase --signoff $base   (then force-push your branch)"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] && echo "All commits signed off ✓"
+          exit $missing
