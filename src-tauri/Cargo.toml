@@ -3,6 +3,7 @@ name = "portbay"
 version = "0.1.0"
 description = "PortBay — lightweight local development environment manager"
 authors = ["Tribal House"]
+license = "Apache-2.0"
 edition = "2021"
 default-run = "portbay-app"
 
@@ -20,9 +21,18 @@ path = "src/main.rs"
 name = "portbay"
 path = "src/bin/portbay.rs"
 
-[[bin]]
-name = "portbay-hosts-helper"
-path = "src/bin/portbay-hosts-helper.rs"
+# Companion binaries (portbay-mcp, portbay-hosts-helper) are NOT bins of this
+# package — they live in their own workspace crates under crates/ and ship as
+# Tauri sidecars (see [workspace] below and scripts/build-*.sh). Keeping them
+# out of this package means the Tauri bundler only auto-includes the GUI bin,
+# and the rmcp/schemars stack is compiled only when crates/mcp is built.
+[workspace]
+members = ["crates/mcp", "crates/hosts-helper"]
+
+[features]
+# Enables `portbay_lib::mcp` + its protocol stack (rmcp). Off by default for
+# GUI/CLI builds; turned on by the crates/mcp dependency on this package.
+mcp = ["dep:rmcp"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -44,12 +54,30 @@ url = "2"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 which = "6"
+window-vibrancy = { version = "0.5", optional = false }
 console = "0.15"
 sysinfo = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x509-parser = "0.16"
 libc = "0.2"
+ed25519-dalek = "2"
+base64 = "0.22"
+keyring = { version = "3", features = ["apple-native"] }
+aes-gcm = "0.10"
+
+# Official Rust MCP SDK. Optional — gated behind the `mcp` feature and only
+# compiled when the crates/mcp workspace member (which enables that feature)
+# is built, never for the GUI/CLI. `schemars` is enabled so we can derive the
+# JSON Schema agents read; rmcp re-exports it (`rmcp::schemars`) so the
+# version always matches the SDK's expectation. stdio transport only —
+# no HTTP/axum surface.
+rmcp = { version = "1.7", features = [
+    "server",
+    "macros",
+    "transport-io",
+    "schemars",
+], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

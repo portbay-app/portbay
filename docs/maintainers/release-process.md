@@ -93,8 +93,27 @@ The workflow produces and attaches to the GitHub Release:
 - `PortBay_vX.Y.Z_aarch64.dmg` — signed and notarized macOS disk image
 - `PortBay_vX.Y.Z_aarch64.app.tar.gz` — tarball of the `.app` bundle
 - `latest.json` — Tauri Updater manifest consumed by the auto-update mechanism
+- `portbay-cargo-sbom.cdx.json` — CycloneDX SBOM for Rust dependencies
 
-### 3.3 Auto-update
+### 3.3 Homebrew cask update
+
+After the GitHub Release draft is created, the workflow checks out
+`portbay-app/homebrew-portbay`, renders `Casks/portbay.rb`, computes the DMG
+SHA-256 from the release artifact, opens a tap PR, and enables automerge. The tap
+repository must have a CI workflow that runs:
+
+```sh
+brew audit --cask Casks/portbay.rb
+brew style Casks/portbay.rb
+```
+
+Required secret:
+
+| Secret name | Purpose |
+|---|---|
+| `HOMEBREW_TAP_TOKEN` | Fine-scoped token with contents + pull-request access to `portbay-app/homebrew-portbay` |
+
+### 3.4 Auto-update
 
 The Tauri Updater plugin reads `latest.json` from the GitHub Release assets. The update URL configured in `src-tauri/tauri.conf.json` must point to the release asset path. Verify the URL pattern is correct before tagging; a misconfigured URL will silently prevent existing installs from receiving update notifications.
 

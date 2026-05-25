@@ -17,7 +17,7 @@
   let { variant, query }: Props = $props();
 
   function openAddProject() {
-    addProjectWizard.show();
+    addProjectWizard.requestAdd();
   }
 </script>
 

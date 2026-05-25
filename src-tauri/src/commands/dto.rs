@@ -14,7 +14,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::process_compose::{Process, ProjectStatus};
-use crate::registry::{Project, ProjectType, Readiness, Workspace, WorkspaceTool};
+use crate::registry::{
+    CorsConfig, MobileRunConfig, Project, ProjectType, Readiness, SandboxConfig, WebServer,
+    Workspace, WorkspaceTool,
+};
 
 /// A merged registry + runtime view of one project.
 ///
@@ -42,8 +45,19 @@ pub struct ProjectView {
     pub tags: Vec<String>,
     pub document_root: Option<String>,
     pub php_version: Option<String>,
+    pub web_server: Option<WebServer>,
+    pub mobile_run: Option<MobileRunConfig>,
     /// Monorepo workspace binding, when this project runs one app of a repo.
     pub workspace: Option<Workspace>,
+
+    /// Per-project CORS policy (Pro). `None` = no custom policy (free default).
+    pub cors: Option<CorsConfig>,
+
+    /// True when the project command is currently wrapped by PortBay's
+    /// sandbox profile.
+    pub sandboxed: bool,
+    /// Persisted sandbox policy, when configured.
+    pub sandbox: Option<SandboxConfig>,
 
     /// PortBay status taxonomy (`docs/UX_DESIGN.md` §5.3).
     pub status: ProjectStatus,
@@ -74,7 +88,12 @@ impl ProjectView {
             tags: project.tags.clone(),
             document_root: project.document_root.clone(),
             php_version: project.php_version.clone(),
+            web_server: project.web_server,
+            mobile_run: project.mobile_run.clone(),
             workspace: project.workspace.clone(),
+            cors: project.cors.clone(),
+            sandboxed: crate::sandbox::is_enabled(project),
+            sandbox: project.sandbox.clone(),
             status: proc
                 .map(|p| p.portbay_status())
                 .unwrap_or(ProjectStatus::Stopped),
@@ -218,6 +237,10 @@ pub struct AddProjectInput {
     pub kind: ProjectType,
     pub port: Option<u16>,
     pub start_command: Option<String>,
+    pub document_root: Option<String>,
+    pub php_version: Option<String>,
+    pub web_server: Option<WebServer>,
+    pub mobile_run: Option<MobileRunConfig>,
     #[serde(default = "default_https")]
     pub https: bool,
     #[serde(default)]
@@ -226,6 +249,7 @@ pub struct AddProjectInput {
     /// project. When set, `path` is the monorepo root and `start_command` is
     /// normally omitted so the reconciler runs the derived filter command.
     pub workspace: Option<Workspace>,
+    pub sandbox: Option<SandboxConfig>,
 }
 
 fn default_kind() -> ProjectType {
@@ -245,8 +269,12 @@ pub struct DetectedProject {
     pub suggested_id: String,
     pub suggested_name: String,
     pub suggested_hostname: String,
-    pub suggested_port: u16,
+    pub suggested_port: Option<u16>,
     pub suggested_start_command: Option<String>,
+    pub suggested_document_root: Option<String>,
+    pub suggested_php_version: Option<String>,
+    pub suggested_web_server: Option<WebServer>,
+    pub suggested_mobile_run: Option<MobileRunConfig>,
 }
 
 /// Result of `detect_workspace_apps` — the monorepo apps a folder exposes that
@@ -280,7 +308,7 @@ pub struct WorkspaceAppDto {
     pub suggested_id: String,
     pub suggested_name: String,
     pub suggested_hostname: String,
-    pub suggested_port: u16,
+    pub suggested_port: Option<u16>,
     pub suggested_start_command: Option<String>,
 }
 
@@ -302,11 +330,20 @@ pub struct UpdateProjectPatch {
     pub env: Option<BTreeMap<String, String>>,
     pub document_root: Option<String>,
     pub php_version: Option<String>,
+    pub web_server: Option<WebServer>,
+    pub mobile_run: Option<MobileRunConfig>,
     /// Monorepo workspace binding. When present, sets/replaces the project's
     /// workspace filter (Tier-2 "run one app from the repo root"). Patch
     /// semantics: absent leaves it unchanged — clear it by removing and
     /// re-adding the project, which is rare enough not to warrant a tri-state.
     pub workspace: Option<Workspace>,
+
+    /// Per-project CORS policy (Pro-gated). `Some` sets/replaces the policy;
+    /// an empty `allowedOrigins` clears it. Introducing or changing an active
+    /// policy without the `custom_port_cors` entitlement is rejected core-side
+    /// (`ProRequired`); an existing policy is preserved on downgrade.
+    pub cors: Option<CorsConfig>,
+    pub sandbox: Option<SandboxConfig>,
 }
 
 #[cfg(test)]
@@ -333,8 +370,12 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
+            cors: None,
+            sandbox: None,
         }
     }
 

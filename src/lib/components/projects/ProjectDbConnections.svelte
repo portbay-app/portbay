@@ -12,7 +12,7 @@
   triggered by keyboard, and this panel went through the a11y sweep.
 -->
 <script lang="ts">
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
 
   import { DashboardCard, Icon } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";

@@ -29,8 +29,12 @@
 
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView } from "$lib/types/projects";
-  import type { PortbayStatus } from "$lib/types/status";
-  import { typeLabel } from "$lib/types/projects";
+  import { displayStatusLabel } from "$lib/types/status";
+  import {
+    typeLabel,
+    effectiveWebServer,
+    webServerLabel,
+  } from "$lib/types/projects";
 
   import ProjectRowMenu from "./ProjectRowMenu.svelte";
   import OpenInButton from "./OpenInButton.svelte";
@@ -44,8 +48,23 @@
   let busy = $state<"start" | "stop" | "restart" | null>(null);
 
   const isSelected = $derived(projects.selectedId === project.id);
-  const isRunning = $derived(
-    project.status === "running" || project.status === "starting",
+  // The status the row *shows* — optimistic overlay while a Play/Stop is in
+  // flight, otherwise the real status. Drives the dot, label, and which
+  // primary button appears.
+  const display = $derived(projects.displayStatusOf(project));
+  const showStop = $derived(
+    display === "running" || display === "starting" || display === "stopping",
+  );
+  // Primary-button mode: an in-flight action (busy) wins so the spinner tracks
+  // the actual IPC; otherwise the displayed status decides stop vs start.
+  const buttonMode = $derived<"starting" | "stopping" | "stop" | "start">(
+    busy === "start"
+      ? "starting"
+      : busy === "stop"
+        ? "stopping"
+        : showStop
+          ? "stop"
+          : "start",
   );
   const compact = $derived(density.value === "compact");
   const cellClass = $derived(compact ? "py-2 px-3" : "py-3 px-4");
@@ -60,29 +79,32 @@
     return typeLabel[project.type];
   });
 
-  const statusLabel = $derived.by<string>(() => {
-    const m: Record<PortbayStatus, string> = {
-      running: "Running",
-      stopped: "Stopped",
-      starting: "Starting",
-      unhealthy: "Unhealthy",
-      crashed: "Crashed",
-      port_conflict: "Port conflict",
-    };
-    return m[project.status];
-  });
+  const statusText = $derived(displayStatusLabel(display));
+
+  // The web server actually fronting this project (PHP doc-root projects
+  // only); null when the choice doesn't apply, so we don't mislabel a Node
+  // app as "Caddy".
+  const server = $derived(effectiveWebServer(project));
 
   async function run(op: "start" | "stop" | "restart") {
     if (busy) return;
     busy = op;
+    // Flip the row to its optimistic state *now*, before any await, so the UI
+    // responds on the click rather than after the IPC round-trip. A restart
+    // ends up running, so it reads as a start. The real status event (or a
+    // failure below) reconciles it.
+    projects.beginTransition(project.id, op === "stop" ? "stop" : "start");
     try {
       switch (op) {
         case "start": {
           await dns.ensureReady();
-          // Resolves a port conflict via a confirm + force-quit; returns the
-          // unresolved error (if any) to surface as this row's inline error.
-          const conflict = await startProject(project.id, project.name);
-          if (conflict) throw conflict;
+          // Resolves a port conflict via a confirm + force-quit.
+          const r = await startProject(project.id, project.name);
+          if (r.kind === "declined") {
+            projects.failTransition(project.id); // nothing started — roll back
+            break;
+          }
+          if (r.kind === "error") throw r.error;
           break;
         }
         case "stop":
@@ -94,6 +116,7 @@
       }
       projects.clearError(project.id);
     } catch (err) {
+      projects.failTransition(project.id); // roll the optimistic overlay back
       projects.setError(project.id, err as CommandError);
     } finally {
       busy = null;
@@ -157,6 +180,24 @@
     <div class="flex items-center gap-2 text-fg-muted text-[12px]">
       <StackIcon type={project.type} size={16} />
       <span class="truncate">{typeLabel[project.type]}</span>
+      {#if server}
+        <span
+          class="shrink-0 px-1.5 py-0.5 rounded bg-surface-2 text-fg-subtle
+                 text-[10.5px] border border-border/50"
+          title="Served by {webServerLabel[server]}"
+        >
+          {webServerLabel[server]}
+        </span>
+      {/if}
+      {#if project.sandboxed}
+        <span
+          class="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded
+                 bg-accent/10 text-accent text-[10.5px] border border-accent/30"
+          title="Running with PortBay sandbox profile"
+        >
+          <Icon name="shield" size={11} /> Sandbox
+        </span>
+      {/if}
     </div>
   </td>
 
@@ -182,15 +223,15 @@
   <!-- Status -->
   <td class={cellClass}>
     <span class="inline-flex items-center gap-1.5 text-[12px]">
-      <StatusDot status={project.status} size="md" />
+      <StatusDot status={display} size="md" />
       <span
         class="text-fg-muted"
-        class:text-status-running={project.status === "running"}
-        class:text-status-unhealthy={project.status === "unhealthy" ||
-          project.status === "port_conflict"}
-        class:text-status-crashed={project.status === "crashed"}
+        class:text-status-running={display === "running"}
+        class:text-status-unhealthy={display === "unhealthy" ||
+          display === "port_conflict"}
+        class:text-status-crashed={display === "crashed"}
       >
-        {statusLabel}
+        {statusText}
       </span>
     </span>
   </td>
@@ -232,7 +273,7 @@
 
       <span class="w-px h-5 bg-border/60 mx-1" aria-hidden="true"></span>
 
-      {#if isRunning}
+      {#if buttonMode === "stop" || buttonMode === "stopping"}
         <button
           type="button"
           onclick={(e) => {
@@ -246,7 +287,7 @@
                  text-on-accent bg-status-crashed hover:brightness-110
                  active:brightness-95 disabled:opacity-50 transition"
         >
-          {#if busy === "stop"}
+          {#if buttonMode === "stopping"}
             <Icon name="refresh-cw" size={12} class="animate-spin" />
           {:else}
             <Icon name="square" size={11} class="fill-current" />
@@ -266,7 +307,7 @@
                  text-on-accent bg-status-running hover:brightness-110
                  active:brightness-95 disabled:opacity-50 transition"
         >
-          {#if busy === "start"}
+          {#if buttonMode === "starting"}
             <Icon name="refresh-cw" size={12} class="animate-spin" />
           {:else}
             <Icon name="play" size={12} class="fill-current" />

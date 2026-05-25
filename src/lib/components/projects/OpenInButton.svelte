@@ -29,16 +29,37 @@
   }
   let { projectId, variant = "full" }: Props = $props();
 
-  const KIND_ORDER: DevToolKind[] = ["editor", "agent", "terminal"];
+  const KIND_ORDER: DevToolKind[] = ["editor", "agent", "terminal", "file-manager"];
   const KIND_LABEL: Record<DevToolKind, string> = {
     editor: "Editors",
     agent: "Agents",
     terminal: "Terminals",
+    "file-manager": "File Manager",
   };
   const KIND_ICON: Record<DevToolKind, IconName> = {
     editor: "pencil",
     agent: "sparkles",
     terminal: "terminal",
+    "file-manager": "folder",
+  };
+
+  const TOOL_ICONS: Record<string, string> = {
+    vscode: "/apps/vscode.png",
+    cursor: "/apps/cursor.png",
+    phpstorm: "/apps/phpstorm.png",
+    sublime: "/apps/sublime-text.png",
+    zed: "/apps/zed.png",
+    xcode: "/apps/xcode.png",
+    "android-studio": "/apps/android-studio.png",
+    "claude-code": "/apps/claude.png",
+    "claude-desktop": "/apps/claude.png",
+    codex: "/apps/codex.png",
+    antigravity: "/apps/antigravity.png",
+    warp: "/apps/warp.png",
+    ghostty: "/apps/ghostty.png",
+    iterm: "/apps/iterm2.png",
+    terminal: "/apps/terminal.png",
+    finder: "/apps/finder.png",
   };
 
   const MENU_WIDTH = 200;
@@ -192,8 +213,17 @@
           onclick={(e) => openInTool(e, tool)}
           class="w-full text-left px-2 py-1.5 rounded
                  text-fg-muted hover:bg-surface-2 hover:text-fg
-                 transition-colors"
+                 transition-colors flex items-center gap-2"
         >
+          {#if TOOL_ICONS[tool.id]}
+            <img
+              src={TOOL_ICONS[tool.id]}
+              alt=""
+              class="w-4 h-4 rounded-[3px] object-cover flex-shrink-0"
+            />
+          {:else}
+            <span class="w-4 h-4 flex-shrink-0"></span>
+          {/if}
           {tool.label}
         </button>
       {/each}

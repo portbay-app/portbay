@@ -19,6 +19,8 @@ Record the following from ServBay before moving a project:
 
 1. Stop the ServBay site.
 2. Add the project in PortBay.
-3. Match hostname, PHP version, document root, and HTTPS setting.
+3. Match hostname, PHP version, document root, HTTPS setting, and web server.
+   PHP sites can run as PortBay-managed dev-server projects, or as document-root
+   projects served through Caddy, Nginx, or Apache with PHP-FPM.
 4. Reconcile local DNS or hosts.
 5. Start in PortBay and verify the local URL.

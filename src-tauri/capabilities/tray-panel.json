@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tray-panel",
+  "description": "Tray popover webview. Grants only the core baseline so the popover can receive live `portbay://status` / `portbay://metrics` events and resolve its own window. Privileged window ops (show / focus / hide the main window) and navigation are deliberately NOT granted here — they run Rust-side via the `open_main_window` and `quit_app` app commands — so the popover keeps a minimal surface with no shell, dialog, opener, or window-mutation permissions.",
+  "local": true,
+  "windows": ["tray-panel"],
+  "permissions": ["core:default"]
+}

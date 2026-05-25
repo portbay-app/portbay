@@ -28,7 +28,7 @@
   let userMenuOpen = $state<boolean>(false);
 
   function openAddProject() {
-    addProjectWizard.show();
+    addProjectWizard.requestAdd();
   }
 
   function openPalette() {

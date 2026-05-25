@@ -8,11 +8,11 @@
 @custom-variant light (&:where(.light, .light *));
 
 @theme {
-  /* Surface */
-  --color-bg: #0b0f14;
-  --color-surface: #161b22;
-  --color-surface-2: #1c232c;
-  --color-border: #2a323d;
+  /* Surface — semi-transparent so native vibrancy blur shows through */
+  --color-bg: rgb(11 15 20 / 0.82);
+  --color-surface: rgb(22 27 34 / 0.88);
+  --color-surface-2: rgb(28 35 44 / 0.93);
+  --color-border: rgb(42 50 61 / 0.75);
   --color-border-strong: #3a4453;
 
   /* Foreground */
@@ -52,7 +52,7 @@
 
 @layer base {
   html {
-    background: var(--color-bg);
+    background: transparent;
     color: var(--color-fg);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
@@ -64,18 +64,18 @@
     margin: 0;
     min-height: 100vh;
     overscroll-behavior: none;
-    background: var(--color-bg);
+    background: transparent;
     color: var(--color-fg);
   }
 
   body[data-theme="light"] {
     color-scheme: light;
 
-    /* Surface */
-    --color-bg: #f4f6f8;
-    --color-surface: #ffffff;
-    --color-surface-2: #eef2f6;
-    --color-border: #d7dee7;
+    /* Surface — semi-transparent for vibrancy */
+    --color-bg: rgb(244 246 248 / 0.85);
+    --color-surface: rgb(255 255 255 / 0.90);
+    --color-surface-2: rgb(238 242 246 / 0.92);
+    --color-border: rgb(215 222 231 / 0.80);
     --color-border-strong: #aeb9c7;
 
     /* Foreground */
@@ -145,4 +145,35 @@
   --density-card-py: 0.875rem;
   --density-card-px: 1rem;
   --density-row-py: 0.625rem;
+}
+
+/* Shimmer sweep — add class="shimmer" to any surface element to get a
+   single-pass highlight that reads as "loading done / polished". */
+.shimmer {
+  overflow: hidden;
+  position: relative;
+}
+.shimmer::before {
+  content: "";
+  position: absolute;
+  inset: 0 -60%;
+  background: linear-gradient(
+    118deg,
+    transparent 0%,
+    transparent 14%,
+    color-mix(in srgb, var(--color-accent) 8%, var(--color-surface)) 28%,
+    color-mix(in srgb, var(--color-accent) 22%, var(--color-surface)) 47%,
+    color-mix(in srgb, var(--color-accent) 8%, var(--color-surface)) 66%,
+    transparent 86%,
+    transparent 100%
+  );
+  animation: shimmerSlide 2.1s linear infinite;
+  pointer-events: none;
+}
+@keyframes shimmerSlide {
+  0%   { transform: translate(60%); }
+  100% { transform: translate(-60%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shimmer::before { animation: none; opacity: 0; }
 }

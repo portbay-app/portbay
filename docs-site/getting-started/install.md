@@ -1,6 +1,23 @@
 # Install
 
-PortBay is currently built from source. The app expects Node, pnpm, Rust, and Tauri prerequisites to be installed.
+PortBay ships as a signed macOS app. Developers can install the current release with Homebrew or download the DMG from GitHub Releases.
+
+## Homebrew
+
+```bash
+brew tap portbay-app/portbay
+brew install --cask portbay
+```
+
+The cask installs `PortBay.app` and the bundled `portbay` CLI. Uninstalling with Homebrew removes the app; `brew uninstall --zap portbay` also removes PortBay's local app data, caches, logs, preferences, and WebKit state.
+
+## DMG
+
+Download the latest `PortBay-<version>.dmg` from GitHub Releases, mount it, and drag `PortBay.app` into Applications. The app is signed and notarized for macOS Gatekeeper.
+
+## Build From Source
+
+Source builds are for contributors. The app expects Node, pnpm, Rust, and Tauri prerequisites to be installed.
 
 ## Requirements
 
@@ -12,7 +29,7 @@ PortBay is currently built from source. The app expects Node, pnpm, Rust, and Ta
 | Rust | Required for the Tauri core and CLI. |
 | Xcode Command Line Tools | Required for native builds on macOS. |
 
-## Clone And Install
+### Clone And Install
 
 ```bash
 git clone https://github.com/portbay-app/portbay.git
@@ -20,7 +37,7 @@ cd portbay
 pnpm install
 ```
 
-## Fetch Development Sidecars
+### Fetch Development Sidecars
 
 Tauri looks for sidecars under `src-tauri/binaries/<name>-<target-triple>`. Process Compose is committed. The larger or platform-specific tools are fetched per checkout.
 
@@ -36,7 +53,7 @@ The scripts write into the repository checkout. They should be run from the repo
 
 `fetch-dnsmasq.sh` bundles the DNS resolver that powers wildcard `*.test` routing. Because PortBay ships its own copy, there is no separate `brew install dnsmasq` step — DNS routing works out of the box, both in a source checkout and in the signed release build.
 
-## Verify The Checkout
+### Verify The Checkout
 
 ```bash
 cd src-tauri
@@ -45,7 +62,7 @@ cd ..
 pnpm check
 ```
 
-## Run The App
+### Run The App
 
 ```bash
 pnpm tauri dev

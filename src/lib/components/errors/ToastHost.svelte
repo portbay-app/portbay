@@ -12,7 +12,7 @@
     - Neither set → no-op; the button just dismisses.
 -->
 <script lang="ts">
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
 
   import { errorBus } from "$lib/stores/errors.svelte";
   import { safeInvoke } from "$lib/ipc";

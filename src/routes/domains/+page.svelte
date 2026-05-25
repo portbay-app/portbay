@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
 
   import { DashboardCard, Icon, StatusDot } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";

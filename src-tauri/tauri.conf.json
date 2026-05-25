@@ -19,7 +19,8 @@
         "minWidth": 900,
         "minHeight": 560,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "transparent": true
       },
       {
         "label": "tray-panel",
@@ -38,7 +39,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     }
   },
   "bundle": {
@@ -58,7 +59,8 @@
       "binaries/mailpit",
       "binaries/cloudflared",
       "binaries/dnsmasq",
-      "binaries/portbay-hosts-helper"
+      "binaries/portbay-hosts-helper",
+      "binaries/portbay-mcp"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0",

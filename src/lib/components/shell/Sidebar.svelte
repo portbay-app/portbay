@@ -16,7 +16,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
   import { getVersion } from "@tauri-apps/api/app";
 
   import SidebarItem from "./SidebarItem.svelte";
@@ -250,6 +250,12 @@
       <SidebarItem href="/dns" icon="globe" label="DNS" matchPrefix />
       <SidebarItem href="/services" icon="server" label="Services" matchPrefix />
       <SidebarItem href="/logs" icon="file-text" label="Logs" matchPrefix />
+      <SidebarItem
+        href="/inspector"
+        icon="activity"
+        label="Inspector"
+        matchPrefix
+      />
       <SidebarItem
         href="/languages"
         icon="file-code"

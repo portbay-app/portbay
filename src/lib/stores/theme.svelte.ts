@@ -26,8 +26,9 @@ function apply(value: Theme) {
 }
 
 function createThemeStore() {
-  let current = $state<Theme>(loadInitial());
-  if (browser) apply(current);
+  const initial = loadInitial();
+  let current = $state<Theme>(initial);
+  if (browser) apply(initial);
 
   return {
     get value() {

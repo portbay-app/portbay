@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::registry::{ProjectType, Readiness};
+use crate::registry::{MobileRunConfig, ProjectType, Readiness, WebServer};
 
 /// Current schema version emitted by `export_project`. Bump when the
 /// shape changes; older files with smaller version numbers continue
@@ -38,6 +38,12 @@ pub struct PortbayFile {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub php_version: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_server: Option<WebServer>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile_run: Option<MobileRunConfig>,
 
     pub https: bool,
 

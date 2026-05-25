@@ -90,15 +90,13 @@ jobs:
             --failOn 'GPL-2.0-only;GPL-2.0;LGPL-2.0-only;SSPL-1.0;BUSL-1.1;CC-BY-NC-4.0;Commons-Clause'
 
   audit:
-    name: dependency audit (advisory)
+    name: dependency audit (required)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Advisory only: a freshly disclosed CVE in a transitive dep should surface
-    # here without blocking unrelated merges. Dependabot (.github/dependabot.yml)
-    # opens the actual upgrade PRs.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -111,11 +109,11 @@ jobs:
       - name: pnpm install
         run: pnpm install --frozen-lockfile
       - name: pnpm audit (prod)
-        run: pnpm audit --prod || true
+        run: pnpm audit --prod
       - name: cargo audit
         run: |
-          cargo install cargo-audit --locked || true
-          cd src-tauri && cargo audit || true
+          cargo install cargo-audit --locked
+          cd src-tauri && cargo audit
 
   required-files:
     name: required governance files present

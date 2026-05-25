@@ -13,13 +13,13 @@
 </script>
 
 <script lang="ts">
-  import type { PortbayStatus } from "$lib/types/status";
-  import { statusDotClass } from "$lib/types/status";
+  import type { DisplayStatus } from "$lib/types/status";
+  import { statusDotClass, isTransitional } from "$lib/types/status";
 
   interface Props {
-    status: PortbayStatus;
+    status: DisplayStatus;
     size?: DotSize;
-    /** Pulse animation for transitional states (starting). */
+    /** Pulse animation for transitional states (starting / stopping). */
     pulse?: boolean;
   }
   let { status, size = "md", pulse = false }: Props = $props();
@@ -32,7 +32,7 @@
 
   const cls = $derived(
     `${sizeClass[size]} ${statusDotClass(status)} rounded-full shrink-0${
-      pulse || status === "starting" ? " animate-pulse" : ""
+      pulse || isTransitional(status) ? " animate-pulse" : ""
     }`,
   );
 </script>

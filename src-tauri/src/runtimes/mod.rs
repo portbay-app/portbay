@@ -26,6 +26,7 @@
 
 pub mod bun;
 pub mod env;
+pub mod flutter;
 pub mod go;
 pub mod node;
 pub mod php;
@@ -44,6 +45,10 @@ use serde::{Deserialize, Serialize};
 pub enum InstallSource {
     /// Homebrew formula (Apple Silicon or Intel prefix).
     Homebrew,
+    /// ServBay-managed package.
+    ServBay,
+    /// FlyEnv-managed package.
+    FlyEnv,
     /// asdf-vm — `~/.asdf/installs/<lang>/<ver>/`.
     Asdf,
     /// mise (formerly rtx) — `~/.local/share/mise/installs/<lang>/<ver>/`.
@@ -138,6 +143,8 @@ pub enum FieldKind {
     Select { options: Vec<String> },
     /// Boolean toggle. `value` is `"true"` / `"false"`.
     Bool,
+    /// Multi-line free text.
+    Textarea,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -207,6 +214,34 @@ impl KvRow {
             hint: None,
             is_path: false,
             field: FieldKind::Text,
+        }
+    }
+
+    /// Editable multi-line text row.
+    pub fn textarea(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            value: value.into(),
+            hint: None,
+            is_path: false,
+            field: FieldKind::Textarea,
+        }
+    }
+
+    /// Editable boolean row.
+    pub fn bool(key: impl Into<String>, label: impl Into<String>, value: bool) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            value: value.to_string(),
+            hint: None,
+            is_path: false,
+            field: FieldKind::Bool,
         }
     }
 
@@ -358,6 +393,8 @@ pub trait LanguageRuntime: Send + Sync {
 pub fn source_label(s: InstallSource) -> &'static str {
     match s {
         InstallSource::Homebrew => "Homebrew",
+        InstallSource::ServBay => "ServBay",
+        InstallSource::FlyEnv => "FlyEnv",
         InstallSource::Asdf => "asdf",
         InstallSource::Mise => "mise",
         InstallSource::Nvm => "nvm",
@@ -376,6 +413,7 @@ fn registry() -> Vec<Box<dyn LanguageRuntime>> {
         Box::new(node::NodeRuntime),
         Box::new(bun::BunRuntime),
         Box::new(python::PythonRuntime),
+        Box::new(flutter::FlutterRuntime),
         Box::new(go::GoRuntime),
         Box::new(ruby::RubyRuntime),
     ]
@@ -440,6 +478,35 @@ pub fn list_all(settings: &crate::registry::RuntimeSettings) -> Vec<LanguageView
             }
         })
         .collect()
+}
+
+/// Resolve the primary binary for a runtime pin. Exact version match wins; a
+/// major/minor or major-only pin can match a fuller detected version, so
+/// `.nvmrc` values such as `20` still find `20.11.1`.
+pub fn resolve_binary(
+    runtime: &crate::registry::Runtime,
+    settings: &crate::registry::RuntimeSettings,
+) -> Option<PathBuf> {
+    let lang = runtime_by_id(&runtime.lang)?;
+    let mut installs = lang.detect();
+    for manual in settings.manual.iter().filter(|m| m.lang == runtime.lang) {
+        installs.push(RuntimeInstall {
+            version: manual.version.clone(),
+            binary: manual.binary.clone(),
+            source: InstallSource::Manual,
+            config_dir: None,
+        });
+    }
+    installs
+        .into_iter()
+        .find(|install| version_matches(&install.version, &runtime.version))
+        .map(|install| install.binary)
+}
+
+fn version_matches(installed: &str, requested: &str) -> bool {
+    installed == requested
+        || installed.starts_with(&format!("{requested}."))
+        || requested.starts_with(&format!("{installed}."))
 }
 
 // -----------------------------------------------------------------------
@@ -551,6 +618,7 @@ mod tests {
         assert!(ids.contains(&"node"));
         assert!(ids.contains(&"bun"));
         assert!(ids.contains(&"python"));
+        assert!(ids.contains(&"flutter"));
         assert!(ids.contains(&"go"));
         assert!(ids.contains(&"ruby"));
     }

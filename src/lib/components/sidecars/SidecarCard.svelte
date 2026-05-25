@@ -15,7 +15,7 @@
   } from "$lib/types/status";
   import type { SidecarKey, SidecarStatus } from "$lib/types/sidecars";
   import { sidecarTitle } from "$lib/types/sidecars";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
 
   interface Props {
     sidecarKey: SidecarKey;

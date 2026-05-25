@@ -95,6 +95,7 @@ Required secrets:
 | `APPLE_TEAM_ID` | `V2CYH6HZT8`. |
 | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater signing key. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the updater key, if set. |
+| `HOMEBREW_TAP_TOKEN` | Fine-scoped token used to update `portbay-app/homebrew-portbay`. |
 
 ## Release Procedure
 
@@ -108,8 +109,17 @@ git push origin v0.1.0
 ```
 
 4. Wait for the `release` workflow.
-5. Download the artifact and verify Gatekeeper locally.
-6. Publish the draft GitHub Release only after verification passes.
+5. Confirm the Homebrew tap PR was opened and automerge is waiting on tap CI.
+6. Download the artifact and verify Gatekeeper locally.
+7. Publish the draft GitHub Release only after verification passes.
+8. After publishing, verify:
+
+```bash
+brew tap portbay-app/portbay
+brew install --cask portbay
+portbay --help
+brew uninstall --zap portbay
+```
 
 ## Failure Modes
 

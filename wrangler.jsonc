@@ -1,0 +1,23 @@
+{
+  // Hosted web simulator — the PortBay SPA built with PUBLIC_SIMULATOR=true
+  // (mock IPC + dummy roster baked in), served as static assets. NOT a Worker:
+  // there is no `main`, so this is a pure static deploy of `build/`. Distinct
+  // name from the cloud backend so the two never collide.
+  //
+  // Deploy:  pnpm deploy:web   (builds, then `wrangler deploy`)
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "portbay-simulator",
+  "compatibility_date": "2026-05-25",
+  "assets": {
+    "directory": "build",
+    "not_found_handling": "single-page-application"
+  },
+  // Public, memorable URL for the README/docs. `custom_domain` makes wrangler
+  // provision the DNS record + cert on the portbay.app zone at deploy time.
+  "routes": [{ "pattern": "try.portbay.app", "custom_domain": true }],
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true
+  }
+}

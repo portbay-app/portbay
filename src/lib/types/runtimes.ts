@@ -7,6 +7,8 @@
 
 export type InstallSource =
   | "homebrew"
+  | "serv_bay"
+  | "fly_env"
   | "asdf"
   | "mise"
   | "nvm"
@@ -31,7 +33,8 @@ export type FieldKind =
   | { kind: "text" }
   | { kind: "number"; min?: number; max?: number }
   | { kind: "select"; options: string[] }
-  | { kind: "bool" };
+  | { kind: "bool" }
+  | { kind: "textarea" };
 
 export interface KvRow {
   /** Stable key edits are posted under (ignored for readonly rows). */
@@ -68,6 +71,8 @@ export interface LanguageView {
 /** Human label for the install-source pill. */
 export const sourceLabel: Record<InstallSource, string> = {
   homebrew: "Homebrew",
+  serv_bay: "ServBay",
+  fly_env: "FlyEnv",
   asdf: "asdf",
   mise: "mise",
   nvm: "nvm",

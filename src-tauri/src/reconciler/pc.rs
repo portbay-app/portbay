@@ -43,12 +43,14 @@ pub(super) async fn reconcile(
     let data_dir = data_dir_from_logs(logs_dir);
     let php_fpm_specs = php_fpm_specs_for(reg, data_dir);
     let db_specs = db_daemon_specs_for(reg, data_dir);
+    let web_specs = crate::webservers::specs_for(reg, data_dir, logs_dir);
     let yaml = match process_compose::config::to_yaml(
         reg,
         logs_dir,
         mail_env.as_ref(),
         &php_fpm_specs,
         &db_specs,
+        &web_specs,
     ) {
         Ok(y) => y,
         Err(e) => return StepOutcome::failed(format!("yaml generation: {e}")),
@@ -79,7 +81,7 @@ pub(super) async fn reconcile(
 /// after Mailpit comes up will regenerate the YAML with the
 /// injections and restart PC once.
 pub fn build_initial_yaml(reg: &Registry, logs_dir: &Path) -> Result<String, String> {
-    process_compose::config::to_yaml(reg, logs_dir, None, &[], &[]).map_err(|e| e.to_string())
+    process_compose::config::to_yaml(reg, logs_dir, None, &[], &[], &[]).map_err(|e| e.to_string())
 }
 
 /// The PortBay app-data directory — `<logs_dir>/..`. Used to derive
@@ -161,6 +163,26 @@ fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::co
         // (set via the /languages FPM and PHP tabs). Absent → defaults, which
         // render the same pool config as before any tuning was saved.
         let php_cfg = reg.runtimes.php.get(ver).cloned().unwrap_or_default();
+        let slowlog_path = if php_cfg.fpm.slowlog.trim().is_empty() {
+            crate::php::lifecycle::fpm_slowlog_path(data_dir, ver)
+        } else {
+            std::path::PathBuf::from(php_cfg.fpm.slowlog.trim())
+        };
+        if !php_cfg.fpm.request_slowlog_timeout.trim().is_empty()
+            && php_cfg.fpm.request_slowlog_timeout.trim() != "0"
+            && php_cfg.fpm.request_slowlog_timeout.trim() != "0s"
+        {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&slowlog_path);
+        }
+        if php_cfg.fpm.access_log {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(crate::php::lifecycle::fpm_access_log_path(data_dir, ver));
+        }
         let pool_body = crate::php::lifecycle::render_pool_config(
             install,
             &socket_path,
@@ -271,10 +293,22 @@ pub(super) fn hash_yaml(s: &str) -> u64 {
 }
 
 fn count_processes(reg: &Registry) -> usize {
-    reg.list_projects()
+    let project_processes = reg
+        .list_projects()
         .iter()
         .filter(|p| p.start_command.is_some())
-        .count()
+        .count();
+    let generated_web_servers = reg
+        .list_projects()
+        .iter()
+        .filter(|p| {
+            p.kind == crate::registry::ProjectType::Php
+                && p.start_command.is_none()
+                && p.port.is_some()
+                && !matches!(p.web_server_effective(), crate::registry::WebServer::Caddy)
+        })
+        .count();
+    project_processes + generated_web_servers
 }
 
 #[cfg(test)]
@@ -286,6 +320,8 @@ mod tests {
 
     fn next_project(id: &str, port: u16) -> Project {
         Project {
+            cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
@@ -302,6 +338,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         }
@@ -315,8 +353,10 @@ mod tests {
         let mut b = Registry::new("test");
         b.add_project(next_project("y", 3011)).unwrap();
         b.add_project(next_project("x", 3010)).unwrap();
-        let y_a = process_compose::config::to_yaml(&a, Path::new("/tmp"), None, &[], &[]).unwrap();
-        let y_b = process_compose::config::to_yaml(&b, Path::new("/tmp"), None, &[], &[]).unwrap();
+        let y_a =
+            process_compose::config::to_yaml(&a, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let y_b =
+            process_compose::config::to_yaml(&b, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
         // YAML emit may be ordering-stable already; we don't depend on
         // that. We do depend on the hash being deterministic given a
         // string input.
@@ -331,11 +371,11 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
         let h1 = hash_string(
-            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap(),
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap(),
         );
         r.add_project(next_project("b", 3011)).unwrap();
         let h2 = hash_string(
-            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap(),
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap(),
         );
         assert_ne!(h1, h2);
     }

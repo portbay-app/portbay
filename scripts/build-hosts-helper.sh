@@ -42,16 +42,20 @@ triple="${TARGET_TRIPLE:-$host_triple}"
 mkdir -p "$bin_dir"
 dest="${bin_dir}/portbay-hosts-helper-${triple}"
 
-# Chicken-and-egg: tauri.conf.json lists this path as an externalBin, and
-# `tauri_build` (run from the crate's build.rs) validates that every externalBin
-# file EXISTS at compile time. But the helper IS part of that same crate, so
-# building it would fail on its own missing externalBin. Seed an empty
-# placeholder first to satisfy the existence check, then overwrite it with the
-# real binary once the build succeeds.
-[ -f "$dest" ] || : > "$dest"
+# Chicken-and-egg: tauri.conf.json lists our own binaries as externalBin, and
+# `tauri_build` (run from the app crate's build.rs) validates that EVERY
+# externalBin file exists at compile time. But building any of our own binaries
+# compiles that build.rs, which would fail on the others (and on this one)
+# before they exist. Seed empty placeholders for all of our own sidecars first
+# to satisfy the existence check; the real binary overwrites this one below, and
+# build-mcp.sh overwrites portbay-mcp.
+for ours in portbay-hosts-helper portbay-mcp; do
+  ph="${bin_dir}/${ours}-${triple}"
+  [ -f "$ph" ] || : > "$ph"
+done
 
-echo "build-hosts-helper: cargo build --release --target ${triple} --bin portbay-hosts-helper"
-cargo build --release --manifest-path "$manifest" --target "$triple" --bin portbay-hosts-helper
+echo "build-hosts-helper: cargo build --release --target ${triple} -p portbay-hosts-helper"
+cargo build --release --manifest-path "$manifest" --target "$triple" -p portbay-hosts-helper
 
 src="${repo_root}/src-tauri/target/${triple}/release/portbay-hosts-helper"
 cp "$src" "$dest"

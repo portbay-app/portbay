@@ -35,7 +35,9 @@ export default defineConfig({
       { text: "Start", link: "/getting-started/" },
       { text: "Guides", link: "/guides/" },
       { text: "Reference", link: "/reference/cli" },
+      { text: "AI Agents", link: "/agents/" },
       { text: "Architecture", link: "/architecture/" },
+      { text: "Pro", link: "/pro/" },
       { text: "Troubleshooting", link: "/troubleshooting/" },
     ],
     sidebar: [
@@ -53,11 +55,31 @@ export default defineConfig({
         items: [
           { text: "Overview", link: "/guides/" },
           { text: "Caddy and HTTPS", link: "/guides/caddy-https" },
-          { text: "PHP Setup", link: "/guides/php-setup" },
           { text: "Custom Domain Suffix", link: "/guides/custom-domain-suffix" },
+          { text: "PHP Setup", link: "/guides/php-setup" },
           { text: "Environment Variables", link: "/guides/environment-variables" },
           { text: "Project Groups", link: "/guides/project-groups" },
           { text: "CLI Usage", link: "/guides/cli-usage" },
+        ],
+      },
+      {
+        text: "Features",
+        items: [
+          { text: "HTTP Inspector", link: "/guides/http-inspector" },
+          { text: "Databases", link: "/guides/databases" },
+          { text: "Languages & Runtimes", link: "/guides/languages" },
+          { text: "Stack Recipes", link: "/guides/recipes" },
+          { text: "Mailpit", link: "/guides/mailpit" },
+          { text: "Cloudflare Tunnels", link: "/guides/tunnels" },
+          { text: "Sandboxed Projects", link: "/guides/sandbox" },
+        ],
+      },
+      {
+        text: "The App",
+        items: [
+          { text: "Command Palette", link: "/guides/command-palette" },
+          { text: "Log Viewer", link: "/guides/log-viewer" },
+          { text: "Tray Mode", link: "/guides/tray-mode" },
         ],
       },
       {
@@ -70,8 +92,19 @@ export default defineConfig({
         ],
       },
       {
+        text: "AI Agents (MCP)",
+        items: [
+          { text: "Overview", link: "/agents/" },
+          { text: "Tool Reference", link: "/agents/tools" },
+        ],
+      },
+      {
         text: "Architecture",
         items: [{ text: "System Design", link: "/architecture/" }],
+      },
+      {
+        text: "Pro",
+        items: [{ text: "PortBay Pro", link: "/pro/" }],
       },
       {
         text: "Troubleshooting",

@@ -145,6 +145,13 @@ fn icon_for(status: AggregateStatus) -> Image<'static> {
 pub struct TrayHandle {
     pub icon: Option<TrayIcon>,
     pub last_status: Option<AggregateStatus>,
+    /// Timestamp of the most recent blur-triggered hide. Used by
+    /// `toggle_panel` to ignore the `Click Up` event that macOS fires
+    /// immediately after `Focused(false)` when the user clicks the tray
+    /// icon to dismiss an open popover — without this guard the panel
+    /// re-opens because `is_visible` is already false by the time the
+    /// click arrives.
+    pub last_hidden_at: Option<std::time::Instant>,
 }
 
 /// Hold the tray inside a single mutex so the poller can read/swap
@@ -162,7 +169,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_fallback_menu(app)?;
     let icon = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon_for(AggregateStatus::Idle))
-        .icon_as_template(false) // we ship 4 distinct colours; let macOS keep them
+        .icon_as_template(true) // monochrome PNGs — macOS inverts for dark menu bar
         .tooltip("PortBay — idle")
         .menu(&menu)
         // Left-click opens the popover webview (handled in
@@ -334,6 +341,26 @@ fn toggle_panel(app: &AppHandle, click: PhysicalPosition<f64>, rect: Rect) {
         return;
     }
 
+    // Guard against the macOS blur-then-click race: when the popover is
+    // open and the user clicks the tray icon, `Focused(false)` fires first
+    // (hiding the panel) and then `Click Up` arrives here with the panel
+    // already hidden. Without this check the panel immediately re-opens,
+    // making click-to-dismiss feel broken. 200 ms covers the observed
+    // OS event gap with headroom to spare.
+    let recently_hidden = {
+        let state: tauri::State<AppState> = app.state();
+        let v = state
+            .tray
+            .lock()
+            .expect("tray mutex poisoned")
+            .last_hidden_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(200));
+        v
+    };
+    if recently_hidden {
+        return;
+    }
+
     let scale = panel.scale_factor().unwrap_or(1.0);
     // Anchor: centre horizontally on the icon, drop the panel below
     // it. macOS's coordinate origin is top-left, so "below" is
@@ -383,6 +410,12 @@ fn toggle_panel(app: &AppHandle, click: PhysicalPosition<f64>, rect: Rect) {
 pub fn hide_panel(app: &AppHandle) {
     if let Some(panel) = app.get_webview_window(PANEL_WINDOW_LABEL) {
         let _ = panel.hide();
+        let state: tauri::State<AppState> = app.state();
+        state
+            .tray
+            .lock()
+            .expect("tray mutex poisoned")
+            .last_hidden_at = Some(std::time::Instant::now());
     }
 }
 

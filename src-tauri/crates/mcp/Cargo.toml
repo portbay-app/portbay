@@ -1,0 +1,26 @@
+# portbay-mcp — the MCP server, shipped as a Tauri sidecar.
+#
+# Its own crate (not a [[bin]] of the Tauri app package) so the Tauri bundler
+# never auto-includes it, and so the rmcp/schemars stack is only compiled when
+# this binary is built — never for the GUI. Depends on the app crate's lib
+# (`portbay_lib`) with the `mcp` feature, which gates `portbay_lib::mcp`.
+#
+# Built into src-tauri/binaries/portbay-mcp-<triple> by scripts/build-mcp.sh
+# and listed in tauri.conf.json `externalBin`.
+[package]
+name = "portbay-mcp"
+version = "0.1.0"
+description = "PortBay MCP server — drive PortBay from an MCP-aware AI agent over stdio."
+authors = ["Tribal House"]
+license = "Apache-2.0"
+edition = "2021"
+
+[[bin]]
+name = "portbay-mcp"
+path = "src/main.rs"
+
+[dependencies]
+portbay = { path = "../..", features = ["mcp"] }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

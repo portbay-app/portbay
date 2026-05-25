@@ -2,6 +2,8 @@
 
 PortBay defaults to local hostnames such as `project.test`. The suffix is part of each project hostname stored in the registry.
 
+![PortBay domains — one row per project hostname](/screenshots/domains.png)
+
 ## Current Behavior
 
 The active registry stores full hostnames, not a global hostname template. That means a project’s suffix is changed by editing the project hostname:
@@ -30,3 +32,9 @@ The active registry stores full hostnames, not a global hostname template. That 
 5. Start the project and open the new URL.
 
 Changing the suffix without reconciling hostnames leaves stale entries behind.
+
+## Local DNS
+
+PortBay routes exact hostnames through the privileged `/etc/hosts` helper and resolves wildcard `*.<suffix>` through the bundled dnsmasq sidecar. The DNS view shows resolver status, the managed records, and the cache tuning.
+
+![PortBay local DNS](/screenshots/dns.png)

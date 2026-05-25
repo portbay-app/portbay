@@ -28,8 +28,9 @@ function apply(value: Density) {
 }
 
 function createDensityStore() {
-  let current = $state<Density>(loadInitial());
-  if (browser) apply(current);
+  const initial = loadInitial();
+  let current = $state<Density>(initial);
+  if (browser) apply(initial);
 
   return {
     get value() {

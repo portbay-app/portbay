@@ -33,6 +33,37 @@ pub fn fpm_socket_path(data_dir: &std::path::Path, version: &str) -> std::path::
     data_dir.join("php").join(version).join("php-fpm.sock")
 }
 
+/// Default slow-log file for a PHP version's PortBay-owned pool.
+pub fn fpm_slowlog_path(data_dir: &std::path::Path, version: &str) -> std::path::PathBuf {
+    data_dir.join("php").join(version).join("php-fpm.slow.log")
+}
+
+/// Access-log file for a PHP version's PortBay-owned pool.
+pub fn fpm_access_log_path(data_dir: &std::path::Path, version: &str) -> std::path::PathBuf {
+    data_dir
+        .join("php")
+        .join(version)
+        .join("php-fpm.access.log")
+}
+
+/// FPM listen address generated from the saved per-version tuning.
+pub fn fpm_listen_address(tuning: &FpmTuning, socket_path: &std::path::Path) -> String {
+    if tuning.listen == "tcp" {
+        format!("127.0.0.1:{}", tuning.tcp_port)
+    } else {
+        socket_path.to_string_lossy().into_owned()
+    }
+}
+
+/// Caddy's FastCGI upstream dial string for the same saved tuning.
+pub fn fpm_fastcgi_dial(tuning: &FpmTuning, socket_path: &std::path::Path) -> String {
+    if tuning.listen == "tcp" {
+        format!("127.0.0.1:{}", tuning.tcp_port)
+    } else {
+        format!("unix/{}", socket_path.to_string_lossy())
+    }
+}
+
 /// Render the FPM pool config for a version. One `[www]` pool listening on
 /// the socket path, with process-manager tuning from `tuning` and any php.ini
 /// overrides from `ini` layered in as `php_admin_value` directives.
@@ -49,6 +80,16 @@ pub fn render_pool_config(
     tuning: &FpmTuning,
     ini: &BTreeMap<String, String>,
 ) -> String {
+    let listen = fpm_listen_address(tuning, socket_path);
+    let pool_dir = socket_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/tmp"));
+    let slowlog_path = if tuning.slowlog.trim().is_empty() {
+        pool_dir.join("php-fpm.slow.log")
+    } else {
+        std::path::PathBuf::from(tuning.slowlog.trim())
+    };
+    let access_log_path = pool_dir.join("php-fpm.access.log");
     let mut out = format!(
         "; PortBay-managed FPM pool for PHP {ver}\n\
          [global]\n\
@@ -58,18 +99,22 @@ pub fn render_pool_config(
          [www]\n\
          user = $USER\n\
          group = staff\n\
-         listen = {sock}\n\
-         listen.owner = $USER\n\
-         listen.group = staff\n\
-         listen.mode = 0660\n\
+         listen = {listen}\n\
          pm = {pm}\n\
          pm.max_children = {max_children}\n",
         ver = install.version,
         ver_safe = install.version.replace('.', "-"),
-        sock = socket_path.display(),
+        listen = listen,
         pm = pm_mode(&tuning.pm),
         max_children = tuning.max_children.max(1),
     );
+    if tuning.listen != "tcp" {
+        out.push_str(
+            "listen.owner = $USER\n\
+             listen.group = staff\n\
+             listen.mode = 0660\n",
+        );
+    }
 
     // start/spare servers are dynamic-only; ondemand uses an idle timeout.
     match pm_mode(&tuning.pm) {
@@ -92,6 +137,32 @@ pub fn render_pool_config(
 
     let _ = writeln!(out, "pm.max_requests = {}", tuning.max_requests);
     out.push_str("clear_env = no\n");
+    let slow_timeout = tuning.request_slowlog_timeout.trim();
+    if !slow_timeout.is_empty() && slow_timeout != "0" && slow_timeout != "0s" {
+        let _ = writeln!(out, "request_slowlog_timeout = {slow_timeout}");
+        let _ = writeln!(out, "slowlog = {}", slowlog_path.display());
+    }
+    let _ = writeln!(
+        out,
+        "catch_workers_output = {}",
+        if tuning.catch_workers_output {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    let _ = writeln!(
+        out,
+        "decorate_workers_output = {}",
+        if tuning.decorate_workers_output {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    if tuning.access_log {
+        let _ = writeln!(out, "access.log = {}", access_log_path.display());
+    }
 
     // php.ini overrides, applied per-pool. `php_admin_value` is read by FPM
     // and not overridable from userland, which is what we want for a managed
@@ -102,6 +173,11 @@ pub fn render_pool_config(
             continue;
         }
         let _ = writeln!(out, "php_admin_value[{key}] = {value}");
+    }
+    if !tuning.raw_params.trim().is_empty() {
+        out.push_str("\n; User-managed raw FPM directives\n");
+        out.push_str(tuning.raw_params.trim_end());
+        out.push('\n');
     }
 
     out

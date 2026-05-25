@@ -12,13 +12,16 @@
 //! `src/error.rs` for the exact wire format.
 
 pub mod artifacts;
+pub mod auth;
 pub mod certs;
 pub mod databases;
 pub mod dbconn;
 pub mod dnsmasq;
 pub mod dto;
+pub mod entitlements;
 pub mod events;
 pub mod groups;
+pub mod http_inspector;
 pub mod import;
 pub mod integrations;
 pub mod lifecycle;
@@ -30,6 +33,7 @@ pub mod preferences;
 pub mod projects;
 pub mod runtimes;
 pub mod sidecars;
+pub mod sync;
 pub mod system;
 pub mod telemetry;
 pub mod tunnel;

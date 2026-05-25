@@ -16,6 +16,7 @@ enum ToolKind {
     Editor,
     Agent,
     Terminal,
+    FileManager,
 }
 
 /// The custom URL schemes PortBay knows how to launch. A typed enum (rather
@@ -116,6 +117,30 @@ const TOOL_DEFINITIONS: &[ToolDefinition] = &[
         },
     },
     ToolDefinition {
+        id: "xcode",
+        label: "Xcode",
+        kind: ToolKind::Editor,
+        launch: LaunchMode::Cli {
+            cli: "xed",
+            fallback: Some(MacApp {
+                app_names: &["Xcode"],
+                bundle_ids: &["com.apple.dt.Xcode"],
+            }),
+        },
+    },
+    ToolDefinition {
+        id: "android-studio",
+        label: "Android Studio",
+        kind: ToolKind::Editor,
+        launch: LaunchMode::Cli {
+            cli: "studio",
+            fallback: Some(MacApp {
+                app_names: &["Android Studio"],
+                bundle_ids: &["com.google.android.studio"],
+            }),
+        },
+    },
+    ToolDefinition {
         id: "claude-code",
         label: "Claude Code",
         kind: ToolKind::Agent,
@@ -162,6 +187,15 @@ const TOOL_DEFINITIONS: &[ToolDefinition] = &[
         }),
     },
     ToolDefinition {
+        id: "ghostty",
+        label: "Ghostty",
+        kind: ToolKind::Terminal,
+        launch: LaunchMode::MacApp(MacApp {
+            app_names: &["Ghostty"],
+            bundle_ids: &["com.mitchellh.ghostty"],
+        }),
+    },
+    ToolDefinition {
         id: "iterm",
         label: "iTerm",
         kind: ToolKind::Terminal,
@@ -181,6 +215,18 @@ const TOOL_DEFINITIONS: &[ToolDefinition] = &[
         launch: LaunchMode::MacApp(MacApp {
             app_names: &["Terminal"],
             bundle_ids: &["com.apple.Terminal"],
+        }),
+    },
+    // Finder is always present on macOS. Listed as a file manager so
+    // it stays in its own section rather than cluttering the editor or
+    // terminal lists.
+    ToolDefinition {
+        id: "finder",
+        label: "Finder",
+        kind: ToolKind::FileManager,
+        launch: LaunchMode::MacApp(MacApp {
+            app_names: &["Finder"],
+            bundle_ids: &["com.apple.finder"],
         }),
     },
 ];
@@ -277,6 +323,7 @@ fn detect_installed_dev_tools_with(
                 ToolKind::Editor => "editor",
                 ToolKind::Agent => "agent",
                 ToolKind::Terminal => "terminal",
+                ToolKind::FileManager => "file-manager",
             }
             .to_string(),
         })
@@ -382,6 +429,33 @@ fn deep_link_url(scheme: DeepLinkScheme, path: &str) -> String {
             format!("claude://code/new?{}", query.finish())
         }
     }
+}
+
+/// `open_privacy_settings(kind)` — open the relevant macOS Privacy pane in System Settings.
+#[tauri::command]
+pub async fn open_privacy_settings(app: AppHandle, kind: String) -> AppResult<()> {
+    let url = match kind.as_str() {
+        "accessibility" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        }
+        "screen-recording" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        "full-disk-access" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+        }
+        _ => {
+            return Err(AppError::BadInput(format!(
+                "unknown permission kind: {kind}"
+            )))
+        }
+    };
+    app.shell()
+        .command("open")
+        .arg(url)
+        .spawn()
+        .map_err(|e| AppError::Internal(format!("failed to open privacy settings: {e}")))?;
+    Ok(())
 }
 
 #[cfg(test)]

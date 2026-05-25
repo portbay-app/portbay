@@ -72,6 +72,8 @@ pub struct PhpInstall {
 #[serde(rename_all = "snake_case")]
 pub enum PhpSource {
     Homebrew,
+    ServBay,
+    FlyEnv,
     System,
 }
 
@@ -98,6 +100,22 @@ pub fn detect_all() -> Vec<PhpInstall> {
         }
     }
 
+    for path in servbay_php_bins() {
+        if let Some(install) = probe(&path, "", PhpSource::ServBay) {
+            if seen_versions.insert(install.version.clone()) {
+                out.push(install);
+            }
+        }
+    }
+
+    for path in flyenv_php_bins() {
+        if let Some(install) = probe(&path, "", PhpSource::FlyEnv) {
+            if seen_versions.insert(install.version.clone()) {
+                out.push(install);
+            }
+        }
+    }
+
     // Anything on the (login-shell-expanded) PATH as a final fallback.
     if let Ok(path) = which::which("php") {
         if let Some(install) = probe(&path, "", PhpSource::System) {
@@ -109,6 +127,74 @@ pub fn detect_all() -> Vec<PhpInstall> {
 
     out.sort_by(|a, b| a.version.cmp(&b.version));
     out
+}
+
+fn servbay_php_bins() -> Vec<PathBuf> {
+    let mut bins = Vec::new();
+    let roots = [
+        PathBuf::from("/Applications/ServBay/package"),
+        PathBuf::from("/Volumes/DEVSSD/Apps/UserData/ServBay/package"),
+        PathBuf::from("/Volumes/DevSSD/Apps/UserData/ServBay/package"),
+    ];
+    for root in roots {
+        bins.push(root.join("bin/php"));
+        bins.extend(versioned_php_bins(&root.join("php"), 3));
+    }
+    bins.push(PathBuf::from("/Applications/ServBay/script/alias/php"));
+    existing_unique(bins)
+}
+
+fn flyenv_php_bins() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let roots = [
+        home.join("Library/Application Support/FlyEnv"),
+        home.join(".flyenv"),
+        home.join(".config/FlyEnv"),
+    ];
+    let mut bins = Vec::new();
+    for root in roots {
+        bins.extend(versioned_php_bins(&root.join("php"), 4));
+        bins.extend(versioned_php_bins(&root.join("server/php"), 4));
+        bins.extend(versioned_php_bins(&root.join("packages/php"), 4));
+        bins.extend(versioned_php_bins(&root.join("package/php"), 4));
+    }
+    existing_unique(bins)
+}
+
+fn versioned_php_bins(root: &Path, max_depth: usize) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_php_bins(root, max_depth, &mut out);
+    out
+}
+
+fn collect_php_bins(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth == 0 || !dir.is_dir() {
+        return;
+    }
+    let bin = dir.join("bin/php");
+    if bin.exists() {
+        out.push(bin);
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_php_bins(&path, depth - 1, out);
+        }
+    }
+}
+
+fn existing_unique(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .filter(|p| p.exists())
+        .filter(|p| seen.insert(p.clone()))
+        .collect()
 }
 
 /// Probe a specific PHP binary and return its [`PhpInstall`]. The
@@ -172,6 +258,7 @@ fn probe(bin: &Path, version_hint: &str, source: PhpSource) -> Option<PhpInstall
 fn locate_fpm(php_bin: &Path) -> Option<PathBuf> {
     let prefix = php_bin.parent()?.parent()?;
     let candidates = [
+        php_bin.parent()?.join("php-fpm"),
         prefix.join("sbin").join("php-fpm"),
         prefix.join("bin").join("php-fpm"),
     ];

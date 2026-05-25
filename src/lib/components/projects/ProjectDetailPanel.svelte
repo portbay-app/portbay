@@ -8,7 +8,7 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { trapFocus } from "$lib/actions/trapFocus";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/security/openUrl";
 
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
   import EnvEditor from "./EnvEditor.svelte";
@@ -24,9 +24,14 @@
   import { parseLogLine, levelClass } from "$lib/components/logs/ansi";
   import { projects } from "$lib/stores/projects.svelte";
   import { dns } from "$lib/stores/dns.svelte";
+  import { entitlements } from "$lib/stores/entitlements.svelte";
   import { createCertInfo } from "$lib/stores/certInfo.svelte";
   import type { CommandError } from "$lib/types/error";
-  import type { ProjectView, ProjectType } from "$lib/types/projects";
+  import type {
+    ProjectView,
+    SandboxConfig,
+    SandboxNetworkPolicy,
+  } from "$lib/types/projects";
   import { typeLabel } from "$lib/types/projects";
 
   // Currently-displayed project; null while panel is closed.
@@ -34,6 +39,13 @@
     projectDetailPanel.id === null
       ? null
       : (projects.value.find((p) => p.id === projectDetailPanel.id) ?? null),
+  );
+
+  // Optimistic display status for the header pill (overlay while a Play/Stop
+  // is in flight, else the real status). Falls back to "stopped" when no
+  // project is selected — the pill isn't rendered in that case anyway.
+  const displayStatus = $derived(
+    project ? projects.displayStatusOf(project) : "stopped",
   );
 
   // Editable form state — initialised on open / when target project changes.
@@ -62,6 +74,10 @@
 
   let rawConfigOpen = $state<boolean>(false);
   let rawDraft = $state<string>("");
+  let sandboxNetwork = $state<SandboxNetworkPolicy>("loopback_only");
+  let sandboxEphemeral = $state<boolean>(true);
+  let sandboxViolations = $state<string[]>([]);
+  let loadingSandboxViolations = $state<boolean>(false);
 
   let removeArmed = $state<boolean>(false);
   let removeArmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -80,6 +96,9 @@
       dirty = false;
       formError = null;
       rawConfigOpen = false;
+      sandboxNetwork = p.sandbox?.network ?? "loopback_only";
+      sandboxEphemeral = p.sandbox?.ephemeral ?? true;
+      sandboxViolations = [];
       syncRawFromFields();
       void loadLogs();
       void loadCert();
@@ -245,25 +264,88 @@
 
   async function run(op: "start" | "stop" | "restart") {
     if (!project) return;
+    const id = project.id;
+    // Optimistic flip before any await — see ProjectRow for the rationale.
+    projects.beginTransition(id, op === "stop" ? "stop" : "start");
     try {
       switch (op) {
         case "start": {
           await dns.ensureReady();
-          // Resolves a port conflict via confirm + force-quit; toasts the
-          // unresolved error (if any).
-          const conflict = await startProject(project.id, project.name);
-          if (conflict) errorBus.push(conflict);
+          // Resolves a port conflict via confirm + force-quit.
+          const r = await startProject(id, project.name);
+          if (r.kind === "declined") {
+            projects.failTransition(id); // nothing started — roll back
+            break;
+          }
+          if (r.kind === "error") {
+            projects.failTransition(id);
+            errorBus.push(r.error);
+          }
           break;
         }
         case "stop":
-          await safeInvoke("stop_project", { id: project.id });
+          await safeInvoke("stop_project", { id });
           break;
         case "restart":
-          await safeInvoke("restart_project", { id: project.id });
+          await safeInvoke("restart_project", { id });
           break;
       }
     } catch {
+      projects.failTransition(id); // roll the optimistic overlay back
       /* toast already pushed */
+    }
+  }
+
+  async function runSandboxed() {
+    if (!project) return;
+    const id = project.id;
+    projects.beginTransition(id, "start");
+    try {
+      await dns.ensureReady();
+      await safeInvoke("start_project_sandboxed", {
+        id,
+        options: {
+          network: sandboxNetwork,
+          ephemeral: sandboxEphemeral,
+        } satisfies Partial<SandboxConfig>,
+      });
+      await projects.refresh();
+    } catch {
+      projects.failTransition(id);
+      /* toast already pushed */
+    }
+  }
+
+  async function promoteToLocal() {
+    if (!project) return;
+    try {
+      await safeInvoke("promote_project_to_local", { id: project.id });
+      await projects.refresh();
+      errorBus.push({
+        code: "SANDBOX_PROMOTED",
+        whatHappened: `${project.name} will run locally on the next start.`,
+        whyItMatters: "The sandbox wrapper was removed from this project.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
+    } catch {
+      /* toast already pushed */
+    }
+  }
+
+  async function loadSandboxViolations() {
+    if (!project) return;
+    loadingSandboxViolations = true;
+    try {
+      sandboxViolations = await safeInvoke<string[]>("sandbox_violations", {
+        id: project.id,
+        limit: 250,
+      });
+    } catch {
+      sandboxViolations = [];
+    } finally {
+      loadingSandboxViolations = false;
     }
   }
 
@@ -367,8 +449,17 @@
     >
       <div class="flex items-start justify-between gap-3">
         <div class="flex items-center gap-2.5 min-w-0">
-          <StatusPill status={project.status} />
+          <StatusPill status={displayStatus} />
           <h2 class="text-base font-semibold truncate">{project.name}</h2>
+          {#if project.sandboxed}
+            <span
+              class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border
+                     border-accent/40 bg-accent/10 text-[10px] text-accent"
+              title="This project command is wrapped by PortBay's sandbox profile"
+            >
+              <Icon name="shield" size={10} /> Sandbox
+            </span>
+          {/if}
         </div>
         <button
           type="button"
@@ -402,6 +493,24 @@
           class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md text-status-running border border-status-running/40 hover:bg-status-running/10 transition-colors"
         >
           <Icon name="play" size={12} /> Start
+        </button>
+        <button
+          type="button"
+          onclick={project.sandboxed ? promoteToLocal : runSandboxed}
+          disabled={!entitlements.isPro}
+          title={entitlements.isPro
+            ? project.sandboxed
+              ? "Remove the sandbox wrapper"
+              : "Run this project with PortBay's macOS sandbox profile"
+            : "Pro feature"}
+          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md
+                 border transition-colors disabled:opacity-45 disabled:cursor-not-allowed
+                 {project.sandboxed
+            ? 'text-accent border-accent/40 hover:bg-accent/10'
+            : 'text-fg-muted border-border hover:text-fg hover:bg-surface-2'}"
+        >
+          <Icon name="shield" size={12} />
+          {project.sandboxed ? "Promote" : "Sandbox"}
         </button>
         <button
           type="button"
@@ -443,6 +552,93 @@
       {#if formError}
         <ErrorEnvelope envelope={formError} tone="inline" />
       {/if}
+
+      <!-- Sandbox -->
+      <DashboardCard title="Sandbox" flush>
+        {#snippet badge()}
+          {#if project.sandboxed}
+            <span class="text-[11px] text-accent">Active</span>
+          {:else if entitlements.isPro}
+            <span class="text-[11px] text-fg-subtle">Ready</span>
+          {:else}
+            <span class="text-[11px] text-fg-subtle">Pro</span>
+          {/if}
+        {/snippet}
+        <div class="space-y-3 text-xs">
+          <div class="grid grid-cols-[120px,1fr] gap-x-4 gap-y-3 items-center">
+            <label for="sandbox-network" class="text-fg-muted">Network</label>
+            <select
+              id="sandbox-network"
+              bind:value={sandboxNetwork}
+              disabled={!entitlements.isPro || project.sandboxed}
+              class="px-3 py-2 rounded-md bg-bg border border-border text-fg
+                     disabled:opacity-55 focus:border-accent/60 outline-none"
+            >
+              <option value="loopback_only">Loopback only</option>
+              <option value="outbound">Outbound</option>
+              <option value="full">Full</option>
+              <option value="blocked">Blocked</option>
+            </select>
+
+            <span class="text-fg-muted">Ephemeral</span>
+            <label class="inline-flex items-center gap-2 text-fg">
+              <input
+                type="checkbox"
+                bind:checked={sandboxEphemeral}
+                disabled={!entitlements.isPro || project.sandboxed}
+                class="accent-accent"
+              />
+              Reset sandbox temp/cache before start
+            </label>
+          </div>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              onclick={project.sandboxed ? promoteToLocal : runSandboxed}
+              disabled={!entitlements.isPro}
+              class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md
+                     border text-xs transition-colors disabled:opacity-45
+                     {project.sandboxed
+                ? 'text-accent border-accent/40 hover:bg-accent/10'
+                : 'text-status-running border-status-running/40 hover:bg-status-running/10'}"
+            >
+              <Icon name={project.sandboxed ? "check" : "shield"} size={12} />
+              {project.sandboxed ? "Promote to local" : "Run in Sandbox"}
+            </button>
+            {#if project.sandboxed}
+              <button
+                type="button"
+                onclick={loadSandboxViolations}
+                disabled={loadingSandboxViolations}
+                class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md
+                       border border-border text-fg-muted hover:text-fg hover:bg-surface-2
+                       disabled:opacity-50"
+              >
+                <Icon
+                  name={loadingSandboxViolations ? "refresh-cw" : "circle-alert"}
+                  size={12}
+                  class={loadingSandboxViolations ? "animate-spin" : ""}
+                />
+                Violations
+              </button>
+            {/if}
+          </div>
+          {#if sandboxViolations.length > 0}
+            <div
+              class="max-h-28 overflow-auto rounded-md border border-border bg-bg
+                     p-2 font-mono text-[11px] text-status-unhealthy space-y-1"
+            >
+              {#each sandboxViolations as line}
+                <div>{line}</div>
+              {/each}
+            </div>
+          {:else if project.sandboxed}
+            <p class="text-fg-subtle">
+              No sandbox violations loaded for this run.
+            </p>
+          {/if}
+        </div>
+      </DashboardCard>
 
       <!-- Connection -->
       <DashboardCard title="Connection" flush>

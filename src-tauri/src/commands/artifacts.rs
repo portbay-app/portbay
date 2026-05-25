@@ -54,6 +54,17 @@ fn artifact_catalogue(kind: ProjectType) -> &'static [(&'static str, &'static st
             ("storage/framework/cache", "Framework cache"),
         ],
         ProjectType::Static => &[("dist", "Build output"), ("build", "Build output")],
+        ProjectType::Flutter => &[
+            ("build", "Flutter build"),
+            (".dart_tool", "Dart tool cache"),
+            (".pub-cache", "Pub cache"),
+        ],
+        ProjectType::Xcode => &[("build", "Xcode build"), ("DerivedData", "Derived data")],
+        ProjectType::Android => &[
+            ("build", "Gradle build"),
+            ("app/build", "Android app build"),
+            (".gradle", "Gradle cache"),
+        ],
         ProjectType::Custom => &[
             ("node_modules", "Dependencies"),
             ("dist", "Build output"),

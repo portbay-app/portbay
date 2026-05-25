@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 pub use error::{ImportError, Result};
 
-use crate::registry::ProjectType;
+use crate::registry::{ProjectType, WebServer};
 
 /// Stable identifier for each known source tool. Surface in the GUI and
 /// in the registry's `tags` on imported projects (`source:herd` etc.).
@@ -69,6 +69,8 @@ pub struct ImportedSite {
     /// sub-directory (e.g. `public` for a Laravel/PHP front-controller app).
     /// `None` when the project is served straight from `path`.
     pub document_root: Option<String>,
+    /// Preferred PHP web server when the source implies one.
+    pub web_server: Option<WebServer>,
     /// Project type the source clearly implies (e.g. PHP for an FPM vhost,
     /// Static for a plain file-server vhost). `None` lets the import command
     /// fall back to its php-version heuristic.
@@ -97,6 +99,11 @@ impl ImportedSite {
             php_version,
             https,
             document_root: None,
+            web_server: match source {
+                ImportSource::ServBay => Some(WebServer::Nginx),
+                ImportSource::Mamp => Some(WebServer::Apache),
+                ImportSource::Herd => Some(WebServer::Caddy),
+            },
             kind_hint: None,
         }
     }

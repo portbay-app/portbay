@@ -1,30 +1,39 @@
 // PortBay — Tauri 2 + Rust core.
 
+pub mod auth;
 pub mod caddy;
 pub mod commands;
 pub mod databases;
 pub mod dnsmasq;
 pub mod domain;
+pub mod entitlements;
 pub mod error;
+pub mod flags;
 pub mod hosts;
 pub mod hosts_helper;
 pub mod import;
 pub mod mailpit;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod mkcert;
 pub mod php;
 pub mod port_holder;
 pub mod portfile;
 pub mod preferences;
 pub mod process_compose;
+pub mod project_runtime;
 pub mod reconciler;
 pub mod registry;
 pub mod runtimes;
+pub mod sandbox;
 pub mod smoke;
 pub mod state;
+pub mod sync;
 pub mod telemetry;
 pub mod tray;
 pub mod tunnel;
 pub mod util;
+pub mod webservers;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -278,10 +287,28 @@ pub fn run() {
             commands::events::spawn_status_poller(app.handle().clone());
             commands::metrics::spawn_metrics_poller(app.handle().clone());
 
+            // Tail Caddy's JSON access log → `portbay://request` events for the
+            // HTTP request inspector. Idle until Caddy writes its first entry.
+            commands::http_inspector::spawn_request_tailer(app.handle().clone());
+
             // Background build-artifact auto-clean. No-op unless the user opted
             // into a weekly/monthly cadence in Settings; the cadence gate lives
             // inside the scheduler.
             commands::artifacts::spawn_auto_clean_scheduler(app.handle().clone());
+
+            // Apply native macOS window vibrancy (liquid-glass blur backdrop).
+            // Degrades silently on non-macOS builds via cfg gate.
+            #[cfg(target_os = "macos")]
+            {
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                if let Some(main_win) = app.get_webview_window("main") {
+                    let _ = apply_vibrancy(&main_win, NSVisualEffectMaterial::Menu, None, None);
+                }
+                if let Some(tray_panel) = app.get_webview_window("tray-panel") {
+                    let _ =
+                        apply_vibrancy(&tray_panel, NSVisualEffectMaterial::HudWindow, None, None);
+                }
+            }
 
             // Install the menu-bar tray if the user hasn't disabled it.
             // Failures degrade gracefully — the dashboard still works
@@ -350,20 +377,25 @@ pub fn run() {
             commands::projects::list_projects,
             commands::projects::get_project,
             commands::projects::add_project,
+            commands::projects::clone_git_project_sandboxed,
             commands::projects::update_project,
             commands::projects::remove_project,
             commands::projects::detect_project,
             commands::projects::detect_workspace_apps,
             commands::projects::validate_project_folder,
             commands::lifecycle::start_project,
+            commands::lifecycle::start_project_sandboxed,
             commands::lifecycle::force_start_project,
             commands::lifecycle::stop_project,
             commands::lifecycle::restart_project,
+            commands::lifecycle::promote_project_to_local,
+            commands::lifecycle::sandbox_violations,
             commands::lifecycle::stop_all,
             commands::lifecycle::open_project,
             commands::lifecycle::preview_port_conflict,
             commands::integrations::installed_dev_tools,
             commands::integrations::open_in_ide,
+            commands::integrations::open_privacy_settings,
             commands::sidecars::sidecar_status,
             commands::sidecars::pc_alive,
             commands::sidecars::restart_pc,
@@ -382,6 +414,8 @@ pub fn run() {
             commands::system::quit_app,
             commands::system::open_main_window,
             commands::log_stream::subscribe_logs,
+            commands::http_inspector::recent_requests,
+            commands::http_inspector::clear_requests,
             commands::import::detect_sources,
             commands::import::preview_import,
             commands::import::import_projects,
@@ -422,6 +456,23 @@ pub fn run() {
             commands::preferences::get_domain_settings,
             commands::preferences::update_domain_suffix,
             commands::preferences::mark_close_toast_seen,
+            commands::entitlements::get_entitlement,
+            commands::entitlements::refresh_entitlement,
+            commands::entitlements::clear_entitlement,
+            commands::auth::begin_login,
+            commands::auth::poll_login,
+            commands::auth::cancel_login,
+            commands::auth::logout,
+            commands::auth::account_resync,
+            commands::sync::sync_state,
+            commands::sync::enable_sync,
+            commands::sync::get_recovery_key,
+            commands::sync::set_recovery_key,
+            commands::sync::disable_sync,
+            commands::sync::sync_push,
+            commands::sync::sync_pull,
+            commands::sync::list_sync_devices,
+            commands::sync::revoke_sync_device,
             commands::runtimes::list_runtimes,
             commands::runtimes::add_runtime_by_path,
             commands::runtimes::remove_runtime_path,

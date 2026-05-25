@@ -412,6 +412,8 @@ mod tests {
 
     fn project(id: &str, host: &str) -> Project {
         Project {
+            cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
@@ -428,6 +430,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         }

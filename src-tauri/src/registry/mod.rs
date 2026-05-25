@@ -16,9 +16,10 @@ pub mod workspace;
 
 pub use error::{RegistryError, Result};
 pub use types::{
-    DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, FpmTuning, Group,
-    ManualRuntime, PhpVersionConfig, Project, ProjectId, ProjectType, Readiness, Runtime,
-    RuntimeSettings, Workspace, WorkspaceTool,
+    CorsConfig, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, FpmTuning,
+    Group, ManualRuntime, MobileRunConfig, PhpVersionConfig, Project, ProjectId, ProjectType,
+    Readiness, Runtime, RuntimeSettings, SandboxConfig, SandboxNetworkPolicy, WebServer, Workspace,
+    WorkspaceTool,
 };
 
 /// The registry-file schema version this build reads and writes.
@@ -298,6 +299,8 @@ mod tests {
 
     fn sample_project(id: &str) -> Project {
         Project {
+            cors: None,
+            sandbox: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
@@ -314,6 +317,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         }

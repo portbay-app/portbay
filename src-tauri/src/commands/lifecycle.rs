@@ -12,8 +12,21 @@ use crate::commands::dto::{StopAllReport, StopAllResultEntry};
 use crate::commands::projects::load_registry;
 use crate::error::{AppError, AppResult};
 use crate::port_holder;
-use crate::registry::{Project, ProjectId};
+use crate::registry::{Project, ProjectId, SandboxNetworkPolicy};
 use crate::state::AppState;
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxStartOptions {
+    #[serde(default)]
+    pub network: SandboxNetworkPolicy,
+    #[serde(default = "default_true")]
+    pub ephemeral: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
 
 #[tauri::command]
 pub async fn start_project(
@@ -57,6 +70,73 @@ pub async fn start_project(
     let _ = state.reconciler.tick(&app).await;
 
     Ok(())
+}
+
+/// `start_project_sandboxed(id)` — Pro safety run for untrusted projects.
+///
+/// The project stays in the normal Process Compose lifecycle, but its generated
+/// command is wrapped by a PortBay-owned macOS sandbox profile. The hidden
+/// sandbox tag persists until `promote_project_to_local` removes it, so
+/// restarts remain sandboxed and the UI can show an explicit indicator.
+#[tauri::command]
+pub async fn start_project_sandboxed(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    options: Option<SandboxStartOptions>,
+) -> AppResult<()> {
+    if !crate::entitlements::current().entitlements.early_access {
+        return Err(AppError::ProRequired {
+            feature: "Sandboxed Run",
+        });
+    }
+
+    {
+        let mut registry = load_registry(&state)?;
+        let project = registry
+            .get_project_mut(&ProjectId::new(id.clone()))
+            .ok_or_else(|| AppError::NotFound(id.clone()))?;
+        if project.start_command.is_none() && project.workspace.is_none() {
+            return Err(AppError::BadInput(
+                "Sandboxed Run requires a project command to supervise".into(),
+            ));
+        }
+        let options = options.unwrap_or(SandboxStartOptions {
+            network: SandboxNetworkPolicy::LoopbackOnly,
+            ephemeral: true,
+        });
+        crate::sandbox::enable(project, options.network, options.ephemeral);
+        let data_dir = state.logs_dir.parent().unwrap_or(&state.logs_dir);
+        crate::sandbox::reset_ephemeral_state(data_dir, project)
+            .map_err(|e| AppError::Internal(format!("sandbox reset failed: {e}")))?;
+        crate::commands::projects::save_registry(&state, &registry)?;
+    }
+    let _ = state.reconciler.tick(&app).await;
+    start_project(app, state, id).await
+}
+
+/// Remove the sandbox wrapper from a project after the user has inspected it.
+#[tauri::command]
+pub async fn promote_project_to_local(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let mut registry = load_registry(&state)?;
+    let project = registry
+        .get_project_mut(&ProjectId::new(id.clone()))
+        .ok_or_else(|| AppError::NotFound(id.clone()))?;
+    crate::sandbox::disable(project);
+    crate::commands::projects::save_registry(&state, &registry)?;
+    state.reconciler.mark_dirty();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sandbox_violations(
+    state: State<'_, AppState>,
+    id: String,
+    limit: Option<u32>,
+) -> AppResult<Vec<String>> {
+    let client = state.pc_client()?;
+    let lines = client.logs(&id, 0, limit.unwrap_or(250)).await?;
+    Ok(crate::sandbox::violation_lines(&lines))
 }
 
 /// `force_start_project(id)` — the user's explicit "stop whatever's on the port
@@ -438,6 +518,8 @@ mod tests {
         ws: Option<Workspace>,
     ) -> Project {
         Project {
+            cors: None,
+            sandbox: None,
             id: ProjectId::new("p"),
             name: "P".into(),
             path: PathBuf::from(path),
@@ -454,6 +536,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: ws,
         }

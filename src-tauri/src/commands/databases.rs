@@ -99,6 +99,7 @@ const ALL_ENGINES: &[DatabaseEngine] = &[
     DatabaseEngine::Mariadb,
     DatabaseEngine::Redis,
     DatabaseEngine::Mongo,
+    DatabaseEngine::Memcached,
 ];
 
 fn install_hint(e: DatabaseEngine) -> &'static str {
@@ -108,6 +109,7 @@ fn install_hint(e: DatabaseEngine) -> &'static str {
         DatabaseEngine::Mariadb => "brew install mariadb",
         DatabaseEngine::Redis => "brew install redis",
         DatabaseEngine::Mongo => "brew install mongodb-community",
+        DatabaseEngine::Memcached => "brew install memcached",
     }
 }
 
@@ -118,6 +120,7 @@ fn install_formula(e: DatabaseEngine) -> &'static str {
         DatabaseEngine::Mariadb => "mariadb",
         DatabaseEngine::Redis => "redis",
         DatabaseEngine::Mongo => "mongodb-community",
+        DatabaseEngine::Memcached => "memcached",
     }
 }
 
@@ -596,8 +599,34 @@ mod tests {
     #[test]
     fn parse_engine_accepts_known_ids() {
         assert!(parse_engine("mysql").is_ok());
+        assert!(parse_engine("mariadb").is_ok());
         assert!(parse_engine("postgres").is_ok());
+        assert!(parse_engine("mongo").is_ok());
+        assert!(parse_engine("redis").is_ok());
+        assert!(parse_engine("memcached").is_ok());
         assert!(parse_engine("clickhouse").is_err());
+    }
+
+    #[test]
+    fn every_supported_engine_has_ui_metadata() {
+        let expected = [
+            DatabaseEngine::Mysql,
+            DatabaseEngine::Postgres,
+            DatabaseEngine::Mariadb,
+            DatabaseEngine::Redis,
+            DatabaseEngine::Mongo,
+            DatabaseEngine::Memcached,
+        ];
+
+        assert_eq!(ALL_ENGINES, expected);
+
+        for engine in ALL_ENGINES {
+            assert_eq!(DatabaseEngine::from_id(engine.id()), Some(*engine));
+            assert!(!engine.label().is_empty());
+            assert!(engine.default_port() > 0);
+            assert!(install_hint(*engine).starts_with("brew install "));
+            assert!(!install_formula(*engine).is_empty());
+        }
     }
 
     #[test]

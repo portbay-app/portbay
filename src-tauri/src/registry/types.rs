@@ -54,7 +54,35 @@ pub enum ProjectType {
     Php,
     Static,
     Node,
+    Flutter,
+    Xcode,
+    Android,
     Custom,
+}
+
+/// Web server used for PHP document-root projects.
+///
+/// Caddy remains PortBay's edge router for local hostnames and TLS. When a PHP
+/// project chooses Apache or Nginx, PortBay launches that server on the
+/// project's loopback `port` and Caddy reverse-proxies the public hostname to
+/// it. This avoids multiple daemons fighting over :80/:443 while still giving
+/// project-level Apache/Nginx/Caddy behavior.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebServer {
+    Caddy,
+    Nginx,
+    Apache,
+}
+
+impl WebServer {
+    pub fn id(&self) -> &'static str {
+        match self {
+            WebServer::Caddy => "caddy",
+            WebServer::Nginx => "nginx",
+            WebServer::Apache => "apache",
+        }
+    }
 }
 
 /// How PortBay decides a project is "actually serving" rather than just
@@ -153,6 +181,20 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub php_version: Option<String>,
 
+    /// Web server selected for PHP document-root projects. Absent means Caddy.
+    /// Ignored for non-PHP projects and for PHP projects that provide a custom
+    /// `start_command` (those are reverse-proxied like any dev server).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_server: Option<WebServer>,
+
+    // ----- Mobile run configuration (optional) -------------------------
+    /// Project-local run settings for Flutter, Xcode, and Android projects.
+    /// The Play command is still stored in `start_command` for Process Compose;
+    /// this structured config lets the UI edit scheme/flavor/device settings
+    /// without making users hand-author shell commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile_run: Option<MobileRunConfig>,
+
     // ----- Runtime selection (schema v2+) -------------------------------
     /// Pinned language runtime — which language toolchain and version
     /// PortBay launches this project with. Introduced in registry schema v2;
@@ -173,6 +215,22 @@ pub struct Project {
     /// added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<Workspace>,
+
+    /// Per-project CORS policy applied at the Caddy edge. **Pro-gated** (the
+    /// `custom_port_cors` entitlement): the `add`/`update` paths reject
+    /// introducing or changing a custom policy without Pro, but an existing
+    /// policy keeps being served on downgrade — we never strip a configured
+    /// value. `None`/empty = PortBay's default (no CORS headers), the free,
+    /// always-available behaviour. Additive — absent on free projects and
+    /// pre-existing registries (deserialises to `None`); no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cors: Option<CorsConfig>,
+
+    /// Pro sandbox runner configuration. `None` means normal unrestricted
+    /// local execution. Additive field for registries written before sandbox
+    /// mode existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxConfig>,
 }
 
 impl Project {
@@ -192,6 +250,89 @@ impl Project {
             Some(_) => None,
             None => self.php_version.as_deref(),
         }
+    }
+
+    pub fn web_server_effective(&self) -> WebServer {
+        self.web_server.unwrap_or(WebServer::Caddy)
+    }
+}
+
+/// Per-project CORS policy applied at the Caddy edge. The basic listen port
+/// is **not** gated (every project needs one); only this custom cross-origin
+/// policy is a Pro feature. `allowed_origins` empty means the feature is off
+/// and PortBay adds no CORS headers — identical to today's behaviour.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct CorsConfig {
+    /// Exact origins allowed. When a request's `Origin` matches one of these,
+    /// Caddy echoes it into `Access-Control-Allow-Origin` and answers
+    /// preflight `OPTIONS` with the standard allow headers. Empty = off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_origins: Vec<String>,
+
+    /// Send `Access-Control-Allow-Credentials: true` for matched origins.
+    #[serde(default)]
+    pub allow_credentials: bool,
+}
+
+/// Per-project sandbox runner configuration. This is intentionally explicit
+/// instead of a tag so UI, import, and lifecycle code share one auditable
+/// security contract.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxConfig {
+    /// Whether the next supervised run is wrapped by the generated sandbox
+    /// profile. Keeping the object while disabled lets the UI preserve policy
+    /// choices between runs.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Network access granted inside the profile.
+    #[serde(default)]
+    pub network: SandboxNetworkPolicy,
+    /// Remove mutable sandbox cache/temp dirs before each sandboxed start.
+    #[serde(default = "default_true")]
+    pub ephemeral: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            network: SandboxNetworkPolicy::LoopbackOnly,
+            ephemeral: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxNetworkPolicy {
+    /// Allow loopback bind/connect only. This is the safest useful default for
+    /// local dev servers once dependencies are already installed.
+    #[default]
+    LoopbackOnly,
+    /// Allow outbound package-manager access plus loopback dev-server bind.
+    Outbound,
+    /// Allow all networking. Useful for projects that legitimately need LAN
+    /// devices or multicast during inspection.
+    Full,
+    /// Block networking. The process can still run local scripts.
+    Blocked,
+}
+
+impl SandboxConfig {
+    pub fn enabled(network: SandboxNetworkPolicy, ephemeral: bool) -> Self {
+        Self {
+            enabled: true,
+            network,
+            ephemeral,
+        }
+    }
+}
+
+impl CorsConfig {
+    /// Whether this policy actually does anything (has ≥1 allowed origin).
+    pub fn is_active(&self) -> bool {
+        !self.allowed_origins.is_empty()
     }
 }
 
@@ -311,6 +452,7 @@ pub enum DatabaseEngine {
     Postgres,
     Redis,
     Mongo,
+    Memcached,
 }
 
 impl DatabaseEngine {
@@ -323,6 +465,7 @@ impl DatabaseEngine {
             DatabaseEngine::Postgres => "postgres",
             DatabaseEngine::Redis => "redis",
             DatabaseEngine::Mongo => "mongo",
+            DatabaseEngine::Memcached => "memcached",
         }
     }
 
@@ -334,6 +477,7 @@ impl DatabaseEngine {
             DatabaseEngine::Postgres => "PostgreSQL",
             DatabaseEngine::Redis => "Redis",
             DatabaseEngine::Mongo => "MongoDB",
+            DatabaseEngine::Memcached => "Memcached",
         }
     }
 
@@ -344,6 +488,7 @@ impl DatabaseEngine {
             DatabaseEngine::Postgres => 5432,
             DatabaseEngine::Redis => 6379,
             DatabaseEngine::Mongo => 27017,
+            DatabaseEngine::Memcached => 11211,
         }
     }
 
@@ -355,6 +500,7 @@ impl DatabaseEngine {
             "postgres" => Some(DatabaseEngine::Postgres),
             "redis" => Some(DatabaseEngine::Redis),
             "mongo" => Some(DatabaseEngine::Mongo),
+            "memcached" => Some(DatabaseEngine::Memcached),
             _ => None,
         }
     }
@@ -414,7 +560,7 @@ impl DatabaseInstance {
             DatabaseEngine::Postgres => "postgres",
             DatabaseEngine::Mysql | DatabaseEngine::Mariadb => "root",
             // Redis/Mongo have no user by default in a fresh local instance.
-            DatabaseEngine::Redis | DatabaseEngine::Mongo => "",
+            DatabaseEngine::Redis | DatabaseEngine::Mongo | DatabaseEngine::Memcached => "",
         }
     }
 
@@ -430,6 +576,7 @@ impl DatabaseInstance {
             }
             DatabaseEngine::Redis => format!("redis://127.0.0.1:{port}"),
             DatabaseEngine::Mongo => format!("mongodb://127.0.0.1:{port}"),
+            DatabaseEngine::Memcached => format!("memcached://127.0.0.1:{port}"),
         }
     }
 
@@ -549,7 +696,11 @@ impl RuntimeSettings {
         let lang = match kind {
             ProjectType::Next | ProjectType::Vite | ProjectType::Node => "node",
             ProjectType::Php => "php",
-            ProjectType::Static | ProjectType::Custom => return None,
+            ProjectType::Flutter => "flutter",
+            ProjectType::Static
+            | ProjectType::Xcode
+            | ProjectType::Android
+            | ProjectType::Custom => return None,
         };
         self.defaults.get(lang).map(|version| Runtime {
             lang: lang.to_string(),
@@ -580,6 +731,12 @@ pub struct PhpVersionConfig {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FpmTuning {
+    /// FPM listen transport: `socket` (PortBay-owned unix socket) or `tcp`.
+    #[serde(default = "default_fpm_listen")]
+    pub listen: String,
+    /// Loopback port used when `listen == "tcp"`.
+    #[serde(default = "default_fpm_tcp_port")]
+    pub tcp_port: u16,
     /// Process-manager mode: `dynamic`, `static`, or `ondemand`.
     pub pm: String,
     /// Hard ceiling on child processes (`pm.max_children`).
@@ -592,19 +749,59 @@ pub struct FpmTuning {
     pub max_spare_servers: u32,
     /// Requests a child handles before respawning (`pm.max_requests`).
     pub max_requests: u32,
+    /// FPM `request_slowlog_timeout`; `0` disables slow logging.
+    #[serde(default)]
+    pub request_slowlog_timeout: String,
+    /// Optional FPM `slowlog` path. Blank resolves to PortBay's per-version
+    /// config dir at render time.
+    #[serde(default)]
+    pub slowlog: String,
+    /// Forward worker stdout/stderr into the FPM error log.
+    #[serde(default)]
+    pub catch_workers_output: bool,
+    /// Prefix forwarded worker output with FPM metadata.
+    #[serde(default = "default_true")]
+    pub decorate_workers_output: bool,
+    /// Emit FPM access logs into the per-version config dir.
+    #[serde(default)]
+    pub access_log: bool,
+    /// Free-form pool directives appended after PortBay-managed settings.
+    /// Only a constrained allowlist is accepted by the runtime apply path.
+    #[serde(default)]
+    pub raw_params: String,
 }
 
 impl Default for FpmTuning {
     fn default() -> Self {
         Self {
+            listen: default_fpm_listen(),
+            tcp_port: default_fpm_tcp_port(),
             pm: "dynamic".into(),
             max_children: 8,
             start_servers: 2,
             min_spare_servers: 1,
             max_spare_servers: 3,
             max_requests: 500,
+            request_slowlog_timeout: String::new(),
+            slowlog: String::new(),
+            catch_workers_output: false,
+            decorate_workers_output: true,
+            access_log: false,
+            raw_params: String::new(),
         }
     }
+}
+
+fn default_fpm_listen() -> String {
+    "socket".into()
+}
+
+fn default_fpm_tcp_port() -> u16 {
+    9000
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One manually-added runtime install. PortBay reuses the binary in place —
@@ -618,6 +815,20 @@ pub struct ManualRuntime {
     pub version: String,
     /// Absolute path to the binary the user browsed to.
     pub binary: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileRunConfig {
+    /// Flutter flavor or Android build variant, e.g. `staging` / `debug`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flavor: Option<String>,
+    /// Xcode scheme or Android module, e.g. `App` / `app`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Flutter device id, Android serial, or xcodebuild destination string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 #[cfg(test)]
@@ -671,6 +882,8 @@ mod tests {
     fn project_serialises_in_assessment_doc_shape() {
         // Mirrors the Next.js example in ASSESSMENT_AND_PLAN.md §7.1.
         let p = Project {
+            cors: None,
+            sandbox: None,
             id: ProjectId::new("marketing-site"),
             name: "Marketing Site".into(),
             path: PathBuf::from("/Volumes/DEVSSD/Projects/Clients/Marketing Site"),
@@ -690,6 +903,8 @@ mod tests {
             tags: vec!["client".into(), "nextjs".into()],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         };
@@ -705,6 +920,8 @@ mod tests {
 
     fn bare_php_project() -> Project {
         Project {
+            cors: None,
+            sandbox: None,
             id: ProjectId::new("legacy-php"),
             name: "Legacy PHP".into(),
             path: PathBuf::from("/tmp/legacy-php"),
@@ -721,6 +938,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         }

@@ -19,18 +19,23 @@
 import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
 
 import { errorBus } from "$lib/stores/errors.svelte";
+import { startTimer } from "$lib/perf";
 import { isCommandError, type CommandError } from "$lib/types/error";
 
 export async function safeInvoke<T>(
   command: string,
   args?: InvokeArgs,
 ): Promise<T> {
+  // Dev-only latency instrument; compiles away in release (see perf.ts).
+  const done = startTimer(`ipc:${command}`);
   try {
     return await invoke<T>(command, args);
   } catch (raw) {
     const err = normalise(raw);
     errorBus.push(err);
     throw err;
+  } finally {
+    done();
   }
 }
 
@@ -44,10 +49,13 @@ export async function invokeQuiet<T>(
   command: string,
   args?: InvokeArgs,
 ): Promise<T> {
+  const done = startTimer(`ipc:${command}`);
   try {
     return await invoke<T>(command, args);
   } catch (raw) {
     throw normalise(raw);
+  } finally {
+    done();
   }
 }
 

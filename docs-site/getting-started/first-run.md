@@ -2,6 +2,8 @@
 
 The first run should establish three things: the registry location, the sidecar health state, and whether PortBay can safely route hostnames on this machine.
 
+![PortBay services and sidecar health](/screenshots/services.png)
+
 ## Expected State
 
 | Area | Expected result |

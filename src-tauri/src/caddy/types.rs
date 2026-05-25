@@ -13,6 +13,12 @@ use std::path::PathBuf;
 pub struct CaddyConfig {
     pub admin: AdminConfig,
     pub apps: AppsConfig,
+    /// Caddy's `logging` block. Populated by [`crate::caddy::with_access_log`]
+    /// to route a JSON access log to a file the HTTP request inspector tails.
+    /// Kept as raw JSON so we don't model Caddy's full logging schema. `None`
+    /// → omitted (no access log).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logging: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,6 +51,10 @@ pub struct Server {
     /// routes — we serve PortBay's placeholder page here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<ServerErrors>,
+    /// Per-server access-log config (`{"default_logger_name": "..."}`).
+    /// Populated by [`crate::caddy::with_access_log`]; `None` → omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logs: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,6 +154,7 @@ mod tests {
                 disable: true,
             },
             errors: None,
+            logs: None,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["automatic_https"]["disable_redirects"], true);
@@ -165,6 +176,7 @@ mod tests {
                     certificates: TlsCertificates::default(),
                 },
             },
+            logging: None,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["apps"]["http"]["http_port"], 0);

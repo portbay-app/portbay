@@ -143,6 +143,22 @@ enum Cmd {
         /// Shell to generate completions for.
         shell: Shell,
     },
+
+    /// Sign in to PortBay Cloud (GitHub by default; `--email <addr>` for a magic link).
+    Login(LoginArgs),
+
+    /// Show the current account and entitlement (tier, project cap, features).
+    License,
+
+    /// Sign out and clear the saved session.
+    Logout,
+}
+
+#[derive(Args, Debug)]
+struct LoginArgs {
+    /// Sign in with an email magic link instead of GitHub OAuth.
+    #[arg(long)]
+    email: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -194,6 +210,18 @@ struct AddArgs {
     /// Shell command run inside the project's working directory.
     #[arg(long)]
     start_command: Option<String>,
+
+    /// PHP document root relative to the project path, e.g. public.
+    #[arg(long)]
+    document_root: Option<String>,
+
+    /// PHP version label to bind to, e.g. 8.3.
+    #[arg(long)]
+    php_version: Option<String>,
+
+    /// PHP web server for document-root projects.
+    #[arg(long, value_enum, default_value = "caddy")]
+    web_server: CliWebServer,
 
     /// Whether to enable local HTTPS via mkcert.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -247,7 +275,17 @@ enum CliProjectType {
     Php,
     Static,
     Node,
+    Flutter,
+    Xcode,
+    Android,
     Custom,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CliWebServer {
+    Caddy,
+    Nginx,
+    Apache,
 }
 
 impl From<CliProjectType> for ProjectType {
@@ -258,7 +296,20 @@ impl From<CliProjectType> for ProjectType {
             CliProjectType::Php => ProjectType::Php,
             CliProjectType::Static => ProjectType::Static,
             CliProjectType::Node => ProjectType::Node,
+            CliProjectType::Flutter => ProjectType::Flutter,
+            CliProjectType::Xcode => ProjectType::Xcode,
+            CliProjectType::Android => ProjectType::Android,
             CliProjectType::Custom => ProjectType::Custom,
+        }
+    }
+}
+
+impl From<CliWebServer> for portbay_lib::registry::WebServer {
+    fn from(v: CliWebServer) -> Self {
+        match v {
+            CliWebServer::Caddy => portbay_lib::registry::WebServer::Caddy,
+            CliWebServer::Nginx => portbay_lib::registry::WebServer::Nginx,
+            CliWebServer::Apache => portbay_lib::registry::WebServer::Apache,
         }
     }
 }
@@ -319,7 +370,105 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Hosts(sub) => cmd_hosts(&ctx, sub).await,
         Cmd::Export { id } => cmd_export(&ctx, &id).await,
         Cmd::Completions { shell } => cmd_completions(shell),
+        Cmd::Login(args) => cmd_login(args).await,
+        Cmd::License => cmd_license(),
+        Cmd::Logout => cmd_logout(),
     }
+}
+
+/// `portbay login` — drive the flow+poll handshake from the terminal, then
+/// store the session in the OS keychain (shared with the GUI).
+async fn cmd_login(args: LoginArgs) -> Result<ExitCode, CliError> {
+    use portbay_lib::auth::{self, PollOutcome, CLOUD_BASE_URL};
+    use portbay_lib::entitlements;
+
+    let method = if args.email.is_some() {
+        "email"
+    } else {
+        "github"
+    };
+    let init = auth::init(CLOUD_BASE_URL, method, args.email.as_deref())
+        .await
+        .map_err(CliError::Other)?;
+
+    match (&init.authorize_url, &args.email) {
+        (Some(url), _) => {
+            println!("Opening your browser to sign in. If it doesn't open, visit:\n  {url}\n");
+            let _ = std::process::Command::new("open").arg(url).status();
+        }
+        (None, Some(email)) => {
+            println!("We emailed a sign-in link to {email}. Open it to continue…")
+        }
+        (None, None) => {}
+    }
+    println!("Waiting for you to finish signing in (Ctrl-C to cancel)…");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err(CliError::Other(
+                "sign-in timed out — run `portbay login` again".into(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        match auth::poll(CLOUD_BASE_URL, &init.poll_token)
+            .await
+            .map_err(CliError::Other)?
+        {
+            PollOutcome::Pending => continue,
+            PollOutcome::Expired => {
+                return Err(CliError::Other("sign-in link expired — try again".into()))
+            }
+            PollOutcome::Ready(session) => {
+                auth::store_session(&session).map_err(CliError::Other)?;
+                let eff = entitlements::refresh(CLOUD_BASE_URL, &session.access_token)
+                    .await
+                    .map_err(CliError::Other)?;
+                let who = eff
+                    .account
+                    .as_ref()
+                    .map(|a| a.login.clone())
+                    .unwrap_or_default();
+                println!("\u{2713} Signed in as {who} — {} tier.", eff.tier);
+                return Ok(ExitCode::SUCCESS);
+            }
+        }
+    }
+}
+
+/// `portbay license` — print the cached effective entitlement.
+fn cmd_license() -> Result<ExitCode, CliError> {
+    use portbay_lib::entitlements;
+    let eff = entitlements::current();
+    match &eff.account {
+        Some(a) => println!("Account: {}", a.login),
+        None => println!("Account: not signed in (anonymous)"),
+    }
+    let cap = eff
+        .entitlements
+        .max_projects
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "unlimited".into());
+    println!("Tier:     {}", eff.tier);
+    println!("Projects: {cap}");
+    println!(
+        "Sync:     {}",
+        if eff.entitlements.sync { "yes" } else { "no" }
+    );
+    println!("Mail:     {}", eff.entitlements.mail);
+    if eff.tier != "pro" {
+        println!("\nUpgrade: support PortBay with a donation or a merged PR to unlock Pro.");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `portbay logout` — clear the saved session and cached entitlement.
+fn cmd_logout() -> Result<ExitCode, CliError> {
+    use portbay_lib::{auth, entitlements};
+    let _ = auth::clear_session();
+    let _ = entitlements::clear_cache();
+    println!("Signed out.");
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_completions(shell: Shell) -> Result<ExitCode, CliError> {
@@ -522,6 +671,18 @@ async fn cmd_status(ctx: &CliContext, id: Option<&str>) -> Result<ExitCode, CliE
     Ok(ExitCode::SUCCESS)
 }
 
+/// Shared project-cap gate for the CLI add paths (anonymous 3 / free 6 / pro
+/// unlimited). Reads the same cached entitlement the GUI does, so the limit is
+/// consistent across both surfaces.
+fn enforce_project_cap(current_count: usize) -> Result<(), CliError> {
+    portbay_lib::entitlements::check_can_add(current_count).map_err(|cap| {
+        CliError::BadInput(format!(
+            "you've reached your {cap}-project limit. Sign in with `portbay login` for 6 projects, \
+             or support PortBay (donate / merged PR) for unlimited Pro projects."
+        ))
+    })
+}
+
 async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> {
     let canonical = args
         .path
@@ -537,6 +698,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
     }
 
     let mut reg = ctx.load_registry()?;
+    enforce_project_cap(reg.projects.len())?;
 
     let dir_name = canonical
         .file_name()
@@ -557,14 +719,27 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         timeout_seconds: 75,
     });
 
-    // Inherit the language's default runtime version (set in the Languages
-    // panel) exactly as the GUI's `add_project` does, so a project added from
-    // the CLI honours the same defaults. For PHP, mirror it into `php_version`
-    // too, since the FPM reconciler still reads that field.
+    // Prefer the project's own version-manager files, then fall back to the
+    // language default from the Languages panel. This keeps the CLI aligned
+    // with the GUI add flow and avoids global runtime conflicts.
     let kind: ProjectType = args.kind.into();
-    let runtime = reg.runtimes.default_for(kind);
+    let runtime =
+        portbay_lib::project_runtime::detect(&canonical).or_else(|| reg.runtimes.default_for(kind));
     let php_version = if kind == ProjectType::Php {
-        runtime.as_ref().map(|r| r.version.clone())
+        args.php_version
+            .clone()
+            .or_else(|| runtime.as_ref().map(|r| r.version.clone()))
+    } else {
+        None
+    };
+    let document_root = if kind == ProjectType::Php {
+        args.document_root.filter(|s| !s.trim().is_empty())
+    } else {
+        None
+    };
+    let has_start_command = args.start_command.is_some();
+    let web_server = if kind == ProjectType::Php && !has_start_command {
+        Some(args.web_server.into())
     } else {
         None
     };
@@ -579,23 +754,38 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         extra_ports: vec![],
         hostname,
         https: args.https,
-        services: if args.https {
-            vec!["caddy".into()]
-        } else {
-            vec![]
+        services: match kind {
+            ProjectType::Flutter | ProjectType::Xcode | ProjectType::Android => vec![],
+            ProjectType::Php if has_start_command => vec!["caddy".into()],
+            ProjectType::Php => vec!["caddy".into(), "php-fpm".into()],
+            _ if args.https => vec!["caddy".into()],
+            _ => vec![],
         },
         env: Default::default(),
         readiness,
         auto_start: args.auto_start,
         tags: vec![],
-        document_root: None,
+        document_root,
         php_version,
+        web_server,
+        mobile_run: None,
         runtime,
         workspace: None,
+        cors: None,
+        sandbox: None,
     };
 
     reg.add_project(project.clone())
         .map_err(CliError::Registry)?;
+    if let Some(runtime) = &project.runtime {
+        if let Err(err) = portbay_lib::project_runtime::ensure_marker_files(&project.path, runtime)
+        {
+            eprintln!(
+                "warning: failed to write project runtime marker files for {}: {err}",
+                project.id
+            );
+        }
+    }
     ctx.save_registry(&reg)?;
 
     // Best-effort hosts write. Permission-denied is reported as a hint, not
@@ -678,6 +868,7 @@ async fn cmd_add_from_portfile(
         .map_err(|e| CliError::BadInput(format!("materialise: {e}")))?;
 
     let mut reg = ctx.load_registry()?;
+    enforce_project_cap(reg.projects.len())?;
     reg.add_project(project.clone())
         .map_err(CliError::Registry)?;
     ctx.save_registry(&reg)?;
@@ -1377,6 +1568,25 @@ mod tests {
         assert_eq!(args.path, PathBuf::from("/tmp/x"));
         assert!(args.https);
         assert!(matches!(args.kind, CliProjectType::Custom));
+        assert!(matches!(args.web_server, CliWebServer::Caddy));
+    }
+
+    #[test]
+    fn cli_parses_php_web_server_flag() {
+        let cli = Cli::try_parse_from([
+            "portbay",
+            "add",
+            "/tmp/x",
+            "--kind",
+            "php",
+            "--web-server",
+            "nginx",
+        ])
+        .unwrap();
+        let Some(Cmd::Add(args)) = cli.cmd else {
+            panic!("expected Add")
+        };
+        assert!(matches!(args.web_server, CliWebServer::Nginx));
     }
 
     #[test]

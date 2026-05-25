@@ -3,7 +3,7 @@
  * Mirrors `portbay_lib::portfile::schema::PortbayFile`.
  */
 
-import type { ProjectType } from "$lib/types/projects";
+import type { MobileRunConfig, ProjectType, WebServer } from "$lib/types/projects";
 
 export interface PortbayFile {
   version: number;
@@ -12,6 +12,8 @@ export interface PortbayFile {
   hostname: string;
   port?: number | null;
   phpVersion?: string | null;
+  webServer?: WebServer | null;
+  mobileRun?: MobileRunConfig | null;
   https: boolean;
   autoStart: boolean;
   startCommand?: string | null;
