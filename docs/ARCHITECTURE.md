@@ -70,16 +70,32 @@ Considered. Rejected:
 
 ## Bundle size budget
 
-| Component | Size (release, measured 2026-05-22) |
-|---|---|
-| Tauri shell (`portbay-app`) | 12 MB |
-| Bundled `process-compose` sidecar | 40 MB |
-| Bundled `caddy` sidecar (planned) | ~40 MB |
-| Bundled `mkcert` sidecar (planned) | ~5 MB |
-| Frontend assets, icons, Info.plist | ~1 MB |
-| **Target total** | **<100 MB** |
+The `<100 MB` budget is for the **compressed DMG installer** (what a user
+downloads), **not** the uncompressed `.app`. The two differ by ~2.3× because
+the bundle is dominated by prebuilt Go sidecars that compress to ~⅓ their size.
 
-The original `<30 MB` target from the planning phase was unreachable once we accepted bundling all three sidecars. RAM budget (`<80 MB idle`) remains unchanged — disk size and runtime memory are independent.
+| Component (release `.app`, measured 2026-05-25, arm64) | Uncompressed |
+|---|---|
+| `process-compose` sidecar | 42 MB |
+| `caddy` sidecar | 38 MB |
+| `cloudflared` sidecar (tunnels) | 39 MB |
+| `mailpit` sidecar (mail) | 24 MB |
+| `portbay-app` (Tauri/Rust shell) | 21 MB&nbsp;* |
+| `mkcert` sidecar | 5 MB |
+| `portbay` CLI + `portbay-hosts-helper` + `dnsmasq` | ~7 MB |
+| Frontend assets, icons, Info.plist | ~1 MB |
+| **`.app` total (uncompressed)** | **~175 MB** |
+| **DMG installer (UDZO/zlib, measured)** | **~77 MB — under budget** |
+
+\* Before `[profile.release]` stripping (added 2026-05-25: `strip`, `lto`,
+`codegen-units = 1`); stripping pulls the shell binary back toward ~12 MB.
+
+The original `<30 MB` target from the planning phase was unreachable once we
+accepted bundling all sidecars. The revised `<100 MB` **installer** budget holds
+with ~23 MB of headroom. RAM budget (`<80 MB idle`) is unchanged — disk size and
+runtime memory are independent. If the installer ever nears 100 MB, the cheapest
+lever is lazy-downloading the optional sidecars (cloudflared/tunnels,
+mailpit/mail) instead of bundling them.
 
 ---
 
