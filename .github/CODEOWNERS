@@ -1,0 +1,79 @@
+# PortBay CODEOWNERS
+#
+# Owners listed here are requested for review automatically when matching files
+# change. The LAST matching pattern wins, so order matters (general first,
+# specific last).
+#
+# SETUP NOTE: the @portbay-app/* teams below are placeholders. Create them under
+# the portbay-app org (or replace each with an individual @handle) for these
+# rules to take effect. Until the teams exist, GitHub silently ignores unknown
+# owners. Branch protection should require CODEOWNERS review on the sensitive
+# paths (licensing, core runtime, cloud boundary, CI) — see
+# docs/maintainers/review-checklist.md.
+#
+# TODO(maintainers): replace the default owner with the real maintainer handle.
+
+# ----------------------------------------------------------------------------
+# Default owner for everything not matched more specifically.
+# ----------------------------------------------------------------------------
+*                                   @portbay-app/maintainers
+
+# ----------------------------------------------------------------------------
+# Licensing & legal — changes here require licensing approval.
+# ----------------------------------------------------------------------------
+/LICENSE                            @portbay-app/maintainers
+/NOTICE                             @portbay-app/maintainers
+/DCO.md                             @portbay-app/maintainers
+/docs/legal/                        @portbay-app/maintainers
+/docs/contributing/license-policy.md @portbay-app/maintainers
+/docs/maintainers/license-review.md  @portbay-app/maintainers
+
+# ----------------------------------------------------------------------------
+# Core runtime (Rust) — the daemon, reconciler, sidecar adapters, CLI.
+# ----------------------------------------------------------------------------
+/src-tauri/                         @portbay-app/core-maintainers
+/src-tauri/src/bin/                 @portbay-app/core-maintainers
+
+# ----------------------------------------------------------------------------
+# Desktop app (frontend) — Svelte/SvelteKit UI.
+# ----------------------------------------------------------------------------
+/src/                               @portbay-app/app-maintainers
+
+# ----------------------------------------------------------------------------
+# Cloud / Pro integration boundary — the thin client that talks to PortBay
+# Cloud, plus the guards that keep proprietary code out of this repo. Reviewed
+# by maintainers; see docs/architecture/repo-boundaries.md.
+# ----------------------------------------------------------------------------
+/src-tauri/src/auth/                @portbay-app/maintainers
+/src-tauri/src/entitlements/        @portbay-app/maintainers
+/src-tauri/src/commands/auth.rs     @portbay-app/maintainers
+/src-tauri/src/commands/sync.rs     @portbay-app/maintainers
+/src-tauri/src/commands/entitlements.rs @portbay-app/maintainers
+/src-tauri/src/commands/telemetry.rs    @portbay-app/maintainers
+/docs/architecture/cloud-integration.md @portbay-app/maintainers
+/docs/architecture/repo-boundaries.md   @portbay-app/maintainers
+/.repo-boundary-denylist            @portbay-app/maintainers
+/.repo-boundary-allow               @portbay-app/maintainers
+/scripts/check-repo-boundaries.sh   @portbay-app/maintainers
+
+# ----------------------------------------------------------------------------
+# Security-sensitive code — auth, certs, privileged helper, process execution.
+# ----------------------------------------------------------------------------
+/src-tauri/src/caddy/               @portbay-app/maintainers
+/src-tauri/src/commands/certs.rs    @portbay-app/maintainers
+/src-tauri/macos/                   @portbay-app/maintainers
+/SECURITY.md                        @portbay-app/maintainers
+/.gitleaks.toml                     @portbay-app/maintainers
+
+# ----------------------------------------------------------------------------
+# CI / release workflows.
+# ----------------------------------------------------------------------------
+/.github/workflows/                 @portbay-app/maintainers
+/.github/CODEOWNERS                 @portbay-app/maintainers
+
+# ----------------------------------------------------------------------------
+# Documentation.
+# ----------------------------------------------------------------------------
+/docs/                              @portbay-app/maintainers
+/docs-site/                         @portbay-app/maintainers
+/README.md                          @portbay-app/maintainers
