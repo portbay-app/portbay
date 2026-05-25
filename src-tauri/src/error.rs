@@ -97,6 +97,13 @@ pub enum AppError {
     #[error("You've reached your {cap}-project limit")]
     ProjectCapReached { cap: u32 },
 
+    /// Enabling Sandboxed Run on another project would exceed the current
+    /// tier's community allowance (anonymous/free get a small cap; Pro is
+    /// uncapped, so it never sees this). Mirrors [`Self::ProjectCapReached`].
+    /// Re-running an already-sandboxed project never trips it.
+    #[error("You've reached your {cap}-project Sandboxed Run limit")]
+    SandboxCapReached { cap: u32 },
+
     /// A Pro-gated configuration was set or changed by a non-Pro session. The
     /// GUI locks these controls proactively; this is the core-side safety net
     /// for the CLI and hand-edited registries. Carries a human feature label.
@@ -104,6 +111,15 @@ pub enum AppError {
     /// introducing/changing one without Pro is rejected.
     #[error("{feature} is a PortBay Pro feature")]
     ProRequired { feature: &'static str },
+
+    /// A feature was invoked on a platform that can't provide it — e.g. the
+    /// macOS-only Seatbelt sandbox on Linux/Windows. Unlike [`Self::ProRequired`],
+    /// no tier unlocks it on this OS.
+    #[error("{reason}")]
+    Unsupported {
+        feature: &'static str,
+        reason: &'static str,
+    },
 
     /// A failure that doesn't fit the other variants. Kept narrow on purpose.
     #[error("{0}")]
@@ -126,7 +142,9 @@ impl AppError {
             Self::PortConflict { .. } => "PORT_CONFLICT",
             Self::BadInput(_) => "BAD_INPUT",
             Self::ProjectCapReached { .. } => "PROJECT_CAP_REACHED",
+            Self::SandboxCapReached { .. } => "SANDBOX_CAP_REACHED",
             Self::ProRequired { .. } => "PRO_REQUIRED",
+            Self::Unsupported { .. } => "UNSUPPORTED",
             Self::Internal(_) => "INTERNAL",
         }
     }
@@ -160,8 +178,14 @@ impl AppError {
             Self::ProjectCapReached { .. } => {
                 "Sign in or create a free account to add more, or upgrade to Pro for unlimited projects.".into()
             }
+            Self::SandboxCapReached { .. } => {
+                "Upgrade to PortBay Pro to sandbox more projects — your existing sandboxed projects are unchanged.".into()
+            }
             Self::ProRequired { .. } => {
                 "Upgrade to PortBay Pro to use this — your existing settings are unchanged.".into()
+            }
+            Self::Unsupported { .. } => {
+                "This feature isn't available on your operating system.".into()
             }
             Self::Hosts(_) | Self::Io(_) | Self::Internal(_) => {
                 "The action did not complete.".into()
@@ -177,6 +201,7 @@ impl AppError {
             | Self::NotFound(_)
             | Self::PortConflict { .. }
             | Self::ProjectCapReached { .. }
+            | Self::SandboxCapReached { .. }
             | Self::ProRequired { .. } => "user",
             _ => "system",
         }

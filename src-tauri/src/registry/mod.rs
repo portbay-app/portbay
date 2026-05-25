@@ -16,10 +16,10 @@ pub mod workspace;
 
 pub use error::{RegistryError, Result};
 pub use types::{
-    CorsConfig, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, FpmTuning,
-    Group, ManualRuntime, MobileRunConfig, PhpVersionConfig, Project, ProjectId, ProjectType,
-    Readiness, Runtime, RuntimeSettings, SandboxConfig, SandboxNetworkPolicy, WebServer, Workspace,
-    WorkspaceTool,
+    CorsConfig, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings, DomainConfig,
+    FpmTuning, Group, ManualRuntime, MobileRunConfig, PhpVersionConfig, Project, ProjectId,
+    ProjectType, Readiness, ResolverMode, Runtime, RuntimeSettings, SandboxConfig,
+    SandboxNetworkPolicy, WebServer, Workspace, WorkspaceTool,
 };
 
 /// The registry-file schema version this build reads and writes.
@@ -321,6 +321,7 @@ mod tests {
             mobile_run: None,
             runtime: None,
             workspace: None,
+            domain: None,
         }
     }
 

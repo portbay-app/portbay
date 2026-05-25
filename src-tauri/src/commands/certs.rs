@@ -156,6 +156,32 @@ fn parse_cert_pem(
     })
 }
 
+/// Read the DNS SAN list from an on-disk cert PEM. Best-effort: any read or
+/// parse failure yields an empty list (callers treat that as "doesn't cover
+/// the desired names" and reissue). The cert reconciler uses this to decide
+/// whether an existing cert already covers a project's desired hostnames —
+/// e.g. after wildcard subdomains are toggled on, or the hostname changes.
+pub(crate) fn cert_dns_sans(cert_path: &std::path::Path) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(cert_path) else {
+        return Vec::new();
+    };
+    let Some(Ok(pem)) = Pem::iter_from_buffer(&bytes).next() else {
+        return Vec::new();
+    };
+    let Ok((_, cert)) = X509Certificate::from_der(&pem.contents) else {
+        return Vec::new();
+    };
+    let mut sans = Vec::new();
+    if let Ok(Some(ext)) = cert.subject_alternative_name() {
+        for name in &ext.value.general_names {
+            if let GeneralName::DNSName(dns) = name {
+                sans.push((*dns).to_string());
+            }
+        }
+    }
+    sans
+}
+
 fn iso_from_asn1(t: x509_parser::time::ASN1Time) -> Option<String> {
     // x509-parser's ASN1Time stringifies to RFC 3339-ish; we re-emit a
     // strict ISO-8601 form for the frontend.

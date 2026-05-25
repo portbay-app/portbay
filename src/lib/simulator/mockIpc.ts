@@ -45,6 +45,36 @@ export function installSimulatorIpcBrowser(payload: {
   // Mutable working copy so lifecycle transitions persist across calls within
   // a session (and never mutate the shared fixture object).
   const projects: any[] = JSON.parse(JSON.stringify(fixtures.projects));
+  let metricsSnapshot: any = JSON.parse(JSON.stringify(fixtures.metrics));
+  let metricsTick = 0;
+
+  // In-memory preferences for the demo so get/set round-trips — the Web Server
+  // page's "Set as default" and Settings toggles reflect within the session.
+  const prefs: Record<string, unknown> = {
+    showTrayIcon: true,
+    closeToMenuBar: true,
+    closeToMenuBarToastSeen: true,
+    telemetryEnabled: false,
+    earlyAccessOptIn: false,
+    launchAtLogin: false,
+    reopenPreviousProjects: false,
+    confirmBeforeStopAll: true,
+    desktopNotifications: false,
+    accentColor: "blue",
+    defaultWorkspaceFolder: "",
+    autoDetectProjects: false,
+    defaultSort: "name-asc",
+    defaultStartBehavior: "manual",
+    defaultWebServer: null,
+    manageHostsAutomatically: true,
+    autoRenewCertificates: true,
+    storeLogsLocally: true,
+    logRetentionDays: 7,
+    cliPath: "/usr/local/bin/portbay",
+    autoCleanSchedule: "off",
+    lastAutoClean: 0,
+    autoCleanExtraDirs: [],
+  };
 
   let nextCb = 1;
   let nextListenerId = 1;
@@ -79,6 +109,70 @@ export function installSimulatorIpcBrowser(payload: {
     };
   }
 
+  function clamp(n: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, n));
+  }
+
+  // Synthesize a `cert_info` payload for the SSL Certificates page. Every demo
+  // HTTPS project gets a freshly-minted, long-lived mkcert cert so the table
+  // renders a realistic validity window without touching the filesystem.
+  function certInfoFor(p: any): unknown {
+    const now = Date.now();
+    const day = 86_400_000;
+    const issued = new Date(now - 12 * day);
+    const expires = new Date(now + 808 * day);
+    return {
+      projectId: p.id,
+      certificatePath: `/Users/you/.portbay/certs/${p.id}/cert.pem`,
+      keyPath: `/Users/you/.portbay/certs/${p.id}/key.pem`,
+      issuedAt: issued.toISOString(),
+      expiresAt: expires.toISOString(),
+      daysUntilExpiry: Math.round((expires.getTime() - now) / day),
+      sans: [p.hostname],
+    };
+  }
+
+  function nextMetrics(): unknown {
+    const base = fixtures.metrics as any;
+    metricsTick += 1;
+    const tick = metricsTick;
+    const cpuTotal = clamp(
+      base.cpu.total + Math.sin(tick / 2) * 7 + Math.sin(tick / 5) * 3,
+      4,
+      92,
+    );
+    const memoryDrift = Math.sin(tick / 7) * 0.35 * 1024 ** 3;
+    const diskDrift = Math.sin(tick / 23) * 0.08 * 1024 ** 3;
+
+    return {
+      cpu: { total: Number(cpuTotal.toFixed(1)) },
+      memory: {
+        usedBytes: Math.round(
+          clamp(
+            base.memory.usedBytes + memoryDrift,
+            0,
+            base.memory.totalBytes,
+          ),
+        ),
+        totalBytes: base.memory.totalBytes,
+      },
+      disk: {
+        usedBytes: Math.round(
+          clamp(base.disk.usedBytes + diskDrift, 0, base.disk.totalBytes),
+        ),
+        totalBytes: base.disk.totalBytes,
+      },
+    };
+  }
+
+  if (w.__PORTBAY_SIM_METRICS_TIMER__) {
+    clearInterval(w.__PORTBAY_SIM_METRICS_TIMER__);
+  }
+  w.__PORTBAY_SIM_METRICS_TIMER__ = setInterval(() => {
+    metricsSnapshot = nextMetrics();
+    emit("portbay://metrics", metricsSnapshot);
+  }, 1000);
+
   function startProject(id: unknown): Promise<unknown> {
     const p = project(id);
     if (p) p.status = "starting";
@@ -109,6 +203,71 @@ export function installSimulatorIpcBrowser(payload: {
     return Promise.resolve(null);
   }
 
+  // Synthesize the sandbox's blocked-connection log for the Sandbox page. The
+  // tighter the policy, the more a typical app trips against it — so a
+  // loopback-only project shows real denials while a "full" one shows none.
+  function sandboxViolationsFor(id: unknown): string[] {
+    const p = project(id);
+    if (!p || !p.sandboxed) return [];
+    const net = (p.sandbox && p.sandbox.network) || "loopback_only";
+    if (net === "full") return [];
+    const t = (h: number, m: number, s: number) =>
+      `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    const lines = [
+      `[${t(14, 2, 11)}] DENY outbound tcp → 140.82.121.4:443 (api.github.com)`,
+      `[${t(14, 2, 11)}] DENY outbound tcp → 104.16.85.20:443 (registry.npmjs.org)`,
+      `[${t(14, 3, 38)}] DENY dns query → telemetry.example.com`,
+    ];
+    if (net === "loopback_only" || net === "blocked") {
+      lines.push(`[${t(14, 5, 2)}] DENY connect → 192.168.1.24:5432 (LAN)`);
+    }
+    if (net === "blocked") {
+      lines.push(`[${t(14, 5, 9)}] DENY connect → 127.0.0.1:6060 (loopback)`);
+    }
+    return lines;
+  }
+
+  function logsFor(id: unknown, limit?: unknown): string[] {
+    const key = typeof id === "string" ? id : "";
+    const lines = (fixtures.logs && fixtures.logs[key]) || [];
+    const max = typeof limit === "number" && limit > 0 ? limit : 200;
+    return lines.slice(Math.max(0, lines.length - max));
+  }
+
+  function pushChannelMessage(channel: unknown, index: number, message: string): void {
+    const ch = channel as { id?: number } | undefined;
+    if (!ch || typeof ch.id !== "number") return;
+    const cb = w["_" + ch.id];
+    if (typeof cb === "function") cb({ index, message });
+  }
+
+  function subscribeLogs(args?: Record<string, unknown>): Promise<unknown> {
+    const id = args && args.id;
+    const channel = args && args.onLine;
+    const seed = logsFor(id, 8);
+    let index = 0;
+    const timer = setInterval(() => {
+      const p = project(id);
+      const projectName = p && typeof p.name === "string" ? p.name : "Project";
+      const messages = [
+        `GET ${p?.url ?? "https://project.test"} 200 ${24 + index * 3}ms`,
+        `hmr update ${projectName.replaceAll(" ", "-").toLowerCase()}/src/App.svelte`,
+        `PortBay health check passed for ${projectName}`,
+        `TLS certificate valid for ${p?.hostname ?? "project.test"}`,
+      ];
+      const message = seed[index] ?? JSON.stringify({
+        level: "info",
+        process: "simulator",
+        replica: 0,
+        message: messages[index % messages.length],
+      });
+      pushChannelMessage(channel, index, message);
+      index += 1;
+      if (index >= seed.length + 4) clearInterval(timer);
+    }, 900);
+    return Promise.resolve(null);
+  }
+
   function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
     switch (cmd) {
       case "list_projects":
@@ -117,11 +276,61 @@ export function installSimulatorIpcBrowser(payload: {
         return Promise.resolve(fixtures.groups);
       case "sidecar_status":
         return Promise.resolve(fixtures.sidecars);
+      case "webserver_overview":
+        return Promise.resolve(fixtures.webServers);
+      case "installed_dev_tools":
+        return Promise.resolve(fixtures.devTools);
+      case "cert_info": {
+        const p = project(args && args.id);
+        if (!p || !p.https) {
+          return Promise.reject({
+            code: "PROJECT_NOT_FOUND",
+            whatHappened: "No certificate issued for this project yet.",
+            whyItMatters: "The reconciler mints the cert on first reconcile.",
+            whoCausedIt: "system",
+            actions: [],
+          });
+        }
+        return Promise.resolve(certInfoFor(p));
+      }
+      case "reissue_cert":
+        // No-op in the demo — `cert_info` synthesizes fresh metadata on the
+        // next read, so the row repaints as if reissued.
+        return Promise.resolve(null);
+      case "system_metrics":
+        metricsSnapshot = nextMetrics();
+        return Promise.resolve(metricsSnapshot);
+      case "get_preferences":
+        return Promise.resolve({ ...prefs });
+      case "set_preferences": {
+        const next = args && (args.prefs as Record<string, unknown>);
+        if (next) Object.assign(prefs, next);
+        return Promise.resolve({ ...prefs });
+      }
+      case "mark_close_toast_seen":
+        prefs.closeToMenuBarToastSeen = true;
+        return Promise.resolve(null);
       case "get_entitlement":
       case "refresh_entitlement":
+      case "account_resync":
         return Promise.resolve(fixtures.entitlement);
+      case "logout":
+        return Promise.resolve(fixtures.entitlement);
+      case "begin_login":
+        return Promise.resolve({ authorize_url: null });
+      case "poll_login":
+        return Promise.resolve({
+          status: "ready",
+          entitlement: fixtures.entitlement,
+        });
+      case "cancel_login":
+        return Promise.resolve(null);
       case "recent_requests":
         return Promise.resolve(fixtures.requests);
+      case "tail_logs":
+        return Promise.resolve(logsFor(args && args.id, args && args.limit));
+      case "subscribe_logs":
+        return subscribeLogs(args);
       case "list_runtimes":
         return Promise.resolve(fixtures.runtimes);
       case "list_database_engines":
@@ -134,6 +343,17 @@ export function installSimulatorIpcBrowser(payload: {
         return Promise.resolve(fixtures.dnsPreflight);
       case "dnsmasq_resolver_status":
         return Promise.resolve(fixtures.resolverStatus);
+      case "get_domain_settings":
+        return Promise.resolve({
+          domainSuffix: "test",
+          projectCount: projects.length,
+        });
+      case "update_domain_suffix":
+        return Promise.resolve({
+          oldSuffix: "test",
+          newSuffix: args && (args.domainSuffix as string),
+          changedProjects: projects.length,
+        });
       case "get_dnsmasq_settings":
         return Promise.resolve({
           cacheSize: 150,
@@ -146,17 +366,75 @@ export function installSimulatorIpcBrowser(payload: {
             .filter((r) => r.kind === "project")
             .map((r) => ({ ip: "127.0.0.1", hostname: r.hostname })),
         );
-      case "installed_dev_tools":
+      case "telemetry_settings":
+        return Promise.resolve({
+          enabled: false,
+          crashReportCount: 0,
+          endpointConfigured: false,
+        });
+      case "list_crash_reports":
         return Promise.resolve([]);
+      case "send_crash_report":
+      case "discard_crash_report":
+      case "reset_onboarding":
+      case "dnsmasq_install_resolver":
+      case "dnsmasq_uninstall_resolver":
+        return Promise.resolve(null);
       case "onboarding_status":
         return Promise.resolve({ onboarded: true, seenCloseToast: true });
       case "start_project":
       case "force_start_project":
         return startProject(args && args.id);
+      case "open_project":
+      case "open_in_ide":
+        return Promise.resolve(null);
+      case "update_project": {
+        const p = project(args && args.id);
+        const patch = (args && (args.patch as Record<string, unknown>)) || {};
+        if (p) {
+          if (patch.hostname !== undefined) p.hostname = patch.hostname;
+          if (patch.port !== undefined) p.port = patch.port;
+          if (patch.https !== undefined) p.https = patch.https;
+          if (patch.autoStart !== undefined) p.autoStart = patch.autoStart;
+          if (patch.name !== undefined) p.name = patch.name;
+          if (patch.domain !== undefined) {
+            const d = patch.domain as Record<string, unknown> | null;
+            // Normalise an all-default config to null, mirroring the core.
+            const isDefault =
+              !!d &&
+              !d.notes &&
+              !d.pathPrefix &&
+              d.resolverMode === "auto" &&
+              d.autoManageCert === true &&
+              !d.includeWildcardSubdomains &&
+              !d.exposeWhenRunning;
+            p.domain = d && !isDefault ? d : null;
+          }
+          p.url = `${p.https ? "https" : "http"}://${p.hostname}`;
+        }
+        return Promise.resolve(p ?? null);
+      }
+      case "remove_project": {
+        const idx = projects.findIndex((p) => p.id === (args && args.id));
+        if (idx >= 0) projects.splice(idx, 1);
+        return Promise.resolve(null);
+      }
       case "stop_project":
         return stopProject(args && args.id);
       case "restart_project":
         return startProject(args && args.id);
+      case "start_project_sandboxed":
+        return startProject(args && args.id);
+      case "promote_project_to_local": {
+        const p = project(args && args.id);
+        if (p) {
+          p.sandboxed = false;
+          delete p.sandbox;
+        }
+        return Promise.resolve(null);
+      }
+      case "sandbox_violations":
+        return Promise.resolve(sandboxViolationsFor(args && args.id));
       case "stop_all":
         for (const p of projects) {
           if (p.status === "running" || p.status === "starting") {

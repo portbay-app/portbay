@@ -89,6 +89,8 @@ export function collectCommands(): PaletteCommand[] {
     { id: "/", label: "Projects", icon: "home" as const },
     { id: "/services", label: "Services", icon: "server" as const },
     { id: "/domains", label: "Domains", icon: "link" as const },
+    { id: "/certificates", label: "Certificates", icon: "shield" as const },
+    { id: "/sandbox", label: "Sandbox", icon: "package" as const },
     { id: "/languages", label: "Languages", icon: "file-code" as const },
     { id: "/logs", label: "Logs", icon: "file-text" as const },
     { id: "/inspector", label: "Inspector", icon: "activity" as const },

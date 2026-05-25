@@ -355,6 +355,36 @@ pub fn check_can_add(current_count: usize) -> Result<(), u32> {
     }
 }
 
+/// Community sandbox allowance. Both the anonymous and signed-in free tiers may
+/// have Sandboxed Run enabled on up to this many projects at once, so the
+/// feature is usable without Pro; Pro lifts the cap entirely.
+pub const SANDBOX_COMMUNITY_CAP: u32 = 2;
+
+impl Entitlements {
+    /// How many projects may have Sandboxed Run enabled at once. `None` =
+    /// unlimited (Pro). Tied to the same "unlimited projects" signal as
+    /// [`Entitlements::max_projects`], so it tracks the paid tier without
+    /// needing a new field in the signed entitlement document — the community
+    /// cap is enforced client-side, consistent with the project cap (not DRM).
+    pub fn max_sandbox_projects(&self) -> Option<u32> {
+        // A capped project tier (anonymous/free) ⇒ the community sandbox cap;
+        // unlimited projects (Pro) ⇒ unlimited sandboxed runs.
+        self.max_projects.map(|_| SANDBOX_COMMUNITY_CAP)
+    }
+}
+
+/// Defense-in-depth sandbox-cap check, mirroring [`check_can_add`].
+/// `current_count` is how many *other* projects already have Sandboxed Run
+/// enabled; returns `Err(cap)` when enabling one more would exceed the tier's
+/// allowance (Pro is uncapped). Like the project cap, this is an honest limit,
+/// not DRM — it's bypassable by rebuilding.
+pub fn check_can_sandbox(current_count: usize) -> Result<(), u32> {
+    match current().entitlements.max_sandbox_projects() {
+        Some(cap) if current_count as u32 >= cap => Err(cap),
+        _ => Ok(()),
+    }
+}
+
 /// Fetch a fresh signed entitlement from the issuer using the caller's bearer
 /// token, verify it, and cache it. Returns the new effective entitlement.
 pub async fn refresh(base_url: &str, token: &str) -> Result<EffectiveEntitlement, String> {
@@ -519,5 +549,22 @@ mod tests {
         let e = effective_from(&p, 1000, 1001);
         assert_eq!(e.state, EntitlementState::Anonymous);
         assert_eq!(e.entitlements.max_projects, Some(3));
+    }
+
+    #[test]
+    fn community_tiers_get_two_sandbox_projects_pro_unlimited() {
+        // Anonymous and free both get the community cap …
+        assert_eq!(
+            anonymous_entitlements().max_sandbox_projects(),
+            Some(SANDBOX_COMMUNITY_CAP)
+        );
+        assert_eq!(
+            free_entitlements().max_sandbox_projects(),
+            Some(SANDBOX_COMMUNITY_CAP)
+        );
+        // … and Pro (unlimited projects) is uncapped for sandboxed runs too.
+        let pro = verify_signed(PRO_VECTOR).unwrap().entitlements;
+        assert_eq!(pro.max_projects, None);
+        assert_eq!(pro.max_sandbox_projects(), None);
     }
 }

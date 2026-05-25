@@ -24,7 +24,6 @@
     MobileRunConfig,
     ProjectType,
     ProjectView,
-    WebServer,
   } from "$lib/types/projects";
 
   interface Props {
@@ -61,7 +60,6 @@
   // ────────── PHP-only ──────────
   let documentRootDraft = $state<string>("");
   let phpVersionDraft = $state<string>("");
-  let webServerDraft = $state<WebServer>("caddy");
 
   // ────────── Mobile-only ──────────
   let mobileFlavorDraft = $state<string>("");
@@ -87,7 +85,6 @@
     serviceCustom = "";
     documentRootDraft = project.documentRoot ?? "";
     phpVersionDraft = project.phpVersion ?? "";
-    webServerDraft = project.webServer ?? "caddy";
     mobileFlavorDraft = project.mobileRun?.flavor ?? "";
     mobileTargetDraft = project.mobileRun?.target ?? "";
     mobileDeviceDraft = project.mobileRun?.device ?? "";
@@ -146,8 +143,7 @@
 
   const phpDirty = $derived(
     documentRootDraft !== (project.documentRoot ?? "") ||
-      phpVersionDraft !== (project.phpVersion ?? "") ||
-      webServerDraft !== (project.webServer ?? "caddy"),
+      phpVersionDraft !== (project.phpVersion ?? ""),
   );
 
   const isPhp = $derived(project.type === "php");
@@ -241,7 +237,6 @@
     if (isPhp && phpDirty) {
       patch.documentRoot = documentRootDraft.trim();
       patch.phpVersion = phpVersionDraft.trim();
-      patch.webServer = webServerDraft;
     }
     if (isMobile && mobileDirty) {
       patch.mobileRun = mobileDraft;
@@ -577,23 +572,10 @@
             then re-detect from the Languages panel.
           </p>
         {/if}
-
-        <label for="advanced-web-server" class="text-fg-muted">Web server</label>
-        <select
-          id="advanced-web-server"
-          bind:value={webServerDraft}
-          class="px-2.5 py-1.5 rounded-md bg-bg border border-border
-                 focus:border-accent/60 outline-none text-fg text-xs w-36"
-        >
-          <option value="caddy">Caddy</option>
-          <option value="nginx">Nginx</option>
-          <option value="apache">Apache</option>
-        </select>
       </div>
       <p class="text-[10px] text-fg-subtle">
         Document root is typically <code>public</code> for Laravel. PHP version
-        selects which PHP-FPM binary handles requests; web server selects the
-        local server PortBay generates for this project.
+        selects which PHP-FPM binary handles requests.
       </p>
     </section>
   {/if}

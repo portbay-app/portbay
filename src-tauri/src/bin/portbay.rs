@@ -773,6 +773,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         workspace: None,
         cors: None,
         sandbox: None,
+        domain: None,
     };
 
     reg.add_project(project.clone())

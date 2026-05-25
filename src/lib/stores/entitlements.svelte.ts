@@ -34,6 +34,12 @@ interface LoginPollResult {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * Community Sandboxed Run allowance (anonymous + free tiers). Pro is unlimited.
+ * Mirror of the Rust `entitlements::SANDBOX_COMMUNITY_CAP` — keep the two in sync.
+ */
+const SANDBOX_COMMUNITY_CAP = 2;
+
 function createEntitlementsStore() {
   let value = $state<EffectiveEntitlement>(ANONYMOUS_FALLBACK);
   let loaded = $state<boolean>(false);
@@ -167,6 +173,22 @@ function createEntitlementsStore() {
   }
 
   /**
+   * How many projects may have Sandboxed Run enabled at once. `null` =
+   * unlimited (Pro). Mirrors the backend `Entitlements::max_sandbox_projects`:
+   * Pro (unlimited projects) is uncapped; the community tiers share a small cap
+   * so the feature is usable without paying.
+   */
+  function maxSandboxProjects(): number | null {
+    return value.entitlements.max_projects === null ? null : SANDBOX_COMMUNITY_CAP;
+  }
+
+  /** Whether another project may be sandboxed given how many already are. */
+  function canSandbox(currentCount: number): boolean {
+    const max = maxSandboxProjects();
+    return max === null || currentCount < max;
+  }
+
+  /**
    * Which upgrade prompt to show when a project-cap block is hit:
    * - anonymous at the cap → "signup" (free unlocks 6)
    * - free at the cap      → "pro"    (Pro unlocks unlimited)
@@ -215,6 +237,8 @@ function createEntitlementsStore() {
     clear,
     allows,
     canAddProject,
+    canSandbox,
+    maxSandboxProjects,
     upgradePromptAt,
   };
 }

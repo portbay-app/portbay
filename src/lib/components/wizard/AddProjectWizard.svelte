@@ -21,6 +21,7 @@
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
+  import { preferences } from "$lib/stores/preferences.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
@@ -49,7 +50,9 @@
   let startCommand = $state<string>("");
   let documentRoot = $state<string>("");
   let phpVersion = $state<string>("");
-  let webServer = $state<WebServer>("caddy");
+  let webServer = $state<WebServer>(
+    preferences.value.defaultWebServer ?? "caddy",
+  );
   let mobileRun = $state<MobileRunConfig | null>(null);
   let kind = $state<ProjectType>("custom");
   let https = $state<boolean>(true);
@@ -66,6 +69,12 @@
   let gitParentDir = $state<string>("");
   let gitCloneRunning = $state<boolean>(false);
   let gitNetwork = $state<SandboxNetworkPolicy>("outbound");
+
+  // Clone-in-Sandbox makes a *new* sandboxed project, so it's allowed whenever
+  // the tier has room under the community cap (Pro is unlimited), not Pro-only.
+  const canSandboxNew = $derived(
+    entitlements.canSandbox(projects.value.filter((p) => p.sandboxed).length),
+  );
 
   /**
    * Inline port-conflict warning. Backed by a debounced lsof probe so
@@ -111,7 +120,7 @@
 
   const commandPlaceholder = $derived(
     kind === "php"
-      ? "php -S 127.0.0.1:8000 router.php"
+      ? "leave empty for PortBay-managed PHP-FPM"
       : kind === "flutter"
         ? "flutter run"
         : kind === "xcode"
@@ -157,7 +166,7 @@
     startCommand = "";
     documentRoot = "";
     phpVersion = "";
-    webServer = "caddy";
+    webServer = preferences.value.defaultWebServer ?? "caddy";
     kind = "custom";
     https = true;
     autoStart = false;
@@ -238,7 +247,8 @@
         startCommand = file.startCommand ?? "";
         documentRoot = file.documentRoot ?? "";
         phpVersion = file.phpVersion ?? "";
-        webServer = file.webServer ?? "caddy";
+        webServer =
+          file.webServer ?? preferences.value.defaultWebServer ?? "caddy";
         mobileRun = file.mobileRun ?? null;
         kind = file.type;
         https = file.https;
@@ -305,7 +315,8 @@
     startCommand = det.suggestedStartCommand ?? "";
     documentRoot = det.suggestedDocumentRoot ?? "";
     phpVersion = det.suggestedPhpVersion ?? "";
-    webServer = det.suggestedWebServer ?? "caddy";
+    webServer =
+      det.suggestedWebServer ?? preferences.value.defaultWebServer ?? "caddy";
     mobileRun = det.suggestedMobileRun ?? null;
     kind = det.kind;
     syncRawFromFields();
@@ -328,7 +339,7 @@
     kind = app.kind;
     documentRoot = "";
     phpVersion = "";
-    webServer = "caddy";
+    webServer = preferences.value.defaultWebServer ?? "caddy";
     mobileRun = null;
     if (workspaceFromRoot && workspaceScan) {
       // Tier 2: run from the repo root with a workspace filter. Leave the
@@ -704,7 +715,13 @@
 
       <DashboardCard title="Clone in Sandbox" flush>
         {#snippet badge()}
-          <span class="text-[11px] text-fg-subtle">Pro</span>
+          {#if canSandboxNew}
+            <span class="text-[11px] text-fg-subtle">Sandboxed</span>
+          {:else}
+            <span class="text-[11px] text-fg-subtle" title="Upgrade to Pro for unlimited sandboxed projects">
+              Limit reached
+            </span>
+          {/if}
         {/snippet}
         <div class="space-y-3">
           <div class="flex items-center gap-2">
@@ -712,14 +729,14 @@
               type="url"
               bind:value={gitUrl}
               placeholder="https://github.com/org/repo.git"
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="flex-1 px-3 py-2 rounded-md text-sm bg-bg border border-border
                      focus:border-accent/60 outline-none text-fg placeholder-fg-subtle
                      font-mono disabled:opacity-55"
             />
             <select
               bind:value={gitNetwork}
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="px-3 py-2 rounded-md text-xs bg-bg border border-border text-fg
                      disabled:opacity-55"
               title="Sandbox network policy"
@@ -732,7 +749,7 @@
             <button
               type="button"
               onclick={cloneSandboxed}
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="inline-flex items-center gap-1.5 px-3 py-2 text-xs rounded-md
                      text-accent border border-accent/40 hover:bg-accent/10
                      disabled:opacity-50 transition-colors whitespace-nowrap"
@@ -750,7 +767,7 @@
               type="text"
               bind:value={gitParentDir}
               placeholder="Install folder (defaults to PortBay sandbox imports)"
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="flex-1 px-3 py-2 rounded-md text-xs bg-bg border border-border
                      focus:border-accent/60 outline-none text-fg placeholder-fg-subtle
                      font-mono disabled:opacity-55"
@@ -758,7 +775,7 @@
             <button
               type="button"
               onclick={browseSandboxInstallFolder}
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="px-3 py-2 text-xs rounded-md border border-border text-fg-muted
                      hover:text-fg hover:border-border-strong disabled:opacity-50
                      transition-colors whitespace-nowrap"
@@ -1002,6 +1019,13 @@
               <option value="nginx">Nginx</option>
               <option value="apache">Apache</option>
             </select>
+            {#if startCommand.trim()}
+              <span></span>
+              <p class="text-[11px] text-fg-subtle">
+                Custom PHP commands are reverse-proxied by Caddy. Leave the
+                start command empty to use the selected generated backend.
+              </p>
+            {/if}
           {/if}
 
           <span class="text-fg-muted">Options</span>

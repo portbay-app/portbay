@@ -527,6 +527,7 @@ mod tests {
             mobile_run: None,
             runtime: None,
             workspace: None,
+            domain: None,
         }
     }
 
@@ -554,6 +555,7 @@ mod tests {
             mobile_run: None,
             runtime: None,
             workspace: None,
+            domain: None,
         }
     }
 

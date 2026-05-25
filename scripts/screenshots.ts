@@ -54,6 +54,7 @@ const SHOTS: Shot[] = [
   { name: "dns", route: "/dns", title: "PortBay — DNS" },
   { name: "services", route: "/services", title: "PortBay — Services" },
   { name: "domains", route: "/domains", title: "PortBay — Domains" },
+  { name: "sandbox", route: "/sandbox", title: "PortBay — Sandbox" },
 ];
 
 /** Kill animations/transitions so captures are deterministic. */

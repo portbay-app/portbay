@@ -106,6 +106,38 @@ export interface SandboxConfig {
   ephemeral: boolean;
 }
 
+/** How a domain's hostname is published to the local resolver. */
+export type ResolverMode = "auto" | "hosts" | "dnsmasq";
+
+/**
+ * Per-project domain / routing settings edited on the Domains page. Mirrors
+ * the Rust `registry::DomainConfig`. `null` on a project means every setting
+ * takes its default (PortBay's behaviour before these knobs existed).
+ */
+export interface DomainConfig {
+  /** Free-text note. No runtime effect. */
+  notes?: string | null;
+  /** URL path prefix stripped before proxying upstream. Empty / `/` = root. */
+  pathPrefix?: string | null;
+  resolverMode: ResolverMode;
+  /** PortBay issues/renews this hostname's cert. Defaults true. */
+  autoManageCert: boolean;
+  /** Also route + certify `*.hostname`. */
+  includeWildcardSubdomains: boolean;
+  /** Only publish the Caddy route while the project's process is running. */
+  exposeWhenRunning: boolean;
+}
+
+/** Defaults that match the Rust side — used when a project has no `domain`. */
+export const defaultDomainConfig = (): DomainConfig => ({
+  notes: null,
+  pathPrefix: null,
+  resolverMode: "auto",
+  autoManageCert: true,
+  includeWildcardSubdomains: false,
+  exposeWhenRunning: false,
+});
+
 export interface ProjectView {
   id: string;
   name: string;
@@ -130,6 +162,7 @@ export interface ProjectView {
   cors?: CorsConfig | null;
   sandboxed: boolean;
   sandbox?: SandboxConfig | null;
+  domain?: DomainConfig | null;
   status: PortbayStatus;
   runtime?: RuntimeInfo;
 }

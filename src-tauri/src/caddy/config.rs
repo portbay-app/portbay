@@ -8,7 +8,7 @@
 //! generator accepts a `cert_lookup` callback so it can compose without
 //! depending on the mkcert module directly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use serde_json::json;
@@ -203,6 +203,33 @@ pub fn build_config<F>(
 where
     F: Fn(&str) -> Option<CertPaths>,
 {
+    build_config_filtered(
+        reg,
+        admin_port,
+        http_port,
+        https_port,
+        php_socket_dir,
+        &HashSet::new(),
+        cert_lookup,
+    )
+}
+
+/// Like [`build_config`] but omits the routes of any project id in
+/// `suppressed`. The reconciler uses this to drop `expose_when_running`
+/// projects that aren't currently up, so their hostname stops claiming the
+/// edge until the process is back. `build_config` suppresses nothing.
+pub fn build_config_filtered<F>(
+    reg: &Registry,
+    admin_port: u16,
+    http_port: u16,
+    https_port: u16,
+    php_socket_dir: &std::path::Path,
+    suppressed: &HashSet<String>,
+    cert_lookup: F,
+) -> Result<CaddyConfig>
+where
+    F: Fn(&str) -> Option<CertPaths>,
+{
     // Two servers: HTTPS-terminating projects on `https_port` (:443), plain
     // HTTP projects on `http_port` (:80). Each ends with a catch-all that
     // serves PortBay's placeholder, and an error subroute that serves the
@@ -213,6 +240,12 @@ where
     let mut cert_files: Vec<TlsCertFile> = Vec::new();
 
     for p in &reg.projects {
+        // `expose_when_running` projects that aren't up are skipped entirely,
+        // so their hostname falls through to PortBay's catch-all rather than
+        // claiming the edge while the app is down.
+        if suppressed.contains(p.id.as_str()) {
+            continue;
+        }
         if p.https {
             https_routes.push(project_to_route(p, php_socket_dir, reg));
             http_routes.push(https_redirect_route(p));
@@ -330,14 +363,50 @@ pub fn project_to_route(p: &Project, php_socket_dir: &std::path::Path, reg: &Reg
         Some(cors) if cors.is_active() => cors_wrap(handler, cors),
         _ => handler,
     };
+    // Path Prefix (Domains page): serve the app under a sub-path, stripping the
+    // prefix before it reaches the upstream so the app still sees `/`. `None`
+    // for the default root path, so unprefixed projects are untouched.
+    let handler = match p.path_prefix() {
+        Some(prefix) => path_prefix_wrap(handler, prefix),
+        None => handler,
+    };
+    // Wildcard subdomains (Domains page): also match `*.hostname`. The cert
+    // SAN and (where needed) the resolver are handled in the cert/hosts
+    // reconcilers; here we just widen the host matcher.
+    let mut hosts = vec![p.hostname.clone()];
+    if p.include_wildcard_subdomains() {
+        hosts.push(format!("*.{}", p.hostname));
+    }
     Route {
         id,
-        match_: vec![MatchClause {
-            host: vec![p.hostname.clone()],
-        }],
+        match_: vec![MatchClause { host: hosts }],
         handle: vec![handler],
         terminal: true,
     }
+}
+
+/// Wrap a handler so the host only serves requests under `prefix`, stripping
+/// that prefix before the inner handler runs (Caddy's `handle_path` semantics:
+/// a path match plus `rewrite`/`strip_path_prefix`). Requests outside the
+/// prefix fall through to nothing and get PortBay's catch-all. `prefix` is
+/// normalised to a single leading slash and no trailing slash.
+fn path_prefix_wrap(inner: serde_json::Value, prefix: &str) -> serde_json::Value {
+    let trimmed = prefix.trim().trim_end_matches('/');
+    let norm = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+    json!({
+        "handler": "subroute",
+        "routes": [{
+            "match": [{ "path": [norm.clone(), format!("{norm}/*")] }],
+            "handle": [
+                { "handler": "rewrite", "strip_path_prefix": norm },
+                inner
+            ]
+        }]
+    })
 }
 
 /// Wrap a project's handler in a CORS subroute (Pro). For requests whose
@@ -566,6 +635,7 @@ mod tests {
             workspace: None,
             cors: None,
             sandbox: None,
+            domain: None,
         }
     }
 
@@ -593,6 +663,7 @@ mod tests {
             workspace: None,
             cors: None,
             sandbox: None,
+            domain: None,
         }
     }
 

@@ -145,13 +145,21 @@ impl Reconciler {
             caddy::reconcile(&reg, logs_dir, &certs_result.lookup, &state, caddy_cache).await;
 
         // Once the resolver file is installed, dnsmasq is the primary routing
-        // path for the whole suffix. Avoid touching /etc/hosts in that state;
-        // exact host entries are only the fallback before zero-config DNS is
-        // installed.
-        let hosts_outcome = if dns_resolver_installed(&reg, &state) {
+        // path for the whole suffix, so we normally avoid touching /etc/hosts.
+        // The exception is a project that explicitly pins `resolver_mode:
+        // hosts` — it wants an exact entry regardless — so we still run the
+        // hosts reconciler in that case (it writes only the forced rows and
+        // leaves Auto hosts to the wildcard). `resolver_installed` is passed in
+        // so `expected_pairs` can apply the per-project rule.
+        let resolver_installed = dns_resolver_installed(&reg, &state);
+        let forces_hosts = reg
+            .list_projects()
+            .iter()
+            .any(|p| p.resolver_mode() == crate::registry::ResolverMode::Hosts);
+        let hosts_outcome = if resolver_installed && !forces_hosts {
             StepOutcome::skipped("dnsmasq resolver installed; /etc/hosts not touched")
         } else {
-            hosts::reconcile(&reg, hosts_cache)
+            hosts::reconcile(&reg, resolver_installed, hosts_cache)
         };
 
         let report = ReconcileReport {

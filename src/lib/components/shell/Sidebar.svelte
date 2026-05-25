@@ -249,6 +249,24 @@
       <SidebarItem href="/domains" icon="link" label="Domains" matchPrefix />
       <SidebarItem href="/dns" icon="globe" label="DNS" matchPrefix />
       <SidebarItem href="/services" icon="server" label="Services" matchPrefix />
+      <SidebarItem
+        href="/web-servers"
+        icon="server-cog"
+        label="Web Server"
+        matchPrefix
+      />
+      <SidebarItem
+        href="/certificates"
+        icon="shield"
+        label="Certificates"
+        matchPrefix
+      />
+      <SidebarItem
+        href="/sandbox"
+        icon="package"
+        label="Sandbox"
+        matchPrefix
+      />
       <SidebarItem href="/logs" icon="file-text" label="Logs" matchPrefix />
       <SidebarItem
         href="/inspector"

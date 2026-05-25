@@ -31,8 +31,9 @@
     ProjectView,
     SandboxConfig,
     SandboxNetworkPolicy,
+    WebServer,
   } from "$lib/types/projects";
-  import { typeLabel } from "$lib/types/projects";
+  import { typeLabel, webServerLabel } from "$lib/types/projects";
 
   // Currently-displayed project; null while panel is closed.
   const project = $derived<ProjectView | null>(
@@ -40,6 +41,20 @@
       ? null
       : (projects.value.find((p) => p.id === projectDetailPanel.id) ?? null),
   );
+
+  // Sandboxed-project tally for the community cap. Count the *other* sandboxed
+  // projects (this one already being sandboxed never counts against itself),
+  // matching the backend's `check_can_sandbox`. `canSandboxThis` is the gate the
+  // UI uses: enabling Sandboxed Run is offered when this project is already
+  // sandboxed (the button becomes "Promote") or the tier has room.
+  const othersSandboxedCount = $derived(
+    projects.value.filter((p) => p.sandboxed && p.id !== project?.id).length,
+  );
+  const canSandboxThis = $derived(
+    (project?.sandboxed ?? false) || entitlements.canSandbox(othersSandboxedCount),
+  );
+  // Cap label for messaging (e.g. "2/2"); null while unlimited (Pro).
+  const sandboxCap = $derived(entitlements.maxSandboxProjects());
 
   // Optimistic display status for the header pill (overlay while a Play/Stop
   // is in flight, else the real status). Falls back to "stopped" when no
@@ -53,6 +68,7 @@
   let hostnameDraft = $state<string>("");
   let portDraft = $state<number | null>(null);
   let startCommandDraft = $state<string>("");
+  let webServerDraft = $state<WebServer>("caddy");
   let httpsDraft = $state<boolean>(true);
   let autoStartDraft = $state<boolean>(false);
 
@@ -91,6 +107,7 @@
       hostnameDraft = p.hostname;
       portDraft = p.port ?? null;
       startCommandDraft = p.startCommand ?? "";
+      webServerDraft = p.webServer ?? "caddy";
       httpsDraft = p.https;
       autoStartDraft = p.autoStart;
       dirty = false;
@@ -115,6 +132,7 @@
       hostname: hostnameDraft,
       port: portDraft ?? undefined,
       startCommand: startCommandDraft || undefined,
+      webServer: project.type === "php" ? webServerDraft : undefined,
       https: httpsDraft,
       autoStart: autoStartDraft,
     };
@@ -130,6 +148,12 @@
       if (typeof parsed.port === "number") portDraft = parsed.port;
       if (typeof parsed.startCommand === "string")
         startCommandDraft = parsed.startCommand;
+      if (
+        parsed.webServer === "caddy" ||
+        parsed.webServer === "nginx" ||
+        parsed.webServer === "apache"
+      )
+        webServerDraft = parsed.webServer;
       if (typeof parsed.https === "boolean") httpsDraft = parsed.https;
       if (typeof parsed.autoStart === "boolean") autoStartDraft = parsed.autoStart;
       dirty = true;
@@ -160,7 +184,8 @@
           name: nameDraft,
           hostname: hostnameDraft,
           port: portDraft ?? undefined,
-          startCommand: startCommandDraft || undefined,
+          startCommand: startCommandDraft.trim() ? startCommandDraft : null,
+          webServer: project.type === "php" ? webServerDraft : undefined,
           https: httpsDraft,
           autoStart: autoStartDraft,
         },
@@ -187,6 +212,7 @@
     hostnameDraft = project.hostname;
     portDraft = project.port ?? null;
     startCommandDraft = project.startCommand ?? "";
+    webServerDraft = project.webServer ?? "caddy";
     httpsDraft = project.https;
     autoStartDraft = project.autoStart;
     dirty = false;
@@ -497,12 +523,12 @@
         <button
           type="button"
           onclick={project.sandboxed ? promoteToLocal : runSandboxed}
-          disabled={!entitlements.isPro}
-          title={entitlements.isPro
-            ? project.sandboxed
-              ? "Remove the sandbox wrapper"
-              : "Run this project with PortBay's macOS sandbox profile"
-            : "Pro feature"}
+          disabled={!canSandboxThis}
+          title={project.sandboxed
+            ? "Remove the sandbox wrapper"
+            : canSandboxThis
+              ? "Run this project with PortBay's macOS sandbox profile"
+              : `You're using all ${sandboxCap} sandboxed projects — upgrade to Pro for unlimited`}
           class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md
                  border transition-colors disabled:opacity-45 disabled:cursor-not-allowed
                  {project.sandboxed
@@ -558,10 +584,12 @@
         {#snippet badge()}
           {#if project.sandboxed}
             <span class="text-[11px] text-accent">Active</span>
-          {:else if entitlements.isPro}
+          {:else if canSandboxThis}
             <span class="text-[11px] text-fg-subtle">Ready</span>
           {:else}
-            <span class="text-[11px] text-fg-subtle">Pro</span>
+            <span class="text-[11px] text-fg-subtle" title="Upgrade to Pro for unlimited sandboxed projects">
+              {othersSandboxedCount}/{sandboxCap} used
+            </span>
           {/if}
         {/snippet}
         <div class="space-y-3 text-xs">
@@ -570,7 +598,7 @@
             <select
               id="sandbox-network"
               bind:value={sandboxNetwork}
-              disabled={!entitlements.isPro || project.sandboxed}
+              disabled={!canSandboxThis || project.sandboxed}
               class="px-3 py-2 rounded-md bg-bg border border-border text-fg
                      disabled:opacity-55 focus:border-accent/60 outline-none"
             >
@@ -585,7 +613,7 @@
               <input
                 type="checkbox"
                 bind:checked={sandboxEphemeral}
-                disabled={!entitlements.isPro || project.sandboxed}
+                disabled={!canSandboxThis || project.sandboxed}
                 class="accent-accent"
               />
               Reset sandbox temp/cache before start
@@ -595,7 +623,10 @@
             <button
               type="button"
               onclick={project.sandboxed ? promoteToLocal : runSandboxed}
-              disabled={!entitlements.isPro}
+              disabled={!canSandboxThis}
+              title={canSandboxThis
+                ? undefined
+                : `You're using all ${sandboxCap} sandboxed projects — upgrade to Pro for unlimited`}
               class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md
                      border text-xs transition-colors disabled:opacity-45
                      {project.sandboxed
@@ -831,6 +862,28 @@
             oninput={markDirty}
             class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg font-mono"
           />
+          {#if project.type === "php"}
+            <label for="detail-web-server" class="text-fg-muted">Web server</label>
+            <div class="space-y-1">
+              <select
+                id="detail-web-server"
+                bind:value={webServerDraft}
+                onchange={markDirty}
+                class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg w-40"
+              >
+                {#each Object.entries(webServerLabel) as [value, label] (value)}
+                  <option value={value}>{label}</option>
+                {/each}
+              </select>
+              {#if startCommandDraft.trim()}
+                <p class="text-[11px] text-fg-subtle">
+                  Custom PHP commands are reverse-proxied by Caddy. Clear the
+                  start command to run this project through the selected
+                  generated backend.
+                </p>
+              {/if}
+            </div>
+          {/if}
           <span class="text-fg-muted">Options</span>
           <div class="flex items-center gap-4">
             <label class="flex items-center gap-1.5 text-xs cursor-pointer">

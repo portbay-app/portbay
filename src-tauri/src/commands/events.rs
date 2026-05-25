@@ -33,14 +33,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone, PartialEq)]
 struct ObservedState {
+    event_id: String,
     status: ProjectStatus,
     pid: u32,
     restarts: u32,
 }
 
 impl ObservedState {
-    fn from_process(p: &Process) -> Self {
+    fn from_process(p: &Process, event_id: String) -> Self {
         Self {
+            event_id,
             status: p.portbay_status(),
             pid: p.pid,
             restarts: p.restarts,
@@ -79,10 +81,46 @@ pub fn spawn_status_poller(app: AppHandle) {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
 
+            let registry =
+                store::load_or_default(&state.registry_path, state.domain_suffix.as_str()).ok();
+            let process_to_project: HashMap<String, String> = registry
+                .as_ref()
+                .map(|reg| {
+                    reg.list_projects()
+                        .iter()
+                        .filter_map(|project| {
+                            project
+                                .process_compose_id()
+                                .map(|process_id| (process_id, project.id.as_str().to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Projects that publish their Caddy route only while running. A
+            // start/stop transition for one of these must nudge the reconciler
+            // so the route is added/removed promptly instead of waiting for the
+            // next 30 s periodic tick.
+            let expose_ids: std::collections::HashSet<String> = registry
+                .as_ref()
+                .map(|reg| {
+                    reg.list_projects()
+                        .iter()
+                        .filter(|p| p.expose_when_running())
+                        .map(|p| p.id.as_str().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut expose_changed = false;
+
             // Emit on transition; track for the next pass.
             let mut next: HashMap<String, ObservedState> = HashMap::with_capacity(processes.len());
             for p in &processes {
-                let mut observed = ObservedState::from_process(p);
+                let event_id = process_to_project
+                    .get(&p.name)
+                    .cloned()
+                    .unwrap_or_else(|| p.name.clone());
+                let mut observed = ObservedState::from_process(p, event_id);
 
                 // If the user just asked PortBay to stop this project,
                 // a non-zero exit code is almost certainly the wrapper
@@ -90,7 +128,8 @@ pub fn spawn_status_poller(app: AppHandle) {
                 // into `exit(1)`. Downgrade to Stopped so the row
                 // doesn't paint red mid-shutdown.
                 if observed.status == ProjectStatus::Crashed
-                    && state.recently_stop_requested(&p.name)
+                    && (state.recently_stop_requested(&observed.event_id)
+                        || state.recently_stop_requested(&p.name))
                 {
                     observed.status = ProjectStatus::Stopped;
                 }
@@ -113,13 +152,16 @@ pub fn spawn_status_poller(app: AppHandle) {
                         _ => None,
                     };
                     let event = ProjectStatusEvent {
-                        id: p.name.clone(),
+                        id: observed.event_id.clone(),
                         status: observed.status,
                         runtime: Some(RuntimeInfo::from_process(p)),
                         last_error,
                         ts: now,
                     };
                     let _ = app.emit(STATUS_CHANNEL, event);
+                    if expose_ids.contains(&observed.event_id) {
+                        expose_changed = true;
+                    }
                 }
                 next.insert(p.name.clone(), observed);
             }
@@ -128,14 +170,23 @@ pub fn spawn_status_poller(app: AppHandle) {
             for (id, prev) in &last {
                 if !next.contains_key(id) && prev.status != ProjectStatus::Stopped {
                     let event = ProjectStatusEvent {
-                        id: id.clone(),
+                        id: prev.event_id.clone(),
                         status: ProjectStatus::Stopped,
                         runtime: None,
                         last_error: None,
                         ts: now,
                     };
                     let _ = app.emit(STATUS_CHANNEL, event);
+                    if expose_ids.contains(&prev.event_id) {
+                        expose_changed = true;
+                    }
                 }
+            }
+
+            // A project that publishes only while running just flipped state —
+            // regenerate Caddy so its route appears / disappears now.
+            if expose_changed {
+                state.reconciler.mark_dirty();
             }
 
             // Drive the menu-bar tray off the same observation that
@@ -144,11 +195,9 @@ pub fn spawn_status_poller(app: AppHandle) {
             // project list survives add/remove/rename without needing
             // a dedicated event channel.
             let aggregate_input: HashMap<String, ProjectStatus> = next
-                .iter()
-                .map(|(id, observed)| (id.clone(), observed.status))
+                .values()
+                .map(|observed| (observed.event_id.clone(), observed.status))
                 .collect();
-            let registry =
-                store::load_or_default(&state.registry_path, state.domain_suffix.as_str()).ok();
             if let Some(reg) = registry {
                 tray::refresh(&app, reg.list_projects(), &aggregate_input);
             }

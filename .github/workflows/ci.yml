@@ -137,6 +137,12 @@ jobs:
       - name: pnpm build
         run: pnpm build
 
+      - name: pnpm build:web
+        # Guards the hosted try.portbay.app simulator build. It uses the same
+        # app routes/components with PUBLIC_SIMULATOR=true, so new pages and
+        # refactors fail CI here if they drift from the desktop bundle.
+        run: pnpm build:web
+
   e2e:
     name: e2e · interaction latency (optimistic lifecycle)
     runs-on: macos-14
