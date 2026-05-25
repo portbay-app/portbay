@@ -78,3 +78,6 @@ src-tauri/binaries/cloudflared-*
 # Built from source by scripts/build-hosts-helper.sh, not committed.
 src-tauri/binaries/portbay-hosts-helper-*
 .playwright-mcp/
+# Playwright E2E artifacts (interaction-latency harness).
+test-results/
+playwright-report/

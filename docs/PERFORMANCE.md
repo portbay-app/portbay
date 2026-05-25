@@ -112,11 +112,24 @@ on stale events not clearing a fresh overlay. Both are pinned by unit tests in
 function, "issuing an action yields its display with no async step" is a
 structural property the tests lock in.
 
-The **end-to-end** assertion — drive a real build with WebDriver, click Play,
-assert the row paints `Starting…` within the budget — depends on the shared
-WebDriver harness owned by the *Performance + memory budget regression CI*
-card. That harness does not exist yet; when it lands, add the click-to-paint
-timing assertion there rather than duplicating it.
+The **end-to-end** assertion now exists as a Playwright job (`e2e` in CI). It
+serves the real frontend build — the same SPA the Tauri webview loads — in
+headless Chromium, mocks the Tauri IPC so `start_project` stays pending for 5 s,
+clicks Play, and asserts the row paints `Starting…` within a CI-tolerant 1.5 s
+ceiling. Because the IPC is held open far past that ceiling, the test can only
+pass if the flip is optimistic: a regression that made Play await the IPC would
+surface `Starting…` only after 5 s and fail. The spec is
+[`tests/e2e/optimistic-latency.spec.ts`](../tests/e2e/optimistic-latency.spec.ts);
+run it locally with `pnpm test:e2e`.
+
+**Why the frontend build and not the Tauri binary:** `tauri-driver` (Tauri's
+WebDriver bridge) supports Linux and Windows only — macOS has no WKWebView
+WebDriver — and both CI and the dev machine are macOS. The optimistic flip is
+pure frontend (it happens in the Svelte event handler before any `await`), so
+the SPA build in a real browser exercises exactly the guarded path. The
+*Performance + memory budget regression CI* card (P4) — cold-start, bundle size,
+idle RAM — is a separate, complementary harness; if it later adds a Linux
+Tauri-binary E2E, this click-to-paint assertion can move onto it.
 
 ---
 
