@@ -23,6 +23,11 @@
     "test:watch": "vitest",
     "pretest:e2e": "vite build",
     "test:e2e": "playwright test",
+    "prescreenshots": "vite build",
+    "screenshots": "playwright test --config playwright.screenshots.config.ts",
+    "build:web": "PUBLIC_SIMULATOR=true vite build",
+    "preview:web": "pnpm build:web && pnpm exec sirv build --single --host 127.0.0.1 --port 4318",
+    "deploy:web": "pnpm build:web && npx wrangler deploy",
     "tauri": "tauri"
   },
   "license": "AGPL-3.0-only",

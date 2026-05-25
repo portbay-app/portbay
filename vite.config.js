@@ -11,6 +11,15 @@ export default defineConfig(async () => ({
   // these two for proper HMR with .svelte files.
   plugins: [tailwindcss(), sveltekit()],
 
+  // Build-time flag for the hosted web simulator (`pnpm build:web`). Unset in
+  // the desktop/Tauri build, so it folds to "" and the simulator mock + dummy
+  // fixtures tree-shake out of the bundle entirely. See src/hooks.client.ts.
+  define: {
+    "import.meta.env.PUBLIC_SIMULATOR": JSON.stringify(
+      process.env.PUBLIC_SIMULATOR ?? "",
+    ),
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
