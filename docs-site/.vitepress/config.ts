@@ -55,15 +55,30 @@ export default defineConfig({
         items: [
           { text: "Overview", link: "/guides/" },
           { text: "Caddy and HTTPS", link: "/guides/caddy-https" },
-          { text: "PHP Setup", link: "/guides/php-setup" },
           { text: "Custom Domain Suffix", link: "/guides/custom-domain-suffix" },
+          { text: "PHP Setup", link: "/guides/php-setup" },
           { text: "Environment Variables", link: "/guides/environment-variables" },
           { text: "Project Groups", link: "/guides/project-groups" },
+          { text: "CLI Usage", link: "/guides/cli-usage" },
+        ],
+      },
+      {
+        text: "Features",
+        items: [
           { text: "HTTP Inspector", link: "/guides/http-inspector" },
           { text: "Databases", link: "/guides/databases" },
           { text: "Languages & Runtimes", link: "/guides/languages" },
+          { text: "Mailpit", link: "/guides/mailpit" },
+          { text: "Cloudflare Tunnels", link: "/guides/tunnels" },
           { text: "Sandboxed Projects", link: "/guides/sandbox" },
-          { text: "CLI Usage", link: "/guides/cli-usage" },
+        ],
+      },
+      {
+        text: "The App",
+        items: [
+          { text: "Command Palette", link: "/guides/command-palette" },
+          { text: "Log Viewer", link: "/guides/log-viewer" },
+          { text: "Tray Mode", link: "/guides/tray-mode" },
         ],
       },
       {
