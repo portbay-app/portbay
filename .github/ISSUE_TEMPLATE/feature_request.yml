@@ -32,3 +32,26 @@ body:
         - JavaScript developer
         - Maintainer / release engineering
         - Other
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Community or Cloud/Pro?
+      description: >
+        Local-first features (managing local projects, ports, services, domains,
+        HTTPS, logs) belong in Community. Hosted, multi-device, team, or billing
+        features (sync, cloud backups, remote tunnels, org controls) belong in
+        PortBay Cloud/Pro, which is developed separately. Unsure is fine —
+        maintainers will help place it.
+      options:
+        - Community (local-first)
+        - Cloud / Pro (hosted / team)
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: local-dev-fit
+    attributes:
+      label: How does this help local development workflows?
+      description: Tie the request to the day-to-day of running projects locally.
+    validations:
+      required: true
