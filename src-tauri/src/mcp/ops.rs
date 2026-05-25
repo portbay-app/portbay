@@ -854,6 +854,7 @@ impl McpContext {
             workspace: None,
             cors: None,
             sandbox: None,
+            domain: None,
         })
     }
 }
