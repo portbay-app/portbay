@@ -19,6 +19,17 @@ body:
     validations:
       required: true
   - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options:
+        - Apple Silicon (arm64)
+        - Intel (x86_64)
+        - Linux (planned)
+        - Windows (planned)
+    validations:
+      required: true
+  - type: dropdown
     id: area
     attributes:
       label: Area
@@ -34,6 +45,22 @@ body:
         - Other
     validations:
       required: true
+  - type: dropdown
+    id: project_type
+    attributes:
+      label: Project type (if relevant)
+      description: The kind of project that triggers the bug, if applicable.
+      options:
+        - Not applicable
+        - Node
+        - Next.js
+        - Vite / SvelteKit / SPA
+        - PHP
+        - Laravel
+        - Static site
+        - Other
+    validations:
+      required: false
   - type: textarea
     id: steps
     attributes:
@@ -60,3 +87,8 @@ body:
       label: Relevant logs
       description: Remove secrets, tokens, project-private paths, and env values before posting.
       render: text
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots (optional)
+      description: Drag in screenshots or a screen recording if they help. Redact anything private.

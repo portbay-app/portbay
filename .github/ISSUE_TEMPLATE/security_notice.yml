@@ -1,0 +1,39 @@
+name: Security notice (read before filing)
+description: How to report a security vulnerability — do NOT file vulnerability details here.
+title: "[Security]: DO NOT POST VULNERABILITY DETAILS — read the body"
+labels: ["security"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Stop — do not report a vulnerability in a public issue
+
+        Public issues are visible to everyone, including attackers. **Do not
+        include reproduction steps, proof-of-concept, or impact details here.**
+
+        Report security vulnerabilities **privately** through one of:
+
+        - **GitHub private advisory** (preferred):
+          [Report a vulnerability](https://github.com/portbay-app/portbay/security/advisories/new)
+        - **Email:** security@portbay.app
+
+        See [`SECURITY.md`](https://github.com/portbay-app/portbay/blob/main/SECURITY.md)
+        for our threat model, response targets, and what is in scope.
+
+        This template exists only to redirect you. If you open it, the
+        maintainers will close it and ask you to use private reporting.
+  - type: checkboxes
+    id: ack
+    attributes:
+      label: Acknowledgement
+      options:
+        - label: I understand this issue must NOT contain vulnerability details, and I will report privately via a GitHub security advisory or security@portbay.app.
+          required: true
+  - type: textarea
+    id: non_sensitive
+    attributes:
+      label: Non-sensitive note (optional)
+      description: >
+        Optionally, a non-sensitive note (for example, "I've sent a private
+        advisory, tracking here"). Do not paste exploit details, payloads, or
+        affected endpoints.

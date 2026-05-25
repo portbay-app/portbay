@@ -1,0 +1,42 @@
+name: Documentation issue
+description: Report a problem with the docs, or request new documentation.
+title: "[Docs]: "
+labels: ["documentation", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for improving the docs. For small fixes (typos, broken links),
+        a pull request is often faster than an issue — see CONTRIBUTING.md.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type of docs issue
+      options:
+        - Incorrect or outdated information
+        - Missing documentation
+        - Unclear / confusing explanation
+        - Broken link or example
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Where
+      description: Page URL, or the file path under docs/ or docs-site/.
+      placeholder: "docs-site/guides/php-setup.md or https://docs.portbay.app/guides/php-setup"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing?
+      description: Describe the gap or error, and what the docs should say instead.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording (optional)
+      description: If you have a concrete fix in mind, paste it here.
