@@ -1,0 +1,67 @@
+# .repo-boundary-denylist
+#
+# Strings that must NEVER appear in the public portbay-app repository.
+# scripts/check-repo-boundaries.sh fails (locally and in CI) on any match.
+#
+# Each entry marks proprietary PortBay Cloud/Pro implementation, a secret, or a
+# private endpoint that belongs ONLY in the private portbay-cloud repository.
+# See docs/architecture/repo-boundaries.md for the full boundary policy.
+#
+# Format — three kinds of rule:
+#   * `<string>`     forbidden CONTENT, matched as a fixed case-sensitive string.
+#   * `re:<regex>`   forbidden CONTENT, matched as an extended regular expression.
+#   * `path:<glob>`  forbidden PATH — this file may never be staged/committed,
+#                    even with `git add -f` (it bypasses .gitignore, this does not).
+#   Blank lines and lines beginning with `#` are ignored. In `path:` globs, `*`
+#   matches across `/` (shell `case` semantics), so `secrets/*` and `*.pem` are
+#   enough — no `**` needed.
+#
+# False positives (forbidden terms quoted in the boundary docs themselves,
+# teaching examples, the committed `.env.example`) are excluded by path glob in
+# `.repo-boundary-allow`. Add a glob there rather than weakening a rule here.
+
+# --- Secret values / credentials (these never belong in version control) ---
+STRIPE_SECRET
+CUSTOMER_BILLING_SECRET
+PAYMENT_WEBHOOK_SECRET
+LICENSE_PRIVATE_KEY
+ENTERPRISE_POLICY_SECRET
+re:sk_live_[0-9A-Za-z]{16,}
+re:sk_test_[0-9A-Za-z]{16,}
+re:rk_live_[0-9A-Za-z]{16,}
+re:-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----
+
+# --- Private Cloud/Pro implementation markers ---
+PORT_CLOUD_PRIVATE
+CLOUD_INTERNAL
+PRO_INTERNAL
+PRIVATE_TUNNEL_SERVER
+
+# --- Private endpoints (the public app calls documented PUBLIC APIs only) ---
+internal.portbay
+private.portbay
+port-cloud.internal
+
+# --- Private package namespaces (the public repo must not depend on these) ---
+@portbay-cloud/
+
+# --- Paths that must NEVER be committed (blocks even `git add -f`) ---
+# Real environment files and secrets (the committed template `.env.example` is
+# allowlisted in .repo-boundary-allow).
+path:.env
+path:.env.*
+# Private keys / certificates / keystores.
+path:*.pem
+path:*.key
+path:*.p12
+path:*.pfx
+path:*.keystore
+path:*.jks
+# Secret bundles and local-only secret stores.
+path:secrets/*
+path:.secrets-local/*
+path:*.secret
+path:.dev.vars
+# Signed/unsigned distributables belong on Releases, not in git.
+path:*.dmg
+path:*.app.zip

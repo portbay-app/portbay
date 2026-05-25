@@ -11,7 +11,15 @@ PortBay is a local developer tool with access to project folders, local processe
 
 ## Reporting A Vulnerability
 
-Email security@portbay.dev with:
+Report privately through either channel:
+
+- **GitHub private advisory (preferred):**
+  [Report a vulnerability](https://github.com/portbay-app/portbay/security/advisories/new)
+- **Email:** security@portbay.app
+  <!-- TODO(maintainers): confirm a monitored security@portbay.app mailbox (or
+       GPG-enabled alias) is provisioned before the first public release. -->
+
+Include:
 
 - PortBay version or commit SHA.
 - macOS version.
@@ -49,6 +57,38 @@ PortBay must not leak or upload:
 - Vulnerabilities in third-party project code launched by PortBay.
 - Social engineering against maintainers or users.
 - Denial of service by intentionally malformed local project commands.
+
+## Secret Handling And Scanning
+
+PortBay Community ships no secrets. The only cloud endpoint it knows is a public
+domain, and the only embedded key is the **public** entitlement-verification key
+(the matching private key lives only in the private `portbay-cloud` repo). To
+keep it that way:
+
+- **Never commit** real credentials, tokens, private keys, or `.env` files.
+  `.env` is gitignored; `.env.example` holds only safe placeholders.
+- **Secret scanning** runs in CI via [gitleaks](https://github.com/gitleaks/gitleaks)
+  (config: `.gitleaks.toml`). Enable it locally too:
+  ```bash
+  brew install gitleaks pre-commit
+  pre-commit install        # see .pre-commit-config.yaml
+  ```
+  This scans staged changes for credentials on every commit.
+- **Boundary scanning** (`scripts/check-repo-boundaries.sh`, config
+  `.repo-boundary-denylist`) blocks proprietary Cloud/Pro markers and private
+  endpoints from entering this repo. See
+  [repo boundaries](./docs/architecture/repo-boundaries.md).
+- If you discover a committed secret, treat it as compromised: rotate it, then
+  report via the private channel above so we can scrub history.
+
+## Local Certificate And HTTPS Considerations
+
+PortBay uses [mkcert](https://github.com/FiloSottile/mkcert) to mint
+locally-trusted certificates for `*.test` hostnames. This installs a local
+development Certificate Authority into your system/browser trust stores. The CA
+private key stays on your machine and is never uploaded. Removing PortBay's
+mkcert CA (`mkcert -uninstall`) revokes that local trust. Treat the local CA key
+like any other private key on your device.
 
 ## GPG
 
