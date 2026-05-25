@@ -7,7 +7,7 @@
 //! its members.
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::commands::projects::{load_registry, save_registry};
 use crate::error::{AppError, AppResult};
@@ -168,18 +168,26 @@ pub async fn remove_group(state: State<'_, AppState>, id: String) -> AppResult<(
 }
 
 #[tauri::command]
-pub async fn start_group(state: State<'_, AppState>, id: String) -> AppResult<GroupOpReport> {
-    fanout(&state, &id, GroupOp::Start).await
+pub async fn start_group(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<GroupOpReport> {
+    fanout(&app, &state, &id, GroupOp::Start).await
 }
 
 #[tauri::command]
 pub async fn stop_group(state: State<'_, AppState>, id: String) -> AppResult<GroupOpReport> {
-    fanout(&state, &id, GroupOp::Stop).await
+    fanout_without_reconcile(&state, &id, GroupOp::Stop).await
 }
 
 #[tauri::command]
-pub async fn restart_group(state: State<'_, AppState>, id: String) -> AppResult<GroupOpReport> {
-    fanout(&state, &id, GroupOp::Restart).await
+pub async fn restart_group(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<GroupOpReport> {
+    fanout(&app, &state, &id, GroupOp::Restart).await
 }
 
 #[derive(Clone, Copy)]
@@ -190,6 +198,24 @@ enum GroupOp {
 }
 
 async fn fanout(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    group_id: &str,
+    op: GroupOp,
+) -> AppResult<GroupOpReport> {
+    let _ = state.reconciler.tick(app).await;
+    fanout_inner(state, group_id, op).await
+}
+
+async fn fanout_without_reconcile(
+    state: &State<'_, AppState>,
+    group_id: &str,
+    op: GroupOp,
+) -> AppResult<GroupOpReport> {
+    fanout_inner(state, group_id, op).await
+}
+
+async fn fanout_inner(
     state: &State<'_, AppState>,
     group_id: &str,
     op: GroupOp,
@@ -200,10 +226,10 @@ async fn fanout(
         .ok_or_else(|| AppError::NotFound(format!("group:{group_id}")))?
         .clone();
 
-    let known: std::collections::HashSet<&str> = registry
+    let projects_by_id: std::collections::HashMap<&str, &crate::registry::Project> = registry
         .list_projects()
         .iter()
-        .map(|p| p.id.as_str())
+        .map(|p| (p.id.as_str(), p))
         .collect();
     let client = state.pc_client()?;
 
@@ -216,7 +242,7 @@ async fn fanout(
 
     for pid in &group.projects {
         let id_str = pid.as_str().to_string();
-        if !known.contains(id_str.as_str()) {
+        let Some(project) = projects_by_id.get(id_str.as_str()) else {
             // Stale member — count as failed so the user sees the drift.
             report.failed += 1;
             report.results.push(GroupOpResult {
@@ -225,16 +251,28 @@ async fn fanout(
                 error: Some("project not in registry".into()),
             });
             continue;
+        };
+        let process_id = project.process_compose_id();
+        if process_id.is_none() {
+            report.succeeded += 1;
+            report.results.push(GroupOpResult {
+                project_id: id_str,
+                ok: true,
+                error: None,
+            });
+            continue;
         }
+        let process_id = process_id.expect("checked above");
         // Mark stop intent so wrapper-translated SIGTERM exits don't
         // surface as crashes in the dashboard for batched ops.
         if matches!(op, GroupOp::Stop | GroupOp::Restart) {
             state.mark_stop_requested(&id_str);
+            state.mark_stop_requested(&process_id);
         }
         let res = match op {
-            GroupOp::Start => client.start(&id_str).await,
-            GroupOp::Stop => client.stop(&id_str).await,
-            GroupOp::Restart => client.restart(&id_str).await,
+            GroupOp::Start => client.start(&process_id).await,
+            GroupOp::Stop => client.stop(&process_id).await,
+            GroupOp::Restart => client.restart(&process_id).await,
         };
         match res {
             Ok(_) => {

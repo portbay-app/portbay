@@ -34,13 +34,12 @@ pub async fn start_project(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
-    // Pure Caddy-served projects (Static sites, anything with no
-    // `start_command`) have no Process Compose process. Calling
-    // `client.start` for them hits PC's `/process/start/<name>` for a name
-    // PC has never heard of → HTTP 400. They're served straight from disk by
-    // Caddy's file_server, so "starting" them just means making sure the
-    // route is live — handled by the reconcile tick below.
-    if project_has_pc_process(&state, &id)? {
+    // Pure Caddy-served projects have no Process Compose process. Generated
+    // Nginx/Apache PHP backends do, but their process id is derived.
+    if let Some(process_id) = project_pc_process_id(&state, &id)? {
+        // Reconcile first so generated web-server process definitions exist in
+        // Process Compose before we ask it to start one.
+        let _ = state.reconciler.tick(&app).await;
         // Port pre-flight. If the project pins a port and something else
         // is already bound to it, either clean up the orphan ourselves
         // (only when we can prove the holder is one of our stale dev
@@ -56,7 +55,7 @@ pub async fn start_project(
         }
 
         let client = state.pc_client()?;
-        client.start(&id).await?;
+        client.start(&process_id).await?;
     }
 
     // After the process is up (or immediately, for static sites), force a
@@ -72,12 +71,16 @@ pub async fn start_project(
     Ok(())
 }
 
-/// `start_project_sandboxed(id)` — Pro safety run for untrusted projects.
+/// `start_project_sandboxed(id)` — macOS safety run for untrusted projects.
 ///
 /// The project stays in the normal Process Compose lifecycle, but its generated
-/// command is wrapped by a PortBay-owned macOS sandbox profile. The hidden
-/// sandbox tag persists until `promote_project_to_local` removes it, so
+/// command is wrapped by a PortBay-owned macOS Seatbelt profile. The hidden
+/// sandbox config persists until `promote_project_to_local` removes it, so
 /// restarts remain sandboxed and the UI can show an explicit indicator.
+///
+/// Availability: macOS only (Seatbelt). The anonymous/free community tiers can
+/// sandbox up to [`SANDBOX_COMMUNITY_CAP`](crate::entitlements::SANDBOX_COMMUNITY_CAP)
+/// projects; Pro is unlimited.
 #[tauri::command]
 pub async fn start_project_sandboxed(
     app: AppHandle,
@@ -85,34 +88,69 @@ pub async fn start_project_sandboxed(
     id: String,
     options: Option<SandboxStartOptions>,
 ) -> AppResult<()> {
-    if !crate::entitlements::current().entitlements.early_access {
-        return Err(AppError::ProRequired {
+    // Platform gate: Sandboxed Run is enforced by the macOS Seatbelt sandbox
+    // (`sandbox-exec`). There's no equivalent confinement on other platforms
+    // yet, so refuse rather than run untrusted code unconfined.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (&app, &state, &id, &options);
+        Err(AppError::Unsupported {
             feature: "Sandboxed Run",
-        });
+            reason: "Sandboxed Run is only available on macOS.",
+        })
     }
 
+    #[cfg(target_os = "macos")]
     {
-        let mut registry = load_registry(&state)?;
-        let project = registry
-            .get_project_mut(&ProjectId::new(id.clone()))
-            .ok_or_else(|| AppError::NotFound(id.clone()))?;
-        if project.start_command.is_none() && project.workspace.is_none() {
-            return Err(AppError::BadInput(
-                "Sandboxed Run requires a project command to supervise".into(),
-            ));
+        {
+            let mut registry = load_registry(&state)?;
+            let pid = ProjectId::new(id.clone());
+
+            // Tier gate: the anonymous/free community tiers may sandbox up to a
+            // small cap (Pro is unlimited). Re-running a project that's already
+            // sandboxed must never trip the limit, so only a *newly* sandboxed
+            // project counts — measured against the other sandboxed projects.
+            let already_on = registry
+                .get_project(&pid)
+                .map(crate::sandbox::is_enabled)
+                .unwrap_or(false);
+            if !already_on {
+                let others = registry
+                    .projects
+                    .iter()
+                    .filter(|p| p.id != pid && crate::sandbox::is_enabled(p))
+                    .count();
+                if let Err(cap) = crate::entitlements::check_can_sandbox(others) {
+                    return Err(AppError::SandboxCapReached { cap });
+                }
+            }
+
+            let project = registry
+                .get_project_mut(&pid)
+                .ok_or_else(|| AppError::NotFound(id.clone()))?;
+            if project.start_command.is_none() && project.workspace.is_none() {
+                return Err(AppError::BadInput(
+                    "Sandboxed Run requires a project command to supervise".into(),
+                ));
+            }
+            let options = options.unwrap_or(SandboxStartOptions {
+                network: SandboxNetworkPolicy::LoopbackOnly,
+                ephemeral: true,
+            });
+            crate::sandbox::enable(project, options.network, options.ephemeral);
+            let data_dir = state.logs_dir.parent().unwrap_or(&state.logs_dir);
+            // Fail closed: prove macOS accepts this exact profile before we
+            // persist the sandboxed state or start the project. We never want a
+            // path where the project runs but confinement silently didn't apply.
+            crate::sandbox::preflight(data_dir, project)
+                .map_err(|e| AppError::Internal(format!("sandbox could not be activated: {e}")))?;
+            crate::sandbox::reset_ephemeral_state(data_dir, project)
+                .map_err(|e| AppError::Internal(format!("sandbox reset failed: {e}")))?;
+            crate::commands::projects::save_registry(&state, &registry)?;
         }
-        let options = options.unwrap_or(SandboxStartOptions {
-            network: SandboxNetworkPolicy::LoopbackOnly,
-            ephemeral: true,
-        });
-        crate::sandbox::enable(project, options.network, options.ephemeral);
-        let data_dir = state.logs_dir.parent().unwrap_or(&state.logs_dir);
-        crate::sandbox::reset_ephemeral_state(data_dir, project)
-            .map_err(|e| AppError::Internal(format!("sandbox reset failed: {e}")))?;
-        crate::commands::projects::save_registry(&state, &registry)?;
+        let _ = state.reconciler.tick(&app).await;
+        start_project(app, state, id).await
     }
-    let _ = state.reconciler.tick(&app).await;
-    start_project(app, state, id).await
 }
 
 /// Remove the sandbox wrapper from a project after the user has inspected it.
@@ -153,7 +191,8 @@ pub async fn force_start_project(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
-    if project_has_pc_process(&state, &id)? {
+    if let Some(process_id) = project_pc_process_id(&state, &id)? {
+        let _ = state.reconciler.tick(&app).await;
         force_free_ports(&state, &id).await?;
         // Re-check: anything we couldn't kill (e.g. a root-owned process) still
         // blocks the bind — surface it rather than letting PC flail.
@@ -161,7 +200,7 @@ pub async fn force_start_project(
             return Err(AppError::PortConflict { port, holder });
         }
         let client = state.pc_client()?;
-        client.start(&id).await?;
+        client.start(&process_id).await?;
     }
     let _ = state.reconciler.tick(&app).await;
     Ok(())
@@ -210,15 +249,22 @@ async fn force_free_ports(state: &State<'_, AppState>, id: &str) -> AppResult<()
     Ok(())
 }
 
-/// True when the project has a Process Compose process backing it (i.e. it
-/// pins a `start_command`). Static / pure-Caddy projects return `false`: they
-/// have no daemon to start, stop, or restart.
-fn project_has_pc_process(state: &State<'_, AppState>, project_id: &str) -> AppResult<bool> {
+/// Process Compose id backing this project, when one exists. Normal dev-server
+/// projects use the registry id; generated PHP web-server backends use their
+/// derived `web-nginx-*` / `web-apache-*` process ids.
+fn project_pc_process_id(
+    state: &State<'_, AppState>,
+    project_id: &str,
+) -> AppResult<Option<String>> {
     let registry = load_registry(state)?;
     let project = registry
         .get_project(&ProjectId::new(project_id))
         .ok_or_else(|| AppError::NotFound(project_id.to_string()))?;
-    Ok(project.start_command.is_some())
+    Ok(pc_process_id_for_project(project))
+}
+
+fn pc_process_id_for_project(project: &Project) -> Option<String> {
+    project.process_compose_id()
 }
 
 /// Walk the registry for the given project, look up any port it pins
@@ -369,12 +415,12 @@ pub async fn stop_project(state: State<'_, AppState>, id: String) -> AppResult<(
     // Static / pure-Caddy projects have no PC process to stop. Caddy keeps
     // serving their files for as long as they're in the registry, so Stop is
     // a no-op rather than a 400 against a non-existent PC process.
-    if !project_has_pc_process(&state, &id)? {
+    let Some(process_id) = project_pc_process_id(&state, &id)? else {
         return Ok(());
-    }
+    };
     state.mark_stop_requested(&id);
     let client = state.pc_client()?;
-    client.stop(&id).await?;
+    client.stop(&process_id).await?;
 
     // PC's SIGTERM may leave the real dev-server worker orphaned and still on
     // the port; reap it so the next Start doesn't hit a self-inflicted
@@ -392,16 +438,17 @@ pub async fn restart_project(
 ) -> AppResult<()> {
     // Static / pure-Caddy projects have nothing to restart in PC; just
     // re-assert routing so the file_server route is fresh.
-    if !project_has_pc_process(&state, &id)? {
+    let Some(process_id) = project_pc_process_id(&state, &id)? else {
         let _ = state.reconciler.tick(&app).await;
         return Ok(());
-    }
+    };
+    let _ = state.reconciler.tick(&app).await;
 
     // Restart kills the child too, so wrapper-translated SIGTERM exits
     // (npm → exit 1) shouldn't be flagged as crashes either.
     state.mark_stop_requested(&id);
     let client = state.pc_client()?;
-    client.restart(&id).await?;
+    client.restart(&process_id).await?;
 
     // After PC fires the restart, wait briefly and confirm the port
     // got reclaimed by the new child. If a foreign process holds it,
@@ -436,6 +483,16 @@ pub async fn preview_port_conflict(port: u16) -> AppResult<Option<String>> {
 pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
     let client = state.pc_client()?;
     let processes = client.processes().await?;
+    let registry = load_registry(&state)?;
+    let process_to_project: std::collections::HashMap<String, String> = registry
+        .list_projects()
+        .iter()
+        .filter_map(|project| {
+            project
+                .process_compose_id()
+                .map(|process_id| (process_id, project.id.as_str().to_string()))
+        })
+        .collect();
 
     let mut report = StopAllReport {
         stopped: 0,
@@ -449,13 +506,18 @@ pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
             // either; the table only cares about projects we actually touched.
             continue;
         }
-        let id = p.name.clone();
-        state.mark_stop_requested(&id);
-        match client.stop(&id).await {
+        let process_id = p.name.clone();
+        let report_id = process_to_project
+            .get(&process_id)
+            .cloned()
+            .unwrap_or_else(|| process_id.clone());
+        state.mark_stop_requested(&report_id);
+        state.mark_stop_requested(&process_id);
+        match client.stop(&process_id).await {
             Ok(()) => {
                 report.stopped += 1;
                 report.results.push(StopAllResultEntry {
-                    id,
+                    id: report_id,
                     ok: true,
                     error: None,
                 });
@@ -463,7 +525,7 @@ pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
             Err(e) => {
                 report.failed += 1;
                 report.results.push(StopAllResultEntry {
-                    id,
+                    id: report_id,
                     ok: false,
                     error: Some(e.to_string()),
                 });

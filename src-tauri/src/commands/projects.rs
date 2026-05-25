@@ -39,7 +39,9 @@ pub async fn list_projects(state: State<'_, AppState>) -> AppResult<Vec<ProjectV
         .list_projects()
         .iter()
         .map(|p| {
-            let proc = pc_state.as_ref().and_then(|m| m.get(p.id.as_str()));
+            let proc = pc_state
+                .as_ref()
+                .and_then(|m| p.process_compose_id().and_then(|key| m.get(key.as_str())));
             ProjectView::from_project(p, proc)
         })
         .collect();
@@ -54,7 +56,11 @@ pub async fn get_project(state: State<'_, AppState>, id: String) -> AppResult<Pr
         .get_project(&ProjectId::new(id.clone()))
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
     let pc_state = fetch_pc_state(&state).await;
-    let proc = pc_state.as_ref().and_then(|m| m.get(id.as_str()));
+    let proc = pc_state.as_ref().and_then(|m| {
+        project
+            .process_compose_id()
+            .and_then(|key| m.get(key.as_str()))
+    });
     Ok(ProjectView::from_project(project, proc))
 }
 
@@ -92,12 +98,18 @@ pub async fn add_project(
     if let Err(cap) = crate::entitlements::check_can_add(registry.projects.len()) {
         return Err(AppError::ProjectCapReached { cap });
     }
-    if input.sandbox.as_ref().is_some_and(|cfg| cfg.enabled)
-        && !crate::entitlements::current().entitlements.early_access
-    {
-        return Err(AppError::ProRequired {
-            feature: "Sandboxed Run",
-        });
+    // Sandboxed Run is community-capped (anonymous/free get a small allowance;
+    // Pro unlimited), not Pro-only. A brand-new sandboxed project consumes a
+    // slot against the projects already sandboxed.
+    if input.sandbox.as_ref().is_some_and(|cfg| cfg.enabled) {
+        let others = registry
+            .projects
+            .iter()
+            .filter(|p| crate::sandbox::is_enabled(p))
+            .count();
+        if let Err(cap) = crate::entitlements::check_can_sandbox(others) {
+            return Err(AppError::SandboxCapReached { cap });
+        }
     }
 
     let hostname = input
@@ -190,6 +202,25 @@ pub async fn update_project(
     let mut registry = load_registry(&state)?;
     let pid = ProjectId::new(id.clone());
 
+    // Sandbox community cap: newly enabling Sandboxed Run on a project consumes
+    // a slot (Pro unlimited); flipping an already-sandboxed project doesn't.
+    // Computed before the mutable borrow below to satisfy the borrow checker.
+    if patch.sandbox.as_ref().is_some_and(|cfg| cfg.enabled) {
+        let was_on = registry
+            .get_project(&pid)
+            .is_some_and(crate::sandbox::is_enabled);
+        if !was_on {
+            let others = registry
+                .projects
+                .iter()
+                .filter(|p| p.id != pid && crate::sandbox::is_enabled(p))
+                .count();
+            if let Err(cap) = crate::entitlements::check_can_sandbox(others) {
+                return Err(AppError::SandboxCapReached { cap });
+            }
+        }
+    }
+
     let project = registry
         .get_project_mut(&pid)
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
@@ -207,7 +238,10 @@ pub async fn update_project(
         project.extra_ports = extras;
     }
     if let Some(cmd) = patch.start_command {
-        project.start_command = Some(cmd);
+        project.start_command = cmd.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        });
     }
     if let Some(https) = patch.https {
         project.https = https;
@@ -240,11 +274,8 @@ pub async fn update_project(
         project.workspace = Some(ws);
     }
     if let Some(sandbox) = patch.sandbox {
-        if sandbox.enabled && !crate::entitlements::current().entitlements.early_access {
-            return Err(AppError::ProRequired {
-                feature: "Sandboxed Run",
-            });
-        }
+        // The community cap was already enforced above, before the mutable
+        // borrow. Here we just apply the policy.
         project.sandbox = Some(sandbox);
         project
             .tags
@@ -282,7 +313,11 @@ pub async fn update_project(
 
     // Look up live runtime after save.
     let pc_state = fetch_pc_state(&state).await;
-    let proc = pc_state.as_ref().and_then(|m| m.get(id.as_str()));
+    let proc = pc_state.as_ref().and_then(|m| {
+        snapshot
+            .process_compose_id()
+            .and_then(|key| m.get(key.as_str()))
+    });
     Ok(ProjectView::from_project(&snapshot, proc))
 }
 
@@ -433,10 +468,19 @@ pub async fn clone_git_project_sandboxed(
     state: State<'_, AppState>,
     input: CloneSandboxedInput,
 ) -> AppResult<ProjectView> {
-    if !crate::entitlements::current().entitlements.early_access {
-        return Err(AppError::ProRequired {
-            feature: "Sandboxed Run",
-        });
+    // Sandbox community cap (Pro unlimited), checked up-front so we don't run a
+    // network clone only to reject it. The clone always creates a *new*
+    // sandboxed project, so it consumes a slot.
+    {
+        let registry = load_registry(&state)?;
+        let others = registry
+            .projects
+            .iter()
+            .filter(|p| crate::sandbox::is_enabled(p))
+            .count();
+        if let Err(cap) = crate::entitlements::check_can_sandbox(others) {
+            return Err(AppError::SandboxCapReached { cap });
+        }
     }
     let url = validate_git_url(&input.url)?;
     let parent = input
@@ -532,6 +576,7 @@ pub async fn clone_git_project_sandboxed(
         workspace: None,
         cors: None,
         sandbox: Some(SandboxConfig::enabled(input.network, input.ephemeral)),
+        domain: None,
     };
     registry.add_project(project.clone())?;
     save_registry(&state, &registry)?;
@@ -787,8 +832,6 @@ fn detection_with_mobile(
 
 fn detect_php_project(path: &Path) -> ProjectDetection {
     let port = 8000;
-    let php_bin = preferred_php_bin();
-    let php = shell_quote(&php_bin.to_string_lossy());
     let version = detected_runtime_for(ProjectType::Php).map(|rt| rt.version);
     let public = path.join("public");
     let document_root = if public.join("index.php").exists() || public.join("router.php").exists() {
@@ -797,29 +840,13 @@ fn detect_php_project(path: &Path) -> ProjectDetection {
         None
     };
 
-    let start_command = if path.join("router.php").exists() {
-        Some(format!(
-            "{php} -S 127.0.0.1:{port} -d memory_limit=256M router.php"
-        ))
-    } else if public.join("router.php").exists() {
-        Some(format!(
-            "{php} -S 127.0.0.1:{port} -d memory_limit=256M -t public public/router.php"
-        ))
-    } else if document_root.as_deref() == Some("public") {
-        Some(format!(
-            "{php} -S 127.0.0.1:{port} -d memory_limit=256M -t public"
-        ))
-    } else {
-        Some(format!("{php} -S 127.0.0.1:{port} -d memory_limit=256M"))
-    };
-
     ProjectDetection {
         kind: ProjectType::Php,
         port: Some(port),
-        start_command,
+        start_command: None,
         document_root,
         php_version: version,
-        web_server: Some(WebServer::Caddy),
+        web_server: None,
         mobile_run: None,
     }
 }
@@ -983,14 +1010,6 @@ fn has_child_with_extension(path: &Path, ext: &str) -> bool {
             .and_then(|s| s.to_str())
             .is_some_and(|s| s == ext)
     })
-}
-
-fn preferred_php_bin() -> PathBuf {
-    crate::php::detect_all()
-        .into_iter()
-        .next()
-        .map(|p| p.php_bin)
-        .unwrap_or_else(|| PathBuf::from("php"))
 }
 
 fn detected_runtime_for(kind: ProjectType) -> Option<Runtime> {
