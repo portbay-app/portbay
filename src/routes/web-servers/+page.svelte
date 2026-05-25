@@ -213,7 +213,7 @@
       </div>
     {:else}
       {@const tone = serverTone(selected)}
-      <div class="max-w-3xl px-6 py-6 space-y-6">
+      <div class="px-6 py-6 space-y-6">
         <!-- Header -->
         <div class="flex items-start gap-4">
           <span

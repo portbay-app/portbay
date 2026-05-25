@@ -21,6 +21,7 @@
   import Icon, { type IconName } from "$lib/components/atoms/Icon.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { devTools } from "$lib/stores/devTools.svelte";
+  import { errorBus } from "$lib/stores/errors.svelte";
   import type { DevToolInfo, DevToolKind } from "$lib/types/devTools";
 
   interface Props {
@@ -108,6 +109,17 @@
     open = false;
     try {
       await safeInvoke("open_in_ide", { id: projectId, ide: tool.id });
+      errorBus.push({
+        code: "OPEN_IN_TOOL",
+        whatHappened: `Opening project in ${tool.label}.`,
+        whyItMatters:
+          import.meta.env.PUBLIC_SIMULATOR === "true"
+            ? "In the desktop app this launches the project folder in your installed tool."
+            : "The project folder was handed to your installed tool.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
     } catch {
       /* safeInvoke pushes its own toast */
     }

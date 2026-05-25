@@ -375,7 +375,7 @@
         </div>
       </header>
 
-      <div class="px-8 py-6 space-y-4 max-w-3xl">
+      <div class="px-8 py-6 space-y-4">
         <!-- First-run setup / routing health -->
         {#if dns.preflight}
           {@const pf = dns.preflight}
@@ -627,7 +627,7 @@
           </div>
         </div>
       </header>
-      <div class="px-8 py-6 space-y-4 max-w-2xl">
+      <div class="px-8 py-6 space-y-4">
         <article class="bg-surface border border-border/70 rounded-2xl px-5 py-4">
           <dl class="space-y-3 text-[12.5px]">
             <div class="flex items-center justify-between gap-4">
@@ -706,7 +706,7 @@
           </div>
         </div>
       </header>
-      <div class="px-8 py-6 space-y-4 max-w-2xl">
+      <div class="px-8 py-6 space-y-4">
         <article class="bg-surface border border-border/70 rounded-2xl px-5 py-4">
           <span class="block text-[11px] font-medium text-fg-muted mb-1.5">Entry</span>
           <div class="flex items-stretch gap-1.5">

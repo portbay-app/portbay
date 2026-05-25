@@ -19,6 +19,7 @@
   import { Icon, ProjectAvatar, StatusDot, StatusPill } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
   import { devTools } from "$lib/stores/devTools.svelte";
+  import { errorBus } from "$lib/stores/errors.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
   import { parseLogLine, type LogLevel, type LogLine } from "$lib/components/logs/ansi";
@@ -208,6 +209,17 @@
   async function openInTerminal() {
     if (!project || !terminalTool) return;
     await safeInvoke("open_in_ide", { id: project.id, ide: terminalTool.id });
+    errorBus.push({
+      code: "OPEN_TERMINAL",
+      whatHappened: `Opening ${project.name} in ${terminalTool.label}.`,
+      whyItMatters:
+        import.meta.env.PUBLIC_SIMULATOR === "true"
+          ? "In the desktop app this opens a terminal in the project folder."
+          : "The terminal was launched in the project folder.",
+      whoCausedIt: "system",
+      severity: "success",
+      actions: [],
+    });
   }
 
   // Close the picker on outside-click / Escape.

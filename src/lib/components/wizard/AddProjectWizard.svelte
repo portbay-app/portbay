@@ -70,6 +70,12 @@
   let gitCloneRunning = $state<boolean>(false);
   let gitNetwork = $state<SandboxNetworkPolicy>("outbound");
 
+  // Clone-in-Sandbox makes a *new* sandboxed project, so it's allowed whenever
+  // the tier has room under the community cap (Pro is unlimited), not Pro-only.
+  const canSandboxNew = $derived(
+    entitlements.canSandbox(projects.value.filter((p) => p.sandboxed).length),
+  );
+
   /**
    * Inline port-conflict warning. Backed by a debounced lsof probe so
    * the user is told *while typing* if the port they're claiming is
@@ -114,7 +120,7 @@
 
   const commandPlaceholder = $derived(
     kind === "php"
-      ? "php -S 127.0.0.1:8000 router.php"
+      ? "leave empty for PortBay-managed PHP-FPM"
       : kind === "flutter"
         ? "flutter run"
         : kind === "xcode"
@@ -709,7 +715,13 @@
 
       <DashboardCard title="Clone in Sandbox" flush>
         {#snippet badge()}
-          <span class="text-[11px] text-fg-subtle">Pro</span>
+          {#if canSandboxNew}
+            <span class="text-[11px] text-fg-subtle">Sandboxed</span>
+          {:else}
+            <span class="text-[11px] text-fg-subtle" title="Upgrade to Pro for unlimited sandboxed projects">
+              Limit reached
+            </span>
+          {/if}
         {/snippet}
         <div class="space-y-3">
           <div class="flex items-center gap-2">
@@ -717,14 +729,14 @@
               type="url"
               bind:value={gitUrl}
               placeholder="https://github.com/org/repo.git"
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="flex-1 px-3 py-2 rounded-md text-sm bg-bg border border-border
                      focus:border-accent/60 outline-none text-fg placeholder-fg-subtle
                      font-mono disabled:opacity-55"
             />
             <select
               bind:value={gitNetwork}
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="px-3 py-2 rounded-md text-xs bg-bg border border-border text-fg
                      disabled:opacity-55"
               title="Sandbox network policy"
@@ -737,7 +749,7 @@
             <button
               type="button"
               onclick={cloneSandboxed}
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="inline-flex items-center gap-1.5 px-3 py-2 text-xs rounded-md
                      text-accent border border-accent/40 hover:bg-accent/10
                      disabled:opacity-50 transition-colors whitespace-nowrap"
@@ -755,7 +767,7 @@
               type="text"
               bind:value={gitParentDir}
               placeholder="Install folder (defaults to PortBay sandbox imports)"
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="flex-1 px-3 py-2 rounded-md text-xs bg-bg border border-border
                      focus:border-accent/60 outline-none text-fg placeholder-fg-subtle
                      font-mono disabled:opacity-55"
@@ -763,7 +775,7 @@
             <button
               type="button"
               onclick={browseSandboxInstallFolder}
-              disabled={!entitlements.isPro || gitCloneRunning}
+              disabled={!canSandboxNew || gitCloneRunning}
               class="px-3 py-2 text-xs rounded-md border border-border text-fg-muted
                      hover:text-fg hover:border-border-strong disabled:opacity-50
                      transition-colors whitespace-nowrap"
@@ -1007,6 +1019,13 @@
               <option value="nginx">Nginx</option>
               <option value="apache">Apache</option>
             </select>
+            {#if startCommand.trim()}
+              <span></span>
+              <p class="text-[11px] text-fg-subtle">
+                Custom PHP commands are reverse-proxied by Caddy. Leave the
+                start command empty to use the selected generated backend.
+              </p>
+            {/if}
           {/if}
 
           <span class="text-fg-muted">Options</span>

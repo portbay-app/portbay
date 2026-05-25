@@ -182,12 +182,7 @@
       <Icon name="refresh-cw" size={13} class="animate-spin" />
       Stopping…
     {:else}
-      <span
-        class="inline-flex items-center justify-center w-3.5 h-3.5 rounded-[3px]
-               bg-on-accent/95 text-status-crashed"
-      >
-        <Icon name="square" size={9} class="fill-current" />
-      </span>
+      <Icon name="square" size={11} class="fill-current" />
       Stop All
     {/if}
   </button>
