@@ -2,6 +2,8 @@
 
 Projects are registered from local folders. PortBay records the launch command, port, hostname, HTTPS setting, optional services, and readiness probe in the registry.
 
+![PortBay projects list](/screenshots/projects.png)
+
 ## Supported Project Types
 
 | Type | Typical command | Notes |

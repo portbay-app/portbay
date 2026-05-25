@@ -10,6 +10,9 @@ hero:
       text: Get started
       link: /getting-started/
     - theme: alt
+      text: Try it in your browser
+      link: https://try.portbay.app
+    - theme: alt
       text: CLI reference
       link: /reference/cli
     - theme: alt
@@ -17,13 +20,29 @@ hero:
       link: /troubleshooting/
 
 features:
-  - title: One registry
-    details: Projects, hostnames, ports, services, readiness probes, and environment variables live in a JSON registry that the GUI and CLI both use.
-  - title: Sidecar-aware
-    details: Process Compose runs project commands, Caddy routes hostnames, mkcert issues local certificates, and service sidecars stay visible in the app.
-  - title: Built for recovery
-    details: Structured errors include what happened, why it matters, who can fix it, and which action should come next.
+  - title: One registry, GUI + CLI
+    details: Projects, hostnames, ports, services, readiness probes, and environment variables live in a JSON registry both the app and CLI use.
+    link: /getting-started/add-project
+  - title: Local HTTPS by hostname
+    details: Caddy routes each project to https://&lt;name&gt;.test, with mkcert issuing the local certificates.
+    link: /guides/caddy-https
+  - title: HTTP request inspector
+    details: Live Caddy access-log tailing into a filterable request table — method, status, latency, and the matched project.
+    link: /guides/http-inspector
+  - title: Bundled databases
+    details: PortBay-supervised MySQL, MariaDB, Postgres, and Redis instances with connection details and per-project links.
+    link: /guides/databases
+  - title: Sandboxed runner (Pro)
+    details: Run an untrusted project inside a macOS sandbox profile, inspect it, then promote it to a normal local run.
+    link: /guides/sandbox
+  - title: Drive it from an AI agent
+    details: An MCP server exposes PortBay's tools and resources to Claude Code, Cursor, and Zed.
+    link: /agents/
 ---
+
+![PortBay managing local projects](/screenshots/projects.png)
+
+> **See it without installing.** The [interactive simulator](https://try.portbay.app) runs the real PortBay interface against a set of sample projects, right in your browser — click Play on a project and watch it start.
 
 ## Current Release State
 
