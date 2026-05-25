@@ -229,6 +229,14 @@ pub async fn quit_app(app: AppHandle) -> AppResult<()> {
     Ok(())
 }
 
+/// `open_main_window` — reveal PortBay's primary window from secondary UI
+/// surfaces such as the tray panel.
+#[tauri::command]
+pub async fn open_main_window(app: AppHandle) -> AppResult<()> {
+    crate::tray::show_main_window(&app);
+    Ok(())
+}
+
 /// `tail_logs(id, limit, offset)` — static log tail from PC's buffer.
 ///
 /// For live streaming, see card #10's Channel<T>-based follow mode — this
