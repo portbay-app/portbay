@@ -64,8 +64,8 @@ native one.
 
 | | PortBay | Laravel Herd | ServBay | Docker / OrbStack |
 |---|---|---|---|---|
-| Open source | ✅ MIT | ❌ | ❌ | Engine ✅ / app ❌ |
-| Price | Free | Free / paid Pro | Free / paid | Free / paid |
+| Open source | ✅ AGPL-3.0 | ❌ | ❌ | Engine ✅ / app ❌ |
+| Price | Free · optional Pro | Free / paid Pro | Free / paid | Free / paid |
 | Container-free | ✅ | ✅ | ✅ | ❌ |
 | Local HTTPS + `.test` | ✅ | ✅ | ✅ | Manual |
 | Multi-runtime (Node/PHP/…) | ✅ | PHP-first | ✅ | ✅ |
@@ -74,7 +74,10 @@ native one.
 
 If you live in PHP on macOS today, Herd is excellent. PortBay's bet is a single
 open, lightweight tool that handles mixed Node/PHP/static stacks without a daemon
-zoo or a paywall.
+zoo. It's free and open source (AGPL-3.0); an optional, pay-what-you-want
+[Pro tier](https://docs.portbay.app/pro/) — earned with a donation **or** a merged
+pull request — funds the project and unlocks hosted multi-device sync and a few
+power-user features. No subscription, and nothing you can't build yourself.
 
 ## How it works
 
@@ -146,12 +149,42 @@ If PortBay is useful to you, starring the repo genuinely helps it reach other de
 
 ## Support the project
 
-PortBay is free and MIT-licensed. Sponsorships fund the things open source still
+PortBay is free and open source (AGPL-3.0). Sponsorships fund the things open source still
 has to pay for — a code-signing certificate, build infrastructure, and maintainer
 time — and keep the project independent. If your team relies on it, please consider
 [sponsoring](https://github.com/sponsors/portbay-app).
 
+## Editions
+
+**PortBay Community** — this repository — is the open-source local development
+manager for individuals and teams who want a clean, transparent way to run
+projects locally. It is fully usable offline, with no account and no network.
+
+**PortBay Cloud and Pro** are developed separately and may include team sync,
+cloud backups, remote access, hosted recipes, billing, organization management,
+enterprise policy controls, and managed infrastructure. They build on the
+Community app through documented public APIs — the Community edition is never
+crippled to upsell them, and this repository contains no proprietary Cloud/Pro
+code. See [Community vs Pro](./docs/pages/community-vs-pro.md) and the
+[repo boundaries](./docs/architecture/repo-boundaries.md).
+
 ## License
 
-[MIT](./LICENSE) © PortBay contributors. Third-party components are credited in
-[`NOTICE`](./NOTICE).
+PortBay Community is licensed under the **GNU Affero General Public License v3.0
+only** ([`AGPL-3.0-only`](./LICENSE)) — you may use, study, modify, and share it,
+and if you distribute it or run a modified version as a network service, the
+AGPL's terms apply. PortBay Cloud/Pro is separate commercial software.
+
+- Plain-English summary: [docs/pages/license.md](./docs/pages/license.md)
+- License map and policy: [docs/legal/licensing.md](./docs/legal/licensing.md)
+- Third-party components: [`NOTICE`](./NOTICE)
+
+SPDX-License-Identifier: `AGPL-3.0-only` · © PortBay contributors.
+*This is a summary, not legal advice — the [`LICENSE`](./LICENSE) file is binding.*
+
+## Security & conduct
+
+- Report vulnerabilities privately — see [`SECURITY.md`](./SECURITY.md). Do not
+  open public issues for security problems.
+- Participation is governed by the [Code of Conduct](./CODE_OF_CONDUCT.md).
+- Project decision-making is described in [`GOVERNANCE.md`](./GOVERNANCE.md).

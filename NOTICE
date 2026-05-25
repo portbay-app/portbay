@@ -1,9 +1,14 @@
 PortBay
-Copyright (c) 2026 Tribal House
+Copyright (c) 2026 Tribal House and the PortBay contributors
+
+PortBay Community is licensed under the GNU Affero General Public License v3.0
+only (AGPL-3.0-only); the full text is in the LICENSE file.
 
 This product includes software developed by third parties and used under
 their respective licenses. Source files lifted from external projects
-carry an in-file comment pointing back to the upstream path.
+carry an in-file comment pointing back to the upstream path. The MIT-licensed
+components listed below are inbound-compatible with AGPL-3.0 and are
+incorporated into the PortBay Community work under that combined license.
 
 ================================================================================
 
