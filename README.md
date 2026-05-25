@@ -21,11 +21,13 @@ no container stack, no hand-rolled proxy and DNS config.
 
 </div>
 
-<!--
-  SCREENSHOT: drop a dashboard screen recording / hero image here once captured.
-  e.g. <img src="docs/assets/dashboard.png" alt="PortBay dashboard" />
-  Tracked as a task; intentionally omitted rather than shipped as a broken link.
--->
+<div align="center">
+
+<a href="https://try.portbay.app"><img src="docs-site/public/screenshots/projects.png" alt="PortBay managing local projects" width="840" /></a>
+
+<sub><b><a href="https://try.portbay.app">▶ Try it in your browser</a></b> — the real interface with sample projects, no install required.</sub>
+
+</div>
 
 ## Why PortBay
 
@@ -56,6 +58,15 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 
 Everything is driven by a Rust core with full CLI parity, so the GUI is a client,
 not the source of truth.
+
+## A look around
+
+|  |  |
+| :--: | :--: |
+| **HTTP request inspector** — live Caddy traffic | **Bundled databases** — MySQL, Postgres, Redis |
+| ![PortBay HTTP inspector](docs-site/public/screenshots/inspector.png) | ![PortBay databases](docs-site/public/screenshots/databases.png) |
+| **Languages** — detect-first runtimes | **Local DNS** — wildcard `.test` resolution |
+| ![PortBay languages](docs-site/public/screenshots/languages.png) | ![PortBay DNS](docs-site/public/screenshots/dns.png) |
 
 ## How it compares
 
