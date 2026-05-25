@@ -41,7 +41,7 @@ export function collectCommands(): PaletteCommand[] {
       icon: "plus",
       shortcut: "⌘N",
       keywords: ["new", "create", "register"],
-      run: () => addProjectWizard.show(),
+      run: () => addProjectWizard.requestAdd(),
     },
     {
       id: "app.new-group",
@@ -91,6 +91,7 @@ export function collectCommands(): PaletteCommand[] {
     { id: "/domains", label: "Domains", icon: "link" as const },
     { id: "/languages", label: "Languages", icon: "file-code" as const },
     { id: "/logs", label: "Logs", icon: "file-text" as const },
+    { id: "/inspector", label: "Inspector", icon: "activity" as const },
     { id: "/settings", label: "Settings", icon: "settings" as const },
   ]) {
     cmds.push({

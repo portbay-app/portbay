@@ -16,6 +16,7 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import Toggle from "$lib/components/atoms/Toggle.svelte";
   import SetupRequirements from "$lib/components/setup/SetupRequirements.svelte";
+  import { AccountSection, SyncSection, EarlyAccessSection } from "$lib/components/account";
   import Segmented from "$lib/components/atoms/Segmented.svelte";
   import ColorSwatchGroup from "$lib/components/atoms/ColorSwatchGroup.svelte";
 
@@ -447,6 +448,15 @@
 
   <!-- ============== Setup required (self-hides when healthy) ============== -->
   <SetupRequirements />
+
+  <!-- ============== Account & Plan ============== -->
+  <AccountSection />
+
+  <!-- ============== Sync (Pro) ============== -->
+  <SyncSection />
+
+  <!-- ============== Early Access (Pro) ============== -->
+  <EarlyAccessSection />
 
   <!-- ============== General ============== -->
   <section

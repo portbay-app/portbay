@@ -8,7 +8,8 @@ export type DatabaseEngineId =
   | "mariadb"
   | "postgres"
   | "redis"
-  | "mongo";
+  | "mongo"
+  | "memcached";
 
 /** An engine the user can create instances from (Add Database picker). */
 export interface DatabaseEngineView {

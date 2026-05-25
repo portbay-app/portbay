@@ -7,6 +7,8 @@
 
 export type InstallSource =
   | "homebrew"
+  | "serv_bay"
+  | "fly_env"
   | "asdf"
   | "mise"
   | "nvm"
@@ -68,6 +70,8 @@ export interface LanguageView {
 /** Human label for the install-source pill. */
 export const sourceLabel: Record<InstallSource, string> = {
   homebrew: "Homebrew",
+  serv_bay: "ServBay",
+  fly_env: "FlyEnv",
   asdf: "asdf",
   mise: "mise",
   nvm: "nvm",

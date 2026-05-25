@@ -15,6 +15,21 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
+  import { entitlements } from "$lib/stores/entitlements.svelte";
+  import { account } from "$lib/stores/account.svelte";
+  import { licenseDialog } from "$lib/stores/licenseDialog.svelte";
+
+  const tier = $derived(entitlements.tier);
+
+  function openLicense() {
+    onclose();
+    licenseDialog.open();
+  }
+
+  function openAccount(intent: "signin" | "pro") {
+    onclose();
+    account.open({ intent });
+  }
 
   interface Props {
     open: boolean;
@@ -52,7 +67,7 @@
       severity: "info",
       actions: [
         { label: "GitHub", url: "https://github.com/portbay-app/portbay" },
-        { label: "Docs", url: "https://docs.portbay.dev" },
+        { label: "Docs", url: "https://docs.portbay.app" },
       ],
     });
   }
@@ -85,10 +100,48 @@
     aria-label="User menu"
   >
     <div class="px-3 py-2.5 border-b border-border">
-      <p class="text-[12px] font-medium text-fg">PortBay</p>
-      <p class="text-[11px] text-fg-subtle">Single-user workstation</p>
+      {#if entitlements.isSignedIn}
+        <p class="text-[12px] font-medium text-fg truncate">{entitlements.account?.login}</p>
+        <p class="text-[11px] {tier === 'pro' ? 'text-accent' : 'text-fg-subtle'}">
+          {tier === "pro" ? "PortBay Pro" : "Free account"}
+        </p>
+      {:else}
+        <p class="text-[12px] font-medium text-fg">PortBay</p>
+        <p class="text-[11px] text-fg-subtle">Not signed in</p>
+      {/if}
     </div>
 
+    {#if tier === "anonymous"}
+      <button
+        type="button"
+        onclick={() => openAccount("signin")}
+        class="w-full flex items-center gap-2.5 px-3 py-2 text-[13px]
+               text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+        role="menuitem"
+      >
+        <Icon name="users" size={13} /> Sign in or sign up
+      </button>
+    {:else if tier === "free"}
+      <button
+        type="button"
+        onclick={() => openAccount("pro")}
+        class="w-full flex items-center gap-2.5 px-3 py-2 text-[13px]
+               text-accent hover:bg-surface-2 transition-colors"
+        role="menuitem"
+      >
+        <Icon name="sparkles" size={13} /> Upgrade to Pro
+      </button>
+    {/if}
+
+    <button
+      type="button"
+      onclick={openLicense}
+      class="w-full flex items-center gap-2.5 px-3 py-2 text-[13px]
+             text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+      role="menuitem"
+    >
+      <Icon name="sparkles" size={13} /> PortBay Pro
+    </button>
     <button
       type="button"
       onclick={aboutPortbay}

@@ -51,6 +51,12 @@ pub struct Preferences {
     #[serde(default)]
     pub telemetry_enabled: bool,
 
+    /// Opt into early-access (experimental) features. Only meaningful for a
+    /// Pro account with the `early_access` entitlement; the Settings toggle is
+    /// Pro-gated. Read by `flags::enabled` (core) and the client flags store.
+    #[serde(default)]
+    pub early_access_opt_in: bool,
+
     // -------- General --------
     /// Register a LaunchAgent so PortBay starts at login. Off by
     /// default; the agent is provisioned the first time this flips on.
@@ -184,6 +190,7 @@ impl Default for Preferences {
             close_to_menu_bar: true,
             close_to_menu_bar_toast_seen: false,
             telemetry_enabled: false,
+            early_access_opt_in: false,
             launch_at_login: false,
             reopen_previous_projects: false,
             confirm_before_stop_all: true,
@@ -286,6 +293,7 @@ mod tests {
             close_to_menu_bar: true,
             close_to_menu_bar_toast_seen: true,
             telemetry_enabled: true,
+            early_access_opt_in: true,
             launch_at_login: true,
             reopen_previous_projects: true,
             confirm_before_stop_all: false,
@@ -306,6 +314,7 @@ mod tests {
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"showTrayIcon\":false"));
+        assert!(json.contains("\"earlyAccessOptIn\":true"));
         assert!(json.contains("\"closeToMenuBar\":true"));
         assert!(json.contains("\"launchAtLogin\":true"));
         assert!(json.contains("\"accentColor\":\"purple\""));

@@ -13,8 +13,26 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { safeInvoke } from "$lib/ipc";
 import type { CommandError } from "$lib/types/error";
 import type { ProjectStatusEvent, ProjectView } from "$lib/types/projects";
+import type { DisplayStatus, PortbayStatus } from "$lib/types/status";
+import {
+  beginTransition as begin,
+  clearTransition as clearT,
+  onStatusEvent as foldEvent,
+  optimisticDisplay,
+  type TransitionKind,
+  type TransitionMap,
+} from "$lib/lifecycle/optimistic";
 
 const STATUS_CHANNEL = "portbay://status";
+
+/**
+ * Safety net: if no resolving status event ever arrives (e.g. the user
+ * declined a force-quit, or the backend went silent), drop the optimistic
+ * overlay after this long so a row can never get wedged showing
+ * "Starting…"/"Stopping…". The status poller ticks every 750 ms, so a real
+ * transition resolves well inside this window.
+ */
+const OPTIMISTIC_TTL_MS = 12_000;
 
 /** Build a minimal CommandError from a plain string (status-event errors). */
 function syntheticEnvelope(message: string): CommandError {
@@ -33,6 +51,14 @@ function createProjectsStore() {
   let selectedId = $state<string | null>(null);
   /** Per-project inline error envelopes, keyed by project id. */
   let lastErrors = $state<Record<string, CommandError>>({});
+  /**
+   * Optimistic lifecycle overlays — what a row *displays* while a Play/Stop is
+   * in flight, before the real status event lands. Logic lives in the pure
+   * `lifecycle/optimistic` module; this is just the reactive holder.
+   */
+  let transitions = $state<TransitionMap>({});
+  /** TTL timers per project (non-reactive — bookkeeping only). */
+  const ttlTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let unlisten: UnlistenFn | null = null;
 
   async function refresh(): Promise<void> {
@@ -53,6 +79,43 @@ function createProjectsStore() {
     }
   }
 
+  function clearTtlTimer(id: string) {
+    const t = ttlTimers.get(id);
+    if (t !== undefined) {
+      clearTimeout(t);
+      ttlTimers.delete(id);
+    }
+  }
+
+  /**
+   * Optimistically flip a row to `starting`/`stopping` the instant a Play/Stop
+   * is clicked — synchronous, so the UI responds before the IPC resolves. The
+   * real status event reconciles it (see {@link applyStatusEvent}); a TTL net
+   * drops it if nothing ever resolves.
+   */
+  function beginTransition(id: string, kind: TransitionKind) {
+    clearTtlTimer(id);
+    transitions = begin(transitions, id, kind);
+    ttlTimers.set(
+      id,
+      setTimeout(() => {
+        transitions = clearT(transitions, id);
+        ttlTimers.delete(id);
+      }, OPTIMISTIC_TTL_MS),
+    );
+  }
+
+  /** Roll back an optimistic overlay (the action failed or was declined). */
+  function failTransition(id: string) {
+    clearTtlTimer(id);
+    transitions = clearT(transitions, id);
+  }
+
+  /** The status a row should render: optimistic overlay if any, else real. */
+  function displayStatusOf(p: { id: string; status: PortbayStatus }): DisplayStatus {
+    return optimisticDisplay(transitions, p.id, p.status);
+  }
+
   /** Patch a single row from a status event. Avoids re-fetching the list. */
   function applyStatusEvent(ev: ProjectStatusEvent) {
     items = items.map((p) =>
@@ -60,6 +123,12 @@ function createProjectsStore() {
         ? { ...p, status: ev.status, runtime: ev.runtime ?? p.runtime }
         : p,
     );
+
+    // Reconcile any optimistic overlay against the real event: a resolving
+    // event drops it; a stale wrong-direction tick is ignored (no flicker).
+    const before = transitions;
+    transitions = foldEvent(transitions, ev.id, ev.status);
+    if (transitions !== before) clearTtlTimer(ev.id);
 
     // Track inline errors from the status event.
     if (ev.lastError) {
@@ -98,6 +167,9 @@ function createProjectsStore() {
       unlisten();
       unlisten = null;
     }
+    for (const t of ttlTimers.values()) clearTimeout(t);
+    ttlTimers.clear();
+    transitions = {};
   }
 
   function select(id: string | null) {
@@ -134,6 +206,9 @@ function createProjectsStore() {
     selectRelative,
     setError,
     clearError,
+    beginTransition,
+    failTransition,
+    displayStatusOf,
   };
 }
 

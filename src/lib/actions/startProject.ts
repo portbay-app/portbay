@@ -6,25 +6,32 @@
  * process PortBay didn't start is destructive, so the confirmation is mandatory
  * and the dialog spells out what happens.
  *
- * Returns the **unresolved** error for the caller to surface however it likes
- * (an inline row on the dashboard, a toast in the detail panel), or `null` on
- * success or when the user declines the force-quit. Centralising the conflict
- * UX here keeps every Play button behaving identically.
+ * Returns a discriminated {@link StartResult} so callers can tell *started*
+ * from *declined* (the user backed out of the force-quit) from *error*. That
+ * distinction matters for the optimistic Play overlay: a decline must roll the
+ * overlay back (nothing is starting), whereas a success leaves it for the real
+ * status event to resolve. Centralising the conflict UX here keeps every Play
+ * button behaving identically.
  */
 import { invokeQuiet } from "$lib/ipc";
 import { confirmDialog } from "$lib/stores/confirm.svelte";
 import type { CommandError } from "$lib/types/error";
 
+export type StartResult =
+  | { kind: "started" }
+  | { kind: "declined" }
+  | { kind: "error"; error: CommandError };
+
 export async function startProject(
   id: string,
   name: string,
-): Promise<CommandError | null> {
+): Promise<StartResult> {
   try {
     await invokeQuiet<void>("start_project", { id });
-    return null;
+    return { kind: "started" };
   } catch (raw) {
     const err = raw as CommandError;
-    if (err.code !== "PORT_CONFLICT") return err;
+    if (err.code !== "PORT_CONFLICT") return { kind: "error", error: err };
 
     const choice = await confirmDialog.open({
       title: "Port already in use",
@@ -34,14 +41,14 @@ export async function startProject(
       ],
       destructive: true,
     });
-    if (choice !== "force") return null; // user declined — not an error
+    if (choice !== "force") return { kind: "declined" }; // user backed out
 
     try {
       await invokeQuiet<void>("force_start_project", { id });
-      return null;
+      return { kind: "started" };
     } catch (raw2) {
       // e.g. the holder is root-owned and couldn't be killed — surface it.
-      return raw2 as CommandError;
+      return { kind: "error", error: raw2 as CommandError };
     }
   }
 }

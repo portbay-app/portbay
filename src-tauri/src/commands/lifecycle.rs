@@ -438,6 +438,7 @@ mod tests {
         ws: Option<Workspace>,
     ) -> Project {
         Project {
+            cors: None,
             id: ProjectId::new("p"),
             name: "P".into(),
             path: PathBuf::from(path),
@@ -454,6 +455,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: ws,
         }

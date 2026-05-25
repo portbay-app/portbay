@@ -22,7 +22,10 @@ pub mod lifecycle;
 pub mod types;
 
 pub use client::CaddyClient;
-pub use config::{bootstrap_config, build_config, project_to_route, CertPaths};
+pub use config::{
+    bootstrap_config, build_config, project_to_route, with_access_log, CertPaths, ACCESS_LOGGER,
+    ACCESS_LOG_FILE,
+};
 pub use error::{CaddyError, Result};
 pub use lifecycle::{
     find_free_https_port, find_free_port, CaddySidecar, ADMIN_SCAN_RANGE, DEFAULT_ADMIN_PORT,

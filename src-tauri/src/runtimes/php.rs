@@ -169,6 +169,8 @@ fn parse_count(key: &str, val: &str, min: u32) -> Result<u32, String> {
 fn source_from(s: PhpSource) -> InstallSource {
     match s {
         PhpSource::Homebrew => InstallSource::Homebrew,
+        PhpSource::ServBay => InstallSource::ServBay,
+        PhpSource::FlyEnv => InstallSource::FlyEnv,
         PhpSource::System => InstallSource::System,
     }
 }

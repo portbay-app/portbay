@@ -108,16 +108,31 @@
     if (!sel) return;
 
     if (e.key === "s" || e.key === "S") {
+      projects.beginTransition(sel, "start"); // optimistic flip on keypress
       void (async () => {
-        await dns.ensureReady();
-        const name = projects.value.find((p) => p.id === sel)?.name ?? sel;
-        const conflict = await startProject(sel, name);
-        if (conflict) errorBus.push(conflict);
+        try {
+          await dns.ensureReady();
+          const name = projects.value.find((p) => p.id === sel)?.name ?? sel;
+          const r = await startProject(sel, name);
+          if (r.kind === "declined") projects.failTransition(sel);
+          else if (r.kind === "error") {
+            projects.failTransition(sel);
+            errorBus.push(r.error);
+          }
+        } catch {
+          projects.failTransition(sel);
+        }
       })();
     } else if (e.key === "x" || e.key === "X") {
-      void safeInvoke("stop_project", { id: sel });
+      projects.beginTransition(sel, "stop");
+      void safeInvoke("stop_project", { id: sel }).catch(() =>
+        projects.failTransition(sel),
+      );
     } else if (e.key === "r" || e.key === "R") {
-      void safeInvoke("restart_project", { id: sel });
+      projects.beginTransition(sel, "start");
+      void safeInvoke("restart_project", { id: sel }).catch(() =>
+        projects.failTransition(sel),
+      );
     } else if (e.key === "Enter") {
       projectDetailPanel.show(sel);
     }

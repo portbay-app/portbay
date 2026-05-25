@@ -35,7 +35,9 @@ export default defineConfig({
       { text: "Start", link: "/getting-started/" },
       { text: "Guides", link: "/guides/" },
       { text: "Reference", link: "/reference/cli" },
+      { text: "AI Agents", link: "/agents/" },
       { text: "Architecture", link: "/architecture/" },
+      { text: "Pro", link: "/pro/" },
       { text: "Troubleshooting", link: "/troubleshooting/" },
     ],
     sidebar: [
@@ -70,8 +72,19 @@ export default defineConfig({
         ],
       },
       {
+        text: "AI Agents (MCP)",
+        items: [
+          { text: "Overview", link: "/agents/" },
+          { text: "Tool Reference", link: "/agents/tools" },
+        ],
+      },
+      {
         text: "Architecture",
         items: [{ text: "System Design", link: "/architecture/" }],
+      },
+      {
+        text: "Pro",
+        items: [{ text: "PortBay Pro", link: "/pro/" }],
       },
       {
         text: "Troubleshooting",

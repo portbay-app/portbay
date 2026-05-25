@@ -1,4 +1,4 @@
-//! Reconcile loop — drives the live system (PC YAML, Caddy admin, hosts,
+//! Reconcile loop — drives the live system (PC YAML, Caddy admin, DNS/hosts,
 //! certs) toward the on-disk Registry.
 //!
 //! Ticks fire on three triggers:
@@ -10,7 +10,7 @@
 //!    sidecars are up so the bootstrap state applies the registry-
 //!    derived Caddy config + hosts + certs.
 //! 3. **Periodic safety tick** every 30 s catches drift from the CLI
-//!    (which writes the same registry file) or any external `/etc/hosts`
+//!    (which writes the same registry file) or any external resolver/hosts
 //!    edits.
 //!
 //! Multiple `mark_dirty` calls during a single tick coalesce: tokio's
@@ -144,12 +144,15 @@ impl Reconciler {
         let caddy_outcome =
             caddy::reconcile(&reg, logs_dir, &certs_result.lookup, &state, caddy_cache).await;
 
-        // Exact project hostnames are always kept in `/etc/hosts` — it's the
-        // bulletproof primary resolution path (no port, no daemon, no resolver
-        // file, no drift). dnsmasq's `/etc/resolver/<suffix>` wildcard, when
-        // installed, coexists fine: both resolve to 127.0.0.1, `/etc/hosts`
-        // wins for exact names, and dnsmasq covers arbitrary subdomains.
-        let hosts_outcome = hosts::reconcile(&reg, hosts_cache);
+        // Once the resolver file is installed, dnsmasq is the primary routing
+        // path for the whole suffix. Avoid touching /etc/hosts in that state;
+        // exact host entries are only the fallback before zero-config DNS is
+        // installed.
+        let hosts_outcome = if dns_resolver_installed(&reg, &state) {
+            StepOutcome::skipped("dnsmasq resolver installed; /etc/hosts not touched")
+        } else {
+            hosts::reconcile(&reg, hosts_cache)
+        };
 
         let report = ReconcileReport {
             started_at_ms,
@@ -171,6 +174,11 @@ fn reg_summary(reg: &Registry) -> String {
         reg.list_projects().len(),
         reg.domain_suffix
     )
+}
+
+fn dns_resolver_installed(reg: &Registry, state: &AppState) -> bool {
+    let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
+    crate::dnsmasq::resolver::is_installed(&reg.domain_suffix, port)
 }
 
 fn log_report(r: &ReconcileReport, reg_summary: String) {

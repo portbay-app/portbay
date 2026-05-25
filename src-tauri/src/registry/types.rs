@@ -54,7 +54,35 @@ pub enum ProjectType {
     Php,
     Static,
     Node,
+    Flutter,
+    Xcode,
+    Android,
     Custom,
+}
+
+/// Web server used for PHP document-root projects.
+///
+/// Caddy remains PortBay's edge router for local hostnames and TLS. When a PHP
+/// project chooses Apache or Nginx, PortBay launches that server on the
+/// project's loopback `port` and Caddy reverse-proxies the public hostname to
+/// it. This avoids multiple daemons fighting over :80/:443 while still giving
+/// project-level Apache/Nginx/Caddy behavior.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebServer {
+    Caddy,
+    Nginx,
+    Apache,
+}
+
+impl WebServer {
+    pub fn id(&self) -> &'static str {
+        match self {
+            WebServer::Caddy => "caddy",
+            WebServer::Nginx => "nginx",
+            WebServer::Apache => "apache",
+        }
+    }
 }
 
 /// How PortBay decides a project is "actually serving" rather than just
@@ -153,6 +181,20 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub php_version: Option<String>,
 
+    /// Web server selected for PHP document-root projects. Absent means Caddy.
+    /// Ignored for non-PHP projects and for PHP projects that provide a custom
+    /// `start_command` (those are reverse-proxied like any dev server).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_server: Option<WebServer>,
+
+    // ----- Mobile run configuration (optional) -------------------------
+    /// Project-local run settings for Flutter, Xcode, and Android projects.
+    /// The Play command is still stored in `start_command` for Process Compose;
+    /// this structured config lets the UI edit scheme/flavor/device settings
+    /// without making users hand-author shell commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile_run: Option<MobileRunConfig>,
+
     // ----- Runtime selection (schema v2+) -------------------------------
     /// Pinned language runtime — which language toolchain and version
     /// PortBay launches this project with. Introduced in registry schema v2;
@@ -173,6 +215,16 @@ pub struct Project {
     /// added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<Workspace>,
+
+    /// Per-project CORS policy applied at the Caddy edge. **Pro-gated** (the
+    /// `custom_port_cors` entitlement): the `add`/`update` paths reject
+    /// introducing or changing a custom policy without Pro, but an existing
+    /// policy keeps being served on downgrade — we never strip a configured
+    /// value. `None`/empty = PortBay's default (no CORS headers), the free,
+    /// always-available behaviour. Additive — absent on free projects and
+    /// pre-existing registries (deserialises to `None`); no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cors: Option<CorsConfig>,
 }
 
 impl Project {
@@ -192,6 +244,34 @@ impl Project {
             Some(_) => None,
             None => self.php_version.as_deref(),
         }
+    }
+
+    pub fn web_server_effective(&self) -> WebServer {
+        self.web_server.unwrap_or(WebServer::Caddy)
+    }
+}
+
+/// Per-project CORS policy applied at the Caddy edge. The basic listen port
+/// is **not** gated (every project needs one); only this custom cross-origin
+/// policy is a Pro feature. `allowed_origins` empty means the feature is off
+/// and PortBay adds no CORS headers — identical to today's behaviour.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct CorsConfig {
+    /// Exact origins allowed. When a request's `Origin` matches one of these,
+    /// Caddy echoes it into `Access-Control-Allow-Origin` and answers
+    /// preflight `OPTIONS` with the standard allow headers. Empty = off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_origins: Vec<String>,
+
+    /// Send `Access-Control-Allow-Credentials: true` for matched origins.
+    #[serde(default)]
+    pub allow_credentials: bool,
+}
+
+impl CorsConfig {
+    /// Whether this policy actually does anything (has ≥1 allowed origin).
+    pub fn is_active(&self) -> bool {
+        !self.allowed_origins.is_empty()
     }
 }
 
@@ -311,6 +391,7 @@ pub enum DatabaseEngine {
     Postgres,
     Redis,
     Mongo,
+    Memcached,
 }
 
 impl DatabaseEngine {
@@ -323,6 +404,7 @@ impl DatabaseEngine {
             DatabaseEngine::Postgres => "postgres",
             DatabaseEngine::Redis => "redis",
             DatabaseEngine::Mongo => "mongo",
+            DatabaseEngine::Memcached => "memcached",
         }
     }
 
@@ -334,6 +416,7 @@ impl DatabaseEngine {
             DatabaseEngine::Postgres => "PostgreSQL",
             DatabaseEngine::Redis => "Redis",
             DatabaseEngine::Mongo => "MongoDB",
+            DatabaseEngine::Memcached => "Memcached",
         }
     }
 
@@ -344,6 +427,7 @@ impl DatabaseEngine {
             DatabaseEngine::Postgres => 5432,
             DatabaseEngine::Redis => 6379,
             DatabaseEngine::Mongo => 27017,
+            DatabaseEngine::Memcached => 11211,
         }
     }
 
@@ -355,6 +439,7 @@ impl DatabaseEngine {
             "postgres" => Some(DatabaseEngine::Postgres),
             "redis" => Some(DatabaseEngine::Redis),
             "mongo" => Some(DatabaseEngine::Mongo),
+            "memcached" => Some(DatabaseEngine::Memcached),
             _ => None,
         }
     }
@@ -414,7 +499,7 @@ impl DatabaseInstance {
             DatabaseEngine::Postgres => "postgres",
             DatabaseEngine::Mysql | DatabaseEngine::Mariadb => "root",
             // Redis/Mongo have no user by default in a fresh local instance.
-            DatabaseEngine::Redis | DatabaseEngine::Mongo => "",
+            DatabaseEngine::Redis | DatabaseEngine::Mongo | DatabaseEngine::Memcached => "",
         }
     }
 
@@ -430,6 +515,7 @@ impl DatabaseInstance {
             }
             DatabaseEngine::Redis => format!("redis://127.0.0.1:{port}"),
             DatabaseEngine::Mongo => format!("mongodb://127.0.0.1:{port}"),
+            DatabaseEngine::Memcached => format!("memcached://127.0.0.1:{port}"),
         }
     }
 
@@ -549,7 +635,11 @@ impl RuntimeSettings {
         let lang = match kind {
             ProjectType::Next | ProjectType::Vite | ProjectType::Node => "node",
             ProjectType::Php => "php",
-            ProjectType::Static | ProjectType::Custom => return None,
+            ProjectType::Flutter => "flutter",
+            ProjectType::Static
+            | ProjectType::Xcode
+            | ProjectType::Android
+            | ProjectType::Custom => return None,
         };
         self.defaults.get(lang).map(|version| Runtime {
             lang: lang.to_string(),
@@ -620,6 +710,20 @@ pub struct ManualRuntime {
     pub binary: PathBuf,
 }
 
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileRunConfig {
+    /// Flutter flavor or Android build variant, e.g. `staging` / `debug`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flavor: Option<String>,
+    /// Xcode scheme or Android module, e.g. `App` / `app`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Flutter device id, Android serial, or xcodebuild destination string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +775,7 @@ mod tests {
     fn project_serialises_in_assessment_doc_shape() {
         // Mirrors the Next.js example in ASSESSMENT_AND_PLAN.md §7.1.
         let p = Project {
+            cors: None,
             id: ProjectId::new("marketing-site"),
             name: "Marketing Site".into(),
             path: PathBuf::from("/Volumes/DEVSSD/Projects/Clients/Marketing Site"),
@@ -690,6 +795,8 @@ mod tests {
             tags: vec!["client".into(), "nextjs".into()],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         };
@@ -705,6 +812,7 @@ mod tests {
 
     fn bare_php_project() -> Project {
         Project {
+            cors: None,
             id: ProjectId::new("legacy-php"),
             name: "Legacy PHP".into(),
             path: PathBuf::from("/tmp/legacy-php"),
@@ -721,6 +829,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         }

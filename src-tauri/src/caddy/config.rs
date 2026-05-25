@@ -18,7 +18,14 @@ use crate::caddy::types::{
     AdminConfig, AppsConfig, AutomaticHttps, CaddyConfig, HttpApp, MatchClause, Route, Server,
     ServerErrors, TlsApp, TlsCertFile, TlsCertificates,
 };
-use crate::registry::{Project, ProjectType, Registry};
+use crate::registry::{Project, ProjectType, Registry, WebServer};
+
+/// Caddy logger name our per-server access logs emit under. The HTTP request
+/// inspector tails the file this logger writes.
+pub const ACCESS_LOGGER: &str = "portbay_access";
+
+/// Filename (under the logs dir) Caddy writes the JSON access log to.
+pub const ACCESS_LOG_FILE: &str = "caddy-access.log";
 
 /// Per-project TLS cert pair, looked up by the caller.
 #[derive(Debug, Clone)]
@@ -156,6 +163,7 @@ pub fn bootstrap_config(admin_port: u16, https_port: u16) -> CaddyConfig {
                 disable: true,
             },
             errors: None,
+            logs: None,
         },
     );
 
@@ -172,6 +180,7 @@ pub fn bootstrap_config(admin_port: u16, https_port: u16) -> CaddyConfig {
                 certificates: TlsCertificates { load_files: vec![] },
             },
         },
+        logging: None,
     }
 }
 
@@ -233,6 +242,7 @@ where
                 disable: true,
             },
             errors: Some(server_errors("route_error_https")),
+            logs: None,
         },
     );
     servers.insert(
@@ -245,6 +255,7 @@ where
                 disable: true,
             },
             errors: Some(server_errors("route_error_http")),
+            logs: None,
         },
     );
 
@@ -265,7 +276,41 @@ where
                 },
             },
         },
+        logging: None,
     })
+}
+
+/// Enable a JSON access log on every server in `cfg`, writing to `log_path`.
+///
+/// Each server gets `logs.default_logger_name = ACCESS_LOGGER`, and the
+/// top-level `logging` block routes that access namespace to a file (JSON
+/// encoder), excluding it from Caddy's default stderr log. The HTTP request
+/// inspector tails `log_path`. Applied by the reconciler after `build_config`
+/// so the access log survives every `/load`.
+pub fn with_access_log(mut cfg: CaddyConfig, log_path: &std::path::Path) -> CaddyConfig {
+    let server_logs = json!({ "default_logger_name": ACCESS_LOGGER });
+    for server in cfg.apps.http.servers.values_mut() {
+        server.logs = Some(server_logs.clone());
+    }
+
+    let access_ns = format!("http.log.access.{ACCESS_LOGGER}");
+    let mut logs = serde_json::Map::new();
+    // Keep the access entries out of Caddy's default (stderr) log…
+    logs.insert(
+        "default".to_string(),
+        json!({ "exclude": [access_ns.clone()] }),
+    );
+    // …and route them to our JSON file instead.
+    logs.insert(
+        ACCESS_LOGGER.to_string(),
+        json!({
+            "writer": { "output": "file", "filename": log_path.to_string_lossy() },
+            "encoder": { "format": "json" },
+            "include": [access_ns],
+        }),
+    );
+    cfg.logging = Some(json!({ "logs": logs }));
+    cfg
 }
 
 /// Build a single route for a project. Used both by `build_config` and by
@@ -277,6 +322,14 @@ where
 pub fn project_to_route(p: &Project, php_socket_dir: &std::path::Path) -> Route {
     let id = format!("route_{}", p.id);
     let handler = build_handler(p, php_socket_dir);
+    // Pro: wrap in a CORS subroute when the project has an active policy. The
+    // basic listen port is never gated; only this custom cross-origin policy
+    // is (see `Project::cors`). Inactive/absent → the handler is untouched, so
+    // free projects behave exactly as before.
+    let handler = match &p.cors {
+        Some(cors) if cors.is_active() => cors_wrap(handler, cors),
+        _ => handler,
+    };
     Route {
         id,
         match_: vec![MatchClause {
@@ -287,8 +340,76 @@ pub fn project_to_route(p: &Project, php_socket_dir: &std::path::Path) -> Route 
     }
 }
 
+/// Wrap a project's handler in a CORS subroute (Pro). For requests whose
+/// `Origin` is in the allowlist it echoes that origin into
+/// `Access-Control-Allow-Origin` (plus `Vary: Origin`, and credentials when
+/// configured) and answers preflight `OPTIONS` with `204`; all other requests
+/// fall straight through to `inner` with no added headers. Echoing the exact
+/// matched origin keeps an allowlist honest — never a blanket `*`.
+fn cors_wrap(inner: serde_json::Value, cors: &crate::registry::CorsConfig) -> serde_json::Value {
+    let origins = cors.allowed_origins.clone();
+
+    let mut preflight = json!({
+        "Access-Control-Allow-Origin": ["{http.request.header.Origin}"],
+        "Access-Control-Allow-Methods": ["GET, POST, PUT, PATCH, DELETE, OPTIONS"],
+        "Access-Control-Allow-Headers": ["{http.request.header.Access-Control-Request-Headers}"],
+        "Access-Control-Max-Age": ["86400"],
+        "Vary": ["Origin"]
+    });
+    let mut actual_set = json!({
+        "Access-Control-Allow-Origin": ["{http.request.header.Origin}"],
+        "Vary": ["Origin"]
+    });
+    if cors.allow_credentials {
+        preflight["Access-Control-Allow-Credentials"] = json!(["true"]);
+        actual_set["Access-Control-Allow-Credentials"] = json!(["true"]);
+    }
+
+    json!({
+        "handler": "subroute",
+        "routes": [
+            // Preflight: an allow-listed OPTIONS gets a 204 with the CORS
+            // headers and goes no further.
+            {
+                "match": [{ "method": ["OPTIONS"], "header": { "Origin": origins } }],
+                "handle": [{
+                    "handler": "static_response",
+                    "status_code": 204,
+                    "headers": preflight
+                }],
+                "terminal": true
+            },
+            // Actual requests from an allow-listed origin: register the
+            // response headers (non-terminal middleware), then fall through.
+            {
+                "match": [{ "header": { "Origin": origins } }],
+                "handle": [{
+                    "handler": "headers",
+                    "response": { "set": actual_set }
+                }]
+            },
+            // Everything else (and the fall-through above) hits the real handler.
+            { "handle": [inner] }
+        ]
+    })
+}
+
 fn build_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::Value {
     match p.kind {
+        // PHP can run in two modes:
+        // - command + port: a framework/router dev server that PortBay starts
+        //   through Process Compose, then reverse-proxies to;
+        // - no command: a pure Caddy/PHP-FPM site served from disk.
+        ProjectType::Php
+            if (p.start_command.is_some()
+                || matches!(
+                    p.web_server_effective(),
+                    WebServer::Nginx | WebServer::Apache
+                ))
+                && p.port.is_some() =>
+        {
+            reverse_proxy_handler(p)
+        }
         ProjectType::Php => php_handler(p, php_socket_dir),
         // Static sites have no dev server — serve their files straight off
         // disk. Routing them through reverse_proxy (the old `_` arm) dialed
@@ -365,15 +486,30 @@ fn php_handler(p: &Project, php_socket_dir: &std::path::Path) -> serde_json::Val
     let socket_path = php_socket_dir.join(version).join("php-fpm.sock");
     let php_socket = format!("unix/{}", socket_path.to_string_lossy());
 
-    // Nested subroute: *.php → FastCGI, everything else → file_server.
+    // Nested subroute:
+    // 1. rewrite extensionless/directory URLs to a project front controller
+    //    when present (`public/router.php` or `index.php`);
+    // 2. execute PHP through FastCGI;
+    // 3. serve static assets from the document root.
     json!({
         "handler": "subroute",
         "routes": [
             {
+                "handle": [{
+                    "handler": "rewrite",
+                    "try_files": [
+                        "{http.request.uri.path}/index.php",
+                        "{http.request.uri.path}",
+                        "/router.php",
+                        "/index.php"
+                    ]
+                }]
+            },
+            {
                 "match": [{ "path": ["*.php"] }],
                 "handle": [{
                     "handler": "reverse_proxy",
-                    "transport": { "protocol": "fastcgi" },
+                    "transport": { "protocol": "fastcgi", "split_path": [".php"] },
                     "upstreams": [{ "dial": php_socket }]
                 }]
             },
@@ -413,8 +549,11 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
+            cors: None,
         }
     }
 
@@ -436,13 +575,101 @@ mod tests {
             tags: vec![],
             document_root: Some("public".into()),
             php_version: Some(php.into()),
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
+            cors: None,
         }
     }
 
     fn no_certs(_: &str) -> Option<CertPaths> {
         None
+    }
+
+    #[test]
+    fn access_log_wires_every_server_and_routes_to_file() {
+        let mut r = Registry::new("test");
+        r.add_project(next_project("a", 3010, true)).unwrap();
+        let cfg =
+            build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let cfg = with_access_log(cfg, Path::new("/tmp/logs/caddy-access.log"));
+        let v = serde_json::to_value(&cfg).unwrap();
+
+        // Every HTTP server emits its access log under our logger name.
+        let servers = v["apps"]["http"]["servers"].as_object().unwrap();
+        assert!(!servers.is_empty());
+        for (_name, server) in servers {
+            assert_eq!(server["logs"]["default_logger_name"], ACCESS_LOGGER);
+        }
+
+        // The top-level logging block routes that namespace to our JSON file
+        // and keeps it out of the default (stderr) log.
+        let logs = &v["logging"]["logs"];
+        assert_eq!(logs[ACCESS_LOGGER]["writer"]["output"], "file");
+        assert_eq!(
+            logs[ACCESS_LOGGER]["writer"]["filename"],
+            "/tmp/logs/caddy-access.log"
+        );
+        assert_eq!(logs[ACCESS_LOGGER]["encoder"]["format"], "json");
+        assert_eq!(
+            logs[ACCESS_LOGGER]["include"][0],
+            "http.log.access.portbay_access"
+        );
+        assert_eq!(
+            logs["default"]["exclude"][0],
+            "http.log.access.portbay_access"
+        );
+    }
+
+    #[test]
+    fn no_cors_policy_leaves_handler_untouched() {
+        // A project with no CORS policy must route exactly as before — no CORS
+        // headers anywhere in the emitted route.
+        let p = next_project("plain", 3010, true);
+        let route = project_to_route(&p, Path::new("/tmp/portbay-php"));
+        let json = serde_json::to_string(&route).unwrap();
+        assert!(!json.contains("Access-Control-Allow-Origin"));
+    }
+
+    #[test]
+    fn active_cors_policy_wraps_handler_with_allow_origin_and_preflight() {
+        let mut p = next_project("api", 3010, true);
+        p.cors = Some(crate::registry::CorsConfig {
+            allowed_origins: vec!["https://app.example.test".into()],
+            allow_credentials: true,
+        });
+        let route = project_to_route(&p, Path::new("/tmp/portbay-php"));
+        let v = serde_json::to_value(&route).unwrap();
+        let sub = &v["handle"][0];
+        assert_eq!(sub["handler"], "subroute");
+
+        // Route 0 is the preflight: OPTIONS + allow-listed Origin → 204.
+        let preflight = &sub["routes"][0];
+        assert_eq!(preflight["match"][0]["method"][0], "OPTIONS");
+        assert_eq!(
+            preflight["match"][0]["header"]["Origin"][0],
+            "https://app.example.test"
+        );
+        assert_eq!(preflight["handle"][0]["status_code"], 204);
+        assert_eq!(
+            preflight["handle"][0]["headers"]["Access-Control-Allow-Origin"][0],
+            "{http.request.header.Origin}"
+        );
+        assert_eq!(
+            preflight["handle"][0]["headers"]["Access-Control-Allow-Credentials"][0],
+            "true"
+        );
+
+        // Route 1 adds the response header for allow-listed actual requests.
+        assert_eq!(sub["routes"][1]["handle"][0]["handler"], "headers");
+        assert_eq!(
+            sub["routes"][1]["handle"][0]["response"]["set"]["Access-Control-Allow-Origin"][0],
+            "{http.request.header.Origin}"
+        );
+
+        // Route 2 is the real project handler (the reverse-proxy subroute).
+        assert!(sub["routes"][2]["handle"][0].get("handler").is_some());
     }
 
     #[test]
@@ -584,21 +811,24 @@ mod tests {
         let h = &s.routes[0].handle[0];
         assert_eq!(h["handler"], "subroute");
         let sub_routes = &h["routes"];
-        // First sub-route: *.php → FastCGI.
-        assert_eq!(sub_routes[0]["match"][0]["path"][0], "*.php");
-        assert_eq!(sub_routes[0]["handle"][0]["handler"], "reverse_proxy");
+        // First sub-route: front-controller rewrite.
+        assert_eq!(sub_routes[0]["handle"][0]["handler"], "rewrite");
+        assert_eq!(sub_routes[0]["handle"][0]["try_files"][2], "/router.php");
+        // Second sub-route: *.php → FastCGI.
+        assert_eq!(sub_routes[1]["match"][0]["path"][0], "*.php");
+        assert_eq!(sub_routes[1]["handle"][0]["handler"], "reverse_proxy");
         assert_eq!(
-            sub_routes[0]["handle"][0]["transport"]["protocol"],
+            sub_routes[1]["handle"][0]["transport"]["protocol"],
             "fastcgi"
         );
         assert_eq!(
-            sub_routes[0]["handle"][0]["upstreams"][0]["dial"],
+            sub_routes[1]["handle"][0]["upstreams"][0]["dial"],
             "unix//tmp/portbay-php/8.3/php-fpm.sock"
         );
-        // Second sub-route: file_server fallback with index_names.
-        assert_eq!(sub_routes[1]["handle"][0]["handler"], "file_server");
+        // Third sub-route: file_server fallback with index_names.
+        assert_eq!(sub_routes[2]["handle"][0]["handler"], "file_server");
         assert_eq!(
-            sub_routes[1]["handle"][0]["root"],
+            sub_routes[2]["handle"][0]["root"],
             "/tmp/api-gateway/public"
         );
     }
@@ -620,8 +850,42 @@ mod tests {
         let s = c.apps.http.servers.get("portbay").unwrap();
         let sub = &s.routes[0].handle[0]["routes"];
         assert_eq!(
-            sub[0]["handle"][0]["upstreams"][0]["dial"],
+            sub[1]["handle"][0]["upstreams"][0]["dial"],
             "unix//tmp/portbay-php/8.4/php-fpm.sock"
+        );
+    }
+
+    #[test]
+    fn php_project_with_dev_command_reverse_proxies_to_port() {
+        let mut r = Registry::new("test");
+        let mut p = php_project("cms", "8.3");
+        p.start_command = Some("php -S 127.0.0.1:8000 router.php".into());
+        p.port = Some(8000);
+        r.add_project(p).unwrap();
+        let c = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let s = c.apps.http.servers.get("portbay").unwrap();
+        let h = &s.routes[0].handle[0];
+        assert_eq!(h["handler"], "subroute");
+        assert_eq!(
+            h["routes"][1]["handle"][0]["upstreams"][0]["dial"],
+            "127.0.0.1:8000"
+        );
+    }
+
+    #[test]
+    fn php_project_with_nginx_reverse_proxies_to_generated_server_port() {
+        let mut r = Registry::new("test");
+        let mut p = php_project("cms", "8.3");
+        p.web_server = Some(WebServer::Nginx);
+        p.port = Some(9080);
+        r.add_project(p).unwrap();
+        let c = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let s = c.apps.http.servers.get("portbay").unwrap();
+        let h = &s.routes[0].handle[0];
+        assert_eq!(h["handler"], "subroute");
+        assert_eq!(
+            h["routes"][1]["handle"][0]["upstreams"][0]["dial"],
+            "127.0.0.1:9080"
         );
     }
 

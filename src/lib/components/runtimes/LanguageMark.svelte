@@ -3,7 +3,7 @@
 
   Inline SVG, no external assets. Colours are baked so the mark reads
   on any background. New languages slot in by adding a branch here; the
-  caller passes the runtime `id` ("php", "node", "python", "go", "ruby").
+  caller passes the runtime `id` ("php", "node", "python", "flutter", "go", "ruby").
 -->
 <script lang="ts">
   interface Props {
@@ -103,6 +103,19 @@
       font-weight="800"
       letter-spacing="0.5"
     >GO</text>
+  </svg>
+{:else if id === "flutter"}
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 32 32"
+    fill="none"
+    class={cls}
+    aria-hidden="true"
+  >
+    <path d="M18.5 3 6 15.5l4.8 4.8L28 3h-9.5z" fill="#54C5F8" />
+    <path d="m10.8 20.3 4.9 4.9L28 13h-9.6l-7.6 7.3z" fill="#29B6F6" />
+    <path d="m15.7 25.2 4.8 4.8H28l-8.7-8.6-3.6 3.8z" fill="#01579B" />
   </svg>
 {:else if id === "ruby"}
   <svg

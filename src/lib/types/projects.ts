@@ -15,7 +15,21 @@ export type ProjectType =
   | "php"
   | "static"
   | "node"
+  | "flutter"
+  | "xcode"
+  | "android"
   | "custom";
+
+export type WebServer = "caddy" | "nginx" | "apache";
+
+export interface MobileRunConfig {
+  /** Flutter flavor or Android variant, e.g. staging/debug. */
+  flavor?: string | null;
+  /** Xcode scheme or Android module, e.g. App/app. */
+  target?: string | null;
+  /** Flutter device id, Android serial, or xcodebuild destination. */
+  device?: string | null;
+}
 
 export interface Readiness {
   type: "http" | "tcp" | "process";
@@ -54,7 +68,7 @@ export interface WorkspaceApp {
   suggestedId: string;
   suggestedName: string;
   suggestedHostname: string;
-  suggestedPort: number;
+  suggestedPort: number | null;
   suggestedStartCommand?: string;
 }
 
@@ -68,6 +82,16 @@ export interface RuntimeInfo {
   age: number;
   memBytes: number;
   cpuPercent: number;
+}
+
+/**
+ * Per-project CORS policy (Pro). Empty `allowedOrigins` = no policy (the free
+ * default — PortBay adds no CORS headers). Editing this is gated on the
+ * `custom_port_cors` entitlement; the basic listen port is never gated.
+ */
+export interface CorsConfig {
+  allowedOrigins: string[];
+  allowCredentials: boolean;
 }
 
 export interface ProjectView {
@@ -88,7 +112,10 @@ export interface ProjectView {
   tags: string[];
   documentRoot?: string;
   phpVersion?: string;
+  webServer?: WebServer;
+  mobileRun?: MobileRunConfig | null;
   workspace?: Workspace;
+  cors?: CorsConfig | null;
   status: PortbayStatus;
   runtime?: RuntimeInfo;
 }
@@ -109,5 +136,29 @@ export const typeLabel: Record<ProjectType, string> = {
   php: "PHP",
   static: "Static",
   node: "Node",
+  flutter: "Flutter",
+  xcode: "Xcode",
+  android: "Android",
   custom: "Custom",
 };
+
+/** Display labels for each web server option. */
+export const webServerLabel: Record<WebServer, string> = {
+  caddy: "Caddy",
+  nginx: "Nginx",
+  apache: "Apache",
+};
+
+/**
+ * The web server a project actually runs behind, or `null` when the choice
+ * doesn't apply. Mirrors the Rust rule (`registry::types` + `caddy::config`):
+ * the per-project web server is only honored for PHP document-root projects
+ * (no custom start command). Everything else — JS/Node dev servers, or PHP
+ * projects with their own start command — is reverse-proxied through Caddy and
+ * has no user-selectable server, so we don't label one.
+ */
+export function effectiveWebServer(p: ProjectView): WebServer | null {
+  if (p.type !== "php") return null;
+  if (p.startCommand && p.startCommand.trim() !== "") return null;
+  return p.webServer ?? "caddy";
+}

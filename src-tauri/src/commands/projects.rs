@@ -16,7 +16,10 @@ use crate::commands::dto::{
 };
 use crate::error::{AppError, AppResult};
 use crate::process_compose::Process;
-use crate::registry::{store, Project, ProjectId, ProjectType, Readiness, Registry};
+use crate::registry::{
+    store, MobileRunConfig, Project, ProjectId, ProjectType, Readiness, Registry, Runtime,
+    WebServer,
+};
 use crate::state::AppState;
 
 /// `list_projects()` — registry merged with live PC status.
@@ -80,6 +83,13 @@ pub async fn add_project(
 
     let mut registry = load_registry(&state)?;
 
+    // Project-cap gate (anonymous 3 / free 6 / pro unlimited). The GUI gates
+    // this proactively before opening the wizard; this is the backstop that
+    // also covers the CLI and any non-gated path.
+    if let Err(cap) = crate::entitlements::check_can_add(registry.projects.len()) {
+        return Err(AppError::ProjectCapReached { cap });
+    }
+
     let hostname = input
         .hostname
         .unwrap_or_else(|| format!("{}.{}", id_str, registry.domain_suffix));
@@ -89,15 +99,31 @@ pub async fn add_project(
         timeout_seconds: 75,
     });
 
-    // Inherit the language's default runtime version (set in the Languages
-    // panel) when this project doesn't pin one itself. For PHP we mirror it
-    // into `php_version` too, since the FPM reconciler still reads that field.
-    let runtime = registry.runtimes.default_for(input.kind);
+    // Prefer the project's own version-manager files, then fall back to the
+    // language default from the Languages panel. For PHP we mirror it into
+    // `php_version` too, since the FPM reconciler still reads that field.
+    let runtime = crate::project_runtime::detect(&path)
+        .or_else(|| registry.runtimes.default_for(input.kind))
+        .or_else(|| detected_runtime_for(input.kind));
     let php_version = if input.kind == ProjectType::Php {
-        runtime.as_ref().map(|r| r.version.clone())
+        input
+            .php_version
+            .clone()
+            .or_else(|| runtime.as_ref().map(|r| r.version.clone()))
     } else {
         None
     };
+    let document_root = if input.kind == ProjectType::Php {
+        input.document_root.filter(|s| !s.trim().is_empty())
+    } else {
+        None
+    };
+    let web_server = if input.kind == ProjectType::Php && input.start_command.is_none() {
+        input.web_server
+    } else {
+        None
+    };
+    let has_start_command = input.start_command.is_some();
 
     let project = Project {
         id,
@@ -109,22 +135,30 @@ pub async fn add_project(
         extra_ports: vec![],
         hostname: hostname.clone(),
         https: input.https,
-        services: if input.https {
-            vec!["caddy".into()]
-        } else {
-            vec![]
-        },
+        services: default_services(input.kind, input.https, has_start_command),
         env: Default::default(),
         readiness,
         auto_start: input.auto_start,
         tags: vec![],
-        document_root: None,
+        document_root,
         php_version,
+        web_server,
+        mobile_run: input.mobile_run,
         runtime,
         workspace: input.workspace,
+        cors: None,
     };
 
     registry.add_project(project.clone())?;
+    if let Some(runtime) = &project.runtime {
+        if let Err(err) = crate::project_runtime::ensure_marker_files(&project.path, runtime) {
+            tracing::warn!(
+                project_id = %project.id,
+                error = %err,
+                "failed to write project runtime marker files"
+            );
+        }
+    }
     save_registry(&state, &registry)?;
 
     // Hand off side-effects (hosts, certs, Caddy routes, PC YAML) to
@@ -185,8 +219,33 @@ pub async fn update_project(
     if let Some(ver) = patch.php_version {
         project.php_version = Some(ver);
     }
+    if let Some(server) = patch.web_server {
+        project.web_server = Some(server);
+    }
+    if let Some(mobile_run) = patch.mobile_run {
+        project.mobile_run = Some(mobile_run);
+    }
     if let Some(ws) = patch.workspace {
         project.workspace = Some(ws);
+    }
+    if let Some(cors) = patch.cors {
+        // Pro gate (honest split): the basic listen port stays free; only a
+        // custom cross-origin policy is gated. Introducing or changing an
+        // *active* policy requires the `custom_port_cors` entitlement. An
+        // existing policy is preserved on downgrade — we only reject the act
+        // of changing it, never strip a configured value. Clearing (empty
+        // origins) is always allowed. The GUI locks this proactively; this is
+        // the core-side safety net for the CLI and hand-edited registries.
+        let changed = project.cors.as_ref() != Some(&cors);
+        if changed
+            && cors.is_active()
+            && !crate::entitlements::current().entitlements.custom_port_cors
+        {
+            return Err(AppError::ProRequired {
+                feature: "Custom CORS",
+            });
+        }
+        project.cors = if cors.is_active() { Some(cors) } else { None };
     }
 
     let snapshot = project.clone();
@@ -222,15 +281,19 @@ pub async fn detect_project(
     let registry = load_registry(&state)?;
     let suggested_hostname = format!("{id}.{}", registry.domain_suffix);
 
-    let (kind, suggested_port, suggested_start_command) = detect_kind(&p);
+    let detected = detect_kind(&p);
 
     Ok(DetectedProject {
-        kind,
+        kind: detected.kind,
         suggested_id: id,
         suggested_name: dir_name,
         suggested_hostname,
-        suggested_port,
-        suggested_start_command,
+        suggested_port: detected.port,
+        suggested_start_command: detected.start_command,
+        suggested_document_root: detected.document_root,
+        suggested_php_version: detected.php_version,
+        suggested_web_server: detected.web_server,
+        suggested_mobile_run: detected.mobile_run,
     })
 }
 
@@ -266,19 +329,21 @@ pub async fn detect_workspace_apps(
                 .and_then(|s| s.to_str())
                 .unwrap_or(&pkg.rel_dir);
             let id = slugify(leaf);
-            let (kind, port, detected_cmd) = detect_kind(&pkg.abs_dir);
+            let detected = detect_kind(&pkg.abs_dir);
             // Honour the repo's package manager rather than detect_kind's
             // hardcoded `pnpm dev`, but only for an app that has a dev command.
-            let start_command = detected_cmd.map(|_| standalone_dev_command(layout.tool));
+            let start_command = detected
+                .start_command
+                .map(|_| standalone_dev_command(layout.tool));
             WorkspaceAppDto {
                 package: pkg.name.clone(),
                 rel_dir: pkg.rel_dir.clone(),
                 path: pkg.abs_dir.display().to_string(),
-                kind,
+                kind: detected.kind,
                 suggested_hostname: format!("{id}.{suffix}"),
                 suggested_id: id,
                 suggested_name: leaf.to_string(),
-                suggested_port: port,
+                suggested_port: detected.port,
                 suggested_start_command: start_command,
             }
         })
@@ -328,7 +393,17 @@ fn canonical_project_folder(path: &str) -> AppResult<PathBuf> {
     Ok(p)
 }
 
-fn detect_kind(path: &Path) -> (ProjectType, u16, Option<String>) {
+pub(crate) struct ProjectDetection {
+    pub(crate) kind: ProjectType,
+    pub(crate) port: Option<u16>,
+    pub(crate) start_command: Option<String>,
+    pub(crate) document_root: Option<String>,
+    pub(crate) php_version: Option<String>,
+    pub(crate) web_server: Option<WebServer>,
+    pub(crate) mobile_run: Option<MobileRunConfig>,
+}
+
+pub(crate) fn detect_kind(path: &Path) -> ProjectDetection {
     let pkg = path.join("package.json");
     if pkg.exists() {
         let body = std::fs::read_to_string(&pkg).unwrap_or_default();
@@ -338,27 +413,328 @@ fn detect_kind(path: &Path) -> (ProjectType, u16, Option<String>) {
         let cmd = standalone_dev_command(crate::registry::workspace::detect_package_manager(path));
         // Cheap string match — full JSON parse isn't worth the cycles.
         if body.contains("\"next\"") {
-            return (ProjectType::Next, 3000, Some(cmd));
+            return detection(ProjectType::Next, 3000, Some(cmd));
         }
         if body.contains("\"vite\"") {
-            return (ProjectType::Vite, 5173, Some(cmd));
+            return detection(ProjectType::Vite, 5173, Some(cmd));
         }
-        return (ProjectType::Node, 3000, Some(cmd));
+        return detection(ProjectType::Node, 3000, Some(cmd));
     }
 
     if path.join("composer.json").exists() || has_php_index(path) {
-        return (ProjectType::Php, 8000, None);
+        return detect_php_project(path);
+    }
+
+    if is_flutter_project(path) {
+        let mobile_run = detect_flutter_run(path);
+        return detection_with_mobile(
+            ProjectType::Flutter,
+            mobile_start_command(ProjectType::Flutter, mobile_run.as_ref()),
+            mobile_run,
+        );
+    }
+
+    if has_child_with_extension(path, "xcworkspace") || has_child_with_extension(path, "xcodeproj")
+    {
+        let mobile_run = detect_xcode_run(path);
+        return detection_with_mobile(
+            ProjectType::Xcode,
+            mobile_start_command(ProjectType::Xcode, mobile_run.as_ref()),
+            mobile_run,
+        );
+    }
+
+    if is_android_project(path) {
+        let mobile_run = detect_android_run(path);
+        return detection_with_mobile(
+            ProjectType::Android,
+            mobile_start_command(ProjectType::Android, mobile_run.as_ref()),
+            mobile_run,
+        );
     }
 
     if path.join("index.html").exists() {
-        return (ProjectType::Static, 8000, None);
+        return detection(ProjectType::Static, 8000, None);
     }
 
-    (ProjectType::Custom, 3000, None)
+    detection(ProjectType::Custom, 3000, None)
+}
+
+fn detection(kind: ProjectType, port: u16, start_command: Option<String>) -> ProjectDetection {
+    ProjectDetection {
+        kind,
+        port: (port > 0).then_some(port),
+        start_command,
+        document_root: None,
+        php_version: None,
+        web_server: None,
+        mobile_run: None,
+    }
+}
+
+fn detection_with_mobile(
+    kind: ProjectType,
+    start_command: Option<String>,
+    mobile_run: Option<MobileRunConfig>,
+) -> ProjectDetection {
+    ProjectDetection {
+        kind,
+        port: None,
+        start_command,
+        document_root: None,
+        php_version: None,
+        web_server: None,
+        mobile_run,
+    }
+}
+
+fn detect_php_project(path: &Path) -> ProjectDetection {
+    let port = 8000;
+    let php_bin = preferred_php_bin();
+    let php = shell_quote(&php_bin.to_string_lossy());
+    let version = detected_runtime_for(ProjectType::Php).map(|rt| rt.version);
+    let public = path.join("public");
+    let document_root = if public.join("index.php").exists() || public.join("router.php").exists() {
+        Some("public".to_string())
+    } else {
+        None
+    };
+
+    let start_command = if path.join("router.php").exists() {
+        Some(format!(
+            "{php} -S 127.0.0.1:{port} -d memory_limit=256M router.php"
+        ))
+    } else if public.join("router.php").exists() {
+        Some(format!(
+            "{php} -S 127.0.0.1:{port} -d memory_limit=256M -t public public/router.php"
+        ))
+    } else if document_root.as_deref() == Some("public") {
+        Some(format!(
+            "{php} -S 127.0.0.1:{port} -d memory_limit=256M -t public"
+        ))
+    } else {
+        Some(format!("{php} -S 127.0.0.1:{port} -d memory_limit=256M"))
+    };
+
+    ProjectDetection {
+        kind: ProjectType::Php,
+        port: Some(port),
+        start_command,
+        document_root,
+        php_version: version,
+        web_server: Some(WebServer::Caddy),
+        mobile_run: None,
+    }
+}
+
+fn detect_flutter_run(_path: &Path) -> Option<MobileRunConfig> {
+    Some(MobileRunConfig::default())
+}
+
+fn detect_xcode_run(path: &Path) -> Option<MobileRunConfig> {
+    Some(MobileRunConfig {
+        target: find_xcode_scheme(path),
+        flavor: None,
+        device: None,
+    })
+}
+
+fn detect_android_run(path: &Path) -> Option<MobileRunConfig> {
+    Some(MobileRunConfig {
+        target: find_android_module(path).or_else(|| Some("app".into())),
+        flavor: Some("debug".into()),
+        device: None,
+    })
+}
+
+fn mobile_start_command(kind: ProjectType, cfg: Option<&MobileRunConfig>) -> Option<String> {
+    match kind {
+        ProjectType::Flutter => {
+            let mut args = vec!["flutter".to_string(), "run".to_string()];
+            if let Some(flavor) = cfg.and_then(|c| clean_optional(&c.flavor)) {
+                args.push("--flavor".into());
+                args.push(shell_quote(flavor));
+            }
+            if let Some(device) = cfg.and_then(|c| clean_optional(&c.device)) {
+                args.push("-d".into());
+                args.push(shell_quote(device));
+            }
+            Some(args.join(" "))
+        }
+        ProjectType::Xcode => {
+            let scheme = cfg.and_then(|c| clean_optional(&c.target));
+            let Some(scheme) = scheme else {
+                return Some("xed .".into());
+            };
+            let mut args = vec![
+                "xcodebuild".to_string(),
+                "-scheme".into(),
+                shell_quote(scheme),
+            ];
+            if let Some(destination) = cfg.and_then(|c| clean_optional(&c.device)) {
+                args.push("-destination".into());
+                args.push(shell_quote(destination));
+            }
+            args.push("build".into());
+            Some(args.join(" "))
+        }
+        ProjectType::Android => {
+            let module = cfg.and_then(|c| clean_optional(&c.target)).unwrap_or("app");
+            let variant = cfg
+                .and_then(|c| clean_optional(&c.flavor))
+                .map(capitalize_ascii)
+                .unwrap_or_else(|| "Debug".into());
+            let command = format!("./gradlew :{}:install{}", module, variant);
+            if let Some(device) = cfg.and_then(|c| clean_optional(&c.device)) {
+                Some(format!("ANDROID_SERIAL={} {command}", shell_quote(device)))
+            } else {
+                Some(command)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn has_php_index(path: &Path) -> bool {
     path.join("index.php").exists() || path.join("public").join("index.php").exists()
+}
+
+fn is_flutter_project(path: &Path) -> bool {
+    path.join("pubspec.yaml").exists()
+        && (path.join("lib").join("main.dart").exists()
+            || path.join("android").is_dir()
+            || path.join("ios").is_dir())
+}
+
+fn is_android_project(path: &Path) -> bool {
+    path.join("gradlew").exists()
+        && (path.join("settings.gradle").exists() || path.join("settings.gradle.kts").exists())
+        && (path.join("app").join("build.gradle").exists()
+            || path.join("app").join("build.gradle.kts").exists()
+            || path.join("build.gradle").exists()
+            || path.join("build.gradle.kts").exists())
+}
+
+fn find_xcode_scheme(path: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(path).ok()?;
+    for entry in entries.flatten() {
+        let root = entry.path();
+        let ext = root.extension().and_then(|s| s.to_str());
+        if !matches!(ext, Some("xcworkspace") | Some("xcodeproj")) {
+            continue;
+        }
+        let schemes = root.join("xcshareddata").join("xcschemes");
+        if let Some(scheme) = first_scheme_file(&schemes) {
+            return Some(scheme);
+        }
+    }
+    first_child_stem_with_extension(path, "xcodeproj")
+        .or_else(|| first_child_stem_with_extension(path, "xcworkspace"))
+}
+
+fn first_scheme_file(path: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(path).ok()?;
+    entries.flatten().find_map(|entry| {
+        let path = entry.path();
+        (path.extension().and_then(|s| s.to_str()) == Some("xcscheme"))
+            .then(|| path.file_stem()?.to_str().map(str::to_string))
+            .flatten()
+    })
+}
+
+fn first_child_stem_with_extension(path: &Path, ext: &str) -> Option<String> {
+    let entries = std::fs::read_dir(path).ok()?;
+    entries.flatten().find_map(|entry| {
+        let path = entry.path();
+        (path.extension().and_then(|s| s.to_str()) == Some(ext))
+            .then(|| path.file_stem()?.to_str().map(str::to_string))
+            .flatten()
+    })
+}
+
+fn find_android_module(path: &Path) -> Option<String> {
+    for module in ["app", "mobile", "androidApp"] {
+        if path.join(module).join("build.gradle").exists()
+            || path.join(module).join("build.gradle.kts").exists()
+        {
+            return Some(module.into());
+        }
+    }
+    None
+}
+
+fn clean_optional(value: &Option<String>) -> Option<&str> {
+    value.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn capitalize_ascii(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+}
+
+fn has_child_with_extension(path: &Path, ext: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .path()
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s == ext)
+    })
+}
+
+fn preferred_php_bin() -> PathBuf {
+    crate::php::detect_all()
+        .into_iter()
+        .next()
+        .map(|p| p.php_bin)
+        .unwrap_or_else(|| PathBuf::from("php"))
+}
+
+fn detected_runtime_for(kind: ProjectType) -> Option<Runtime> {
+    match kind {
+        ProjectType::Php => crate::php::detect_all()
+            .into_iter()
+            .next()
+            .map(|p| Runtime {
+                lang: "php".into(),
+                version: p.version,
+            }),
+        ProjectType::Flutter => crate::runtimes::runtime_by_id("flutter")?
+            .detect()
+            .into_iter()
+            .next()
+            .map(|p| Runtime {
+                lang: "flutter".into(),
+                version: p.version,
+            }),
+        _ => None,
+    }
+}
+
+fn default_services(kind: ProjectType, https: bool, has_start_command: bool) -> Vec<String> {
+    match kind {
+        ProjectType::Flutter | ProjectType::Xcode | ProjectType::Android => vec![],
+        ProjectType::Php if has_start_command => vec!["caddy".into()],
+        ProjectType::Php => vec!["caddy".into(), "php-fpm".into()],
+        _ if https => vec!["caddy".into()],
+        _ => vec![],
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':'))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 /// `remove_project(id)` — drop the entry from the registry. The
@@ -517,10 +893,10 @@ mod tests {
             r#"{ "name": "app", "dependencies": { "next": "14" } }"#,
             Some("bun.lockb"),
         );
-        let (kind, port, cmd) = detect_kind(dir.path());
-        assert_eq!(kind, ProjectType::Next);
-        assert_eq!(port, 3000);
-        assert_eq!(cmd.as_deref(), Some("bun run dev"));
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Next);
+        assert_eq!(detected.port, Some(3000));
+        assert_eq!(detected.start_command.as_deref(), Some("bun run dev"));
     }
 
     #[test]
@@ -531,9 +907,79 @@ mod tests {
             r#"{ "name": "app", "devDependencies": { "vite": "5" } }"#,
             Some("package-lock.json"),
         );
-        let (kind, _port, cmd) = detect_kind(dir.path());
-        assert_eq!(kind, ProjectType::Vite);
-        assert_eq!(cmd.as_deref(), Some("npm run dev"));
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Vite);
+        assert_eq!(detected.start_command.as_deref(), Some("npm run dev"));
+    }
+
+    #[test]
+    fn detect_kind_flutter_project_has_process_command_and_no_port() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pubspec.yaml"), "name: app\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        std::fs::write(dir.path().join("lib").join("main.dart"), "void main() {}\n").unwrap();
+
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Flutter);
+        assert_eq!(detected.port, None);
+        assert_eq!(detected.mobile_run, Some(MobileRunConfig::default()));
+        assert_eq!(detected.start_command.as_deref(), Some("flutter run"));
+    }
+
+    #[test]
+    fn detect_kind_xcode_project_opens_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(
+            dir.path()
+                .join("Mobile.xcodeproj")
+                .join("xcshareddata")
+                .join("xcschemes"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path()
+                .join("Mobile.xcodeproj")
+                .join("xcshareddata")
+                .join("xcschemes")
+                .join("TribalHouse.xcscheme"),
+            "",
+        )
+        .unwrap();
+
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Xcode);
+        assert_eq!(detected.port, None);
+        assert_eq!(
+            detected
+                .mobile_run
+                .as_ref()
+                .and_then(|m| m.target.as_deref()),
+            Some("TribalHouse")
+        );
+        assert_eq!(
+            detected.start_command.as_deref(),
+            Some("xcodebuild -scheme TribalHouse build")
+        );
+    }
+
+    #[test]
+    fn detect_kind_android_project_installs_debug_build() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("gradlew"), "").unwrap();
+        std::fs::write(dir.path().join("settings.gradle.kts"), "").unwrap();
+        std::fs::create_dir_all(dir.path().join("app")).unwrap();
+        std::fs::write(dir.path().join("app").join("build.gradle.kts"), "").unwrap();
+
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Android);
+        assert_eq!(detected.port, None);
+        let mobile = detected.mobile_run.as_ref().unwrap();
+        assert_eq!(mobile.target.as_deref(), Some("app"));
+        assert_eq!(mobile.flavor.as_deref(), Some("debug"));
+        assert_eq!(
+            detected.start_command.as_deref(),
+            Some("./gradlew :app:installDebug")
+        );
     }
 
     #[test]
@@ -545,16 +991,16 @@ mod tests {
             r#"{ "name": "app", "packageManager": "yarn@4.1.0", "dependencies": {} }"#,
             Some("package-lock.json"),
         );
-        let (kind, _port, cmd) = detect_kind(dir.path());
-        assert_eq!(kind, ProjectType::Node);
-        assert_eq!(cmd.as_deref(), Some("yarn dev"));
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Node);
+        assert_eq!(detected.start_command.as_deref(), Some("yarn dev"));
     }
 
     #[test]
     fn detect_kind_defaults_to_pnpm_when_no_signal() {
         let dir = tempfile::tempdir().unwrap();
         write_js_project(dir.path(), r#"{ "name": "app" }"#, None);
-        let (_kind, _port, cmd) = detect_kind(dir.path());
-        assert_eq!(cmd.as_deref(), Some("pnpm dev"));
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.start_command.as_deref(), Some("pnpm dev"));
     }
 }

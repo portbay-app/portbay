@@ -27,8 +27,10 @@
   import type { CommandError } from "$lib/types/error";
   import type { PortbayFile, PortfilePreview } from "$lib/types/portfile";
   import type {
+    MobileRunConfig,
     ProjectType,
     ProjectView,
+    WebServer,
     Workspace,
     WorkspaceApp,
     WorkspaceScan,
@@ -43,6 +45,10 @@
   let hostname = $state<string>("");
   let port = $state<number | null>(null);
   let startCommand = $state<string>("");
+  let documentRoot = $state<string>("");
+  let phpVersion = $state<string>("");
+  let webServer = $state<WebServer>("caddy");
+  let mobileRun = $state<MobileRunConfig | null>(null);
   let kind = $state<ProjectType>("custom");
   let https = $state<boolean>(true);
   let autoStart = $state<boolean>(false);
@@ -97,6 +103,22 @@
   /** True when the file's derived id already exists — surfaced before commit. */
   let portfileIdCollision = $state<boolean>(false);
 
+  const commandPlaceholder = $derived(
+    kind === "php"
+      ? "php -S 127.0.0.1:8000 router.php"
+      : kind === "flutter"
+        ? "flutter run"
+        : kind === "xcode"
+          ? "xed ."
+          : kind === "android"
+            ? "./gradlew installDebug"
+            : "pnpm dev",
+  );
+
+  function isMobileKind(value: ProjectType): boolean {
+    return value === "flutter" || value === "xcode" || value === "android";
+  }
+
   /**
    * Set when the picked folder is a JS monorepo root. The wizard shows a
    * one-app picker; choosing an app fills the standard fields with that app's
@@ -127,6 +149,9 @@
     hostname = "";
     port = null;
     startCommand = "";
+    documentRoot = "";
+    phpVersion = "";
+    webServer = "caddy";
     kind = "custom";
     https = true;
     autoStart = false;
@@ -191,6 +216,10 @@
         hostname = file.hostname;
         port = file.port ?? null;
         startCommand = file.startCommand ?? "";
+        documentRoot = file.documentRoot ?? "";
+        phpVersion = file.phpVersion ?? "";
+        webServer = file.webServer ?? "caddy";
+        mobileRun = file.mobileRun ?? null;
         kind = file.type;
         https = file.https;
         autoStart = file.autoStart;
@@ -252,8 +281,12 @@
     id = det.suggestedId;
     name = det.suggestedName;
     hostname = det.suggestedHostname;
-    port = det.suggestedPort;
+    port = det.suggestedPort ?? null;
     startCommand = det.suggestedStartCommand ?? "";
+    documentRoot = det.suggestedDocumentRoot ?? "";
+    phpVersion = det.suggestedPhpVersion ?? "";
+    webServer = det.suggestedWebServer ?? "caddy";
+    mobileRun = det.suggestedMobileRun ?? null;
     kind = det.kind;
     syncRawFromFields();
     schedulePortCheck(port);
@@ -271,8 +304,12 @@
     id = app.suggestedId;
     name = app.suggestedName;
     hostname = app.suggestedHostname;
-    port = app.suggestedPort;
+    port = app.suggestedPort ?? null;
     kind = app.kind;
+    documentRoot = "";
+    phpVersion = "";
+    webServer = "caddy";
+    mobileRun = null;
     if (workspaceFromRoot && workspaceScan) {
       // Tier 2: run from the repo root with a workspace filter. Leave the
       // start command empty so the backend derives `<tool> --filter … dev`.
@@ -363,6 +400,10 @@
       path,
       type: kind,
       startCommand: startCommand || undefined,
+      documentRoot: kind === "php" && documentRoot ? documentRoot : undefined,
+      phpVersion: kind === "php" && phpVersion ? phpVersion : undefined,
+      webServer: kind === "php" ? webServer : undefined,
+      mobileRun: isMobileKind(kind) ? mobileRun : undefined,
       port: port ?? undefined,
       hostname,
       https,
@@ -381,6 +422,18 @@
       if (typeof parsed.type === "string") kind = parsed.type as ProjectType;
       if (typeof parsed.startCommand === "string")
         startCommand = parsed.startCommand;
+      if (typeof parsed.documentRoot === "string")
+        documentRoot = parsed.documentRoot;
+      if (typeof parsed.phpVersion === "string") phpVersion = parsed.phpVersion;
+      if (
+        parsed.webServer === "caddy" ||
+        parsed.webServer === "nginx" ||
+        parsed.webServer === "apache"
+      )
+        webServer = parsed.webServer;
+      if (parsed.mobileRun && typeof parsed.mobileRun === "object") {
+        mobileRun = parsed.mobileRun as MobileRunConfig;
+      }
       if (typeof parsed.port === "number") port = parsed.port;
       if (typeof parsed.hostname === "string") hostname = parsed.hostname;
       if (typeof parsed.https === "boolean") https = parsed.https;
@@ -448,6 +501,11 @@
             kind,
             port: port ?? undefined,
             startCommand: startCommand || undefined,
+            documentRoot:
+              kind === "php" && documentRoot ? documentRoot : undefined,
+            phpVersion: kind === "php" && phpVersion ? phpVersion : undefined,
+            webServer: kind === "php" ? webServer : undefined,
+            mobileRun: isMobileKind(kind) ? mobileRun : undefined,
             https,
             autoStart,
             workspace: workspaceBinding ?? undefined,
@@ -779,9 +837,40 @@
             id="wizard-cmd"
             type="text"
             bind:value={startCommand}
-            placeholder="pnpm dev"
+            placeholder={commandPlaceholder}
             class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg font-mono"
           />
+
+          {#if kind === "php"}
+            <label for="wizard-docroot" class="text-fg-muted">Document root</label>
+            <input
+              id="wizard-docroot"
+              type="text"
+              bind:value={documentRoot}
+              placeholder="public"
+              class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg font-mono"
+            />
+
+            <label for="wizard-php-version" class="text-fg-muted">PHP version</label>
+            <input
+              id="wizard-php-version"
+              type="text"
+              bind:value={phpVersion}
+              placeholder="8.3"
+              class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg font-mono w-32"
+            />
+
+            <label for="wizard-web-server" class="text-fg-muted">Web server</label>
+            <select
+              id="wizard-web-server"
+              bind:value={webServer}
+              class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg w-40"
+            >
+              <option value="caddy">Caddy</option>
+              <option value="nginx">Nginx</option>
+              <option value="apache">Apache</option>
+            </select>
+          {/if}
 
           <span class="text-fg-muted">Options</span>
           <div class="flex items-center gap-4">

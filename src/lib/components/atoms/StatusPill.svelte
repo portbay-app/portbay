@@ -7,12 +7,12 @@
   six-state taxonomy. See NOTICE.
 -->
 <script lang="ts">
-  import type { PortbayStatus } from "$lib/types/status";
-  import { statusLabel } from "$lib/types/status";
+  import type { DisplayStatus } from "$lib/types/status";
+  import { displayStatusLabel } from "$lib/types/status";
   import StatusDot from "./StatusDot.svelte";
 
   interface Props {
-    status: PortbayStatus;
+    status: DisplayStatus;
     /** Override the default word. Use sparingly — taxonomy consistency matters. */
     label?: string;
     /** Compact mode hides the word, leaves only the dot + tooltip. */
@@ -20,12 +20,13 @@
   }
   let { status, label, iconOnly = false }: Props = $props();
 
-  const word = $derived(label ?? statusLabel[status]);
+  const word = $derived(label ?? displayStatusLabel(status));
 
   // Subtle surface tint matches the status, kept low-contrast so the dot
-  // and word do the visual work.
-  const toneClass: Record<PortbayStatus, string> = {
+  // and word do the visual work. `stopping` reuses the neutral stopped tint.
+  const toneClass: Record<DisplayStatus, string> = {
     stopped: "bg-status-stopped/10 text-fg-muted",
+    stopping: "bg-status-stopped/10 text-fg-muted",
     starting: "bg-status-starting/10 text-status-starting",
     running: "bg-status-running/10 text-status-running",
     unhealthy: "bg-status-unhealthy/10 text-status-unhealthy",

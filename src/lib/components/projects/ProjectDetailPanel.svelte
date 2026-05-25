@@ -36,6 +36,13 @@
       : (projects.value.find((p) => p.id === projectDetailPanel.id) ?? null),
   );
 
+  // Optimistic display status for the header pill (overlay while a Play/Stop
+  // is in flight, else the real status). Falls back to "stopped" when no
+  // project is selected — the pill isn't rendered in that case anyway.
+  const displayStatus = $derived(
+    project ? projects.displayStatusOf(project) : "stopped",
+  );
+
   // Editable form state — initialised on open / when target project changes.
   let nameDraft = $state<string>("");
   let hostnameDraft = $state<string>("");
@@ -245,24 +252,34 @@
 
   async function run(op: "start" | "stop" | "restart") {
     if (!project) return;
+    const id = project.id;
+    // Optimistic flip before any await — see ProjectRow for the rationale.
+    projects.beginTransition(id, op === "stop" ? "stop" : "start");
     try {
       switch (op) {
         case "start": {
           await dns.ensureReady();
-          // Resolves a port conflict via confirm + force-quit; toasts the
-          // unresolved error (if any).
-          const conflict = await startProject(project.id, project.name);
-          if (conflict) errorBus.push(conflict);
+          // Resolves a port conflict via confirm + force-quit.
+          const r = await startProject(id, project.name);
+          if (r.kind === "declined") {
+            projects.failTransition(id); // nothing started — roll back
+            break;
+          }
+          if (r.kind === "error") {
+            projects.failTransition(id);
+            errorBus.push(r.error);
+          }
           break;
         }
         case "stop":
-          await safeInvoke("stop_project", { id: project.id });
+          await safeInvoke("stop_project", { id });
           break;
         case "restart":
-          await safeInvoke("restart_project", { id: project.id });
+          await safeInvoke("restart_project", { id });
           break;
       }
     } catch {
+      projects.failTransition(id); // roll the optimistic overlay back
       /* toast already pushed */
     }
   }
@@ -367,7 +384,7 @@
     >
       <div class="flex items-start justify-between gap-3">
         <div class="flex items-center gap-2.5 min-w-0">
-          <StatusPill status={project.status} />
+          <StatusPill status={displayStatus} />
           <h2 class="text-base font-semibold truncate">{project.name}</h2>
         </div>
         <button

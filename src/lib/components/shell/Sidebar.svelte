@@ -251,6 +251,12 @@
       <SidebarItem href="/services" icon="server" label="Services" matchPrefix />
       <SidebarItem href="/logs" icon="file-text" label="Logs" matchPrefix />
       <SidebarItem
+        href="/inspector"
+        icon="activity"
+        label="Inspector"
+        matchPrefix
+      />
+      <SidebarItem
         href="/languages"
         icon="file-code"
         label="Languages"

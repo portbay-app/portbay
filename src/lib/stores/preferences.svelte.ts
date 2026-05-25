@@ -33,6 +33,8 @@ export interface Preferences {
   closeToMenuBarToastSeen: boolean;
   /** Explicit opt-in for usage telemetry and crash-report upload. */
   telemetryEnabled: boolean;
+  /** Opt into early-access (experimental) features. Pro-gated in Settings. */
+  earlyAccessOptIn: boolean;
 
   // General
   launchAtLogin: boolean;
@@ -72,6 +74,7 @@ const DEFAULTS: Preferences = {
   closeToMenuBar: true,
   closeToMenuBarToastSeen: false,
   telemetryEnabled: false,
+  earlyAccessOptIn: false,
   launchAtLogin: false,
   reopenPreviousProjects: false,
   confirmBeforeStopAll: true,

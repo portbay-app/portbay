@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::caddy::{
-    build_config, find_free_https_port, CaddyClient, CertPaths, DEFAULT_HTTPS_PORT,
+    build_config, find_free_https_port, with_access_log, CaddyClient, CertPaths, ACCESS_LOG_FILE,
+    DEFAULT_HTTPS_PORT,
 };
 use crate::reconciler::report::StepOutcome;
 use crate::registry::Registry;
@@ -69,6 +70,10 @@ pub(super) async fn reconcile(
         Err(e) => return StepOutcome::failed(format!("build config: {e}")),
     };
 
+    // Route a JSON access log to a file the HTTP request inspector tails.
+    // Applied after build so it rides along on every `/load`.
+    let cfg = with_access_log(cfg, &logs_dir.join(ACCESS_LOG_FILE));
+
     let bytes = match serde_json::to_vec(&cfg) {
         Ok(b) => b,
         Err(e) => return StepOutcome::failed(format!("serialise config: {e}")),
@@ -104,6 +109,7 @@ mod tests {
 
     fn next_project(id: &str, port: u16, https: bool) -> Project {
         Project {
+            cors: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
@@ -120,6 +126,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         }

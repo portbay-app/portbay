@@ -119,6 +119,12 @@ pub struct AppState {
     /// idempotent across the multiple quit signals Tauri can deliver (the
     /// window `Destroyed` event AND the app-level `RunEvent::Exit`).
     shutdown_done: AtomicBool,
+
+    /// In-flight account login. Holds the opaque poll token for the pending
+    /// `/auth/session/*` handshake so the frontend can poll without ever
+    /// seeing tokens; cleared when the login completes or expires. Tokens
+    /// themselves never live here — they go straight to the OS keychain.
+    pub pending_login: Mutex<Option<crate::auth::PendingLogin>>,
 }
 
 /// How long after a Stop request a non-zero exit is still considered
@@ -152,6 +158,7 @@ impl AppState {
             tray: Mutex::new(Default::default()),
             stop_intents: Mutex::new(HashMap::new()),
             shutdown_done: AtomicBool::new(false),
+            pending_login: Mutex::new(None),
         }
     }
 
@@ -310,8 +317,8 @@ impl AppState {
         // pointing at a now-dead port after a restart. If DNS routing was
         // previously set up (the file exists) and our privileged helper is
         // reachable, silently re-point the file at the port we just bound.
-        // Best-effort — /etc/hosts is the primary path, so a failure here
-        // never blocks boot.
+        // Best-effort — if this fails, PortBay falls back to exact /etc/hosts
+        // entries on the next reconcile tick.
         if crate::dnsmasq::resolver::read_installed(&reg.domain_suffix).is_some() {
             let helper = crate::hosts_helper::HostsHelperClient::system();
             if helper.is_available() {

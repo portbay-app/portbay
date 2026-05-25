@@ -97,7 +97,7 @@ pub enum ScaffoldKind {
 }
 
 impl ScaffoldKind {
-    fn project_type(self) -> ProjectType {
+    pub(crate) fn project_type(self) -> ProjectType {
         match self {
             Self::Nextjs | Self::Vite | Self::Astro => ProjectType::Node,
             Self::Laravel | Self::Php => ProjectType::Php,
@@ -106,7 +106,7 @@ impl ScaffoldKind {
 
     /// Default start command for the scaffolded project. Frameworks
     /// have stable enough conventions that we don't need to detect.
-    fn default_start_command(self) -> Option<&'static str> {
+    pub(crate) fn default_start_command(self) -> Option<&'static str> {
         match self {
             Self::Nextjs | Self::Vite | Self::Astro => Some("pnpm dev"),
             Self::Laravel => Some("php artisan serve"),
@@ -116,7 +116,7 @@ impl ScaffoldKind {
 
     /// `(program, args)` for the upstream scaffolder. Run inside the
     /// chosen parent directory; `name` is the new folder it creates.
-    fn command_for(self, name: &str) -> (&'static str, Vec<String>) {
+    pub(crate) fn command_for(self, name: &str) -> (&'static str, Vec<String>) {
         match self {
             Self::Nextjs => (
                 "pnpm",
@@ -290,6 +290,10 @@ async fn finalize(
         kind: kind.project_type(),
         port: None,
         start_command: kind.default_start_command().map(str::to_string),
+        document_root: None,
+        php_version: None,
+        web_server: None,
+        mobile_run: None,
         https: true,
         auto_start: false,
         workspace: None,

@@ -10,7 +10,7 @@
 //!   skipped with a reason).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tauri::State;
@@ -18,7 +18,7 @@ use tauri::State;
 use crate::commands::projects::{load_registry, save_registry};
 use crate::error::{AppError, AppResult};
 use crate::import::{self, DetectedSource, ImportSource, ImportedSite};
-use crate::registry::{Project, ProjectId, ProjectType, Readiness, Runtime};
+use crate::registry::{Project, ProjectId, ProjectType, Readiness, Runtime, WebServer};
 use crate::state::AppState;
 
 /// One row in the import preview. Built from `ImportedSite` plus
@@ -145,12 +145,30 @@ fn build_project(site: &ImportedSite) -> std::result::Result<Project, String> {
     // to the php-version heuristic. Custom is the last resort — note it would
     // be reverse-proxied, so the static/php hint matters for correct serving.
     let kind = site.kind_hint.unwrap_or_else(|| {
-        if site.php_version.is_some() {
+        if site.php_version.is_some() || path_has_php_entry(&path) {
             ProjectType::Php
         } else {
             ProjectType::Custom
         }
     });
+    let runtime = if kind == ProjectType::Php {
+        site.php_version
+            .clone()
+            .or_else(detected_php_version)
+            .map(|version| Runtime {
+                lang: "php".into(),
+                version,
+            })
+    } else {
+        None
+    };
+    let php_version = if kind == ProjectType::Php {
+        site.php_version
+            .clone()
+            .or_else(|| runtime.as_ref().map(|rt| rt.version.clone()))
+    } else {
+        None
+    };
     Ok(Project {
         id,
         name: site.suggested_name.clone(),
@@ -161,27 +179,42 @@ fn build_project(site: &ImportedSite) -> std::result::Result<Project, String> {
         extra_ports: vec![],
         hostname: site.hostname.clone(),
         https: site.https,
-        services: if site.https {
-            vec!["caddy".into()]
-        } else {
-            vec![]
+        services: match kind {
+            ProjectType::Php => vec!["caddy".into(), "php-fpm".into()],
+            _ if site.https => vec!["caddy".into()],
+            _ => vec![],
         },
         env: Default::default(),
         readiness: Some(Readiness::Process),
         auto_start: false,
         tags: vec![site.source.tag().to_string()],
         document_root: site.document_root.clone(),
-        php_version: site.php_version.clone(),
+        php_version,
+        web_server: if kind == ProjectType::Php {
+            site.web_server.or(Some(WebServer::Caddy))
+        } else {
+            None
+        },
+        mobile_run: None,
         // Populate the structured runtime pin too (not just the legacy field),
         // so imported PHP sites converge onto `runtime` like GUI-created ones.
-        runtime: site.php_version.clone().map(|version| Runtime {
-            lang: "php".into(),
-            version,
-        }),
+        runtime,
         // Imported sites are always standalone folders; monorepo apps are set
         // up through the add-project workspace flow, not import.
         workspace: None,
+        cors: None,
     })
+}
+
+fn path_has_php_entry(path: &Path) -> bool {
+    path.join("index.php").exists() || path.join("public").join("index.php").exists()
+}
+
+fn detected_php_version() -> Option<String> {
+    crate::php::detect_all()
+        .into_iter()
+        .next()
+        .map(|p| p.version)
 }
 
 #[cfg(test)]

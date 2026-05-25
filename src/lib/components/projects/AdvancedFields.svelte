@@ -17,8 +17,15 @@
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { runtimes } from "$lib/stores/runtimes.svelte";
+  import { entitlements } from "$lib/stores/entitlements.svelte";
+  import { account } from "$lib/stores/account.svelte";
   import type { CommandError } from "$lib/types/error";
-  import type { ProjectView } from "$lib/types/projects";
+  import type {
+    MobileRunConfig,
+    ProjectType,
+    ProjectView,
+    WebServer,
+  } from "$lib/types/projects";
 
   interface Props {
     project: ProjectView;
@@ -54,6 +61,19 @@
   // ────────── PHP-only ──────────
   let documentRootDraft = $state<string>("");
   let phpVersionDraft = $state<string>("");
+  let webServerDraft = $state<WebServer>("caddy");
+
+  // ────────── Mobile-only ──────────
+  let mobileFlavorDraft = $state<string>("");
+  let mobileTargetDraft = $state<string>("");
+  let mobileDeviceDraft = $state<string>("");
+
+  // ────────── CORS (Pro) ──────────
+  // The basic listen port stays free for everyone; only this custom
+  // cross-origin policy is gated. Origins are edited one-per-line.
+  let corsOriginsDraft = $state<string>("");
+  let corsCredentialsDraft = $state<boolean>(false);
+  const corsLocked = $derived(!entitlements.allows("custom_port_cors"));
 
   // Save state — shared across sub-sections.
   let saving = $state<boolean>(false);
@@ -67,8 +87,22 @@
     serviceCustom = "";
     documentRootDraft = project.documentRoot ?? "";
     phpVersionDraft = project.phpVersion ?? "";
+    webServerDraft = project.webServer ?? "caddy";
+    mobileFlavorDraft = project.mobileRun?.flavor ?? "";
+    mobileTargetDraft = project.mobileRun?.target ?? "";
+    mobileDeviceDraft = project.mobileRun?.device ?? "";
+    corsOriginsDraft = (project.cors?.allowedOrigins ?? []).join("\n");
+    corsCredentialsDraft = project.cors?.allowCredentials ?? false;
     error = null;
   }
+
+  // Parse the textarea into a clean origin list (trimmed, blank lines dropped).
+  const corsOriginsParsed = $derived.by<string[]>(() =>
+    corsOriginsDraft
+      .split(/[\n,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
 
   $effect(() => {
     const _id = project.id;
@@ -112,13 +146,51 @@
 
   const phpDirty = $derived(
     documentRootDraft !== (project.documentRoot ?? "") ||
-      phpVersionDraft !== (project.phpVersion ?? ""),
+      phpVersionDraft !== (project.phpVersion ?? "") ||
+      webServerDraft !== (project.webServer ?? "caddy"),
   );
 
   const isPhp = $derived(project.type === "php");
+  const isMobile = $derived(
+    project.type === "flutter" ||
+      project.type === "xcode" ||
+      project.type === "android",
+  );
+
+  const mobileDraft = $derived<MobileRunConfig>({
+    flavor: cleanOrNull(mobileFlavorDraft),
+    target: cleanOrNull(mobileTargetDraft),
+    device: cleanOrNull(mobileDeviceDraft),
+  });
+
+  const mobileCommand = $derived(
+    commandForMobile(project.type, mobileDraft) ?? project.startCommand ?? "",
+  );
+
+  const mobileDirty = $derived.by(() => {
+    const original = project.mobileRun ?? {};
+    return (
+      (mobileDraft.flavor ?? "") !== (original.flavor ?? "") ||
+      (mobileDraft.target ?? "") !== (original.target ?? "") ||
+      (mobileDraft.device ?? "") !== (original.device ?? "")
+    );
+  });
+
+  const corsDirty = $derived.by(() => {
+    const original = project.cors?.allowedOrigins ?? [];
+    const a = corsOriginsParsed;
+    const originsChanged =
+      a.length !== original.length || a.some((o, i) => o !== original[i]);
+    return originsChanged || corsCredentialsDraft !== (project.cors?.allowCredentials ?? false);
+  });
 
   const anyDirty = $derived(
-    tagsDirty || extraPortsDirty || servicesDirty || (isPhp && phpDirty),
+    tagsDirty ||
+      extraPortsDirty ||
+      servicesDirty ||
+      (isPhp && phpDirty) ||
+      (isMobile && mobileDirty) ||
+      (!corsLocked && corsDirty),
   );
 
   // ────────── Tag actions ──────────
@@ -169,6 +241,17 @@
     if (isPhp && phpDirty) {
       patch.documentRoot = documentRootDraft.trim();
       patch.phpVersion = phpVersionDraft.trim();
+      patch.webServer = webServerDraft;
+    }
+    if (isMobile && mobileDirty) {
+      patch.mobileRun = mobileDraft;
+      patch.startCommand = mobileCommand;
+    }
+    if (!corsLocked && corsDirty) {
+      patch.cors = {
+        allowedOrigins: corsOriginsParsed,
+        allowCredentials: corsCredentialsDraft,
+      };
     }
 
     try {
@@ -194,6 +277,49 @@
 
   function discard() {
     syncFromProject();
+  }
+
+  function cleanOrNull(value: string): string | null {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+
+  function shellQuote(value: string): string {
+    return /^[A-Za-z0-9/._:-]+$/.test(value)
+      ? value
+      : `'${value.replaceAll("'", "'\\''")}'`;
+  }
+
+  function capitalizeAscii(value: string): string {
+    return value ? value[0].toUpperCase() + value.slice(1) : value;
+  }
+
+  function commandForMobile(
+    kind: ProjectType,
+    cfg: MobileRunConfig,
+  ): string | null {
+    if (kind === "flutter") {
+      const args = ["flutter", "run"];
+      if (cfg.flavor) args.push("--flavor", shellQuote(cfg.flavor));
+      if (cfg.device) args.push("-d", shellQuote(cfg.device));
+      return args.join(" ");
+    }
+    if (kind === "xcode") {
+      if (!cfg.target) return "xed .";
+      const args = ["xcodebuild", "-scheme", shellQuote(cfg.target)];
+      if (cfg.device) args.push("-destination", shellQuote(cfg.device));
+      args.push("build");
+      return args.join(" ");
+    }
+    if (kind === "android") {
+      const module = cfg.target || "app";
+      const variant = capitalizeAscii(cfg.flavor || "debug");
+      const command = `./gradlew :${module}:install${variant}`;
+      return cfg.device
+        ? `ANDROID_SERIAL=${shellQuote(cfg.device)} ${command}`
+        : command;
+    }
+    return null;
   }
 </script>
 
@@ -274,6 +400,50 @@
         </span>
       {/if}
     </p>
+  </section>
+
+  <!-- CORS (Pro) -->
+  <section class="space-y-2">
+    <div class="flex items-center justify-between">
+      <span class="text-xs uppercase tracking-wide text-fg-subtle">CORS</span>
+      <span class="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent font-medium">Pro</span>
+    </div>
+    {#if corsLocked}
+      <div class="flex items-start gap-2 rounded-md border border-border bg-surface-2/40 p-2.5">
+        <Icon name="lock" size={13} class="text-fg-subtle mt-0.5 shrink-0" />
+        <div class="flex-1 space-y-1.5">
+          <p class="text-[11px] leading-relaxed text-fg-muted">
+            Let specific origins call this project across origins (custom
+            <code class="text-fg">Access-Control-Allow-Origin</code>). Custom CORS is a
+            <span class="text-fg">PortBay Pro</span> feature — the project's port stays free.
+          </p>
+          <button
+            type="button"
+            onclick={() => account.open({ intent: "pro" })}
+            class="inline-flex items-center gap-1 text-[11px] font-medium text-accent hover:underline"
+          >
+            <Icon name="sparkles" size={11} /> Unlock with Pro
+          </button>
+        </div>
+      </div>
+    {:else}
+      <textarea
+        bind:value={corsOriginsDraft}
+        rows="3"
+        placeholder={"https://app.example.test\nhttps://admin.example.test"}
+        spellcheck="false"
+        class="w-full px-2.5 py-1.5 rounded-md bg-bg border border-border
+               focus:border-accent/60 outline-none text-fg font-mono text-xs resize-y"
+      ></textarea>
+      <label class="flex items-center gap-2 text-[11px] text-fg-muted">
+        <input type="checkbox" bind:checked={corsCredentialsDraft} class="accent-accent" />
+        Allow credentials (<code class="text-fg-subtle">Access-Control-Allow-Credentials</code>)
+      </label>
+      <p class="text-[10px] text-fg-subtle">
+        One allowed origin per line. Only these origins are echoed back — never a
+        blanket <code>*</code>. Leave empty to remove the policy.
+      </p>
+    {/if}
   </section>
 
   <!-- Services -->
@@ -407,12 +577,109 @@
             then re-detect from the Languages panel.
           </p>
         {/if}
+
+        <label for="advanced-web-server" class="text-fg-muted">Web server</label>
+        <select
+          id="advanced-web-server"
+          bind:value={webServerDraft}
+          class="px-2.5 py-1.5 rounded-md bg-bg border border-border
+                 focus:border-accent/60 outline-none text-fg text-xs w-36"
+        >
+          <option value="caddy">Caddy</option>
+          <option value="nginx">Nginx</option>
+          <option value="apache">Apache</option>
+        </select>
       </div>
       <p class="text-[10px] text-fg-subtle">
-        Document root is the subfolder Caddy serves (typically
-        <code>public</code> for Laravel). PHP version selects which PHP-FPM
-        binary handles requests.
+        Document root is typically <code>public</code> for Laravel. PHP version
+        selects which PHP-FPM binary handles requests; web server selects the
+        local server PortBay generates for this project.
       </p>
+    </section>
+  {/if}
+
+  {#if isMobile}
+    <section class="space-y-2">
+      <span class="text-xs uppercase tracking-wide text-fg-subtle">Mobile run</span>
+      <div class="grid grid-cols-[110px,1fr] gap-x-3 gap-y-2 items-center text-sm">
+        {#if project.type === "flutter"}
+          <label for="advanced-mobile-flavor" class="text-fg-muted">Flavor</label>
+          <input
+            id="advanced-mobile-flavor"
+            type="text"
+            bind:value={mobileFlavorDraft}
+            placeholder="staging"
+            spellcheck="false"
+            class="px-2.5 py-1.5 rounded-md bg-bg border border-border
+                   focus:border-accent/60 outline-none text-fg font-mono text-xs"
+          />
+          <label for="advanced-mobile-device" class="text-fg-muted">Device</label>
+          <input
+            id="advanced-mobile-device"
+            type="text"
+            bind:value={mobileDeviceDraft}
+            placeholder="iPhone 16 or emulator-5554"
+            spellcheck="false"
+            class="px-2.5 py-1.5 rounded-md bg-bg border border-border
+                   focus:border-accent/60 outline-none text-fg font-mono text-xs"
+          />
+        {:else if project.type === "xcode"}
+          <label for="advanced-mobile-target" class="text-fg-muted">Scheme</label>
+          <input
+            id="advanced-mobile-target"
+            type="text"
+            bind:value={mobileTargetDraft}
+            placeholder="App"
+            spellcheck="false"
+            class="px-2.5 py-1.5 rounded-md bg-bg border border-border
+                   focus:border-accent/60 outline-none text-fg font-mono text-xs"
+          />
+          <label for="advanced-mobile-device" class="text-fg-muted">Destination</label>
+          <input
+            id="advanced-mobile-device"
+            type="text"
+            bind:value={mobileDeviceDraft}
+            placeholder="platform=iOS Simulator,name=iPhone 16"
+            spellcheck="false"
+            class="px-2.5 py-1.5 rounded-md bg-bg border border-border
+                   focus:border-accent/60 outline-none text-fg font-mono text-xs"
+          />
+        {:else if project.type === "android"}
+          <label for="advanced-mobile-target" class="text-fg-muted">Module</label>
+          <input
+            id="advanced-mobile-target"
+            type="text"
+            bind:value={mobileTargetDraft}
+            placeholder="app"
+            spellcheck="false"
+            class="px-2.5 py-1.5 rounded-md bg-bg border border-border
+                   focus:border-accent/60 outline-none text-fg font-mono text-xs"
+          />
+          <label for="advanced-mobile-flavor" class="text-fg-muted">Variant</label>
+          <input
+            id="advanced-mobile-flavor"
+            type="text"
+            bind:value={mobileFlavorDraft}
+            placeholder="debug"
+            spellcheck="false"
+            class="px-2.5 py-1.5 rounded-md bg-bg border border-border
+                   focus:border-accent/60 outline-none text-fg font-mono text-xs"
+          />
+          <label for="advanced-mobile-device" class="text-fg-muted">Device</label>
+          <input
+            id="advanced-mobile-device"
+            type="text"
+            bind:value={mobileDeviceDraft}
+            placeholder="emulator-5554"
+            spellcheck="false"
+            class="px-2.5 py-1.5 rounded-md bg-bg border border-border
+                   focus:border-accent/60 outline-none text-fg font-mono text-xs"
+          />
+        {/if}
+      </div>
+      <div class="rounded-md border border-border bg-bg px-2.5 py-1.5">
+        <code class="block text-[11px] text-fg-muted break-all">{mobileCommand}</code>
+      </div>
     </section>
   {/if}
 

@@ -61,6 +61,7 @@
     | "log-out"
     | "database"
     | "cloud"
+    | "copy"
     | "eye";
 </script>
 
@@ -113,6 +114,7 @@
     LogOut,
     Database,
     Cloud,
+    Copy,
     Eye,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
@@ -180,6 +182,7 @@
     "log-out": LogOut,
     database: Database,
     cloud: Cloud,
+    copy: Copy,
     eye: Eye,
   };
 

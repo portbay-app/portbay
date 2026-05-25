@@ -91,6 +91,20 @@ pub enum AppError {
     #[error("bad input: {0}")]
     BadInput(String),
 
+    /// Adding another project would exceed the current tier's cap. The GUI
+    /// catches this code to open the sign-in / upgrade sheet; the CLI prints
+    /// the next step. Carries the cap that was hit.
+    #[error("You've reached your {cap}-project limit")]
+    ProjectCapReached { cap: u32 },
+
+    /// A Pro-gated configuration was set or changed by a non-Pro session. The
+    /// GUI locks these controls proactively; this is the core-side safety net
+    /// for the CLI and hand-edited registries. Carries a human feature label.
+    /// An *existing* configured value is never stripped — only the act of
+    /// introducing/changing one without Pro is rejected.
+    #[error("{feature} is a PortBay Pro feature")]
+    ProRequired { feature: &'static str },
+
     /// A failure that doesn't fit the other variants. Kept narrow on purpose.
     #[error("{0}")]
     Internal(String),
@@ -111,6 +125,8 @@ impl AppError {
             Self::NotFound(_) => "PROJECT_NOT_FOUND",
             Self::PortConflict { .. } => "PORT_CONFLICT",
             Self::BadInput(_) => "BAD_INPUT",
+            Self::ProjectCapReached { .. } => "PROJECT_CAP_REACHED",
+            Self::ProRequired { .. } => "PRO_REQUIRED",
             Self::Internal(_) => "INTERNAL",
         }
     }
@@ -141,6 +157,12 @@ impl AppError {
                 format!("Stop {holder} (or change this project's port in its detail panel) and try again.")
             }
             Self::BadInput(_) => "Fix the input and try again.".into(),
+            Self::ProjectCapReached { .. } => {
+                "Sign in or create a free account to add more, or upgrade to Pro for unlimited projects.".into()
+            }
+            Self::ProRequired { .. } => {
+                "Upgrade to PortBay Pro to use this — your existing settings are unchanged.".into()
+            }
             Self::Hosts(_) | Self::Io(_) | Self::Internal(_) => {
                 "The action did not complete.".into()
             }
@@ -151,7 +173,11 @@ impl AppError {
     /// anything PortBay or the OS got wrong. Drives the UI's tone.
     fn who(&self) -> &'static str {
         match self {
-            Self::BadInput(_) | Self::NotFound(_) | Self::PortConflict { .. } => "user",
+            Self::BadInput(_)
+            | Self::NotFound(_)
+            | Self::PortConflict { .. }
+            | Self::ProjectCapReached { .. }
+            | Self::ProRequired { .. } => "user",
             _ => "system",
         }
     }

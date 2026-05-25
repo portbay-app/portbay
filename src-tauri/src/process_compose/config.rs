@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::process_compose::error::Result;
-use crate::registry::{DatabaseInstance, Project, Readiness, Registry};
+use crate::registry::{DatabaseInstance, Project, Readiness, Registry, RuntimeSettings};
 
 /// Top-level YAML document for Process Compose.
 #[derive(Debug, Serialize)]
@@ -164,6 +164,25 @@ pub struct DatabaseDaemonSpec {
     pub auto_start: bool,
 }
 
+/// One generated web-server daemon (Nginx or Apache) PortBay supervises for a
+/// PHP document-root project. Caddy still owns the public hostname and TLS; it
+/// reverse-proxies to this loopback port.
+#[derive(Debug, Clone)]
+pub struct WebServerSpec {
+    /// Stable PC process name, e.g. `web-nginx-myapp`.
+    pub process_id: String,
+    /// Human description, e.g. `Nginx - myapp`.
+    pub description: String,
+    /// Fully-built launch command.
+    pub command: String,
+    /// Directory PC `cd`s into before launching.
+    pub working_dir: std::path::PathBuf,
+    /// Loopback HTTP port Caddy reverse-proxies to.
+    pub port: u16,
+    /// Honour the project's auto_start flag.
+    pub auto_start: bool,
+}
+
 /// Build a YAML string from the registry.
 ///
 /// `logs_dir` is the directory each per-process log file is written to
@@ -185,10 +204,13 @@ pub fn to_yaml(
     mail_env: Option<&MailpitEnv>,
     php_fpm_specs: &[PhpFpmSpec],
     db_specs: &[DatabaseDaemonSpec],
+    web_specs: &[WebServerSpec],
 ) -> Result<String> {
     let mut processes = BTreeMap::new();
     for p in &reg.projects {
-        if let Some(entry) = project_to_pc_process(p, logs_dir, mail_env, &reg.databases) {
+        if let Some(entry) =
+            project_to_pc_process(p, logs_dir, mail_env, &reg.databases, &reg.runtimes)
+        {
             processes.insert(p.id.to_string(), entry);
         }
     }
@@ -202,6 +224,12 @@ pub fn to_yaml(
         processes.insert(
             spec.process_id.clone(),
             db_daemon_to_pc_process(spec, logs_dir),
+        );
+    }
+    for spec in web_specs {
+        processes.insert(
+            spec.process_id.clone(),
+            web_server_to_pc_process(spec, logs_dir),
         );
     }
 
@@ -280,11 +308,43 @@ fn db_daemon_to_pc_process(spec: &DatabaseDaemonSpec, logs_dir: &Path) -> PcProc
     }
 }
 
+fn web_server_to_pc_process(spec: &WebServerSpec, logs_dir: &Path) -> PcProcess {
+    let log_path = logs_dir.join(format!("{}.log", spec.process_id));
+    PcProcess {
+        description: Some(spec.description.clone()),
+        working_dir: spec.working_dir.to_string_lossy().into_owned(),
+        command: spec.command.clone(),
+        disabled: !spec.auto_start,
+        availability: PcAvailability { restart: "no" },
+        readiness_probe: Some(PcReadinessProbe {
+            http_get: Some(PcHttpGet {
+                host: "127.0.0.1",
+                scheme: "http",
+                path: "/".into(),
+                port: spec.port,
+            }),
+            tcp_socket: None,
+            initial_delay_seconds: 1,
+            period_seconds: 2,
+            timeout_seconds: 5,
+            success_threshold: 1,
+            failure_threshold: 30,
+        }),
+        log_location: log_path.to_string_lossy().into_owned(),
+        environment: BTreeMap::new(),
+        shutdown: PcShutdown {
+            signal: 15,
+            timeout_seconds: 10,
+        },
+    }
+}
+
 fn project_to_pc_process(
     p: &Project,
     logs_dir: &Path,
     mail_env: Option<&MailpitEnv>,
     databases: &[DatabaseInstance],
+    runtimes: &RuntimeSettings,
 ) -> Option<PcProcess> {
     // The command to launch. An explicit `start_command` always wins. Failing
     // that, a monorepo project derives a workspace-filtered command from its
@@ -327,6 +387,7 @@ fn project_to_pc_process(
     for (k, v) in &p.env {
         environment.insert(k.clone(), v.clone());
     }
+    inject_runtime_path(p, runtimes, &mut environment);
 
     Some(PcProcess {
         description: Some(p.name.clone()),
@@ -347,6 +408,33 @@ fn project_to_pc_process(
             timeout_seconds: 10,
         },
     })
+}
+
+fn inject_runtime_path(
+    p: &Project,
+    runtimes: &RuntimeSettings,
+    environment: &mut BTreeMap<String, String>,
+) {
+    let Some(runtime) = &p.runtime else {
+        return;
+    };
+    let Some(binary) = crate::runtimes::resolve_binary(runtime, runtimes) else {
+        return;
+    };
+    let Some(bin_dir) = binary.parent() else {
+        return;
+    };
+    let current = environment
+        .get("PATH")
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    environment.insert(
+        "PATH".into(),
+        format!("{}:{current}", bin_dir.to_string_lossy()),
+    );
+    environment.insert("PORTBAY_RUNTIME_LANG".into(), runtime.lang.clone());
+    environment.insert("PORTBAY_RUNTIME_VERSION".into(), runtime.version.clone());
 }
 
 fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadinessProbe> {
@@ -395,11 +483,12 @@ fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadiness
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{Project, ProjectId, ProjectType, Readiness};
+    use crate::registry::{ManualRuntime, Project, ProjectId, ProjectType, Readiness, Runtime};
     use std::path::PathBuf;
 
     fn next_project(id: &str, port: u16) -> Project {
         Project {
+            cors: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
@@ -419,6 +508,8 @@ mod tests {
             tags: vec![],
             document_root: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         }
@@ -426,6 +517,7 @@ mod tests {
 
     fn php_project(id: &str) -> Project {
         Project {
+            cors: None,
             id: ProjectId::new(id),
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
@@ -442,6 +534,8 @@ mod tests {
             tags: vec![],
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         }
@@ -450,7 +544,7 @@ mod tests {
     #[test]
     fn empty_registry_produces_minimal_yaml() {
         let r = Registry::new("test");
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
         assert!(yaml.contains("version: '0.5'") || yaml.contains("version: \"0.5\""));
         assert!(yaml.contains("processes: {}"));
     }
@@ -459,7 +553,7 @@ mod tests {
     fn next_project_produces_process_with_http_probe() {
         let mut r = Registry::new("test");
         r.add_project(next_project("marketing-site", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[]).unwrap();
         assert!(
             yaml.contains("marketing-site"),
             "process name missing: {yaml}"
@@ -485,7 +579,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(php_project("api-gateway")).unwrap();
         r.add_project(next_project("marketing-site", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
         assert!(!yaml.contains("api-gateway"));
         assert!(yaml.contains("marketing-site"));
     }
@@ -505,7 +599,7 @@ mod tests {
         });
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
         assert!(
             yaml.contains("pnpm --filter @bookslash/web dev"),
             "expected the derived filter command in:\n{yaml}"
@@ -521,10 +615,43 @@ mod tests {
         p.env.insert("NODE_ENV".into(), "development".into());
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
         assert!(yaml.contains("DATABASE_URL"));
         assert!(yaml.contains("postgres://x"));
         assert!(yaml.contains("NODE_ENV"));
+    }
+
+    #[test]
+    fn project_runtime_binary_dir_is_prepended_to_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("node-22").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let node = bin_dir.join("node");
+        std::fs::write(&node, "#!/bin/sh\necho v22.1.0\n").unwrap();
+
+        let mut p = next_project("runtime-path", 3010);
+        p.runtime = Some(Runtime {
+            lang: "node".into(),
+            version: "22.1.0".into(),
+        });
+        let mut r = Registry::new("test");
+        r.runtimes.manual.push(ManualRuntime {
+            lang: "node".into(),
+            version: "22.1.0".into(),
+            binary: node,
+        });
+        r.add_project(p).unwrap();
+
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let env = &doc["processes"]["runtime-path"]["environment"];
+        let path = env["PATH"].as_str().unwrap();
+        assert!(
+            path.starts_with(&bin_dir.to_string_lossy().to_string()),
+            "expected runtime bin dir first in PATH, got {path}"
+        );
+        assert_eq!(env["PORTBAY_RUNTIME_LANG"].as_str(), Some("node"));
+        assert_eq!(env["PORTBAY_RUNTIME_VERSION"].as_str(), Some("22.1.0"));
     }
 
     #[test]
@@ -532,7 +659,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("withmail", 3010)).unwrap();
         let mail = MailpitEnv::with_smtp_port(1025);
-        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[], &[]).unwrap();
         assert!(yaml.contains("MAIL_HOST: 127.0.0.1"));
         assert!(yaml.contains("MAIL_PORT: '1025'") || yaml.contains("MAIL_PORT: \"1025\""));
         assert!(yaml.contains("MAIL_MAILER: smtp"));
@@ -547,7 +674,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
         let mail = MailpitEnv::with_smtp_port(1025);
-        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[], &[]).unwrap();
         // Project's explicit override wins; the default loopback is gone.
         assert!(yaml.contains("MAIL_HOST: mail.production.test"));
         assert!(!yaml.contains("MAIL_HOST: 127.0.0.1"));
@@ -557,7 +684,7 @@ mod tests {
     fn no_mail_env_leaves_yaml_without_mail_vars() {
         let mut r = Registry::new("test");
         r.add_project(next_project("nomail", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
         assert!(!yaml.contains("MAIL_HOST"));
         assert!(!yaml.contains("MAIL_PORT"));
     }
@@ -568,7 +695,7 @@ mod tests {
         p.readiness = Some(Readiness::Process);
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
         assert!(!yaml.contains("readiness_probe"));
     }
 
@@ -577,7 +704,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
         r.add_project(next_project("b", 3011)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
         let back: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         // Just confirm structural validity — content was checked above.
         assert!(back.get("processes").is_some());
@@ -604,7 +731,7 @@ mod tests {
                 working_dir: PathBuf::from("/tmp/portbay/php/7.4"),
             },
         ];
-        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &specs, &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &specs, &[], &[]).unwrap();
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         let procs = &doc["processes"];
 
@@ -641,11 +768,40 @@ mod tests {
             pool_config: PathBuf::from("/x/conf"),
             working_dir: PathBuf::from("/x"),
         };
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[spec], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[spec], &[], &[]).unwrap();
         // The spec inserts AFTER the project loop, so it overwrites —
         // documenting that here. If we later want the project to win,
         // swap the iteration order.
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         assert!(doc["processes"]["php-fpm-8-3"].is_mapping());
+    }
+
+    #[test]
+    fn web_server_specs_emit_http_readiness_probe() {
+        let r = Registry::new("test");
+        let spec = WebServerSpec {
+            process_id: "web-nginx-cms".into(),
+            description: "Nginx - CMS".into(),
+            command: "nginx -c /tmp/nginx.conf -g 'daemon off;'".into(),
+            working_dir: PathBuf::from("/tmp/portbay/webservers/nginx/cms"),
+            port: 9080,
+            auto_start: true,
+        };
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[spec]).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let proc = &doc["processes"]["web-nginx-cms"];
+        assert_eq!(
+            proc["command"].as_str(),
+            Some("nginx -c /tmp/nginx.conf -g 'daemon off;'")
+        );
+        assert_eq!(
+            proc["readiness_probe"]["http_get"]["port"].as_u64(),
+            Some(9080)
+        );
+        assert_eq!(
+            proc["readiness_probe"]["http_get"]["path"].as_str(),
+            Some("/")
+        );
+        assert_eq!(proc["disabled"].as_bool(), Some(false));
     }
 }

@@ -104,7 +104,7 @@ jobs:
         run: cargo test --no-default-features
 
   frontend:
-    name: frontend · pnpm check + build
+    name: frontend · check + test + build
     runs-on: macos-14
     timeout-minutes: 20
     steps:
@@ -126,6 +126,13 @@ jobs:
 
       - name: pnpm check (svelte-check)
         run: pnpm check
+
+      - name: pnpm test (vitest)
+        # Unit tests for the optimistic-lifecycle core — guards the
+        # interaction-latency budget's stale-event resolution logic
+        # (docs/PERFORMANCE.md). End-to-end timing assertion is owned by the
+        # P4 performance-regression-CI card's WebDriver harness.
+        run: pnpm test
 
       - name: pnpm build
         run: pnpm build

@@ -36,6 +36,9 @@ portbay add <PATH> \
   --kind next|vite|php|static|node|custom \
   --port <port> \
   --start-command <command> \
+  --document-root <relative-path> \
+  --php-version <version> \
+  --web-server caddy|nginx|apache \
   --https true|false \
   --auto-start
 ```

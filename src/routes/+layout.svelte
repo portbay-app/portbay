@@ -25,6 +25,8 @@
   import GroupEditorModal from "$lib/components/groups/GroupEditorModal.svelte";
   import CommandPalette from "$lib/components/palette/CommandPalette.svelte";
   import { ConfirmDialog } from "$lib/components/atoms";
+  import { SignInSheet, AboutLicenseDialog } from "$lib/components/account";
+  import FeedbackPrompt from "$lib/components/lifecycle/FeedbackPrompt.svelte";
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
   import { onMount } from "svelte";
@@ -37,6 +39,7 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { entitlements } from "$lib/stores/entitlements.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { installCrashReporter } from "$lib/stores/crashReporter.svelte";
 
@@ -66,6 +69,9 @@
     // emptied store.
     void projects.start();
     void preferences.load();
+    // Load the cached entitlement immediately (no network), then re-verify a
+    // stored session in the background (rotates tokens, refetches the license).
+    void entitlements.load().then(() => entitlements.resync());
 
     // Tray-driven nav: the menu-bar "Preferences…" item emits
     // `portbay://nav` with the target route. Same channel can be used
@@ -247,5 +253,8 @@
   <GroupEditorModal />
   <CommandPalette />
   <ConfirmDialog />
+  <SignInSheet />
+  <AboutLicenseDialog />
+  <FeedbackPrompt />
   <ToastHost />
 {/if}

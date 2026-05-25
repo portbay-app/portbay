@@ -21,7 +21,7 @@ pub mod schema;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::registry::{Project, ProjectId, Readiness};
+use crate::registry::{Project, ProjectId, ProjectType, Readiness};
 
 pub use error::{PortfileError, Result};
 pub use schema::{PortbayFile, PORTBAY_FILE_NAME, SCHEMA_VERSION};
@@ -74,6 +74,8 @@ pub fn export_project(project: &Project) -> PortbayFile {
         hostname: project.hostname.clone(),
         port: project.port,
         php_version: project.php_version.clone(),
+        web_server: project.web_server,
+        mobile_run: project.mobile_run.clone(),
         https: project.https,
         auto_start: project.auto_start,
         start_command: project.start_command.clone(),
@@ -167,6 +169,18 @@ pub fn materialise_project(
 
     let readiness = plan.file.readiness.clone().or(Some(Readiness::Process));
 
+    let runtime = if plan.file.kind == ProjectType::Php {
+        plan.file
+            .php_version
+            .clone()
+            .map(|version| crate::registry::Runtime {
+                lang: "php".into(),
+                version,
+            })
+    } else {
+        None
+    };
+
     Ok(Project {
         id,
         name: plan.file.name.clone(),
@@ -177,18 +191,25 @@ pub fn materialise_project(
         extra_ports: vec![],
         hostname: plan.file.hostname.clone(),
         https: plan.file.https,
-        services,
+        services: if plan.file.kind == ProjectType::Php && plan.file.start_command.is_none() {
+            vec!["caddy".to_string(), "php-fpm".to_string()]
+        } else {
+            services
+        },
         env,
         readiness,
         auto_start: plan.file.auto_start,
         tags: plan.file.tags.clone(),
         document_root: plan.file.document_root.clone(),
         php_version: plan.file.php_version.clone(),
-        runtime: None,
+        web_server: plan.file.web_server,
+        mobile_run: plan.file.mobile_run.clone(),
+        runtime,
         // Portfile import doesn't carry a workspace binding yet — a monorepo
         // app round-trips as a root-path project. Re-set via the add-project
         // workspace flow if needed.
         workspace: None,
+        cors: None,
     })
 }
 
@@ -215,6 +236,7 @@ mod tests {
         env.insert("APP_DEBUG".into(), "true".into());
 
         Project {
+            cors: None,
             id: ProjectId::new("demo-cms"),
             name: "Demo CMS".into(),
             path: PathBuf::from("/Users/me/code/demo-cms"),
@@ -231,6 +253,8 @@ mod tests {
             tags: vec!["client:demo".into()],
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
+            web_server: None,
+            mobile_run: None,
             runtime: None,
             workspace: None,
         }
@@ -314,6 +338,8 @@ mod tests {
             hostname: "myapp.test".into(),
             port: Some(8000),
             php_version: Some("8.3".into()),
+            web_server: None,
+            mobile_run: None,
             https: true,
             auto_start: false,
             start_command: None,
@@ -343,6 +369,8 @@ mod tests {
             hostname: "x.test".into(),
             port: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             https: true,
             auto_start: false,
             start_command: None,
@@ -371,6 +399,8 @@ mod tests {
             hostname: "x.test".into(),
             port: None,
             php_version: None,
+            web_server: None,
+            mobile_run: None,
             https: true,
             auto_start: false,
             start_command: None,
