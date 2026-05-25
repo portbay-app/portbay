@@ -63,7 +63,8 @@
     | "cloud"
     | "copy"
     | "eye"
-    | "shield";
+    | "shield"
+    | "server-cog";
 </script>
 
 <script lang="ts">
@@ -118,6 +119,7 @@
     Copy,
     Eye,
     Shield,
+    ServerCog,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -187,6 +189,7 @@
     copy: Copy,
     eye: Eye,
     shield: Shield,
+    "server-cog": ServerCog,
   };
 
   const Component = $derived(iconMap[name]);

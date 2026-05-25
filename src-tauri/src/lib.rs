@@ -404,6 +404,7 @@ pub fn run() {
             commands::certs::install_mkcert_ca,
             commands::certs::cert_info,
             commands::certs::reissue_cert,
+            commands::webservers::webserver_overview,
             commands::system::doctor,
             commands::system::tail_logs,
             commands::system::read_dotenv,

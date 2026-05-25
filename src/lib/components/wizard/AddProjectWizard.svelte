@@ -21,6 +21,7 @@
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
+  import { preferences } from "$lib/stores/preferences.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
@@ -49,7 +50,9 @@
   let startCommand = $state<string>("");
   let documentRoot = $state<string>("");
   let phpVersion = $state<string>("");
-  let webServer = $state<WebServer>("caddy");
+  let webServer = $state<WebServer>(
+    preferences.value.defaultWebServer ?? "caddy",
+  );
   let mobileRun = $state<MobileRunConfig | null>(null);
   let kind = $state<ProjectType>("custom");
   let https = $state<boolean>(true);
@@ -157,7 +160,7 @@
     startCommand = "";
     documentRoot = "";
     phpVersion = "";
-    webServer = "caddy";
+    webServer = preferences.value.defaultWebServer ?? "caddy";
     kind = "custom";
     https = true;
     autoStart = false;
@@ -238,7 +241,8 @@
         startCommand = file.startCommand ?? "";
         documentRoot = file.documentRoot ?? "";
         phpVersion = file.phpVersion ?? "";
-        webServer = file.webServer ?? "caddy";
+        webServer =
+          file.webServer ?? preferences.value.defaultWebServer ?? "caddy";
         mobileRun = file.mobileRun ?? null;
         kind = file.type;
         https = file.https;
@@ -305,7 +309,8 @@
     startCommand = det.suggestedStartCommand ?? "";
     documentRoot = det.suggestedDocumentRoot ?? "";
     phpVersion = det.suggestedPhpVersion ?? "";
-    webServer = det.suggestedWebServer ?? "caddy";
+    webServer =
+      det.suggestedWebServer ?? preferences.value.defaultWebServer ?? "caddy";
     mobileRun = det.suggestedMobileRun ?? null;
     kind = det.kind;
     syncRawFromFields();
@@ -328,7 +333,7 @@
     kind = app.kind;
     documentRoot = "";
     phpVersion = "";
-    webServer = "caddy";
+    webServer = preferences.value.defaultWebServer ?? "caddy";
     mobileRun = null;
     if (workspaceFromRoot && workspaceScan) {
       // Tier 2: run from the repo root with a workspace filter. Leave the

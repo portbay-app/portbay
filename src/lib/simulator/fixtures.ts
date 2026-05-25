@@ -23,6 +23,7 @@ import type {
   DatabaseInstanceView,
 } from "$lib/types/databases";
 import type { DnsPreflight, DnsRecord, ResolverStatus } from "$lib/types/dns";
+import type { WebServerInfo } from "$lib/types/webservers";
 
 /** Everything the mock IPC layer can serve, in one bag. */
 export interface DemoFixtures {
@@ -37,6 +38,7 @@ export interface DemoFixtures {
   dnsRecords: DnsRecord[];
   dnsPreflight: DnsPreflight;
   resolverStatus: ResolverStatus;
+  webServers: WebServerInfo[];
 }
 
 /** A healthy-looking process snapshot for a running project. */
@@ -443,6 +445,50 @@ const RESOLVER_STATUS: ResolverStatus = {
   currentPort: 53531,
 };
 
+/**
+ * Web servers, as the `/web-servers` page sees them. Caddy is the bundled edge;
+ * Nginx is "installed" and serves the one PHP project (Billing API); Apache is
+ * detected-as-absent to show the not-installed state.
+ */
+const WEB_SERVERS: WebServerInfo[] = [
+  {
+    id: "caddy",
+    name: "Caddy",
+    role: "Edge router — maps your project hostnames to their ports, terminates local HTTPS, and reverse-proxies to Nginx/Apache when a project picks them.",
+    edge: true,
+    bundled: true,
+    installed: true,
+    binaryPath: null,
+    version: null,
+    projects: [],
+    isDefault: true,
+  },
+  {
+    id: "nginx",
+    name: "Nginx",
+    role: "Per-project PHP backend. PortBay generates the nginx.conf (FastCGI to PHP-FPM) and Caddy reverse-proxies the hostname to it.",
+    edge: false,
+    bundled: false,
+    installed: true,
+    binaryPath: "/opt/homebrew/bin/nginx",
+    version: "1.27.0",
+    projects: [{ id: "billing-api", name: "Billing API" }],
+    isDefault: false,
+  },
+  {
+    id: "apache",
+    name: "Apache",
+    role: "Per-project PHP backend. PortBay generates the httpd.conf (mod_proxy_fcgi to PHP-FPM) and Caddy reverse-proxies the hostname to it.",
+    edge: false,
+    bundled: false,
+    installed: false,
+    binaryPath: null,
+    version: null,
+    projects: [],
+    isDefault: false,
+  },
+];
+
 /** The canonical fixture bag. Deep-cloned by the mock before mutation. */
 export const DEMO_FIXTURES: DemoFixtures = {
   projects: PROJECTS,
@@ -456,4 +502,5 @@ export const DEMO_FIXTURES: DemoFixtures = {
   dnsRecords: DNS_RECORDS,
   dnsPreflight: DNS_PREFLIGHT,
   resolverStatus: RESOLVER_STATUS,
+  webServers: WEB_SERVERS,
 };

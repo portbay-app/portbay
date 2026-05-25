@@ -10,6 +10,7 @@
 import { browser } from "$app/environment";
 
 import { safeInvoke } from "$lib/ipc";
+import type { WebServer } from "$lib/types/projects";
 
 export type AccentColor =
   | "blue"
@@ -50,6 +51,8 @@ export interface Preferences {
   autoDetectProjects: boolean;
   defaultSort: DefaultSort;
   defaultStartBehavior: StartBehavior;
+  /** Web server pre-selected for new PHP projects. null → Caddy. */
+  defaultWebServer: WebServer | null;
 
   // Domains & HTTPS
   manageHostsAutomatically: boolean;
@@ -84,6 +87,7 @@ const DEFAULTS: Preferences = {
   autoDetectProjects: false,
   defaultSort: "name-asc",
   defaultStartBehavior: "manual",
+  defaultWebServer: null,
   manageHostsAutomatically: true,
   autoRenewCertificates: true,
   storeLogsLocally: true,

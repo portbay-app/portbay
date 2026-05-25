@@ -46,6 +46,34 @@ export function installSimulatorIpcBrowser(payload: {
   // a session (and never mutate the shared fixture object).
   const projects: any[] = JSON.parse(JSON.stringify(fixtures.projects));
 
+  // In-memory preferences for the demo so get/set round-trips — the Web Server
+  // page's "Set as default" and Settings toggles reflect within the session.
+  const prefs: Record<string, unknown> = {
+    showTrayIcon: true,
+    closeToMenuBar: true,
+    closeToMenuBarToastSeen: true,
+    telemetryEnabled: false,
+    earlyAccessOptIn: false,
+    launchAtLogin: false,
+    reopenPreviousProjects: false,
+    confirmBeforeStopAll: true,
+    desktopNotifications: false,
+    accentColor: "blue",
+    defaultWorkspaceFolder: "",
+    autoDetectProjects: false,
+    defaultSort: "name-asc",
+    defaultStartBehavior: "manual",
+    defaultWebServer: null,
+    manageHostsAutomatically: true,
+    autoRenewCertificates: true,
+    storeLogsLocally: true,
+    logRetentionDays: 7,
+    cliPath: "/usr/local/bin/portbay",
+    autoCleanSchedule: "off",
+    lastAutoClean: 0,
+    autoCleanExtraDirs: [],
+  };
+
   let nextCb = 1;
   let nextListenerId = 1;
   let nextEventId = 1;
@@ -117,6 +145,18 @@ export function installSimulatorIpcBrowser(payload: {
         return Promise.resolve(fixtures.groups);
       case "sidecar_status":
         return Promise.resolve(fixtures.sidecars);
+      case "webserver_overview":
+        return Promise.resolve(fixtures.webServers);
+      case "get_preferences":
+        return Promise.resolve({ ...prefs });
+      case "set_preferences": {
+        const next = args && (args.prefs as Record<string, unknown>);
+        if (next) Object.assign(prefs, next);
+        return Promise.resolve({ ...prefs });
+      }
+      case "mark_close_toast_seen":
+        prefs.closeToMenuBarToastSeen = true;
+        return Promise.resolve(null);
       case "get_entitlement":
       case "refresh_entitlement":
         return Promise.resolve(fixtures.entitlement);

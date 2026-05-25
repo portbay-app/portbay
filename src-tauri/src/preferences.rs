@@ -17,6 +17,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::registry::WebServer;
+
 /// Filename used inside the PortBay data directory.
 const FILENAME: &str = "preferences.json";
 
@@ -106,6 +108,14 @@ pub struct Preferences {
     /// "manual" | "auto".
     #[serde(default = "default_start_behavior")]
     pub default_start_behavior: String,
+
+    /// Web server pre-selected for *new* PHP projects in the Add Project
+    /// wizard. `None` falls back to Caddy (PortBay's edge default). Set from
+    /// the Web Server page; not applied retroactively — existing projects
+    /// keep their own `web_server` (or the Caddy fallback in
+    /// `Project::web_server_effective`).
+    #[serde(default)]
+    pub default_web_server: Option<WebServer>,
 
     // -------- Domains & HTTPS --------
     /// Permit PortBay to write managed entries to /etc/hosts. On by
@@ -200,6 +210,7 @@ impl Default for Preferences {
             auto_detect_projects: false,
             default_sort: default_sort(),
             default_start_behavior: default_start_behavior(),
+            default_web_server: None,
             manage_hosts_automatically: true,
             auto_renew_certificates: true,
             store_logs_locally: true,
@@ -284,6 +295,9 @@ mod tests {
         assert!(p.close_to_menu_bar);
         assert!(!p.close_to_menu_bar_toast_seen);
         assert!(!p.telemetry_enabled);
+        // New default-web-server preference is absent in old files → None,
+        // which `Project::web_server_effective` reads as Caddy.
+        assert_eq!(p.default_web_server, None);
     }
 
     #[test]
@@ -303,6 +317,7 @@ mod tests {
             auto_detect_projects: true,
             default_sort: "status".to_string(),
             default_start_behavior: "auto".to_string(),
+            default_web_server: Some(WebServer::Nginx),
             manage_hosts_automatically: false,
             auto_renew_certificates: false,
             store_logs_locally: false,
@@ -321,6 +336,7 @@ mod tests {
         assert!(json.contains("\"logRetentionDays\":30"));
         assert!(json.contains("\"autoCleanSchedule\":\"weekly\""));
         assert!(json.contains("\"lastAutoClean\":1700000000"));
+        assert!(json.contains("\"defaultWebServer\":\"nginx\""));
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
     }
