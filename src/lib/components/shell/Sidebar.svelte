@@ -256,6 +256,7 @@
         matchPrefix
       />
       <SidebarItem
+        href="/certificates"
         icon="shield"
         label="Certificates"
         matchPrefix
