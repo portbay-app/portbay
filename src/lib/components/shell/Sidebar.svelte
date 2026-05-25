@@ -255,6 +255,17 @@
         label="Web Server"
         matchPrefix
       />
+      <SidebarItem
+        icon="shield"
+        label="Certificates"
+        matchPrefix
+      />
+      <SidebarItem
+        href="/sandbox"
+        icon="package"
+        label="Sandbox"
+        matchPrefix
+      />
       <SidebarItem href="/logs" icon="file-text" label="Logs" matchPrefix />
       <SidebarItem
         href="/inspector"
