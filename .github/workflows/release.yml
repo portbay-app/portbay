@@ -117,6 +117,28 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --target aarch64-apple-darwin
 
+      # Guards the "<100 MB installer" positioning claim (docs/ARCHITECTURE.md
+      # bundle-size budget; baseline ~77 MB). A regression — a stray dependency,
+      # an un-stripped binary, an extra bundled sidecar — fails the release here
+      # instead of surfacing as a user complaint. Budget is the compressed DMG,
+      # not the uncompressed .app. See docs/PERFORMANCE.md.
+      - name: Guard DMG size budget (<100 MB)
+        run: |
+          dmg="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' | head -n 1)"
+          if [ -z "$dmg" ]; then
+            echo "::error::No .dmg produced by the build; cannot check the size budget."
+            exit 1
+          fi
+          bytes=$(stat -f%z "$dmg")
+          budget=$((100 * 1024 * 1024))
+          mb=$(echo "scale=1; $bytes / 1048576" | bc)
+          echo "DMG: $(basename "$dmg") — ${mb} MB (budget 100 MB, baseline ~77 MB)"
+          if [ "$bytes" -gt "$budget" ]; then
+            echo "::error::DMG installer is ${mb} MB, over the 100 MB budget. See docs/PERFORMANCE.md for the levers to claw it back."
+            exit 1
+          fi
+          echo "::notice::DMG installer ${mb} MB — under the 100 MB budget."
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
