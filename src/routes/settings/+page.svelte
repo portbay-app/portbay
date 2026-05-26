@@ -81,6 +81,99 @@
     `[mcp_servers.portbay]\ncommand = "${mcpPath}"`,
   );
 
+  // The integration panel shows one environment at a time, chosen from a
+  // dropdown — most users wire up a single agent, so listing every client's
+  // config at once just buried the one snippet they needed.
+  type EnvKey = "claude-code" | "claude-desktop" | "codex" | "cursor" | "vscode";
+  let selectedEnv = $state<EnvKey>("claude-code");
+  /** Whether the environment picker menu is open (mirrors the "Open in" menu). */
+  let envMenuOpen = $state<boolean>(false);
+
+  interface IntegrationEnv {
+    key: EnvKey;
+    label: string;
+    /** App logo (served from static/apps), reused from the "Open in" menu. */
+    logo: string;
+    /** Shown instead of a config path for command-style setup (Claude Code). */
+    runHint?: string;
+    /** Config file the snippet is pasted into. */
+    configPath?: string;
+    snippet: string;
+    /** Optional one-click install affordance. */
+    deepLink?: { run: () => void; label: string; note: string };
+  }
+
+  // Listed alphabetically by label (Claude Code, Claude Desktop, Codex,
+  // Cursor, VS Code).
+  const integrationEnvs = $derived<IntegrationEnv[]>([
+    {
+      key: "claude-code",
+      label: "Claude Code",
+      logo: "/apps/claude.png",
+      runHint: "Run once in any terminal to register PortBay for all projects.",
+      snippet: claudeCodeSnippet,
+    },
+    {
+      key: "claude-desktop",
+      label: "Claude Desktop",
+      logo: "/apps/claude.png",
+      configPath:
+        "~/Library/Application Support/Claude/claude_desktop_config.json",
+      snippet: claudeDesktopSnippet,
+    },
+    {
+      key: "codex",
+      label: "Codex",
+      logo: "/apps/codex.png",
+      configPath: "~/.codex/config.toml",
+      snippet: codexSnippet,
+    },
+    {
+      key: "cursor",
+      label: "Cursor",
+      logo: "/apps/cursor.png",
+      configPath: "~/.cursor/mcp.json",
+      snippet: cursorSnippet,
+      deepLink: {
+        run: openCursorDeepLink,
+        label: "Add to Cursor",
+        note: "opens Cursor's MCP install flow.",
+      },
+    },
+    {
+      key: "vscode",
+      label: "VS Code",
+      logo: "/apps/vscode.png",
+      configPath: ".vscode/mcp.json",
+      snippet: vscodeSnippet,
+      deepLink: {
+        run: openVscodeDeepLink,
+        label: "Add to VS Code",
+        note: "attempts VS Code's MCP install deep link (best-effort; copy the JSON if it doesn't open).",
+      },
+    },
+  ]);
+
+  const activeEnv = $derived(
+    integrationEnvs.find((e) => e.key === selectedEnv) ?? integrationEnvs[0],
+  );
+
+  function selectEnv(key: EnvKey) {
+    selectedEnv = key;
+    envMenuOpen = false;
+  }
+
+  // Close the picker on outside-click / Escape — matches the "Open in" menu.
+  function onEnvWindowClick(e: MouseEvent) {
+    if (!envMenuOpen) return;
+    const t = e.target as Element | null;
+    if (t && t.closest("[data-env-picker]")) return;
+    envMenuOpen = false;
+  }
+  function onEnvWindowKey(e: KeyboardEvent) {
+    if (envMenuOpen && e.key === "Escape") envMenuOpen = false;
+  }
+
   async function copySnippet(text: string, key: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -529,6 +622,8 @@
   let advancedDiagnosticsOpen = $state<boolean>(false);
 </script>
 
+<svelte:window onclick={onEnvWindowClick} onkeydown={onEnvWindowKey} />
+
 <div class="px-6 py-5 space-y-6">
   <!-- Page heading -->
   <header class="space-y-1">
@@ -830,7 +925,7 @@
   <section
     id="ai-integrations"
     class="bg-surface border border-border rounded-2xl p-5
-           grid grid-cols-[180px,1fr] gap-x-6 scroll-mt-4"
+           grid grid-cols-[180px,minmax(0,1fr)] gap-x-6 scroll-mt-4"
   >
     <div class="flex items-start gap-2.5">
       <span
@@ -873,190 +968,135 @@
         </p>
       </div>
 
-      <!-- Per-client rows -->
-      <div class="divide-y divide-border/60">
-
-        <!-- Claude Code -->
-        <div class="py-3 first:pt-0 space-y-1.5">
-          <span class="text-[13px] font-medium text-fg">Claude Code</span>
-          <p class="text-[11px] text-fg-subtle">
-            Run once in any terminal to register PortBay for all projects.
-          </p>
-          <div class="flex items-center gap-2">
-            <pre
-              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
-                     border-border px-3 py-2 text-[11.5px] font-mono text-fg
-                     leading-relaxed whitespace-pre"
-            >{claudeCodeSnippet}</pre>
+      <!-- Environment selector — one client's config shown at a time -->
+      <div class="space-y-3">
+        <div class="flex flex-col gap-1.5">
+          <span class="text-[12px] font-medium text-fg-muted">
+            Select your environment
+          </span>
+          <!-- Logo + name picker (mirrors the project "Open in" menu) -->
+          <div class="relative w-full max-w-72" data-env-picker>
             <button
               type="button"
-              onclick={() => copySnippet(claudeCodeSnippet, "claude-code")}
-              aria-label="Copy Claude Code command"
-              class="shrink-0 inline-flex items-center justify-center w-8 h-8
-                     rounded-md border border-border text-fg-muted
-                     hover:text-fg hover:bg-surface-2 transition-colors"
+              onclick={() => (envMenuOpen = !envMenuOpen)}
+              aria-haspopup="menu"
+              aria-expanded={envMenuOpen}
+              class="w-full inline-flex items-center gap-2 px-2.5 h-9 rounded-md
+                     border border-border bg-bg hover:bg-surface-2 text-[12.5px]
+                     text-fg transition-colors"
             >
+              <img
+                src={activeEnv.logo}
+                alt=""
+                class="w-4 h-4 rounded-[3px] object-cover flex-shrink-0"
+              />
+              <span class="flex-1 text-left truncate">{activeEnv.label}</span>
               <Icon
-                name={copiedKey === "claude-code" ? "check" : "copy"}
-                size={13}
+                name="chevron-down"
+                size={12}
+                class="text-fg-subtle shrink-0 transition-transform {envMenuOpen
+                  ? 'rotate-180'
+                  : ''}"
               />
             </button>
+
+            {#if envMenuOpen}
+              <div
+                role="menu"
+                aria-label="Select your environment"
+                class="absolute z-30 mt-1 w-full py-1 rounded-md border
+                       border-border bg-surface shadow-2xl"
+              >
+                {#each integrationEnvs as env (env.key)}
+                  {@const isSel = env.key === selectedEnv}
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={isSel}
+                    onclick={() => selectEnv(env.key)}
+                    class="w-full text-left px-2.5 py-1.5 flex items-center gap-2
+                           text-[12.5px] transition-colors
+                           {isSel
+                      ? 'text-fg bg-surface-2/60'
+                      : 'text-fg-muted hover:text-fg hover:bg-surface-2'}"
+                  >
+                    <img
+                      src={env.logo}
+                      alt=""
+                      class="w-4 h-4 rounded-[3px] object-cover flex-shrink-0"
+                    />
+                    <span class="flex-1 truncate">{env.label}</span>
+                    {#if isSel}
+                      <Icon
+                        name="check"
+                        size={12}
+                        class="text-accent shrink-0"
+                      />
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            {/if}
           </div>
         </div>
 
-        <!-- Claude Desktop -->
-        <div class="py-3 space-y-1.5">
-          <span class="text-[13px] font-medium text-fg">Claude Desktop</span>
-          <p class="text-[11px] text-fg-subtle">
-            Add to
-            <code class="font-mono">
-              ~/Library/Application&nbsp;Support/Claude/claude_desktop_config.json
-            </code>
-          </p>
-          <div class="flex items-start gap-2">
-            <pre
-              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
-                     border-border px-3 py-2 text-[11.5px] font-mono text-fg
-                     leading-relaxed whitespace-pre"
-            >{claudeDesktopSnippet}</pre>
-            <button
-              type="button"
-              onclick={() =>
-                copySnippet(claudeDesktopSnippet, "claude-desktop")}
-              aria-label="Copy Claude Desktop config"
-              class="shrink-0 inline-flex items-center justify-center w-8 h-8
-                     rounded-md border border-border text-fg-muted
-                     hover:text-fg hover:bg-surface-2 transition-colors"
-            >
-              <Icon
-                name={copiedKey === "claude-desktop" ? "check" : "copy"}
-                size={13}
-              />
-            </button>
-          </div>
-        </div>
+        <!-- Selected environment config -->
+        <div class="space-y-1.5">
+          {#if activeEnv.runHint}
+            <p class="text-[11.5px] text-fg-subtle">{activeEnv.runHint}</p>
+          {:else if activeEnv.configPath}
+            <p class="text-[11.5px] text-fg-subtle">
+              Add to
+              <code class="font-mono text-fg-muted break-all"
+                >{activeEnv.configPath}</code
+              >
+            </p>
+          {/if}
 
-        <!-- Cursor -->
-        <div class="py-3 space-y-1.5">
-          <span class="text-[13px] font-medium text-fg">Cursor</span>
-          <p class="text-[11px] text-fg-subtle">
-            Add to <code class="font-mono">~/.cursor/mcp.json</code>, or use
-            the one-click button.
-          </p>
           <div class="flex items-start gap-2">
             <pre
-              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
+              class="flex-1 min-w-0 rounded-lg bg-bg border
                      border-border px-3 py-2 text-[11.5px] font-mono text-fg
-                     leading-relaxed whitespace-pre"
-            >{cursorSnippet}</pre>
+                     leading-relaxed whitespace-pre-wrap break-all"
+            >{activeEnv.snippet}</pre>
             <div class="flex flex-col gap-1.5 shrink-0">
               <button
                 type="button"
-                onclick={() => copySnippet(cursorSnippet, "cursor")}
-                aria-label="Copy Cursor MCP config"
+                onclick={() => copySnippet(activeEnv.snippet, activeEnv.key)}
+                aria-label="Copy {activeEnv.label} config"
+                title="Copy"
                 class="inline-flex items-center justify-center w-8 h-8
                        rounded-md border border-border text-fg-muted
                        hover:text-fg hover:bg-surface-2 transition-colors"
               >
                 <Icon
-                  name={copiedKey === "cursor" ? "check" : "copy"}
+                  name={copiedKey === activeEnv.key ? "check" : "copy"}
                   size={13}
                 />
               </button>
-              <button
-                type="button"
-                onclick={openCursorDeepLink}
-                aria-label="Add to Cursor"
-                title="Add to Cursor"
-                class="inline-flex items-center justify-center w-8 h-8
-                       rounded-md border border-border text-fg-muted
-                       hover:text-fg hover:bg-surface-2 transition-colors"
-              >
-                <Icon name="zap" size={13} />
-              </button>
+              {#if activeEnv.deepLink}
+                <button
+                  type="button"
+                  onclick={activeEnv.deepLink.run}
+                  aria-label={activeEnv.deepLink.label}
+                  title={activeEnv.deepLink.label}
+                  class="inline-flex items-center justify-center w-8 h-8
+                         rounded-md border border-border text-fg-muted
+                         hover:text-fg hover:bg-surface-2 transition-colors"
+                >
+                  <Icon name="zap" size={13} />
+                </button>
+              {/if}
             </div>
           </div>
-          <p class="text-[11px] text-fg-subtle">
-            The one-click button (<Icon name="zap" size={11} />) opens Cursor's
-            MCP install flow.
-          </p>
-        </div>
 
-        <!-- VS Code -->
-        <div class="py-3 space-y-1.5">
-          <span class="text-[13px] font-medium text-fg">VS Code</span>
-          <p class="text-[11px] text-fg-subtle">
-            Add to <code class="font-mono">.vscode/mcp.json</code> in your
-            project, or use the one-click button.
-          </p>
-          <div class="flex items-start gap-2">
-            <pre
-              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
-                     border-border px-3 py-2 text-[11.5px] font-mono text-fg
-                     leading-relaxed whitespace-pre"
-            >{vscodeSnippet}</pre>
-            <div class="flex flex-col gap-1.5 shrink-0">
-              <button
-                type="button"
-                onclick={() => copySnippet(vscodeSnippet, "vscode")}
-                aria-label="Copy VS Code MCP config"
-                class="inline-flex items-center justify-center w-8 h-8
-                       rounded-md border border-border text-fg-muted
-                       hover:text-fg hover:bg-surface-2 transition-colors"
-              >
-                <Icon
-                  name={copiedKey === "vscode" ? "check" : "copy"}
-                  size={13}
-                />
-              </button>
-              <button
-                type="button"
-                onclick={openVscodeDeepLink}
-                aria-label="Add to VS Code"
-                title="Add to VS Code"
-                class="inline-flex items-center justify-center w-8 h-8
-                       rounded-md border border-border text-fg-muted
-                       hover:text-fg hover:bg-surface-2 transition-colors"
-              >
-                <Icon name="zap" size={13} />
-              </button>
-            </div>
-          </div>
-          <p class="text-[11px] text-fg-subtle">
-            The one-click button (<Icon name="zap" size={11} />) attempts
-            VS Code's MCP install deep link (best-effort; copy the JSON if it
-            doesn't open).
-          </p>
+          {#if activeEnv.deepLink}
+            <p class="text-[11px] text-fg-subtle">
+              The one-click button (<Icon name="zap" size={11} />)
+              {activeEnv.deepLink.note}
+            </p>
+          {/if}
         </div>
-
-        <!-- Codex -->
-        <div class="py-3 last:pb-0 space-y-1.5">
-          <span class="text-[13px] font-medium text-fg">Codex</span>
-          <p class="text-[11px] text-fg-subtle">
-            Add to <code class="font-mono">~/.codex/config.toml</code>
-          </p>
-          <div class="flex items-center gap-2">
-            <pre
-              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
-                     border-border px-3 py-2 text-[11.5px] font-mono text-fg
-                     leading-relaxed whitespace-pre"
-            >{codexSnippet}</pre>
-            <button
-              type="button"
-              onclick={() => copySnippet(codexSnippet, "codex")}
-              aria-label="Copy Codex config"
-              class="shrink-0 inline-flex items-center justify-center w-8 h-8
-                     rounded-md border border-border text-fg-muted
-                     hover:text-fg hover:bg-surface-2 transition-colors"
-            >
-              <Icon
-                name={copiedKey === "codex" ? "check" : "copy"}
-                size={13}
-              />
-            </button>
-          </div>
-        </div>
-
       </div>
     </div>
   </section>
