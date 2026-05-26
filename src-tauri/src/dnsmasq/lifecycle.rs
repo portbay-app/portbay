@@ -189,14 +189,18 @@ fn resolve_command(
         .args([CONF_FLAG, config_str]))
 }
 
-/// Resolve a free local port for dnsmasq. Scans `start..start+range` and
+/// Resolve a free local port for dnsmasq. Scans `start..start+range`, skipping
+/// any port in `avoid` (typically the registered projects' declared ports) and
 /// returns the first that's free on **both UDP and TCP** — dnsmasq binds both,
 /// and DNS is primarily UDP, so a TCP-only probe (the previous behaviour) would
 /// happily hand back a port another DNS daemon already holds on UDP, and our
 /// dnsmasq would then fail to bind silently.
-pub fn find_free_port(start: u16, range: u16) -> Option<u16> {
+pub fn find_free_port(start: u16, range: u16, avoid: &[u16]) -> Option<u16> {
     for offset in 0..range {
         let port = start.checked_add(offset)?;
+        if avoid.contains(&port) {
+            continue;
+        }
         let udp_ok = std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok();
         let tcp_ok = std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
         if udp_ok && tcp_ok {
@@ -231,7 +235,7 @@ mod tests {
 
     #[test]
     fn finds_a_free_port_near_default() {
-        let port = find_free_port(DEFAULT_PORT, 32);
+        let port = find_free_port(DEFAULT_PORT, 32, &[]);
         assert!(port.is_some());
     }
 }

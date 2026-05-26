@@ -51,7 +51,7 @@ pub(super) async fn reconcile(
         .lock()
         .expect("caddy mutex poisoned")
         .admin_port();
-    let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
+    let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT, &[]);
     // Plain-HTTP projects are served on the standard :80. PortBay must own it
     // (no other local web server can be holding it).
     let http_port = 80;
@@ -90,6 +90,23 @@ pub(super) async fn reconcile(
     }
 
     if let Err(e) = client.load(&cfg).await {
+        // A foreign process on :80 is the most common load failure for HTTP
+        // projects. Attribute it precisely — but never misreport our own Caddy
+        // (which legitimately holds :80 after a prior successful load).
+        if reg.list_projects().iter().any(|p| !p.https) {
+            let caddy_pid = state.caddy.lock().expect("caddy mutex poisoned").pid();
+            if let Some(holder) = crate::port_holder::find(http_port) {
+                let is_ours = caddy_pid.is_some_and(|pid| {
+                    holder.pid == pid || holder.descends_from(pid)
+                });
+                if !is_ours {
+                    return StepOutcome::failed(format!(
+                        "port {http_port} is in use by {} — stop it or switch the project to HTTPS",
+                        holder.display()
+                    ));
+                }
+            }
+        }
         return StepOutcome::failed(format!("POST /load: {e}"));
     }
 

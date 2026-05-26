@@ -193,6 +193,20 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    /// Ports declared by registered projects (primary + extra). Sidecars feed
+    /// this into their free-port scan so a dynamic sidecar port never lands on a
+    /// port a dev server expects.
+    fn registered_project_ports(&self) -> Vec<u16> {
+        store::load_or_default(&self.registry_path, &self.domain_suffix)
+            .map(|reg| {
+                reg.list_projects()
+                    .iter()
+                    .flat_map(|p| p.port.into_iter().chain(p.extra_ports.iter().copied()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Borrow a cloned client. Returns `SidecarDown` when PC hasn't come up.
     /// Cloning is cheap — `reqwest::Client` is internally reference-counted.
     pub fn pc_client(&self) -> Result<PcClient, crate::error::AppError> {
@@ -224,11 +238,12 @@ impl AppState {
         app: &AppHandle,
         config_path: &Path,
     ) -> Result<(), crate::error::AppError> {
+        let avoid = self.registered_project_ports();
         let client = self
             .pc
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .start(app, config_path)?;
+            .start(app, config_path, &avoid)?;
         *self.pc_client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
         Ok(())
     }
@@ -251,11 +266,14 @@ impl AppState {
     ///   is left running so the next `restart_caddy` can retry cleanly
     ///   without the lifecycle thinking the slot is free.
     pub async fn boot_caddy(&self, app: &AppHandle) -> Result<(), crate::error::AppError> {
+        let avoid = self.registered_project_ports();
         let admin_port =
-            find_free_port(DEFAULT_ADMIN_PORT, ADMIN_SCAN_RANGE).ok_or(CaddyError::NoFreePort {
-                start: DEFAULT_ADMIN_PORT,
-            })?;
-        let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT);
+            find_free_port(DEFAULT_ADMIN_PORT, ADMIN_SCAN_RANGE, &avoid).ok_or(
+                CaddyError::NoFreePort {
+                    start: DEFAULT_ADMIN_PORT,
+                },
+            )?;
+        let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT, &avoid);
         let config_path = write_caddy_bootstrap_config(admin_port, https_port)?;
 
         let client = self.caddy.lock().unwrap_or_else(|e| e.into_inner()).start(
@@ -296,11 +314,11 @@ impl AppState {
         if !dnsmasq::binary_available(app) {
             return Ok(());
         }
-        let port = dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE).ok_or(
-            crate::dnsmasq::DnsmasqError::NoFreePort {
+        let avoid = self.registered_project_ports();
+        let port = dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE, &avoid)
+            .ok_or(crate::dnsmasq::DnsmasqError::NoFreePort {
                 start: DNSMASQ_DEFAULT_PORT,
-            },
-        )?;
+            })?;
         // The registry is the source of truth for both the wildcard suffix
         // and the tunable dnsmasq settings; `self.domain_suffix` is only the
         // first-run fallback. Reading it here means a suffix migration or a
@@ -346,14 +364,7 @@ impl AppState {
         // Never claim a port a registered project expects. Mailpit's default
         // ranges (1025–1040 / 8025–8040) overlap common dev-server ports, so we
         // feed the registry's project ports (incl. extra_ports) into the scan.
-        let avoid: Vec<u16> = store::load_or_default(&self.registry_path, &self.domain_suffix)
-            .map(|reg| {
-                reg.list_projects()
-                    .iter()
-                    .flat_map(|p| p.port.into_iter().chain(p.extra_ports.iter().copied()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let avoid = self.registered_project_ports();
         let smtp = mailpit::find_free_port(DEFAULT_SMTP_PORT, MAILPIT_PORT_SCAN_RANGE, &avoid)
             .ok_or(crate::mailpit::MailpitError::NoFreePort {
                 start: DEFAULT_SMTP_PORT,

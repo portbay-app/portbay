@@ -69,17 +69,19 @@ impl SidecarManager {
 
     /// Spawn the bundled `process-compose` sidecar against `config_path`.
     ///
-    /// Picks a free port starting from `DEFAULT_PORT`. Returns a ready-to-use
+    /// Picks a free port starting from `DEFAULT_PORT`, skipping any in `avoid`
+    /// (typically the registered projects' declared ports). Returns a ready-to-use
     /// `PcClient`.
-    pub fn start(&mut self, app: &AppHandle, config_path: &Path) -> Result<PcClient> {
+    pub fn start(&mut self, app: &AppHandle, config_path: &Path, avoid: &[u16]) -> Result<PcClient> {
         if self.child.is_some() {
             // Idempotent: already running, hand back the existing client.
             return Ok(PcClient::new(self.port));
         }
 
-        let port = find_free_port(DEFAULT_PORT, PORT_SCAN_RANGE).ok_or(PcError::NoFreePort {
-            start: DEFAULT_PORT,
-        })?;
+        let port =
+            find_free_port(DEFAULT_PORT, PORT_SCAN_RANGE, avoid).ok_or(PcError::NoFreePort {
+                start: DEFAULT_PORT,
+            })?;
         self.port = port;
 
         let port_str = port.to_string();
@@ -237,12 +239,17 @@ fn stale_pc_pids(ps_output: &str, marker: &str, exclude: &[u32], mode: SweepMode
         .collect()
 }
 
-/// Try to bind a TCP listener on `start, start+1, ...` until one succeeds.
+/// Try to bind a TCP listener on `start, start+1, ...` until one succeeds,
+/// skipping any port listed in `avoid`. `avoid` carries the registered
+/// projects' ports so PC never claims a port a dev server expects.
 /// Closes the test listener immediately and returns the port number — the
 /// next attempt to bind it (by PC) will race only with other apps, not us.
-pub fn find_free_port(start: u16, range: u16) -> Option<u16> {
+pub fn find_free_port(start: u16, range: u16, avoid: &[u16]) -> Option<u16> {
     for offset in 0..range {
         let port = start.checked_add(offset)?;
+        if avoid.contains(&port) {
+            continue;
+        }
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Some(port);
         }
@@ -256,7 +263,7 @@ mod tests {
 
     #[test]
     fn finds_a_free_port_near_default() {
-        let port = find_free_port(DEFAULT_PORT, 32).expect("expected at least one free port");
+        let port = find_free_port(DEFAULT_PORT, 32, &[]).expect("expected at least one free port");
         assert!((DEFAULT_PORT..DEFAULT_PORT + 32).contains(&port));
     }
 
@@ -307,14 +314,31 @@ mod tests {
         // Hold one port, then see that find_free_port skips it.
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let held_port = listener.local_addr().unwrap().port();
-        let chosen = find_free_port(held_port, 4).unwrap();
+        let chosen = find_free_port(held_port, 4, &[]).unwrap();
         // chosen is either held_port (if bind raced) — unlikely — or
         // something within [held_port, held_port+4). Don't assert equality,
         // just that it didn't pick the one we hold *during the call*.
         // Drop the listener first so the next assertion is meaningful.
         drop(listener);
         // Re-run with the now-free port — should find it.
-        let chosen2 = find_free_port(chosen, 4).unwrap();
+        let chosen2 = find_free_port(chosen, 4, &[]).unwrap();
         assert!(chosen2 >= chosen);
+    }
+
+    #[test]
+    fn skips_avoided_ports() {
+        // Bind a listener to discover a free port, then pass it as an avoided
+        // port — the scanner must yield a different one.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free_port = listener.local_addr().unwrap().port();
+        // Release it so the scan range is actually free; the avoid list is
+        // what should force the scanner past it.
+        drop(listener);
+        let result = find_free_port(free_port, 16, &[free_port]);
+        let chosen = result.expect("should find a free port beyond the avoided one");
+        assert_ne!(
+            chosen, free_port,
+            "find_free_port must skip a port in the avoid list"
+        );
     }
 }
