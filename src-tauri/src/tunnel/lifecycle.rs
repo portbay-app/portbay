@@ -33,6 +33,12 @@ pub struct TunnelStatus {
     /// True iff the child process is still alive (we don't reap until
     /// the next `start` / `stop` call observes the exit).
     pub running: bool,
+    /// Whether the local origin the tunnel points at is actually reachable.
+    /// `None` until probed (the manager leaves it unset; the async command
+    /// layer fills it). `Some(false)` means the cloudflared process is alive
+    /// but visitors would get errors — an honest "degraded" signal instead of
+    /// a misleading green "running".
+    pub origin_reachable: Option<bool>,
     /// Wall-clock ms when the tunnel started.
     pub started_at_ms: u64,
 }
@@ -68,6 +74,7 @@ impl Tunnel {
                 .expect("public_url mutex poisoned")
                 .clone(),
             running: self.child.is_some(),
+            origin_reachable: None,
             started_at_ms: self.started_at_ms,
         }
     }
