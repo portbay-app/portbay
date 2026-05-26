@@ -17,6 +17,7 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
 
+  import { MacPermissionDialog } from "$lib/components/permissions";
   import { dns } from "$lib/stores/dns.svelte";
   import { confirmDialog } from "$lib/stores/confirm.svelte";
   import { projects } from "$lib/stores/projects.svelte";
@@ -32,6 +33,9 @@
   let selection = $state<Selection>({ type: "config" });
   let query = $state<string>("");
   let copied = $state<string | null>(null);
+  // Gates the privileged-helper install behind an explicit, explained prompt —
+  // the request only fires when the user confirms in the dialog, never on load.
+  let showDnsPermission = $state<boolean>(false);
 
   // Editable form state, synced from the store on load / save.
   let cacheSize = $state<number>(150);
@@ -398,7 +402,7 @@
               {#if !pf.ready}
                 <button
                   type="button"
-                  onclick={() => dns.setupLocalDns()}
+                  onclick={() => (showDnsPermission = true)}
                   disabled={dns.isBusy("setup")}
                   class="shrink-0 inline-flex items-center gap-1.5 h-8 px-3.5 rounded-md text-[12px] font-medium
                          text-on-accent bg-accent hover:brightness-110 active:brightness-95
@@ -746,3 +750,10 @@
     {/if}
   </section>
 </div>
+
+<MacPermissionDialog
+  open={showDnsPermission}
+  kind="login-items"
+  onConfirm={() => dns.setupLocalDns()}
+  onClose={() => (showDnsPermission = false)}
+/>

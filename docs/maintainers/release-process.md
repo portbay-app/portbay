@@ -77,12 +77,28 @@ The workflow builds a signed, notarized macOS `.app` and packages it as a `.dmg`
 |---|---|
 | `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application certificate (`.p12`) |
 | `APPLE_CERTIFICATE_PASSWORD` | Passphrase for the certificate |
-| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: …` string |
-| `APPLE_ID` | Apple ID used for notarytool submission |
-| `APPLE_PASSWORD` | App-specific password for that Apple ID |
-| `APPLE_TEAM_ID` | 10-character Apple Developer Team ID |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: …` string (e.g. `Developer ID Application: Tribal House LLC (V2CYH6HZT8)`) |
+| `APPLE_API_ISSUER` | App Store Connect API **issuer ID** (UUID) — notarytool authentication |
+| `APPLE_API_KEY` | App Store Connect API **key ID** (10-character) |
+| `APPLE_API_KEY_P8` | Full contents of the App Store Connect API key `.p8` file (the workflow writes it to a temp file and points `APPLE_API_KEY_PATH` at it) |
+| `TAURI_SIGNING_PRIVATE_KEY` | Tauri Updater minisign **private** key — contents of `~/.tauri/portbay-updater.key`. The matching public key is committed in `tauri.conf.json::plugins.updater.pubkey`. |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the updater private key (set to an empty string if the key was generated without one) |
+
+> **Notarization uses the App Store Connect API key (`.p8`) method**, not the
+> Apple-ID + app-specific-password method. If you have the older
+> `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` secrets, they are no longer read
+> by the workflow — migrate to the three `APPLE_API_*` secrets above.
 
 The workflow currently has a guard (`if: vars.RELEASE_SIGNING_ENABLED == 'true'`) that skips signing until these secrets are populated. To activate automated release builds, set the repository variable `RELEASE_SIGNING_ENABLED` to `true` after the secrets are in place.
+
+> **Updater key safety:** if `~/.tauri/portbay-updater.key` (or its password) is
+> ever lost, you can no longer sign updates that existing installs will accept —
+> they would be stranded on their current version. Back the private key up
+> securely (password manager / offline). The bootstrap key generated during
+> setup has **no password**; rotating to a password-protected key before the
+> first public release is recommended (regenerate with `pnpm tauri signer
+> generate`, then update both the `pubkey` in `tauri.conf.json` and the two
+> `TAURI_SIGNING_*` secrets).
 
 Until the guard is lifted, releases are built and signed manually on a maintainer machine using `pnpm tauri build` with the Developer ID cert present in the local Keychain, then the DMG is attached to the GitHub Release manually.
 

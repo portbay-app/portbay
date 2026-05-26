@@ -162,15 +162,16 @@
         </p>
       </div>
     {:else}
-      <table class="w-full text-left border-collapse">
+      <div class="rounded-xl border border-border bg-surface overflow-hidden">
+        <table class="w-full text-left border-collapse">
         <thead>
           <tr class="text-[11px] uppercase tracking-wide text-fg-subtle">
-            <th class="font-medium py-2 pr-3">Time</th>
-            <th class="font-medium py-2 pr-3">Method</th>
-            <th class="font-medium py-2 pr-3">Host · Path</th>
-            <th class="font-medium py-2 pr-3 text-right">Status</th>
-            <th class="font-medium py-2 pr-3 text-right">Latency</th>
-            <th class="font-medium py-2">Project</th>
+            <th class="font-medium px-4 py-2">Time</th>
+            <th class="font-medium px-4 py-2">Method</th>
+            <th class="font-medium px-4 py-2">Host · Path</th>
+            <th class="font-medium px-4 py-2 text-right">Status</th>
+            <th class="font-medium px-4 py-2 text-right">Latency</th>
+            <th class="font-medium px-4 py-2">Project</th>
           </tr>
         </thead>
         <tbody>
@@ -180,26 +181,26 @@
               class="border-t border-border/60 text-[12.5px] cursor-pointer
                      hover:bg-surface-2/60 transition-colors"
             >
-              <td class="py-1.5 pr-3 font-mono tabular-nums text-fg-subtle whitespace-nowrap">
+              <td class="py-1.5 px-4 font-mono tabular-nums text-fg-subtle whitespace-nowrap">
                 {fmtTime(e.ts)}
               </td>
-              <td class="py-1.5 pr-3 font-mono text-fg-muted">{e.method}</td>
-              <td class="py-1.5 pr-3 min-w-0">
+              <td class="py-1.5 px-4 font-mono text-fg-muted">{e.method}</td>
+              <td class="py-1.5 px-4 min-w-0">
                 <span class="text-fg-subtle">{e.host}</span><span
                   class="text-fg font-mono">{e.uri}</span
                 >
               </td>
-              <td class="py-1.5 pr-3 text-right font-mono tabular-nums {statusClass(e.status)}">
+              <td class="py-1.5 px-4 text-right font-mono tabular-nums {statusClass(e.status)}">
                 {e.status}
               </td>
-              <td class="py-1.5 pr-3 text-right font-mono tabular-nums text-fg-muted whitespace-nowrap">
+              <td class="py-1.5 px-4 text-right font-mono tabular-nums text-fg-muted whitespace-nowrap">
                 {fmtLatency(e.durationMs)}
               </td>
-              <td class="py-1.5 text-fg-muted truncate">{projectName(e.projectId)}</td>
+              <td class="py-1.5 px-4 text-fg-muted truncate">{projectName(e.projectId)}</td>
             </tr>
             {#if expanded === e}
               <tr class="bg-surface-2/40">
-                <td colspan="6" class="px-3 py-2">
+                <td colspan="6" class="px-4 py-2">
                   <div class="text-[11.5px] space-y-1.5">
                     <div class="flex flex-wrap gap-x-6 gap-y-1 text-fg-muted font-mono">
                       <span>scheme: {e.host}</span>
@@ -229,7 +230,8 @@
             {/if}
           {/each}
         </tbody>
-      </table>
+        </table>
+      </div>
     {/if}
   </div>
 </div>

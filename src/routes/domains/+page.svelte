@@ -19,6 +19,7 @@
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
+  import { dns } from "$lib/stores/dns.svelte";
   import { statusLabel } from "$lib/types/status";
   import {
     defaultDomainConfig,
@@ -28,6 +29,46 @@
   } from "$lib/types/projects";
 
   const PAGE_SIZE = 8;
+
+  // The single system-wide domain suffix (e.g. "portbay.test"), surfaced from
+  // the DNS resolver status. The Hostname field is a Cloudflare-style split
+  // input: the user edits only the subdomain prefix and this is the inline
+  // suffix shown after it.
+  const FALLBACK_SUFFIX = "portbay.test";
+  const systemSuffix = $derived(dns.status?.suffix ?? FALLBACK_SUFFIX);
+
+  // Mirror the label rules in src-tauri/src/domain.rs: each dot-separated label
+  // is 1–63 chars of [a-z0-9-] with no leading/trailing hyphen.
+  const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+  function isValidSubPrefix(prefix: string): boolean {
+    const p = prefix.trim();
+    if (p === "") return true; // empty prefix = the suffix's root domain
+    return p
+      .split(".")
+      .every((l) => l.length >= 1 && l.length <= 63 && LABEL_RE.test(l));
+  }
+
+  // Split a stored hostname into { subPrefix, suffix }. Prefer the active system
+  // suffix; otherwise fall back to "first label is the prefix, the rest is the
+  // suffix" so a hostname on a different/legacy suffix still round-trips.
+  function splitHostname(
+    hostname: string,
+    sysSuffix: string,
+  ): { subPrefix: string; suffix: string } {
+    const host = hostname.trim().toLowerCase();
+    if (host === sysSuffix) return { subPrefix: "", suffix: sysSuffix };
+    if (host.endsWith("." + sysSuffix)) {
+      return {
+        subPrefix: host.slice(0, host.length - sysSuffix.length - 1),
+        suffix: sysSuffix,
+      };
+    }
+    const dot = host.indexOf(".");
+    if (dot > 0) {
+      return { subPrefix: host.slice(0, dot), suffix: host.slice(dot + 1) };
+    }
+    return { subPrefix: host, suffix: sysSuffix };
+  }
 
   let selectedId = $state<string | null>(null);
   let query = $state<string>("");
@@ -83,6 +124,8 @@
 
   onMount(() => {
     void projects.start();
+    // Load the domain suffix for the split hostname input if not already cached.
+    if (!dns.status) void dns.refresh();
   });
 
   // Auto-select the first domain once the list is loaded and nothing's chosen.
@@ -95,7 +138,8 @@
 
   // ── Editable draft ─────────────────────────────────────────────────────────
   interface Draft {
-    hostname: string;
+    subPrefix: string;
+    suffix: string;
     port: string;
     https: boolean;
     autoStart: boolean;
@@ -113,8 +157,10 @@
 
   function loadDraft(p: ProjectView) {
     const d = p.domain ?? defaultDomainConfig();
+    const { subPrefix, suffix } = splitHostname(p.hostname, systemSuffix);
     draft = {
-      hostname: p.hostname,
+      subPrefix,
+      suffix,
       port: p.port != null ? String(p.port) : "",
       https: p.https,
       autoStart: p.autoStart,
@@ -153,6 +199,45 @@
 
   const dirty = $derived(draft !== null && JSON.stringify(draft) !== pristine);
 
+  // The suffix arrives asynchronously from the DNS store; if it lands after the
+  // draft loaded and the user hasn't edited, re-split so the prefix/suffix
+  // boundary matches the real suffix.
+  $effect(() => {
+    const sfx = systemSuffix;
+    if (!selected || !draft || dirty) return;
+    untrack(() => {
+      if (!draft || !selected) return;
+      const split = splitHostname(selected.hostname, sfx);
+      if (
+        split.subPrefix !== draft.subPrefix ||
+        split.suffix !== draft.suffix
+      ) {
+        draft = { ...draft, ...split };
+        pristine = JSON.stringify(draft);
+      }
+    });
+  });
+
+  // Inline suffix options. Today this is just the system suffix (rendered as a
+  // static addon); the draft's own suffix is kept so a hostname on a different
+  // suffix still round-trips. Pro custom domains (Phase 2) will append the
+  // user's verified domains here, turning the addon into a real dropdown.
+  const suffixOptions = $derived.by<string[]>(() => {
+    const opts = [systemSuffix];
+    if (draft?.suffix && !opts.includes(draft.suffix)) opts.push(draft.suffix);
+    return opts;
+  });
+
+  const subPrefixValid = $derived(
+    draft ? isValidSubPrefix(draft.subPrefix) : true,
+  );
+
+  const composedHostname = $derived.by<string>(() => {
+    if (!draft) return "";
+    const p = draft.subPrefix.trim().toLowerCase();
+    return p ? `${p}.${draft.suffix}` : draft.suffix;
+  });
+
   // ── Actions ────────────────────────────────────────────────────────────────
   function addDomain() {
     addProjectWizard.requestAdd();
@@ -163,7 +248,7 @@
   }
 
   async function save() {
-    if (!selected || !draft || !dirty || saving) return;
+    if (!selected || !draft || !dirty || saving || !subPrefixValid) return;
     saving = true;
     const target = selected.id;
     const wildcardWas = selected.domain?.includeWildcardSubdomains ?? false;
@@ -177,7 +262,7 @@
         exposeWhenRunning: draft.exposeWhenRunning,
       };
       const patch: Record<string, unknown> = {
-        hostname: draft.hostname.trim(),
+        hostname: composedHostname,
         https: draft.https,
         autoStart: draft.autoStart,
         domain,
@@ -503,7 +588,7 @@
         </div>
       {:else}
         {@const d = draft}
-        <div class="max-w-xl mx-auto px-6 py-6">
+        <div class="px-6 py-6">
           <div class="flex items-center justify-between gap-3">
             <h2 class="text-[15px] font-semibold text-fg">Edit Domain</h2>
             <span class="flex items-center gap-1.5 text-[11.5px] text-fg-subtle">
@@ -513,20 +598,65 @@
           </div>
 
           <div class="mt-5 space-y-5">
-            <!-- Hostname -->
+            <!-- Hostname — Cloudflare-style split: editable subdomain prefix + inline suffix -->
             <div class="space-y-1.5">
               <label for="dom-host" class="block text-[12px] font-medium text-fg">
                 Hostname
               </label>
-              <input
-                id="dom-host"
-                bind:value={d.hostname}
-                spellcheck="false"
-                autocapitalize="off"
-                class="w-full h-9 px-3 rounded-lg bg-bg border border-border font-mono
-                       text-[13px] text-fg focus:outline-none focus:ring-2
-                       focus:ring-accent/40"
-              />
+              <div
+                class="flex items-stretch rounded-lg bg-bg border transition-shadow
+                       focus-within:ring-2 focus-within:ring-accent/40
+                       {subPrefixValid ? 'border-border' : 'border-status-crashed/70'}"
+              >
+                <input
+                  id="dom-host"
+                  value={d.subPrefix}
+                  oninput={(e) =>
+                    (d.subPrefix = e.currentTarget.value
+                      .toLowerCase()
+                      .replace(/\s+/g, ""))}
+                  placeholder="subdomain"
+                  spellcheck="false"
+                  autocapitalize="off"
+                  autocomplete="off"
+                  class="min-w-0 flex-1 h-9 px-3 rounded-l-lg bg-transparent font-mono
+                         text-[13px] text-fg placeholder:text-fg-subtle
+                         focus:outline-none"
+                />
+                {#if suffixOptions.length > 1}
+                  <select
+                    bind:value={d.suffix}
+                    aria-label="Domain suffix"
+                    class="h-9 shrink-0 pl-2 pr-7 rounded-r-lg border-l border-border
+                           bg-surface-2/60 font-mono text-[13px] text-fg-muted
+                           focus:outline-none"
+                  >
+                    {#each suffixOptions as s (s)}
+                      <option value={s}>.{s}</option>
+                    {/each}
+                  </select>
+                {:else}
+                  <span
+                    class="inline-flex items-center h-9 shrink-0 px-3 rounded-r-lg
+                           border-l border-border bg-surface-2/50 font-mono
+                           text-[13px] text-fg-muted select-none"
+                  >
+                    .{d.suffix}
+                  </span>
+                {/if}
+              </div>
+              {#if !subPrefixValid}
+                <p class="text-[11px] text-status-crashed leading-relaxed">
+                  Use lowercase letters, digits, and hyphens (e.g.
+                  <code class="font-mono">cloud</code> or
+                  <code class="font-mono">api.staging</code>). Leave empty for the
+                  root domain.
+                </p>
+              {:else}
+                <p class="text-[11px] text-fg-subtle leading-relaxed">
+                  Resolves at <code class="font-mono">{composedHostname}</code>.
+                </p>
+              {/if}
             </div>
 
             <!-- Project (read-only; domains are 1:1 with their project) -->
@@ -767,7 +897,7 @@
               <button
                 type="button"
                 onclick={save}
-                disabled={!dirty || saving}
+                disabled={!dirty || saving || !subPrefixValid}
                 class="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg text-[12.5px]
                        font-medium bg-accent text-on-accent hover:brightness-110
                        active:scale-[0.98] transition disabled:opacity-50

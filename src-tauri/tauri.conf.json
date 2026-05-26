@@ -44,6 +44,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
@@ -64,7 +65,21 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0",
-      "signingIdentity": "${APPLE_SIGNING_IDENTITY}"
+      "signingIdentity": "${APPLE_SIGNING_IDENTITY}",
+      "dmg": {
+        "background": "icons/dmg-background.tiff",
+        "windowSize": { "width": 540, "height": 380 },
+        "appPosition": { "x": 130, "y": 220 },
+        "applicationFolderPosition": { "x": 410, "y": 220 }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI3ODJDOEJBQUU0OEMxNzAKUldSd3dVaXV1c2lDSnpqRXlhWFI1c0hEaXVReTZhcU1EWTdLdWl3Q0VzL1Z3VmluYzYzRnBUZUQK",
+      "endpoints": [
+        "https://github.com/portbay-app/portbay/releases/latest/download/latest.json"
+      ]
     }
   }
 }

@@ -2,9 +2,9 @@
   Sidebar — left nav rail (redesigned).
 
   Three regions:
-    1. Brand header — lighthouse mark + "PortBay / Local by default." The
-       pt-9 padding keeps the macOS traffic lights (titleBarStyle: Overlay)
-       clear of the brand row.
+    1. Brand header — lighthouse mark + "PortBay" wordmark, with a "Pro"
+       pill alongside it for Pro entitlements. The pt-9 padding keeps the
+       macOS traffic lights (titleBarStyle: Overlay) clear of the brand row.
     2. Nav — Projects, Groups (collapsible), Domains, Services, Logs,
        Settings. Languages is reachable via the palette / Settings, not the
        top-level nav.
@@ -31,6 +31,7 @@
   import { groups } from "$lib/stores/groups.svelte";
   import { groupEditor } from "$lib/stores/groupEditor.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { entitlements } from "$lib/stores/entitlements.svelte";
   import { SIDECAR_ORDER } from "$lib/types/sidecars";
   import type { SidecarState } from "$lib/types/sidecars";
   import type { PortbayStatus } from "$lib/types/status";
@@ -174,9 +175,16 @@
     <span class="text-fg shrink-0">
       <LighthouseLogo size={36} />
     </span>
-    <div class="min-w-0 leading-tight">
+    <div class="min-w-0 leading-tight flex items-center gap-1.5">
       <div class="text-[15px] font-semibold tracking-tight">PortBay</div>
-      <div class="text-[11px] text-fg-subtle">Local by default.</div>
+      {#if entitlements.isPro}
+        <span
+          class="shrink-0 px-1.5 py-0.5 rounded-md bg-accent text-on-accent
+                 text-[10px] font-semibold leading-none tracking-wide"
+        >
+          Pro
+        </span>
+      {/if}
     </div>
   </div>
 

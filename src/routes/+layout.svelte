@@ -14,7 +14,7 @@
 <script lang="ts">
   import "../app.css";
   import type { Snippet } from "svelte";
-  import { goto } from "$app/navigation";
+  import { goto, afterNavigate } from "$app/navigation";
   import { page } from "$app/state";
   import { Sidebar, TopBar, RightRail } from "$lib/components/shell";
   import { ToastHost } from "$lib/components/errors";
@@ -29,7 +29,7 @@
   import FeedbackPrompt from "$lib/components/lifecycle/FeedbackPrompt.svelte";
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { tunnels } from "$lib/stores/tunnels.svelte";
   import { onboarding } from "$lib/stores/onboarding.svelte";
@@ -39,9 +39,14 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
+  import { addProjectWizard } from "$lib/stores/wizard.svelte";
+  import { databases } from "$lib/stores/databases.svelte";
+  import { groupEditor } from "$lib/stores/groupEditor.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { installCrashReporter } from "$lib/stores/crashReporter.svelte";
+  import { updater } from "$lib/stores/updater.svelte";
 
   /** Compact byte label for the auto-clean "freed N" toast. */
   function formatBytes(n: number): string {
@@ -72,6 +77,11 @@
     // Load the cached entitlement immediately (no network), then re-verify a
     // stored session in the background (rotates tokens, refetches the license).
     void entitlements.load().then(() => entitlements.resync());
+
+    // Background update check. Surfaces a non-blocking toast when a newer
+    // signed release is published; silent on failure (transient network
+    // blips shouldn't nag) and a no-op in the hosted web demo.
+    void updater.check({ silent: true });
 
     // Tray-driven nav: the menu-bar "Preferences…" item emits
     // `portbay://nav` with the target route. Same channel can be used
@@ -165,26 +175,136 @@
    * the horizontal space the rail would otherwise occupy.
    */
   const isDashboard = $derived(page.url.pathname === "/");
+
+  // Every right-side surface renders into the grid's single rail column so the
+  // app speaks one side-panel language — no floating overlay drawers. Exactly
+  // one is active at a time, by the precedence below; the passive dashboard
+  // rail yields to any explicitly-opened panel.
+  const showAddProject = $derived(addProjectWizard.isOpen);
+  const showAddDatabase = $derived(databases.wizardOpen);
+  const showGroupEditor = $derived(groupEditor.isOpen);
+  const showDetailPanel = $derived(projectDetailPanel.id !== null);
   const showRail = $derived(
-    isDashboard && projects.selectedId !== null,
+    !showAddProject &&
+      !showAddDatabase &&
+      !showGroupEditor &&
+      !showDetailPanel &&
+      isDashboard &&
+      projects.selectedId !== null &&
+      density.value !== "compact",
   );
 
   // grid-template-columns:
   //   sidebar  user-resizable (160–360 px), or forced 180 in compact
-  //   main     1fr (greedy)
-  //   rail     320px when a project is selected on the dashboard, else 0
-  const gridCols = $derived(
-    density.value === "compact"
-      ? "180px 1fr 0px"
-      : `${sidebar.width}px 1fr ${showRail ? "320px" : "0px"}`,
+  //   main     1fr (greedy; min-w-0 lets it shrink so the grid never overflows)
+  //   rail     responsive per active panel — clamp(floor, vw, natural max) so it
+  //            scales with the window: never wider than its natural size (no
+  //            overflow on small windows) and never cramped (the floor).
+  const sidebarCol = $derived(
+    density.value === "compact" ? "180px" : `${sidebar.width}px`,
   );
+  const railCol = $derived(
+    showAddProject
+      ? "clamp(380px, 42vw, 600px)"
+      : showAddDatabase
+        ? "clamp(380px, 40vw, 560px)"
+        : showGroupEditor
+          ? "clamp(320px, 30vw, 440px)"
+          : showDetailPanel
+            ? "clamp(340px, 33vw, 480px)"
+            : showRail
+              ? "clamp(280px, 23vw, 340px)"
+              : "0px",
+  );
+  const gridCols = $derived(`${sidebarCol} 1fr ${railCol}`);
   const currentTheme = $derived(theme.value);
+
+  // Hosted web demo only (try.portbay.app). The desktop build keeps app.html's
+  // bare <title> (the Tauri window title comes from tauri.conf.json), so these
+  // marketing/share tags ship only when PUBLIC_SIMULATOR is set.
+  const isSimulator = import.meta.env.PUBLIC_SIMULATOR === "true";
+
+  // ── Rail panel hygiene ─────────────────────────────────────────────────────
+  /** Close every rail panel and clear any dashboard selection. */
+  function closeRailPanels() {
+    if (projectDetailPanel.id !== null) projectDetailPanel.hide();
+    if (addProjectWizard.isOpen) addProjectWizard.hide();
+    if (databases.wizardOpen) databases.hideWizard();
+    if (groupEditor.isOpen) groupEditor.close();
+    if (projects.selectedId !== null) projects.select(null);
+  }
+
+  // (1) Navigating to another page closes any open side panel — a panel is
+  // never carried across routes.
+  afterNavigate((nav) => {
+    if (nav.from && nav.from.url.pathname !== nav.to?.url.pathname) {
+      closeRailPanels();
+    }
+  });
+
+  // (2) Single active panel: opening a higher-precedence panel clears the ones
+  // below it (precedence: create/edit wizards > project detail > dashboard
+  // rail), so closing the top panel never reveals a stale one and panels never
+  // layer or carry state. Writes are untracked so this only reacts to a panel
+  // *opening*, never to its own cleanup.
+  $effect(() => {
+    const anyWizard =
+      addProjectWizard.isOpen || databases.wizardOpen || groupEditor.isOpen;
+    const detailOpen = projectDetailPanel.id !== null;
+    untrack(() => {
+      if (anyWizard) {
+        if (projectDetailPanel.id !== null) projectDetailPanel.hide();
+        if (projects.selectedId !== null) projects.select(null);
+      } else if (detailOpen) {
+        if (projects.selectedId !== null) projects.select(null);
+      }
+    });
+  });
 
   // Same derivation the Settings "Setup required" surface uses, so the banner
   // count and that list can never disagree.
   const setupReqs = $derived(setupRequirements(sidecars.value));
   const needsSetup = $derived(setupReqs.length > 0);
 </script>
+
+<svelte:head>
+  {#if isSimulator}
+    <title>PortBay — Local development environment manager</title>
+    <meta
+      name="description"
+      content="Manage every local dev project behind clean .test domains with automatic HTTPS and one-click start/stop — no Docker, no config files. Try the live interactive demo of PortBay for macOS."
+    />
+    <link rel="canonical" href="https://try.portbay.app/" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="PortBay" />
+    <meta property="og:url" content="https://try.portbay.app/" />
+    <meta
+      property="og:title"
+      content="PortBay — Local development environment manager"
+    />
+    <meta
+      property="og:description"
+      content="Local dev projects behind clean .test domains with automatic HTTPS and one-click start/stop. Try the live interactive demo for macOS."
+    />
+    <meta property="og:image" content="https://try.portbay.app/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="PortBay — Local development environment manager"
+    />
+    <meta
+      name="twitter:description"
+      content="Local dev projects behind clean .test domains with automatic HTTPS and one-click start/stop. Try the live interactive demo for macOS."
+    />
+    <meta name="twitter:image" content="https://try.portbay.app/og-image.png" />
+  {/if}
+</svelte:head>
 
 {#if isTrayPanel}
   <!--
@@ -239,18 +359,22 @@
       </main>
     </div>
 
-    {#if showRail}
+    {#if showAddProject}
+      <AddProjectWizard />
+    {:else if showAddDatabase}
+      <AddDatabaseWizard />
+    {:else if showGroupEditor}
+      <GroupEditorModal />
+    {:else if showDetailPanel}
+      <ProjectDetailPanel />
+    {:else if showRail}
       <RightRail />
     {/if}
   </div>
 {/if}
 
 {#if !isTrayPanel}
-  <AddProjectWizard />
-  <AddDatabaseWizard />
-  <ProjectDetailPanel />
   <LogViewer />
-  <GroupEditorModal />
   <CommandPalette />
   <ConfirmDialog />
   <SignInSheet />

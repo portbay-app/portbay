@@ -143,6 +143,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Box-the-error helper — most fallible setup steps just
             // need their error stringified for Tauri's setup signature.
@@ -499,6 +501,8 @@ pub fn run() {
             commands::telemetry::send_crash_report,
             commands::telemetry::record_js_error,
             commands::telemetry::record_telemetry_event,
+            commands::updater::check_for_update,
+            commands::updater::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

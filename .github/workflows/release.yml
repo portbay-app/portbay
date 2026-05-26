@@ -95,6 +95,15 @@ jobs:
           mv portbay-cargo-sbom.cdx.json artifacts/portbay-cargo-sbom.cdx.json
           find crates -name portbay-cargo-sbom.cdx.json -delete
 
+      # notarytool authenticates with the App Store Connect API key (.p8).
+      # The key content lives in the APPLE_API_KEY_P8 secret; we materialise
+      # it to a file and point APPLE_API_KEY_PATH at it. (This is the .p8
+      # method — not the Apple-ID + app-specific-password method.)
+      - name: Write App Store Connect API key
+        run: |
+          mkdir -p "$RUNNER_TEMP/private_keys"
+          printf '%s' "${{ secrets.APPLE_API_KEY_P8 }}" > "$RUNNER_TEMP/private_keys/AuthKey.p8"
+
       - name: Build signed app
         env:
           # Developer ID Application cert (base64-encoded .p12), unwrapped
@@ -102,10 +111,10 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # notarytool credentials.
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # notarytool credentials — App Store Connect API key (.p8) method.
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/private_keys/AuthKey.p8
           # Tauri Updater plugin signature.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -139,7 +148,60 @@ jobs:
           name: portbay-macos-arm64
           path: artifacts/
 
-      - name: Create release + emit latest.json
+      # Assemble the Tauri Updater manifest (`latest.json`) the in-app updater
+      # reads from `releases/latest/download/latest.json`. The `signature`
+      # field is the verbatim contents of the `.app.tar.gz.sig` minisign file
+      # the bundler emitted (createUpdaterArtifacts), and `url` points at the
+      # tarball asset on this release. The client verifies that signature
+      # against the pubkey baked into tauri.conf.json before installing.
+      - name: Assemble latest.json (updater manifest)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          tarball="$(find artifacts -type f -name '*.app.tar.gz' | head -n 1)"
+          sig="$(find artifacts -type f -name '*.app.tar.gz.sig' | head -n 1)"
+          if [ -z "$tarball" ] || [ -z "$sig" ]; then
+            echo "::error::Updater artifacts missing (.app.tar.gz / .sig). Is bundle.createUpdaterArtifacts enabled and TAURI_SIGNING_PRIVATE_KEY set?"
+            exit 1
+          fi
+          asset="$(basename "$tarball")"
+          signature="$(cat "$sig")"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${asset}"
+          pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # jq builds valid JSON and escapes the multi-line signature safely.
+          jq -n \
+            --arg version "$version" \
+            --arg pub_date "$pub_date" \
+            --arg signature "$signature" \
+            --arg url "$url" \
+            '{
+              version: $version,
+              notes: "See the release notes on GitHub.",
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": { signature: $signature, url: $url }
+              }
+            }' > artifacts/latest.json
+          echo "Wrote artifacts/latest.json for v$version:"
+          cat artifacts/latest.json
+
+      # Attach a version-independent DMG name so the website download link
+      # (releases/latest/download/PortBay-macos-arm64.dmg) always resolves to
+      # the newest build. The versioned DMG is still attached too.
+      - name: Stable-name macOS DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(find artifacts -type f -name '*.dmg' ! -name 'PortBay-macos-arm64.dmg' | head -n 1)"
+          if [ -n "$dmg" ]; then
+            cp "$dmg" artifacts/PortBay-macos-arm64.dmg
+            echo "Copied $(basename "$dmg") -> PortBay-macos-arm64.dmg"
+          else
+            echo "::warning::No versioned DMG found to copy to the stable name."
+          fi
+
+      - name: Create release + attach updater manifest
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -147,14 +209,13 @@ jobs:
             artifacts/**/*.app.tar.gz
             artifacts/**/*.app.tar.gz.sig
             artifacts/**/portbay-cargo-sbom.cdx.json
+            artifacts/latest.json
           draft: true
           generate_release_notes: true
 
-      # `latest.json` (the updater manifest) is assembled here once the
-      # tauri-action signature artifacts are present. Body shape:
-      # { version, notes, pub_date, platforms: { "darwin-aarch64": { url, signature } } }
-      # The Updater integration card writes the consumer side; this
-      # workflow writes the producer side.
+      # NOTE: the release is created as a DRAFT for maintainer review. The
+      # updater endpoint (releases/latest/download/latest.json) only resolves
+      # once the release is PUBLISHED — publish it to roll the update out.
 
   update-homebrew-tap:
     name: publish · Homebrew cask PR

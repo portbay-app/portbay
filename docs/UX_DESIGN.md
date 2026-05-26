@@ -95,6 +95,28 @@ The Rust core's status derivation rule (already implemented in `process_compose:
 
 ---
 
+## Design tokens (§5.3.1)
+
+The palette is the **"ZFlow"** preset (derived in [tweakcn](https://tweakcn.com/themes/cmn5czngq000204l4hydwhlao)) — a neutral-gray base with a single blue primary — mapped onto PortBay's semantic tokens. Tokens live in `src/app.css`: the `@theme` block holds the **dark** defaults; `body[data-theme="light"]` overrides for **light**. Surfaces keep an alpha channel so the native macOS vibrancy blur shows through. Components must reference these tokens (`bg-surface`, `text-fg-muted`, `border-border`, …) — never hard-code colours.
+
+| Token | Semantic role | Dark | Light |
+|---|---|---|---|
+| `--color-bg` | App background (behind everything) | `oklch(0.2046 0 0 / .82)` | `oklch(0.9846 0.0017 247.84 / .85)` |
+| `--color-surface` | Cards, panels, the primary raised surface | `oklch(0.2686 0 0 / .9)` | `oklch(1 0 0 / .92)` |
+| `--color-surface-2` | Nested / elevated surface (insets, hover) | `oklch(0.3098 0 0 / .94)` | `oklch(0.9665 0.0045 258.32 / .94)` |
+| `--color-border` | Default hairline divider | `oklch(0.3715 0 0 / .8)` | `oklch(0.9271 0.0075 260.73 / .85)` |
+| `--color-border-strong` | Emphasised border (scroll thumb hover, focus) | `oklch(0.44 0 0)` | `oklch(0.855 0.009 260.73)` |
+| `--color-fg` | Primary text | `oklch(0.9219 0 0)` | `oklch(0.3211 0 0)` |
+| `--color-fg-muted` | Secondary text | `oklch(0.7155 0 0)` | `oklch(0.5471 0.0321 263.29)` |
+| `--color-fg-subtle` | Tertiary / placeholder text | `oklch(0.556 0 0)` | `oklch(0.65 0.025 263.29)` |
+| `--color-accent` | Active nav, primary actions, focus ring | `oklch(0.6225 0.2041 259.9)` | `oklch(0.6225 0.2041 259.9)` |
+| `--color-accent-hover` | Accent hover | `oklch(0.69 0.185 259.9)` | `oklch(0.54 0.2 259.9)` |
+| `--color-on-accent` | Text/icon on an accent or status fill | `#ffffff` | `#ffffff` |
+
+**Status colours (§5.3) are intentionally NOT part of this preset** — they carry fixed meaning (running = green, crashed = red, …) and must stay stable across any palette change, so they keep their own hand-tuned values in both themes. Radii (`--radius-*`) and the type stack are also unchanged by the preset.
+
+---
+
 ## Error UX (§5.4)
 
 Every error follows the same shape:

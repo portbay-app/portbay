@@ -435,6 +435,8 @@ fn deep_link_url(scheme: DeepLinkScheme, path: &str) -> String {
 #[tauri::command]
 pub async fn open_privacy_settings(app: AppHandle, kind: String) -> AppResult<()> {
     let url = match kind.as_str() {
+        // PortBay's privileged hosts/DNS helper shows here as a background item.
+        "login-items" => "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
         "accessibility" => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         }

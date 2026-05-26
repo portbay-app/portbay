@@ -39,6 +39,12 @@
     findings: DoctorFinding[];
   }
 
+  // The hosted web demo (try.portbay.app) has no Tauri runtime: the native
+  // folder picker and the scaffolder don't work, so the welcome CTAs would
+  // dead-end and trap the visitor. In that mode every path completes into the
+  // populated demo workspace instead.
+  const isSimulator = import.meta.env.PUBLIC_SIMULATOR === "true";
+
   let step = $state<Step>("welcome");
   let doctor = $state<DoctorReport | null>(null);
   let doctorLoading = $state<boolean>(false);
@@ -69,6 +75,12 @@
   }
 
   function openAddWizard() {
+    if (isSimulator) {
+      // The add-project wizard relies on a native folder dialog that the web
+      // demo can't show — land the visitor in the demo workspace instead.
+      void skip();
+      return;
+    }
     // The existing wizard is mounted at the layout root; opening it
     // works from anywhere. We do NOT mark onboarded yet — the user
     // can still cancel the wizard. Marker writes happen on
@@ -84,6 +96,15 @@
   async function pickFolderForTemplate(kind: ScaffoldKind) {
     const tmpl = TEMPLATES.find((t) => t.kind === kind);
     if (!tmpl) return;
+    if (isSimulator) {
+      // No native dialog in the demo: skip the folder picker and preview the
+      // scaffold step with a sample parent path. "Scaffold" then completes
+      // into the demo workspace (the mock scaffolder is a no-op).
+      chosenKind = kind;
+      chosenParent = "~/Projects";
+      chosenName = tmpl.defaultName;
+      return;
+    }
     const picked = await openDialog({
       directory: true,
       multiple: false,

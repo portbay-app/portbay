@@ -25,6 +25,8 @@
   import { density, type Density } from "$lib/stores/density.svelte";
   import { theme, type Theme } from "$lib/stores/theme.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
+  import { projects } from "$lib/stores/projects.svelte";
+  import { updater } from "$lib/stores/updater.svelte";
   import type {
     AccentColor,
     DefaultSort,
@@ -163,13 +165,16 @@
       errorBus.push({
         code: "DOMAIN_SUFFIX_UPDATED",
         whatHappened: `Domain suffix changed from .${migration.oldSuffix} to .${migration.newSuffix}.`,
-        whyItMatters: `${migration.changedProjects} project hostname(s) migrated. Reconciler will update DNS, Caddy, and certs.`,
+        whyItMatters: `${migration.changedProjects} project hostname(s) migrated and now resolve via /etc/hosts; Caddy + certificates update automatically. For wildcard *.${migration.newSuffix} subdomains, re-run “Set up local DNS” on the DNS page.`,
         whoCausedIt: "system",
         severity: "success",
         actions: [],
       });
+      // Reflect the migrated hostnames everywhere (project list, detail panel,
+      // domains page) — the registry changed under the running stores.
       await refreshDomainSettings();
       await refreshDnsStatus();
+      await projects.refresh();
     } catch {
       /* toast */
     } finally {
@@ -658,9 +663,19 @@
     </div>
 
     <div class="divide-y divide-border/60">
-      <div class="flex items-center justify-between gap-3 py-2.5 first:pt-0">
-        <span class="text-[13px] text-fg">Default domain suffix</span>
-        <div class="flex items-center gap-2">
+      <div class="flex items-start justify-between gap-3 py-2.5 first:pt-0">
+        <div class="min-w-0">
+          <span class="text-[13px] text-fg">Default domain suffix</span>
+          <p class="mt-1 text-[11px] text-fg-subtle leading-relaxed max-w-md">
+            Applies to every project — existing hostnames migrate automatically.
+            They resolve via <code class="font-mono">/etc/hosts</code> on any
+            suffix; for wildcard <code class="font-mono">*.suffix</code>
+            subdomains, run “Set up local DNS” on the DNS page. Use a local-only
+            suffix like <code class="font-mono">test</code> or
+            <code class="font-mono">portbay.test</code> — public TLDs are rejected.
+          </p>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
           <div class="relative">
             <span
               class="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle text-[12px]"
@@ -1135,6 +1150,59 @@
               </dd>
             </dl>
           </div>
+        </div>
+
+        <!-- Updates -->
+        <div>
+          <h3 class="text-[12px] uppercase tracking-wide text-fg-subtle mb-2">
+            Updates
+          </h3>
+          <p class="text-[11.5px] text-fg-muted mb-2">
+            PortBay checks for new signed releases on launch. Updates are
+            verified against PortBay's public key before they install.
+          </p>
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={updater.status === "checking" ||
+                updater.status === "installing"}
+              onclick={() => updater.check()}
+              class="h-7 px-3 text-[11.5px] rounded-md border border-border
+                     text-fg-muted hover:text-fg hover:bg-surface-2
+                     transition-colors disabled:opacity-50"
+            >
+              {updater.status === "checking"
+                ? "Checking…"
+                : "Check for updates"}
+            </button>
+            {#if updater.available}
+              <button
+                type="button"
+                disabled={updater.status === "installing"}
+                onclick={() => updater.install()}
+                class="h-7 px-3 text-[11.5px] rounded-md bg-accent text-on-accent
+                       hover:bg-accent-hover transition-colors disabled:opacity-50"
+              >
+                {updater.status === "installing"
+                  ? "Installing…"
+                  : `Update to ${updater.available.version}`}
+              </button>
+            {/if}
+          </div>
+          <p class="text-[11px] text-fg-subtle mt-2">
+            {#if updater.status === "uptodate"}
+              You're on the latest version.
+            {:else if updater.status === "available" && updater.available}
+              Version {updater.available.version} is available.
+            {:else if updater.status === "error"}
+              Couldn't check for updates — try again later.
+            {/if}
+            {#if updater.lastChecked}
+              · Last checked {new Date(
+                updater.lastChecked,
+              ).toLocaleString()}
+            {/if}
+          </p>
         </div>
       </div>
     {/if}

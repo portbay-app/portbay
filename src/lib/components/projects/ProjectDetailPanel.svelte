@@ -7,7 +7,6 @@
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { trapFocus } from "$lib/actions/trapFocus";
   import { openUrl } from "$lib/security/openUrl";
 
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
@@ -24,6 +23,7 @@
   import { parseLogLine, levelClass } from "$lib/components/logs/ansi";
   import { projects } from "$lib/stores/projects.svelte";
   import { dns } from "$lib/stores/dns.svelte";
+  import HostnameField from "$lib/components/domains/HostnameField.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { createCertInfo } from "$lib/stores/certInfo.svelte";
   import type { CommandError } from "$lib/types/error";
@@ -66,6 +66,9 @@
   // Editable form state — initialised on open / when target project changes.
   let nameDraft = $state<string>("");
   let hostnameDraft = $state<string>("");
+  let hostnameValid = $state<boolean>(true);
+  // Active DNS suffix for the split hostname editor; matches the /domains page.
+  const systemSuffix = $derived(dns.status?.suffix ?? "portbay.test");
   let portDraft = $state<number | null>(null);
   let startCommandDraft = $state<string>("");
   let webServerDraft = $state<WebServer>("caddy");
@@ -174,7 +177,7 @@
   }
 
   async function save() {
-    if (!project || !dirty) return;
+    if (!project || !dirty || !hostnameValid) return;
     saving = true;
     formError = null;
     try {
@@ -456,17 +459,11 @@
 <svelte:window onkeydown={onKeydown} />
 
 {#if project}
-  <!-- Backdrop is a mouse convenience; Escape (window handler) and the
-       header close button cover keyboard users. -->
-  <div
-    class="fixed inset-0 z-40 bg-bg/60 backdrop-blur-sm"
-    onclick={() => !dirty && projectDetailPanel.hide()}
-    role="presentation"
-  ></div>
-
+  <!-- In-layout right-side panel (not a modal overlay): the root layout renders
+       this into the grid's rail column so it matches the dashboard rail and
+       every other page's side-panel language. Escape + the × button close it. -->
   <aside
-    use:trapFocus
-    class="fixed inset-y-0 right-0 z-50 w-[640px] max-w-[90vw] bg-surface border-l border-border shadow-2xl flex flex-col"
+    class="h-full w-full min-h-0 overflow-hidden bg-surface border-l border-border flex flex-col"
     aria-label="Project detail"
   >
     <!-- Header -->
@@ -498,7 +495,7 @@
         </button>
       </div>
 
-      <div class="flex items-center gap-1.5">
+      <div class="flex flex-wrap items-center gap-1.5">
         <button
           type="button"
           onclick={openProjectUrl}
@@ -830,14 +827,18 @@
             oninput={markDirty}
             class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg"
           />
-          <label for="detail-host" class="text-fg-muted">Hostname</label>
-          <input
-            id="detail-host"
-            type="text"
-            bind:value={hostnameDraft}
-            oninput={markDirty}
-            class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg font-mono"
-          />
+          <label for="detail-host" class="text-fg-muted self-start pt-1.5"
+            >Hostname</label
+          >
+          <div>
+            <HostnameField
+              id="detail-host"
+              bind:value={hostnameDraft}
+              {systemSuffix}
+              onInput={markDirty}
+              onValidChange={(v) => (hostnameValid = v)}
+            />
+          </div>
           <label for="detail-port" class="text-fg-muted">Port</label>
           <input
             id="detail-port"
@@ -918,7 +919,7 @@
             <button
               type="button"
               onclick={save}
-              disabled={saving}
+              disabled={saving || !hostnameValid}
               class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md text-accent border border-accent/40 hover:bg-accent/10 disabled:opacity-50 transition-colors"
             >
               {#if saving}

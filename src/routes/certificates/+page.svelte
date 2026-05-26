@@ -152,7 +152,7 @@
 </script>
 
 <div class="h-full overflow-y-auto">
-  <div class="max-w-5xl mx-auto px-6 py-6 space-y-5">
+  <div class="px-6 py-6 space-y-5">
     <!-- Header -->
     <header class="flex items-center gap-4 flex-wrap">
       <div class="min-w-0 flex-1">
@@ -207,7 +207,7 @@
       </p>
     {:else}
       <!-- Certificates table -->
-      <div class="rounded-xl border border-border overflow-hidden">
+      <div class="rounded-xl border border-border bg-surface overflow-hidden">
         <table class="w-full text-left border-collapse">
           <thead>
             <tr

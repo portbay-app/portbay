@@ -42,6 +42,11 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+# Auto-update: checks the GitHub-hosted latest.json, verifies the minisign
+# signature against the pubkey in tauri.conf.json, downloads + installs.
+# tauri-plugin-process backs the relaunch-after-install call.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -81,3 +86,14 @@ rmcp = { version = "1.7", features = [
 
 [dev-dependencies]
 tempfile = "3"
+
+# Release-build hygiene. `strip` drops debug symbols from the GUI binary
+# (~9 MB off an unstripped ~21 MB), `lto` + a single codegen unit shrink and
+# optimise across crates. opt-level is left at the default (3) so runtime
+# speed — a product positioning point — isn't traded away for size.
+# Applies workspace-wide (this is the workspace root); see scripts/build-*.sh
+# for the sidecar crates.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

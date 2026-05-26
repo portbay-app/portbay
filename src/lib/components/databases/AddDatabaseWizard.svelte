@@ -12,7 +12,6 @@
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
-  import { trapFocus } from "$lib/actions/trapFocus";
   import { ErrorEnvelope } from "$lib/components/errors";
   import DatabaseMark from "./DatabaseMark.svelte";
 
@@ -150,18 +149,10 @@
 <svelte:window onkeydown={onKeydown} />
 
 {#if databases.wizardOpen}
-  <!-- Backdrop is a mouse convenience; keyboard users dismiss with Escape
-       (window handler above) or the header close button. -->
-  <div
-    class="fixed inset-0 z-40 bg-bg/60 backdrop-blur-sm"
-    onclick={close}
-    role="presentation"
-  ></div>
-
+  <!-- In-layout right-side panel (rendered into the grid rail by the root
+       layout). Escape + the header close button dismiss it. -->
   <aside
-    use:trapFocus
-    class="fixed inset-y-0 right-0 z-50 w-[560px] max-w-[92vw] bg-surface
-           border-l border-border shadow-2xl flex flex-col"
+    class="h-full w-full min-h-0 overflow-hidden bg-surface border-l border-border flex flex-col"
     aria-label="Add Database"
   >
     <header

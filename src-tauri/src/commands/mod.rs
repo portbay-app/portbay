@@ -37,4 +37,5 @@ pub mod sync;
 pub mod system;
 pub mod telemetry;
 pub mod tunnel;
+pub mod updater;
 pub mod webservers;
