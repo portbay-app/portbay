@@ -334,7 +334,7 @@
   </div>
 {:else}
   <div
-    class="h-screen w-screen grid grid-rows-[1fr] overflow-hidden"
+    class="h-screen w-screen grid grid-rows-[minmax(0,1fr)] overflow-hidden"
     style:grid-template-columns={gridCols}
     data-theme-current={currentTheme}
   >
