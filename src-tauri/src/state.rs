@@ -343,16 +343,27 @@ impl AppState {
         if !mailpit::binary_available(app) {
             return Ok(());
         }
-        let smtp = mailpit::find_free_port(DEFAULT_SMTP_PORT, MAILPIT_PORT_SCAN_RANGE).ok_or(
-            crate::mailpit::MailpitError::NoFreePort {
+        // Never claim a port a registered project expects. Mailpit's default
+        // ranges (1025–1040 / 8025–8040) overlap common dev-server ports, so we
+        // feed the registry's project ports (incl. extra_ports) into the scan.
+        let avoid: Vec<u16> = store::load_or_default(&self.registry_path, &self.domain_suffix)
+            .map(|reg| {
+                reg.list_projects()
+                    .iter()
+                    .flat_map(|p| p.port.into_iter().chain(p.extra_ports.iter().copied()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let smtp = mailpit::find_free_port(DEFAULT_SMTP_PORT, MAILPIT_PORT_SCAN_RANGE, &avoid)
+            .ok_or(crate::mailpit::MailpitError::NoFreePort {
                 start: DEFAULT_SMTP_PORT,
-            },
-        )?;
-        let ui = mailpit::find_free_port(DEFAULT_UI_PORT, MAILPIT_PORT_SCAN_RANGE).ok_or(
-            crate::mailpit::MailpitError::NoFreePort {
+            })?;
+        // Also avoid the SMTP port for the UI scan (defensive — ranges differ).
+        let ui_avoid: Vec<u16> = avoid.iter().copied().chain(std::iter::once(smtp)).collect();
+        let ui = mailpit::find_free_port(DEFAULT_UI_PORT, MAILPIT_PORT_SCAN_RANGE, &ui_avoid)
+            .ok_or(crate::mailpit::MailpitError::NoFreePort {
                 start: DEFAULT_UI_PORT,
-            },
-        )?;
+            })?;
         let db_path = mailpit::lifecycle::default_db_path()?;
         self.mailpit
             .lock()

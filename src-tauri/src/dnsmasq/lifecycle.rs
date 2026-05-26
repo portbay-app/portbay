@@ -189,14 +189,17 @@ fn resolve_command(
         .args([CONF_FLAG, config_str]))
 }
 
-/// Resolve a free local port for dnsmasq. Scans `start..start+range`
-/// and returns the first that binds. UDP-only here matches the daemon's
-/// actual listening protocol; we attempt a TCP bind as a cheap
-/// availability proxy (most daemons that hold a port hold both).
+/// Resolve a free local port for dnsmasq. Scans `start..start+range` and
+/// returns the first that's free on **both UDP and TCP** — dnsmasq binds both,
+/// and DNS is primarily UDP, so a TCP-only probe (the previous behaviour) would
+/// happily hand back a port another DNS daemon already holds on UDP, and our
+/// dnsmasq would then fail to bind silently.
 pub fn find_free_port(start: u16, range: u16) -> Option<u16> {
     for offset in 0..range {
         let port = start.checked_add(offset)?;
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        let udp_ok = std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok();
+        let tcp_ok = std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+        if udp_ok && tcp_ok {
             return Some(port);
         }
     }

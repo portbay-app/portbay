@@ -13,12 +13,12 @@ use crate::reconciler::StepOutcome;
 use crate::state::AppState;
 
 #[tauri::command]
-pub async fn sidecar_status(state: State<'_, AppState>) -> AppResult<SidecarHealth> {
+pub async fn sidecar_status(app: AppHandle, state: State<'_, AppState>) -> AppResult<SidecarHealth> {
     let process_compose = pc_status(&state).await;
     let caddy = caddy_status(&state).await;
     let mkcert_ca = mkcert_status(&state);
     let dnsmasq = dnsmasq_status(&state);
-    let mailpit = mailpit_status(&state);
+    let mailpit = mailpit_status(&app, &state);
     let hosts_helper = hosts_status();
 
     Ok(SidecarHealth {
@@ -183,7 +183,7 @@ fn dnsmasq_status(state: &AppState) -> SidecarStatus {
     }
 }
 
-fn mailpit_status(state: &AppState) -> SidecarStatus {
+fn mailpit_status(app: &AppHandle, state: &AppState) -> SidecarStatus {
     let (running, smtp, ui) = {
         let guard = state.mailpit.lock().expect("mailpit mutex poisoned");
         (guard.is_running(), guard.smtp_port(), guard.ui_port())
@@ -196,7 +196,9 @@ fn mailpit_status(state: &AppState) -> SidecarStatus {
             last_error: None,
         };
     }
-    if which::which("mailpit").is_ok() {
+    // Sidecar-aware: the bundled binary isn't on PATH, so a PATH-only check
+    // would wrongly report NotInstalled for every shipped build.
+    if crate::mailpit::binary_available(app) {
         SidecarStatus {
             name: "mailpit",
             status: SidecarState::Stopped,

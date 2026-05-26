@@ -128,12 +128,18 @@ fn resolve_command(
         .args(args))
 }
 
-/// Scan loopback for a free TCP port. Mailpit binds both SMTP and the
-/// web UI; we run the scan for each port independently so a collision
-/// on one doesn't force the other to a non-standard value.
-pub fn find_free_port(start: u16, range: u16) -> Option<u16> {
+/// Scan loopback for a free TCP port, skipping any in `avoid`. Mailpit binds
+/// both SMTP and the web UI; we run the scan for each port independently so a
+/// collision on one doesn't force the other to a non-standard value. `avoid`
+/// carries the registered projects' ports so Mailpit never claims a port a
+/// user's dev server expects — its default ranges (1025–1040 SMTP, 8025–8040
+/// UI) sit squarely in dev-server territory.
+pub fn find_free_port(start: u16, range: u16, avoid: &[u16]) -> Option<u16> {
     for offset in 0..range {
         let port = start.checked_add(offset)?;
+        if avoid.contains(&port) {
+            continue;
+        }
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Some(port);
         }
@@ -141,11 +147,14 @@ pub fn find_free_port(start: u16, range: u16) -> Option<u16> {
     None
 }
 
-/// True iff a `mailpit` binary can be found via PATH. Used by the
-/// sidecar-status helper to flag NotInstalled cleanly without trying
-/// to spawn.
-pub fn binary_available(_app: &AppHandle) -> bool {
-    which::which("mailpit").is_ok()
+/// True iff a usable `mailpit` binary exists. Checks the **bundled sidecar
+/// first** (the shipped binary lives in the app bundle, never on `PATH`), then
+/// falls back to `PATH`. The previous PATH-only check made the bundled binary
+/// invisible: `boot_mailpit` short-circuited and the UI told users to
+/// `brew install mailpit` even though Mailpit was sitting right there in the
+/// bundle. Mirrors `dnsmasq::binary_available`.
+pub fn binary_available(app: &AppHandle) -> bool {
+    app.shell().sidecar("mailpit").is_ok() || which::which("mailpit").is_ok()
 }
 
 /// Default persistent DB path. `<data_dir>/PortBay/mailpit.db`.
@@ -163,7 +172,16 @@ mod tests {
 
     #[test]
     fn finds_a_free_port_near_default() {
-        let port = find_free_port(DEFAULT_SMTP_PORT, 16);
+        let port = find_free_port(DEFAULT_SMTP_PORT, 16, &[]);
         assert!(port.is_some());
+    }
+
+    #[test]
+    fn skips_avoided_ports() {
+        // With the first two candidates in the avoid set, the scan must return
+        // a port at or beyond start+2 — never one a project already claims.
+        let avoid = [DEFAULT_SMTP_PORT, DEFAULT_SMTP_PORT + 1];
+        let port = find_free_port(DEFAULT_SMTP_PORT, 16, &avoid).expect("a free port");
+        assert!(port >= DEFAULT_SMTP_PORT + 2, "must skip avoided ports, got {port}");
     }
 }
