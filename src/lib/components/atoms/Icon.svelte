@@ -64,7 +64,9 @@
     | "copy"
     | "eye"
     | "shield"
-    | "server-cog";
+    | "server-cog"
+    | "sliders-horizontal"
+    | "power";
 </script>
 
 <script lang="ts">
@@ -120,6 +122,8 @@
     Eye,
     Shield,
     ServerCog,
+    SlidersHorizontal,
+    Power,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -190,6 +194,8 @@
     eye: Eye,
     shield: Shield,
     "server-cog": ServerCog,
+    "sliders-horizontal": SlidersHorizontal,
+    power: Power,
   };
 
   const Component = $derived(iconMap[name]);

@@ -3,7 +3,7 @@
 //! `doctor` mirrors the CLI's `cmd_doctor` JSON output shape so the GUI
 //! and CLI report the same findings to the same support requests.
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::dto::{DoctorFinding, DoctorReport, DoctorVerdict};
 use crate::commands::projects::load_registry;
@@ -230,10 +230,15 @@ pub async fn quit_app(app: AppHandle) -> AppResult<()> {
 }
 
 /// `open_main_window` — reveal PortBay's primary window from secondary UI
-/// surfaces such as the tray panel.
+/// surfaces such as the tray panel. When `path` is supplied (e.g. the tray
+/// popover's nav grid), route the main window there via the same
+/// `portbay://nav` channel the tray menu uses (handled in +layout.svelte).
 #[tauri::command]
-pub async fn open_main_window(app: AppHandle) -> AppResult<()> {
+pub async fn open_main_window(app: AppHandle, path: Option<String>) -> AppResult<()> {
     crate::tray::show_main_window(&app);
+    if let Some(route) = path {
+        let _ = app.emit("portbay://nav", route);
+    }
     Ok(())
 }
 

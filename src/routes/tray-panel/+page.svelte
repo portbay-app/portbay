@@ -1,87 +1,78 @@
 <!--
-  Tray popover — the rich-control alternative to the native NSMenu.
+  Tray popover — the rich-control surface behind the menu-bar icon.
   Rendered into the `tray-panel` webview window (configured in
   tauri.conf.json: frameless, transparent, alwaysOnTop, hidden by
-  default). The Rust tray module positions + shows this window when
-  the user left-clicks the menu-bar icon; it auto-hides on blur.
+  default). The Rust tray module positions + shows this window when the
+  user left-clicks the menu-bar icon; it auto-hides on blur.
 
   Layout (top to bottom):
-    1. Header strip      — PortBay mark + aggregate status pill + cog
-    2. Sticky action row — Start all · Stop all · Restart all
-    3. Project list      — per-project status, name, hostname, CPU
-                           sparkline, icon buttons (start/stop/restart/open)
-    4. Footer            — aggregate CPU + memory bars and sparklines
+    1. Header        — Portbay wordmark + aggregate status + settings cog
+    2. Nav grid      — Dashboard · Domains · Databases · Logs launchers
+    3. Stat cards    — system CPU (sparkline) · Memory (ring) · Disk (ring)
+    4. Running Now   — live list of up projects; click a host to open it
+    5. Quick Controls— Start all · Stop all · Restart all
+    6. Footer menu   — Preferences · Quit Portbay (⌘Q)
 
-  Background uses a frosted-glass treatment (semi-opaque + backdrop
-  blur) so the transparent window reads cleanly over any wallpaper.
+  Privileged window ops (reveal/focus the main window, navigate, quit)
+  are routed through the `open_main_window` / `quit_app` app commands so
+  this webview keeps a minimal capability surface — see
+  src-tauri/capabilities/tray-panel.json.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+  import Icon from "$lib/components/atoms/Icon.svelte";
+  import type { IconName } from "$lib/components/atoms/Icon.svelte";
+  import LighthouseLogo from "$lib/components/atoms/LighthouseLogo.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { metrics } from "$lib/stores/metrics.svelte";
   import { projects } from "$lib/stores/projects.svelte";
-  import { projectCpu } from "$lib/stores/projectCpu.svelte";
   import type { ProjectView } from "$lib/types/projects";
   import type { PortbayStatus } from "$lib/types/status";
 
-  /** Live aggregate status used by the header pill and the tray icon colour. */
+  /** Live aggregate status used by the header dot + label. */
   const aggregate = $derived(computeAggregate(projects.value));
 
-  /** Total of all per-project CPU% — capped to 100 for the bar width. */
-  const aggregateCpu = $derived(
-    projects.value.reduce((acc, p) => acc + (p.runtime?.cpuPercent ?? 0), 0),
-  );
-
-  /** Sum of per-project RSS, in MB. */
-  const aggregateMemoryMb = $derived(
-    projects.value.reduce(
-      (acc, p) => acc + (p.runtime?.memBytes ?? 0) / (1024 * 1024),
-      0,
-    ),
-  );
-
-  /** System CPU sparkline source — rolling 60s of global CPU%. */
+  /** Rolling system-CPU history (60 × 2s) for the CPU card sparkline. */
   const cpuHistory = $derived(metrics.cpuHistory);
 
-  let busy = $state<Record<string, boolean>>({});
+  /** Projects currently up — the "Running Now" list and service count. */
+  const runningProjects = $derived(projects.value.filter((p) => isUp(p.status)));
+
+  let busy = $state(false);
 
   onMount(() => {
     void projects.start();
     void metrics.start();
-    projectCpu.start();
 
-    // Each Tauri webview has its own JS context. Status events fire
-    // to every listener, but if the popover is hidden when the user
-    // clicks Start in the main window, the popover may show stale
-    // data on the next open. Defensive: refresh on every focus —
-    // cheap (one `list_projects` IPC) and guarantees the row dots
-    // match what the dashboard shows.
+    // Each Tauri webview has its own JS context. Status events fire to
+    // every listener, but if the popover was hidden when state changed
+    // in the main window it can open stale. Defensive: refresh on every
+    // focus — one cheap `list_projects` IPC that guarantees the dots
+    // match the dashboard.
     let unlistenFocus: (() => void) | null = null;
     void (async () => {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       const win = getCurrentWindow();
       unlistenFocus = await win.onFocusChanged(({ payload: focused }) => {
-        if (focused) {
-          void projects.refresh();
-        }
+        if (focused) void projects.refresh();
       });
     })();
 
     return () => {
       // Don't fully stop projects/metrics — the main window may still
       // depend on them. Tear down only this view's listener.
-      projectCpu.stop();
       unlistenFocus?.();
     };
   });
 
-  function computeAggregate(items: ProjectView[]):
-    | "idle"
-    | "starting"
-    | "running"
-    | "error" {
+  function isUp(status: PortbayStatus): boolean {
+    return status === "running" || status === "unhealthy" || status === "starting";
+  }
+
+  function computeAggregate(
+    items: ProjectView[],
+  ): "idle" | "starting" | "running" | "error" {
     let anyStarting = false;
     let anyRunning = false;
     for (const p of items) {
@@ -97,9 +88,20 @@
   const aggregateLabel: Record<ReturnType<typeof computeAggregate>, string> = {
     idle: "Idle",
     starting: "Starting",
-    running: "All healthy",
+    running: "Running",
     error: "Needs attention",
   };
+
+  /** Header status dot + label colour, keyed off the aggregate. */
+  const aggregateColor = $derived(
+    aggregate === "running"
+      ? "text-status-running"
+      : aggregate === "starting"
+        ? "text-status-starting"
+        : aggregate === "error"
+          ? "text-status-crashed"
+          : "text-fg-subtle",
+  );
 
   const dotClass: Record<PortbayStatus, string> = {
     running: "bg-status-running",
@@ -110,44 +112,53 @@
     stopped: "bg-fg-subtle/60",
   };
 
+  /** Launcher cards — each reveals the main window on its route. */
+  const navItems: { label: string; icon: IconName; route: string; color: string }[] = [
+    { label: "Dashboard", icon: "home", route: "/", color: "#818cf8" },
+    { label: "Domains", icon: "globe", route: "/domains", color: "#4d9cff" },
+    { label: "Databases", icon: "database", route: "/databases", color: "#2dd4bf" },
+    { label: "Logs", icon: "terminal", route: "/logs", color: "#a78bfa" },
+  ];
+
   async function startAll() {
-    for (const p of projects.value) {
-      if (p.status === "stopped" || p.status === "crashed") {
-        void perProject(p.id, "start");
+    if (busy) return;
+    busy = true;
+    try {
+      for (const p of projects.value) {
+        if (p.status === "stopped" || p.status === "crashed") {
+          void safeInvoke("start_project", { id: p.id });
+        }
       }
+    } finally {
+      busy = false;
     }
   }
+
   async function stopAll() {
+    if (busy) return;
+    busy = true;
     try {
       await safeInvoke("stop_all");
     } catch {
       /* toast already pushed */
-    }
-  }
-  async function restartAll() {
-    for (const p of projects.value) {
-      if (
-        p.status === "running" ||
-        p.status === "unhealthy" ||
-        p.status === "starting"
-      ) {
-        void perProject(p.id, "restart");
-      }
-    }
-  }
-
-  async function perProject(id: string, action: "start" | "stop" | "restart") {
-    if (busy[id]) return;
-    busy = { ...busy, [id]: true };
-    try {
-      await safeInvoke(`${action}_project`, { id });
-    } catch {
-      /* toast already pushed */
     } finally {
-      busy = { ...busy, [id]: false };
+      busy = false;
     }
   }
 
+  async function restartAll() {
+    if (busy) return;
+    busy = true;
+    try {
+      for (const p of projects.value) {
+        if (isUp(p.status)) void safeInvoke("restart_project", { id: p.id });
+      }
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Open a project's URL in the default browser. */
   async function openProject(id: string) {
     try {
       await safeInvoke("open_project", { id });
@@ -156,310 +167,360 @@
     }
   }
 
-  async function showMainWindow(path?: string) {
-    // Reveals the main window (creating it if it was destroyed) and
-    // optionally pushes a route via the existing nav channel the tray
-    // menu's "Preferences…" item uses.
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  /** Reveal the main window (optionally on a route) and dismiss the popover. */
+  async function openMain(path?: string) {
     try {
-      // Find the main window from any window and show it.
-      const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-      const main = await WebviewWindow.getByLabel("main");
-      if (main) {
-        await main.unminimize();
-        await main.show();
-        await main.setFocus();
-      }
-      if (path) {
-        const { emit } = await import("@tauri-apps/api/event");
-        await emit("portbay://nav", path);
-      }
-      // Hide the popover so it doesn't linger over the main window.
-      await getCurrentWindow().hide();
-    } catch (e) {
-      console.error("showMainWindow failed", e);
+      await safeInvoke("open_main_window", { path: path ?? null });
+    } catch {
+      /* toast already pushed */
     }
   }
 
-  /** Compact mm:ss-style memory label — kilobytes/megabytes/gigabytes. */
-  function formatBytes(b: number): string {
-    if (b < 1024) return `${b} B`;
-    if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
-    if (b < 1024 * 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(0)} MB`;
-    return `${(b / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  async function quitApp() {
+    try {
+      await safeInvoke("quit_app");
+    } catch {
+      /* toast already pushed */
+    }
   }
 
-  /** SVG polyline points for a sparkline given a [0..N] history. */
-  function sparkline(history: number[], width: number, height: number): string {
+  function onKeydown(e: KeyboardEvent) {
+    // Honour the ⌘Q hint shown next to "Quit Portbay".
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "q") {
+      e.preventDefault();
+      void quitApp();
+    }
+  }
+
+  /** Compact GB label — one decimal under 10 GB, whole numbers above. */
+  function gb(bytes: number, whole = false): string {
+    const g = bytes / 1024 ** 3;
+    if (whole || g >= 10) return g.toFixed(0);
+    return g.toFixed(1);
+  }
+
+  /** Fraction (0..1) of a used/total pair, clamped. */
+  function frac(used: number, total: number): number {
+    if (total <= 0) return 0;
+    return Math.max(0, Math.min(1, used / total));
+  }
+
+  /** stroke-dasharray for a ring of radius `r` filled to `f` (0..1). */
+  function ringDash(f: number, r: number): string {
+    const c = 2 * Math.PI * r;
+    return `${(f * c).toFixed(2)} ${c.toFixed(2)}`;
+  }
+
+  /** Polyline points for a sparkline over `history`, scaled to w×h. */
+  function sparkPoints(history: number[], w: number, h: number): string {
     if (history.length < 2) return "";
     const max = Math.max(1, ...history);
-    const step = width / (history.length - 1);
+    const step = w / (history.length - 1);
     return history
-      .map((v, i) => `${(i * step).toFixed(1)},${(height - (v / max) * height).toFixed(1)}`)
+      .map((v, i) => `${(i * step).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`)
       .join(" ");
   }
+
+  /** Closed area path under the sparkline, for the gradient fill. */
+  function sparkArea(history: number[], w: number, h: number): string {
+    const pts = sparkPoints(history, w, h);
+    if (!pts) return "";
+    return `M0,${h} L${pts.split(" ").join(" L")} L${w},${h} Z`;
+  }
+
+  const cpuTotal = $derived(metrics.value?.cpu.total ?? 0);
+  const memFrac = $derived(
+    metrics.value ? frac(metrics.value.memory.usedBytes, metrics.value.memory.totalBytes) : 0,
+  );
+  const diskFrac = $derived(
+    metrics.value ? frac(metrics.value.disk.usedBytes, metrics.value.disk.totalBytes) : 0,
+  );
 </script>
 
+<svelte:window onkeydown={onKeydown} />
+
 <!--
-  Frosted glass panel — let the OS wallpaper bleed through faintly
-  while keeping content readable. The outer transparent webview shows
-  the panel as a floating card with a subtle drop shadow (handled by
-  Tauri's `shadow: true` in tauri.conf.json).
+  Frosted-glass panel — the transparent webview lets the OS wallpaper
+  bleed through faintly while content stays readable. The drop shadow
+  is drawn by Tauri (`shadow: true`).
 -->
 <div
-  class="h-full w-full overflow-hidden rounded-xl border border-border/40
-         bg-bg/85 backdrop-blur-xl text-fg flex flex-col"
+  class="flex h-full w-full flex-col overflow-hidden rounded-2xl border border-border/50
+         bg-bg/90 text-fg backdrop-blur-2xl"
 >
-  <!-- 1. Header strip -->
-  <header class="flex items-center justify-between px-4 py-3 border-b border-border/40">
-    <div class="flex items-center gap-2">
-      <span
-        class="inline-block h-2 w-2 rounded-full transition-colors
-               {aggregate === 'running'
-          ? 'bg-status-running'
-          : aggregate === 'starting'
-            ? 'bg-status-starting'
-            : aggregate === 'error'
-              ? 'bg-status-crashed'
-              : 'bg-fg-subtle/60'}"
-        aria-hidden="true"
-      ></span>
-      <span class="text-sm font-semibold">PortBay</span>
-      <span class="text-xs text-fg-muted">— {aggregateLabel[aggregate]}</span>
+  <!-- 1. Header -->
+  <header class="flex items-center justify-between px-5 pt-5 pb-4">
+    <div class="flex items-center gap-2.5">
+      <LighthouseLogo size={30} />
+      <h1
+        class="text-[22px] font-extrabold leading-none tracking-tight text-fg"
+        style="font-family: 'Nunito', Inter, ui-sans-serif"
+      >
+        Portbay
+      </h1>
+      <span class="flex items-center gap-1.5 {aggregateColor}">
+        <span class="inline-block h-2 w-2 rounded-full bg-current"></span>
+        <span class="text-sm font-medium">{aggregateLabel[aggregate]}</span>
+      </span>
     </div>
     <button
       type="button"
-      class="text-fg-muted hover:text-fg p-1 rounded transition-colors"
-      onclick={() => showMainWindow("/settings")}
+      onclick={() => openMain("/settings")}
       aria-label="Open settings"
-      title="Open settings"
+      title="Settings"
+      class="flex h-9 w-9 items-center justify-center rounded-lg border border-border/60
+             bg-surface/40 text-fg-muted transition-colors hover:border-border-strong
+             hover:bg-surface-2 hover:text-fg"
     >
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-        <path
-          fill-rule="evenodd"
-          d="M9.405 1.05a1 1 0 0 0-2.81 0l-.213 1.281a6 6 0 0 0-1.296.756L3.84 2.611a1 1 0 0 0-1.39 1.39l.476 1.246a6 6 0 0 0-.756 1.296L.89 6.756a1 1 0 0 0 0 2.488l1.281.213a6 6 0 0 0 .756 1.296l-.476 1.246a1 1 0 0 0 1.39 1.39l1.246-.476a6 6 0 0 0 1.296.756l.213 1.281a1 1 0 0 0 2.488 0l.213-1.281a6 6 0 0 0 1.296-.756l1.246.476a1 1 0 0 0 1.39-1.39l-.476-1.246a6 6 0 0 0 .756-1.296l1.281-.213a1 1 0 0 0 0-2.488l-1.281-.213a6 6 0 0 0-.756-1.296l.476-1.246a1 1 0 0 0-1.39-1.39l-1.246.476a6 6 0 0 0-1.296-.756L9.405 1.05ZM8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"
-        />
-      </svg>
+      <Icon name="settings" size={17} />
     </button>
   </header>
 
-  <!-- 2. Sticky action row -->
-  <div class="flex gap-1.5 px-4 py-2.5 border-b border-border/40 bg-bg/40">
-    <button
-      type="button"
-      onclick={startAll}
-      disabled={projects.value.length === 0}
-      class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md
-             text-xs font-medium text-status-running bg-status-running/10
-             hover:bg-status-running/20 disabled:opacity-40 disabled:cursor-not-allowed
-             transition-colors"
-    >
-      <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
-        <path d="M2 1.5v7l6-3.5L2 1.5z" />
-      </svg>
-      Start all
-    </button>
-    <button
-      type="button"
-      onclick={stopAll}
-      disabled={projects.value.length === 0}
-      class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md
-             text-xs font-medium text-status-crashed bg-status-crashed/10
-             hover:bg-status-crashed/20 disabled:opacity-40 disabled:cursor-not-allowed
-             transition-colors"
-    >
-      <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
-        <rect x="2" y="2" width="6" height="6" rx="0.5" />
-      </svg>
-      Stop all
-    </button>
-    <button
-      type="button"
-      onclick={restartAll}
-      disabled={projects.value.length === 0}
-      class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md
-             text-xs font-medium text-fg-muted bg-surface-2/60
-             hover:bg-surface-2 hover:text-fg transition-colors
-             disabled:opacity-40 disabled:cursor-not-allowed"
-    >
-      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-        <path d="M1.5 5a3.5 3.5 0 1 1 1 2.5" />
-        <path d="M1 5V3M1 5h2" />
-      </svg>
-      Restart all
-    </button>
-  </div>
+  <!-- 2. Nav grid -->
+  <nav class="grid grid-cols-4 gap-2.5 px-5">
+    {#each navItems as item (item.route)}
+      <button
+        type="button"
+        onclick={() => openMain(item.route)}
+        class="group relative flex flex-col items-center gap-2 overflow-hidden rounded-xl
+               border border-border/60 bg-surface/40 py-3.5 transition-colors
+               hover:border-accent/50 hover:bg-surface-2"
+      >
+        <span
+          class="absolute inset-x-5 top-0 h-0.5 rounded-full bg-accent opacity-0
+                 transition-opacity group-hover:opacity-100"
+        ></span>
+        <!-- lucide strokes with currentColor; tint per item via `color`. -->
+        <span class="transition-transform group-hover:scale-110" style:color={item.color}>
+          <Icon name={item.icon} size={22} strokeWidth={1.75} />
+        </span>
+        <span class="text-xs font-medium text-fg-muted group-hover:text-fg">{item.label}</span>
+      </button>
+    {/each}
+  </nav>
 
-  <!-- 3. Project list -->
-  <div class="flex-1 min-h-0 overflow-y-auto px-2 py-2 space-y-0.5">
-    {#if projects.value.length === 0}
-      <div class="px-3 py-6 text-center">
-        <p class="text-xs text-fg-muted">No projects yet.</p>
-        <button
-          type="button"
-          onclick={() => showMainWindow("/")}
-          class="mt-2 text-xs text-accent hover:text-accent-hover"
-        >
-          Open dashboard to add one →
-        </button>
+  <!-- 3. Stat cards -->
+  <section class="grid grid-cols-3 gap-2.5 px-5 pt-3">
+    <!-- CPU -->
+    <div class="relative flex h-[86px] flex-col rounded-xl border border-border/60 bg-surface/40 p-3">
+      <div class="flex items-center justify-between">
+        <span class="text-xs font-medium text-fg-muted">CPU</span>
+        <span class="inline-block h-1.5 w-1.5 rounded-full bg-status-running"></span>
       </div>
-    {:else}
-      {#each projects.value as project (project.id)}
-        {@const history = projectCpu.historyFor(project.id)}
-        {@const cpu = project.runtime?.cpuPercent ?? 0}
-        {@const mem = project.runtime?.memBytes ?? 0}
-        {@const isUp =
-          project.status === "running" ||
-          project.status === "unhealthy" ||
-          project.status === "starting"}
-        <div
-          class="group flex items-center gap-2 px-2 py-1.5 rounded-md
-                 hover:bg-surface-2/60 transition-colors"
-        >
-          <span
-            class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {dotClass[project.status]}"
-            aria-hidden="true"
-          ></span>
-          <div class="min-w-0 flex-1">
-            <div class="text-xs font-medium text-fg truncate">{project.name}</div>
-            <div class="text-[10px] font-mono text-fg-subtle truncate">
-              {project.hostname}
-              {#if isUp}
-                <span class="ml-1.5 text-fg-muted">· {cpu.toFixed(0)}% CPU</span>
-                {#if mem > 0}
-                  <span class="text-fg-muted">· {formatBytes(mem)}</span>
-                {/if}
-              {/if}
-            </div>
-          </div>
-          {#if isUp && history.length >= 2}
-            <svg
-              width="36"
-              height="14"
-              viewBox="0 0 36 14"
-              class="text-status-running/70 shrink-0"
-              aria-hidden="true"
-            >
-              <polyline
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1"
-                stroke-linejoin="round"
-                stroke-linecap="round"
-                points={sparkline(history, 36, 12)}
-              />
-            </svg>
-          {/if}
-          <div class="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-            {#if isUp}
-              <button
-                type="button"
-                onclick={() => perProject(project.id, "restart")}
-                disabled={busy[project.id]}
-                title="Restart"
-                class="p-1 rounded text-fg-muted hover:text-fg hover:bg-surface-2 disabled:opacity-40 transition-colors"
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-                  <path d="M1.5 5a3.5 3.5 0 1 1 1 2.5" />
-                  <path d="M1 5V3M1 5h2" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                onclick={() => perProject(project.id, "stop")}
-                disabled={busy[project.id]}
-                title="Stop"
-                class="p-1 rounded text-status-crashed/80 hover:text-status-crashed hover:bg-status-crashed/10 disabled:opacity-40 transition-colors"
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
-                  <rect x="2" y="2" width="6" height="6" rx="0.5" />
-                </svg>
-              </button>
-            {:else}
-              <button
-                type="button"
-                onclick={() => perProject(project.id, "start")}
-                disabled={busy[project.id]}
-                title="Start"
-                class="p-1 rounded text-status-running/80 hover:text-status-running hover:bg-status-running/10 disabled:opacity-40 transition-colors"
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
-                  <path d="M2 1.5v7l6-3.5L2 1.5z" />
-                </svg>
-              </button>
-            {/if}
-            <button
-              type="button"
-              onclick={() => openProject(project.id)}
-              disabled={!isUp}
-              title="Open in browser"
-              class="p-1 rounded text-fg-muted hover:text-fg hover:bg-surface-2 disabled:opacity-30 transition-colors"
-            >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-                <path d="M3 1h5v5M8 1L4 5M5 2H1.5v6.5H8V6" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      {/each}
-    {/if}
-  </div>
-
-  <!-- 4. System load footer -->
-  <footer class="px-4 py-3 border-t border-border/40 bg-bg/50 space-y-2.5">
-    <!-- Aggregate CPU -->
-    <div class="flex items-center gap-2">
-      <span class="text-[10px] font-mono uppercase tracking-wider text-fg-subtle w-9">CPU</span>
-      <div class="flex-1 h-1.5 rounded-full bg-surface-2/60 overflow-hidden">
-        <div
-          class="h-full bg-status-running/80 transition-all duration-500"
-          style:width={`${Math.min(100, aggregateCpu)}%`}
-        ></div>
-      </div>
-      <span class="text-[10px] font-mono text-fg-muted w-10 text-right">
-        {aggregateCpu.toFixed(0)}%
-      </span>
-      <svg width="40" height="14" viewBox="0 0 40 14" class="text-status-running/70 shrink-0" aria-hidden="true">
+      <svg
+        class="absolute inset-x-0 bottom-7 h-9 w-full"
+        viewBox="0 0 100 36"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        <defs>
+          <linearGradient id="cpuGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#2ee36b" stop-opacity="0.4" />
+            <stop offset="100%" stop-color="#2ee36b" stop-opacity="0" />
+          </linearGradient>
+        </defs>
         {#if cpuHistory.length >= 2}
+          <path d={sparkArea(cpuHistory, 100, 36)} fill="url(#cpuGrad)" />
           <polyline
+            points={sparkPoints(cpuHistory, 100, 36)}
             fill="none"
-            stroke="currentColor"
-            stroke-width="1"
+            stroke="#2ee36b"
+            stroke-width="1.5"
             stroke-linejoin="round"
             stroke-linecap="round"
-            points={sparkline(cpuHistory, 40, 12)}
+            vector-effect="non-scaling-stroke"
           />
         {/if}
       </svg>
+      <span class="mt-auto self-end text-lg font-semibold tabular-nums text-fg">
+        {cpuTotal.toFixed(0)}%
+      </span>
     </div>
 
-    <!-- Aggregate memory -->
-    <div class="flex items-center gap-2">
-      <span class="text-[10px] font-mono uppercase tracking-wider text-fg-subtle w-9">MEM</span>
-      <div class="flex-1 h-1.5 rounded-full bg-surface-2/60 overflow-hidden">
-        <div
-          class="h-full bg-accent/70 transition-all duration-500"
-          style:width={`${
-            metrics.value
-              ? Math.min(
-                  100,
-                  (metrics.value.memory.usedBytes / metrics.value.memory.totalBytes) * 100,
-                )
-              : 0
-          }%`}
-        ></div>
+    <!-- Memory -->
+    <div class="flex h-[86px] flex-col rounded-xl border border-border/60 bg-surface/40 p-3">
+      <span class="text-xs font-medium text-fg-muted">Memory</span>
+      <div class="mt-auto flex items-center gap-2">
+        <svg width="30" height="30" viewBox="0 0 38 38" class="-rotate-90 shrink-0" aria-hidden="true">
+          <defs>
+            <linearGradient id="memGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#4d9cff" />
+              <stop offset="100%" stop-color="#a78bfa" />
+            </linearGradient>
+          </defs>
+          <circle cx="19" cy="19" r="14" fill="none" class="text-surface-2" stroke="currentColor" stroke-width="4" />
+          <circle
+            cx="19"
+            cy="19"
+            r="14"
+            fill="none"
+            stroke="url(#memGrad)"
+            stroke-width="4"
+            stroke-linecap="round"
+            stroke-dasharray={ringDash(memFrac, 14)}
+          />
+        </svg>
+        <div class="min-w-0 leading-tight">
+          {#if metrics.value}
+            <div class="flex items-baseline gap-0.5 whitespace-nowrap text-fg">
+              <span class="text-sm font-semibold tabular-nums">{gb(metrics.value.memory.usedBytes)}</span>
+              <span class="text-[10px] font-medium text-fg-muted">GB</span>
+            </div>
+            <div class="whitespace-nowrap text-[10px] tabular-nums text-fg-subtle">/ {gb(metrics.value.memory.totalBytes, true)} GB</div>
+          {:else}
+            <div class="text-sm font-semibold text-fg-subtle">—</div>
+          {/if}
+        </div>
       </div>
-      <span class="text-[10px] font-mono text-fg-muted w-16 text-right">
-        {#if aggregateMemoryMb > 0}
-          {aggregateMemoryMb.toFixed(0)} MB
-        {:else if metrics.value}
-          {formatBytes(metrics.value.memory.usedBytes)}
-        {:else}
-          —
-        {/if}
-      </span>
-      <span class="w-10"></span>
     </div>
+
+    <!-- Disk -->
+    <div class="flex h-[86px] flex-col rounded-xl border border-border/60 bg-surface/40 p-3">
+      <span class="text-xs font-medium text-fg-muted">Disk</span>
+      <div class="mt-auto flex items-center gap-2">
+        <svg width="30" height="30" viewBox="0 0 38 38" class="-rotate-90 shrink-0 text-status-running" aria-hidden="true">
+          <circle cx="19" cy="19" r="14" fill="none" class="text-surface-2" stroke="currentColor" stroke-width="4" />
+          <circle
+            cx="19"
+            cy="19"
+            r="14"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="4"
+            stroke-linecap="round"
+            stroke-dasharray={ringDash(diskFrac, 14)}
+          />
+        </svg>
+        <div class="min-w-0 leading-tight">
+          {#if metrics.value}
+            <div class="flex items-baseline gap-0.5 whitespace-nowrap text-fg">
+              <span class="text-sm font-semibold tabular-nums">{gb(metrics.value.disk.usedBytes, true)}</span>
+              <span class="text-[10px] font-medium text-fg-muted">GB</span>
+            </div>
+            <div class="whitespace-nowrap text-[10px] tabular-nums text-fg-subtle">/ {gb(metrics.value.disk.totalBytes, true)} GB</div>
+          {:else}
+            <div class="text-sm font-semibold text-fg-subtle">—</div>
+          {/if}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. Running Now -->
+  <section class="mx-5 mt-4 flex min-h-0 flex-1 flex-col rounded-xl border border-border/60 bg-surface/40">
+    <div class="flex items-center justify-between px-4 pt-3 pb-2">
+      <h2 class="text-sm font-semibold text-fg">Running Now</h2>
+      <span class="flex items-center gap-1.5 text-xs text-fg-muted">
+        {runningProjects.length}
+        {runningProjects.length === 1 ? "Service" : "Services"}
+        <span
+          class="inline-block h-1.5 w-1.5 rounded-full {runningProjects.length > 0
+            ? 'bg-status-running'
+            : 'bg-fg-subtle/50'}"
+        ></span>
+      </span>
+    </div>
+    <div class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+      {#if runningProjects.length === 0}
+        <div class="px-2 py-5 text-center">
+          <p class="text-xs text-fg-muted">No services running.</p>
+          <button
+            type="button"
+            onclick={startAll}
+            disabled={projects.value.length === 0 || busy}
+            class="mt-1.5 text-xs font-medium text-accent transition-colors hover:text-accent-hover
+                   disabled:opacity-40"
+          >
+            {projects.value.length === 0 ? "Add a project →" : "Start all →"}
+          </button>
+        </div>
+      {:else}
+        {#each runningProjects as project (project.id)}
+          <div class="flex items-center gap-2.5 rounded-lg px-2 py-1.5">
+            <span
+              class="inline-block h-1.5 w-1.5 shrink-0 rounded-full {dotClass[project.status]}"
+              aria-hidden="true"
+            ></span>
+            <button
+              type="button"
+              onclick={() => openProject(project.id)}
+              title="Open {project.hostname} in browser"
+              class="min-w-0 flex-1 truncate text-left text-[13px] text-fg transition-colors
+                     hover:text-accent hover:underline"
+            >
+              {project.hostname}
+            </button>
+            {#if project.port}
+              <span class="shrink-0 text-[13px] tabular-nums text-fg-muted">{project.port}</span>
+            {/if}
+          </div>
+        {/each}
+      {/if}
+    </div>
+  </section>
+
+  <!-- 5. Quick Controls -->
+  <section class="px-5 pt-4">
+    <h2 class="mb-2 text-sm font-semibold text-fg">Quick Controls</h2>
+    <div class="grid grid-cols-3 gap-2.5">
+      <button
+        type="button"
+        onclick={startAll}
+        disabled={projects.value.length === 0 || busy}
+        class="flex items-center justify-center gap-1.5 rounded-xl border border-status-running/30
+               bg-status-running/10 py-2.5 text-xs font-medium text-status-running transition-colors
+               hover:bg-status-running/20 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <Icon name="play" size={13} />
+        Start All
+      </button>
+      <button
+        type="button"
+        onclick={stopAll}
+        disabled={runningProjects.length === 0 || busy}
+        class="flex items-center justify-center gap-1.5 rounded-xl border border-status-crashed/30
+               bg-status-crashed/10 py-2.5 text-xs font-medium text-status-crashed transition-colors
+               hover:bg-status-crashed/20 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <Icon name="square" size={13} />
+        Stop All
+      </button>
+      <button
+        type="button"
+        onclick={restartAll}
+        disabled={runningProjects.length === 0 || busy}
+        class="flex items-center justify-center gap-1.5 rounded-xl border border-accent/30
+               bg-accent/10 py-2.5 text-xs font-medium text-accent transition-colors
+               hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <Icon name="refresh-cw" size={13} />
+        Restart All
+      </button>
+    </div>
+  </section>
+
+  <!-- 6. Footer menu -->
+  <footer class="mt-3 border-t border-border/50 px-2 py-2">
+    <button
+      type="button"
+      onclick={() => openMain("/settings")}
+      class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-fg-muted
+             transition-colors hover:bg-surface-2 hover:text-fg"
+    >
+      <Icon name="sliders-horizontal" size={16} class="shrink-0" />
+      <span class="flex-1 text-left text-[13px]">Preferences</span>
+      <Icon name="chevron-right" size={15} class="text-fg-subtle" />
+    </button>
+    <button
+      type="button"
+      onclick={quitApp}
+      class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-fg-muted
+             transition-colors hover:bg-surface-2 hover:text-fg"
+    >
+      <Icon name="power" size={16} class="shrink-0" />
+      <span class="flex-1 text-left text-[13px]">Quit Portbay</span>
+      <span class="text-[11px] tabular-nums text-fg-subtle">⌘Q</span>
+    </button>
   </footer>
 </div>
 
