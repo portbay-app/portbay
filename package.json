@@ -9,7 +9,7 @@
     "url": "https://github.com/portbay-app/portbay.git"
   },
   "scripts": {
-    "prepare": "bash scripts/setup-hooks.sh || true",
+    "prepare": "svelte-kit sync || true; bash scripts/setup-hooks.sh || true",
     "boundaries": "bash scripts/check-repo-boundaries.sh",
     "dev": "vite dev",
     "build": "vite build",
