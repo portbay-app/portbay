@@ -444,6 +444,7 @@ pub fn run() {
             commands::integrations::installed_dev_tools,
             commands::integrations::open_in_ide,
             commands::integrations::open_privacy_settings,
+            commands::integrations::resolve_mcp_binary_path,
             commands::sidecars::sidecar_status,
             commands::sidecars::pc_alive,
             commands::sidecars::restart_pc,

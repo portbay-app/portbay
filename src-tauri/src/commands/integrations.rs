@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_shell::ShellExt;
 
 use crate::commands::projects::load_registry;
@@ -429,6 +429,55 @@ fn deep_link_url(scheme: DeepLinkScheme, path: &str) -> String {
             format!("claude://code/new?{}", query.finish())
         }
     }
+}
+
+/// `resolve_mcp_binary_path` — locate the `portbay-mcp` sidecar so the frontend
+/// can surface it in copy-paste snippets for MCP clients (Claude Code, Cursor, etc.).
+///
+/// Resolution order (first that exists wins):
+/// 1. Next to the running executable — the production location once the .app is
+///    built; sidecars land in `Contents/MacOS/` with the target-triple stripped.
+/// 2. `<resource_dir>/binaries/portbay-mcp-<target-triple>` — dev / bundle layout,
+///    same triple detection used by `resolve_mkcert_binary`.
+/// 3. `which::which("portbay-mcp")` — PATH fallback (e.g. Homebrew install).
+///
+/// Returns `None` when none of the three resolve. The frontend falls back to the
+/// conventional production path string so the user still gets a usable snippet.
+#[tauri::command]
+pub async fn resolve_mcp_binary_path(app: AppHandle) -> Option<String> {
+    use std::env::consts::{ARCH, OS};
+
+    // Production path: sidecar lives beside the main executable (triple stripped).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("portbay-mcp");
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    // Dev / bundle path: resource_dir/binaries/portbay-mcp-<triple>.
+    let triple = match (OS, ARCH) {
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+        ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
+        _ => None,
+    };
+    if let Some(triple) = triple {
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            let candidate = resource_dir.join(format!("binaries/portbay-mcp-{triple}"));
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    // PATH fallback.
+    which::which("portbay-mcp")
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// `open_privacy_settings(kind)` — open the relevant macOS Privacy pane in System Settings.

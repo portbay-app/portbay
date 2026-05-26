@@ -34,8 +34,90 @@
     AutoCleanSchedule,
   } from "$lib/stores/preferences.svelte";
   import { safeInvoke } from "$lib/ipc";
+  import { openUrl } from "$lib/security/openUrl";
   // Canonical wire shapes — imported so they can't drift from the Rust side.
   import type { ResolverStatus, DomainMigration } from "$lib/types/dns";
+
+  // ---- AI Integrations ----
+  const MCP_FALLBACK_PATH = "/Applications/PortBay.app/Contents/MacOS/portbay-mcp";
+  let mcpPath = $state<string>(MCP_FALLBACK_PATH);
+  /** Which copy button last fired; resets after 1.5 s for the check-mark feedback. */
+  let copiedKey = $state<string | null>(null);
+
+  const claudeCodeSnippet = $derived(
+    `claude mcp add --transport stdio --scope user portbay -- ${mcpPath}`,
+  );
+
+  const claudeDesktopSnippet = $derived(
+    JSON.stringify(
+      { mcpServers: { portbay: { command: mcpPath, args: [], env: {} } } },
+      null,
+      2,
+    ),
+  );
+
+  const cursorSnippet = $derived(
+    JSON.stringify(
+      { mcpServers: { portbay: { command: mcpPath, args: [], env: {} } } },
+      null,
+      2,
+    ),
+  );
+
+  const vscodeSnippet = $derived(
+    JSON.stringify(
+      {
+        servers: {
+          portbay: { type: "stdio", command: mcpPath, args: [], env: {} },
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  // Codex uses TOML at ~/.codex/config.toml (mirrors docs-site/agents).
+  const codexSnippet = $derived(
+    `[mcp_servers.portbay]\ncommand = "${mcpPath}"`,
+  );
+
+  async function copySnippet(text: string, key: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copiedKey = key;
+      setTimeout(() => {
+        if (copiedKey === key) copiedKey = null;
+      }, 1_500);
+      errorBus.push({
+        code: "COPIED",
+        whatHappened: "Snippet copied.",
+        whyItMatters: "Paste it into your tool's config.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+
+  function openCursorDeepLink() {
+    const config = btoa(
+      JSON.stringify({ command: mcpPath, args: [], env: {} }),
+    );
+    void openUrl(
+      `cursor://anysphere.cursor-deeplink/mcp/install?name=portbay&config=${config}`,
+    );
+  }
+
+  function openVscodeDeepLink() {
+    const config = encodeURIComponent(
+      JSON.stringify({ type: "stdio", command: mcpPath, args: [], env: {} }),
+    );
+    void openUrl(
+      `https://insiders.vscode.dev/redirect/mcp/install?name=portbay&config=${config}`,
+    );
+  }
 
   // ---- Existing data sources retained for the "Advanced" region ----
   let dnsStatus = $state<ResolverStatus | null>(null);
@@ -350,6 +432,11 @@
     void refreshDomainSettings();
     void refreshDnsStatus();
     void refreshTelemetry();
+    void safeInvoke<string | null>("resolve_mcp_binary_path").then(
+      (resolved) => {
+        if (resolved) mcpPath = resolved;
+      },
+    );
 
     // Arriving from the dashboard's "Fix it →" banner (/settings#setup):
     // bring the Setup surface into view once it has rendered.
@@ -735,6 +822,241 @@
           label="Auto-renew local certificates"
           onchange={(v) => preferences.update({ autoRenewCertificates: v })}
         />
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== AI Integrations ============== -->
+  <section
+    id="ai-integrations"
+    class="bg-surface border border-border rounded-2xl p-5
+           grid grid-cols-[180px,1fr] gap-x-6 scroll-mt-4"
+  >
+    <div class="flex items-start gap-2.5">
+      <span
+        class="inline-flex items-center justify-center w-8 h-8 rounded-lg
+               bg-fg-muted/10 text-fg-muted"
+      >
+        <Icon name="sparkles" size={15} />
+      </span>
+      <span class="text-[14px] font-semibold text-fg pt-1">AI Integrations</span>
+    </div>
+
+    <div class="space-y-4">
+      <!-- Intro -->
+      <p class="text-[13px] text-fg-muted leading-relaxed">
+        Connect Claude Code, Cursor, VS Code, Codex, or any MCP-aware agent to
+        drive PortBay (register projects, start/stop, read logs).
+        <button
+          type="button"
+          onclick={() => openUrl("https://docs.portbay.app/agents/")}
+          class="text-accent hover:underline ml-1"
+        >
+          Full setup guide →
+        </button>
+      </p>
+
+      <!-- Security callout -->
+      <div
+        class="flex items-start gap-2.5 rounded-xl border border-amber-500/30
+               bg-amber-500/8 px-3.5 py-2.5"
+      >
+        <span
+          class="inline-flex items-center justify-center w-5 h-5 shrink-0 mt-0.5
+                 rounded-full bg-amber-500/15 text-amber-400"
+        >
+          <Icon name="circle-alert" size={11} />
+        </span>
+        <p class="text-[12px] text-fg-muted leading-relaxed">
+          The MCP server runs as your macOS user with your full filesystem
+          access. Only connect AI tools you trust.
+        </p>
+      </div>
+
+      <!-- Per-client rows -->
+      <div class="divide-y divide-border/60">
+
+        <!-- Claude Code -->
+        <div class="py-3 first:pt-0 space-y-1.5">
+          <span class="text-[13px] font-medium text-fg">Claude Code</span>
+          <p class="text-[11px] text-fg-subtle">
+            Run once in any terminal to register PortBay for all projects.
+          </p>
+          <div class="flex items-center gap-2">
+            <pre
+              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
+                     border-border px-3 py-2 text-[11.5px] font-mono text-fg
+                     leading-relaxed whitespace-pre"
+            >{claudeCodeSnippet}</pre>
+            <button
+              type="button"
+              onclick={() => copySnippet(claudeCodeSnippet, "claude-code")}
+              aria-label="Copy Claude Code command"
+              class="shrink-0 inline-flex items-center justify-center w-8 h-8
+                     rounded-md border border-border text-fg-muted
+                     hover:text-fg hover:bg-surface-2 transition-colors"
+            >
+              <Icon
+                name={copiedKey === "claude-code" ? "check" : "copy"}
+                size={13}
+              />
+            </button>
+          </div>
+        </div>
+
+        <!-- Claude Desktop -->
+        <div class="py-3 space-y-1.5">
+          <span class="text-[13px] font-medium text-fg">Claude Desktop</span>
+          <p class="text-[11px] text-fg-subtle">
+            Add to
+            <code class="font-mono">
+              ~/Library/Application&nbsp;Support/Claude/claude_desktop_config.json
+            </code>
+          </p>
+          <div class="flex items-start gap-2">
+            <pre
+              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
+                     border-border px-3 py-2 text-[11.5px] font-mono text-fg
+                     leading-relaxed whitespace-pre"
+            >{claudeDesktopSnippet}</pre>
+            <button
+              type="button"
+              onclick={() =>
+                copySnippet(claudeDesktopSnippet, "claude-desktop")}
+              aria-label="Copy Claude Desktop config"
+              class="shrink-0 inline-flex items-center justify-center w-8 h-8
+                     rounded-md border border-border text-fg-muted
+                     hover:text-fg hover:bg-surface-2 transition-colors"
+            >
+              <Icon
+                name={copiedKey === "claude-desktop" ? "check" : "copy"}
+                size={13}
+              />
+            </button>
+          </div>
+        </div>
+
+        <!-- Cursor -->
+        <div class="py-3 space-y-1.5">
+          <span class="text-[13px] font-medium text-fg">Cursor</span>
+          <p class="text-[11px] text-fg-subtle">
+            Add to <code class="font-mono">~/.cursor/mcp.json</code>, or use
+            the one-click button.
+          </p>
+          <div class="flex items-start gap-2">
+            <pre
+              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
+                     border-border px-3 py-2 text-[11.5px] font-mono text-fg
+                     leading-relaxed whitespace-pre"
+            >{cursorSnippet}</pre>
+            <div class="flex flex-col gap-1.5 shrink-0">
+              <button
+                type="button"
+                onclick={() => copySnippet(cursorSnippet, "cursor")}
+                aria-label="Copy Cursor MCP config"
+                class="inline-flex items-center justify-center w-8 h-8
+                       rounded-md border border-border text-fg-muted
+                       hover:text-fg hover:bg-surface-2 transition-colors"
+              >
+                <Icon
+                  name={copiedKey === "cursor" ? "check" : "copy"}
+                  size={13}
+                />
+              </button>
+              <button
+                type="button"
+                onclick={openCursorDeepLink}
+                aria-label="Add to Cursor"
+                title="Add to Cursor"
+                class="inline-flex items-center justify-center w-8 h-8
+                       rounded-md border border-border text-fg-muted
+                       hover:text-fg hover:bg-surface-2 transition-colors"
+              >
+                <Icon name="zap" size={13} />
+              </button>
+            </div>
+          </div>
+          <p class="text-[11px] text-fg-subtle">
+            The one-click button (<Icon name="zap" size={11} />) opens Cursor's
+            MCP install flow.
+          </p>
+        </div>
+
+        <!-- VS Code -->
+        <div class="py-3 space-y-1.5">
+          <span class="text-[13px] font-medium text-fg">VS Code</span>
+          <p class="text-[11px] text-fg-subtle">
+            Add to <code class="font-mono">.vscode/mcp.json</code> in your
+            project, or use the one-click button.
+          </p>
+          <div class="flex items-start gap-2">
+            <pre
+              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
+                     border-border px-3 py-2 text-[11.5px] font-mono text-fg
+                     leading-relaxed whitespace-pre"
+            >{vscodeSnippet}</pre>
+            <div class="flex flex-col gap-1.5 shrink-0">
+              <button
+                type="button"
+                onclick={() => copySnippet(vscodeSnippet, "vscode")}
+                aria-label="Copy VS Code MCP config"
+                class="inline-flex items-center justify-center w-8 h-8
+                       rounded-md border border-border text-fg-muted
+                       hover:text-fg hover:bg-surface-2 transition-colors"
+              >
+                <Icon
+                  name={copiedKey === "vscode" ? "check" : "copy"}
+                  size={13}
+                />
+              </button>
+              <button
+                type="button"
+                onclick={openVscodeDeepLink}
+                aria-label="Add to VS Code"
+                title="Add to VS Code"
+                class="inline-flex items-center justify-center w-8 h-8
+                       rounded-md border border-border text-fg-muted
+                       hover:text-fg hover:bg-surface-2 transition-colors"
+              >
+                <Icon name="zap" size={13} />
+              </button>
+            </div>
+          </div>
+          <p class="text-[11px] text-fg-subtle">
+            The one-click button (<Icon name="zap" size={11} />) attempts
+            VS Code's MCP install deep link (best-effort; copy the JSON if it
+            doesn't open).
+          </p>
+        </div>
+
+        <!-- Codex -->
+        <div class="py-3 last:pb-0 space-y-1.5">
+          <span class="text-[13px] font-medium text-fg">Codex</span>
+          <p class="text-[11px] text-fg-subtle">
+            Add to <code class="font-mono">~/.codex/config.toml</code>
+          </p>
+          <div class="flex items-center gap-2">
+            <pre
+              class="flex-1 min-w-0 overflow-x-auto rounded-lg bg-bg border
+                     border-border px-3 py-2 text-[11.5px] font-mono text-fg
+                     leading-relaxed whitespace-pre"
+            >{codexSnippet}</pre>
+            <button
+              type="button"
+              onclick={() => copySnippet(codexSnippet, "codex")}
+              aria-label="Copy Codex config"
+              class="shrink-0 inline-flex items-center justify-center w-8 h-8
+                     rounded-md border border-border text-fg-muted
+                     hover:text-fg hover:bg-surface-2 transition-colors"
+            >
+              <Icon
+                name={copiedKey === "codex" ? "check" : "copy"}
+                size={13}
+              />
+            </button>
+          </div>
+        </div>
+
       </div>
     </div>
   </section>

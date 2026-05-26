@@ -12,11 +12,36 @@
   import { StatusCards } from "$lib/components/dashboard";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { goto } from "$app/navigation";
 
   let sortKey = $state<SortKey>("name-asc");
   let viewMode = $state<"list" | "grid">("list");
 
   const projectCount = $derived(projects.value.length);
+
+  // ---- MCP nudge ----
+  const MCP_NUDGE_KEY = "portbay:mcp-nudge-dismissed";
+
+  function readNudgeDismissed(): boolean {
+    try {
+      return localStorage.getItem(MCP_NUDGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  let nudgeDismissed = $state<boolean>(readNudgeDismissed());
+
+  function dismissNudge() {
+    nudgeDismissed = true;
+    try {
+      localStorage.setItem(MCP_NUDGE_KEY, "1");
+    } catch {
+      /* private mode */
+    }
+  }
+
+  const showMcpNudge = $derived(projectCount >= 1 && !nudgeDismissed);
 </script>
 
 <div class="px-6 py-5 space-y-6">
@@ -26,6 +51,38 @@
       Manage your local development environment.
     </p>
   </header>
+
+  <!-- MCP nudge — shown once per install when at least one project exists -->
+  {#if showMcpNudge}
+    <div
+      class="flex items-center justify-between gap-3 rounded-xl border
+             border-accent/30 bg-accent/8 px-4 py-2.5"
+    >
+      <div class="flex items-center gap-2 min-w-0">
+        <Icon name="sparkles" size={14} class="shrink-0 text-accent" />
+        <span class="text-[13px] text-fg-muted">
+          Control PortBay from Claude Code or Cursor —
+          <button
+            type="button"
+            onclick={() => void goto("/settings#ai-integrations")}
+            class="text-accent hover:underline"
+          >
+            AI Integrations →
+          </button>
+        </span>
+      </div>
+      <button
+        type="button"
+        onclick={dismissNudge}
+        aria-label="Dismiss AI integrations nudge"
+        class="shrink-0 inline-flex items-center justify-center w-6 h-6
+               rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2
+               transition-colors"
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </div>
+  {/if}
 
   <StatusCards />
 
