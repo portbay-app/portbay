@@ -353,16 +353,176 @@ async fn run_auto_clean_if_due(app: &AppHandle) {
     }
 }
 
-/// Spawn the background auto-clean scheduler for the app's lifetime. Checks once
-/// shortly after boot (so a long-overdue clean lands on cold start) and then
-/// every [`CHECK_INTERVAL`]. Default cadence is `off`, so this is a no-op until
-/// the user opts in from Settings.
+/// Delete `.log` files under `logs_dir` (recursively) whose mtime is older than
+/// `retention_days`. `0` means "keep forever" (no-op). Best-effort; returns how
+/// many files were removed. Only stale logs (older than the window) are touched,
+/// so the current session's fresh, open log files are never affected.
+pub fn prune_logs(logs_dir: &std::path::Path, retention_days: u32) -> usize {
+    if retention_days == 0 {
+        return 0;
+    }
+    let Some(cutoff) = std::time::SystemTime::now()
+        .checked_sub(Duration::from_secs(u64::from(retention_days) * 86_400))
+    else {
+        return 0;
+    };
+    fn walk(dir: &std::path::Path, cutoff: std::time::SystemTime, removed: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                walk(&path, cutoff, removed);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("log")
+                && meta.modified().map(|m| m < cutoff).unwrap_or(false)
+                && std::fs::remove_file(&path).is_ok()
+            {
+                *removed += 1;
+            }
+        }
+    }
+    let mut removed = 0;
+    walk(logs_dir, cutoff, &mut removed);
+    removed
+}
+
+/// Log-retention pass: prune stale per-process logs per the user's
+/// `log_retention_days` setting. Independent of the auto-clean *schedule* (it
+/// has its own control), so it runs every scheduler tick — cheap: a dir walk +
+/// mtime check.
+async fn run_log_retention(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let retention = state.preferences_snapshot().log_retention_days;
+    if retention == 0 {
+        return;
+    }
+    let logs_dir = state.logs_dir.clone();
+    let removed = tokio::task::spawn_blocking(move || prune_logs(&logs_dir, retention))
+        .await
+        .unwrap_or(0);
+    if removed > 0 {
+        tracing::info!(removed, retention_days = retention, "log retention: pruned stale logs");
+    }
+}
+
+/// Scan `folder`'s immediate subdirectories for project-like dirs not already
+/// registered. "Project-like" = a recognised framework dev command, or a PHP
+/// app — plain/empty folders are ignored so we don't surface noise.
+fn scan_workspace(
+    folder: &Path,
+    registered: &std::collections::HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let canon = path.canonicalize().unwrap_or(path);
+        if registered.contains(&canon) {
+            continue;
+        }
+        let det = crate::commands::projects::detect_kind(&canon);
+        let looks_like_project = det.start_command.is_some()
+            || matches!(det.kind, crate::registry::ProjectType::Php)
+            || det.php_version.is_some();
+        if looks_like_project {
+            out.push(canon);
+        }
+    }
+    out
+}
+
+/// Auto-detect pass: when enabled, scan the user's default workspace folder for
+/// unregistered project dirs and fire ONE desktop notification for any newly
+/// seen since last time (tracked in `detected-projects.json` so the user isn't
+/// re-pinged about the same dirs). Independent of the auto-clean schedule.
+async fn run_auto_detect(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let prefs = state.preferences_snapshot();
+    if !prefs.auto_detect_projects {
+        return;
+    }
+    let folder = prefs.default_workspace_folder.trim().to_string();
+    if folder.is_empty() {
+        return;
+    }
+    let Ok(registry) = load_registry(&state) else {
+        return;
+    };
+    let registered: std::collections::HashSet<PathBuf> = registry
+        .list_projects()
+        .iter()
+        .filter_map(|p| p.path.canonicalize().ok())
+        .collect();
+    let data_dir = state
+        .logs_dir
+        .parent()
+        .unwrap_or(&state.logs_dir)
+        .to_path_buf();
+
+    let found =
+        tokio::task::spawn_blocking(move || scan_workspace(Path::new(&folder), &registered))
+            .await
+            .unwrap_or_default();
+    if found.is_empty() {
+        return;
+    }
+
+    // Only notify about dirs we haven't surfaced before.
+    let seen_path = data_dir.join("detected-projects.json");
+    let mut seen: std::collections::HashSet<String> = std::fs::read(&seen_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let new_count = found
+        .iter()
+        .filter(|p| seen.insert(p.display().to_string()))
+        .count();
+    if new_count == 0 {
+        return;
+    }
+    if let Ok(json) = serde_json::to_vec(&seen) {
+        let _ = std::fs::write(&seen_path, json);
+    }
+    notify_detected(new_count);
+}
+
+/// Fire-and-forget macOS notification about newly detected projects.
+fn notify_detected(count: usize) {
+    #[cfg(target_os = "macos")]
+    {
+        let body = format!(
+            "Found {count} new project(s) in your workspace — open PortBay to add them."
+        );
+        let script = format!("display notification \"{body}\" with title \"PortBay\"");
+        let _ = std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = count;
+}
+
+/// Spawn the background auto-clean + log-retention + auto-detect scheduler for
+/// the app's lifetime. Checks once shortly after boot (so a long-overdue clean
+/// lands on cold start) and then every [`CHECK_INTERVAL`]. Auto-clean defaults
+/// to `off`; log retention defaults to 7 days; auto-detect defaults to off.
 pub fn spawn_auto_clean_scheduler(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         // Let the rest of boot settle before walking project trees.
         tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
             run_auto_clean_if_due(&app).await;
+            run_log_retention(&app).await;
+            run_auto_detect(&app).await;
             tokio::time::sleep(CHECK_INTERVAL).await;
         }
     });
@@ -372,6 +532,41 @@ pub fn spawn_auto_clean_scheduler(app: AppHandle) {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn prune_logs_removes_only_stale_log_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path();
+        let stale = logs.join("old.log");
+        let fresh = logs.join("new.log");
+        let other = logs.join("keep.txt"); // non-.log, also stale
+        fs::write(&stale, b"x").unwrap();
+        fs::write(&fresh, b"x").unwrap();
+        fs::write(&other, b"x").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(100 * 86_400);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        // 0 = keep forever → no-op.
+        assert_eq!(prune_logs(logs, 0), 0);
+        assert!(stale.exists());
+
+        // 7-day window → deletes the stale .log only.
+        assert_eq!(prune_logs(logs, 7), 1);
+        assert!(!stale.exists(), "stale .log should be pruned");
+        assert!(fresh.exists(), "fresh .log must be kept");
+        assert!(other.exists(), "non-.log must be kept");
+    }
 
     #[test]
     fn catalogue_matches_known_dirs_only() {

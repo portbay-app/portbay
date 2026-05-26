@@ -137,7 +137,15 @@ impl Reconciler {
             certs_cache,
         } = &mut *inner;
 
-        let certs_result = certs::reconcile(&reg, state.mkcert.as_ref(), certs_cache);
+        // Honour the user's Settings toggles (previously dead knobs).
+        let prefs = state.preferences_snapshot();
+
+        let certs_result = certs::reconcile(
+            &reg,
+            state.mkcert.as_ref(),
+            prefs.auto_renew_certificates,
+            certs_cache,
+        );
 
         let pc_outcome = pc::reconcile(&reg, logs_dir, yaml_path, &state, app, pc_cache).await;
 
@@ -156,7 +164,9 @@ impl Reconciler {
             .list_projects()
             .iter()
             .any(|p| p.resolver_mode() == crate::registry::ResolverMode::Hosts);
-        let hosts_outcome = if resolver_installed && !forces_hosts {
+        let hosts_outcome = if !prefs.manage_hosts_automatically {
+            StepOutcome::skipped("automatic /etc/hosts management disabled in Settings")
+        } else if resolver_installed && !forces_hosts {
             StepOutcome::skipped("dnsmasq resolver installed; /etc/hosts not touched")
         } else {
             hosts::reconcile(&reg, resolver_installed, hosts_cache)

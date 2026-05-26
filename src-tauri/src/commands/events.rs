@@ -151,6 +151,14 @@ pub fn spawn_status_poller(app: AppHandle) {
                         }
                         _ => None,
                     };
+                    // Fire a native desktop notification on a fresh crash, if the
+                    // user enabled it. Gated on Crashed first so we only touch the
+                    // prefs lock for the rare failure case.
+                    if observed.status == ProjectStatus::Crashed
+                        && state.preferences_snapshot().desktop_notifications
+                    {
+                        notify_crash(&observed.event_id);
+                    }
                     let event = ProjectStatusEvent {
                         id: observed.event_id.clone(),
                         status: observed.status,
@@ -214,6 +222,22 @@ pub fn spawn_status_poller(app: AppHandle) {
 /// is already in use" tells them exactly what to fix.
 ///
 /// Best-effort: any I/O failure falls back to the bare exit-code line.
+/// Fire a native macOS "project crashed" notification, fire-and-forget. Quotes
+/// are stripped from the project name so they can't break the AppleScript string
+/// (slugs never contain them anyway). No-op on non-macOS.
+fn notify_crash(project: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let body = format!("{project} crashed").replace(['"', '\\'], "");
+        let script = format!("display notification \"{body}\" with title \"PortBay\"");
+        let _ = std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = project;
+}
+
 fn crashed_summary(state: &AppState, project_id: &str, exit_code: i32) -> String {
     let log_path = state.logs_dir.join(format!("{project_id}.log"));
     let tail = tail_last_lines(&log_path, 60).unwrap_or_default();

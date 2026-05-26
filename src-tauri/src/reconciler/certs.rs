@@ -33,9 +33,15 @@ pub(super) struct CertsTickResult {
     pub lookup: HashMap<String, CertPaths>,
 }
 
+/// Reissue a cert this many days before it expires, when auto-renew is on.
+/// mkcert leaf certs are ~825 days; 30 days of runway is ample and avoids
+/// reissuing on every tick.
+const CERT_RENEW_THRESHOLD_DAYS: i64 = 30;
+
 pub(super) fn reconcile(
     reg: &Registry,
     mkcert: Option<&Mkcert>,
+    auto_renew: bool,
     cache: &mut CertsCache,
 ) -> CertsTickResult {
     let Some(mkcert) = mkcert else {
@@ -85,7 +91,16 @@ pub(super) fn reconcile(
         if let Some(paths) = mkcert.cert_paths(p.id.as_str()) {
             let have = crate::commands::certs::cert_dns_sans(&paths.certificate);
             if cert_covers(&have, &desired) {
-                continue;
+                // SANs already cover this project. Reissue only when auto-renew
+                // is enabled AND the cert is within the renewal window — so the
+                // `auto_renew_certificates` setting is actually load-bearing
+                // instead of a dead toggle.
+                let near_expiry = auto_renew
+                    && crate::commands::certs::cert_days_until_expiry(&paths.certificate)
+                        .is_some_and(|days| days < CERT_RENEW_THRESHOLD_DAYS);
+                if !near_expiry {
+                    continue;
+                }
             }
         }
         match mkcert.issue_cert(p.id.as_str(), &desired) {
@@ -237,7 +252,7 @@ mod tests {
     fn no_mkcert_binary_returns_failed_and_empty_lookup() {
         let reg = Registry::new("test");
         let mut cache = CertsCache::default();
-        let r = reconcile(&reg, None, &mut cache);
+        let r = reconcile(&reg, None, false, &mut cache);
         assert!(matches!(r.outcome, StepOutcome::Failed { .. }));
         assert!(r.lookup.is_empty());
     }

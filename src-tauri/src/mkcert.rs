@@ -131,17 +131,21 @@ impl Mkcert {
     /// Run `mkcert -install`. Triggers the macOS keychain sudo prompt; on
     /// Firefox-enabled systems may also surface an NSS prompt.
     pub fn install_ca(&self) -> Result<()> {
-        let status = self.command().arg("-install").status().map_err(|e| {
+        // Capture output (not just status): mkcert writes the real reason to
+        // stderr. The previous `.status()` discarded it, leaving `stderr: ""`,
+        // which the GUI's cancel heuristic then misread as "user cancelled" for
+        // *every* failure (untrusted store, SIP, disk error…).
+        let output = self.command().arg("-install").output().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 MkcertError::BinaryMissing(self.binary.clone())
             } else {
                 MkcertError::io(&self.binary, e)
             }
         })?;
-        if !status.success() {
+        if !output.status.success() {
             return Err(MkcertError::ExitStatus {
-                status: status.code().unwrap_or(-1),
-                stderr: String::new(),
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             });
         }
         Ok(())

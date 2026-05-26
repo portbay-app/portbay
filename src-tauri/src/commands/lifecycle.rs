@@ -56,6 +56,9 @@ pub async fn start_project(
 
         let client = state.pc_client()?;
         client.start(&process_id).await?;
+        // Remember this project in the running session so
+        // `reopen_previous_projects` can restart it next launch.
+        session_add(&state, &id);
     }
 
     // After the process is up (or immediately, for static sites), force a
@@ -201,6 +204,9 @@ pub async fn force_start_project(
         }
         let client = state.pc_client()?;
         client.start(&process_id).await?;
+        // Remember this project in the running session so
+        // `reopen_previous_projects` can restart it next launch.
+        session_add(&state, &id);
     }
     let _ = state.reconciler.tick(&app).await;
     Ok(())
@@ -412,6 +418,17 @@ const STOP_REAP_DELAY: std::time::Duration = std::time::Duration::from_millis(75
 
 #[tauri::command]
 pub async fn stop_project(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    // Stop any tunnel sharing this project first: a cloudflared tunnel pointed
+    // at a now-stopped project would otherwise stay "running" in the UI while
+    // every visitor gets an error. Best-effort — NotRunning is fine. Done before
+    // the static-project early return so it covers Caddy-served projects too.
+    {
+        let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned");
+        let _ = tunnels.stop(&id);
+    }
+    // Drop it from the running session so it isn't reopened next launch.
+    session_remove(&state, &id);
+
     // Static / pure-Caddy projects have no PC process to stop. Caddy keeps
     // serving their files for as long as they're in the registry, so Stop is
     // a no-op rather than a 400 against a non-existent PC process.
@@ -544,7 +561,55 @@ pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
         }
     }
 
+    // Nothing is running now → clear the reopen-on-launch session.
+    session_clear(&state);
+
     Ok(report)
+}
+
+// ---- Session persistence for `reopen_previous_projects` -------------------
+//
+// The set of project ids the user currently has running, kept in
+// `<data-dir>/session.json`. Maintained incrementally on start/stop (so there's
+// no async snapshot at quit time) and consumed once at boot by the reopen task.
+
+fn session_file(state: &AppState) -> std::path::PathBuf {
+    let data_dir = state.logs_dir.parent().unwrap_or(&state.logs_dir);
+    data_dir.join("session.json")
+}
+
+pub(crate) fn load_session(state: &AppState) -> Vec<String> {
+    std::fs::read(session_file(state))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_session(state: &AppState, ids: &[String]) {
+    if let Ok(json) = serde_json::to_vec(ids) {
+        let _ = std::fs::write(session_file(state), json);
+    }
+}
+
+fn session_add(state: &AppState, id: &str) {
+    let mut ids = load_session(state);
+    if !ids.iter().any(|x| x == id) {
+        ids.push(id.to_string());
+        write_session(state, &ids);
+    }
+}
+
+fn session_remove(state: &AppState, id: &str) {
+    let mut ids = load_session(state);
+    let before = ids.len();
+    ids.retain(|x| x != id);
+    if ids.len() != before {
+        write_session(state, &ids);
+    }
+}
+
+fn session_clear(state: &AppState) {
+    write_session(state, &[]);
 }
 
 /// `open_project(id)` — open the project's URL in the default browser.

@@ -53,13 +53,25 @@ pub async fn install_mkcert_ca(state: State<'_, AppState>) -> AppResult<()> {
 
     match result {
         Ok(()) => Ok(()),
-        Err(MkcertError::ExitStatus { status, stderr }) if status == 1 && stderr.is_empty() => {
-            // mkcert returns exit code 1 with no stderr when the user
-            // cancels the keychain dialog. Surface as BadInput so the
-            // toast says "you cancelled" rather than "internal error".
-            Err(AppError::BadInput(
-                "cancelled — macOS keychain prompt was dismissed".into(),
-            ))
+        Err(MkcertError::ExitStatus { status, stderr }) => {
+            // Only call it "cancelled" on a real cancel signature — macOS
+            // `security` reports a user-dismissed authorization as "cancel"/-128.
+            // Anything else (untrusted store, SIP, disk error) is surfaced with
+            // mkcert's actual stderr instead of being mislabeled.
+            let lower = stderr.to_ascii_lowercase();
+            if lower.contains("cancel") || stderr.contains("-128") {
+                Err(AppError::BadInput(
+                    "cancelled — macOS keychain prompt was dismissed".into(),
+                ))
+            } else if stderr.is_empty() {
+                Err(AppError::Internal(format!(
+                    "mkcert -install failed (exit {status})"
+                )))
+            } else {
+                Err(AppError::Internal(format!(
+                    "mkcert -install failed (exit {status}): {stderr}"
+                )))
+            }
         }
         Err(e) => Err(AppError::Internal(format!("mkcert -install: {e}"))),
     }
@@ -180,6 +192,15 @@ pub(crate) fn cert_dns_sans(cert_path: &std::path::Path) -> Vec<String> {
         }
     }
     sans
+}
+
+/// Best-effort days until the cert at `cert_path` expires. `None` if the file
+/// can't be read or parsed. Drives auto-renewal in the cert reconciler.
+pub(crate) fn cert_days_until_expiry(cert_path: &std::path::Path) -> Option<i64> {
+    let bytes = std::fs::read(cert_path).ok()?;
+    let pem = Pem::iter_from_buffer(&bytes).next()?.ok()?;
+    let (_, cert) = X509Certificate::from_der(&pem.contents).ok()?;
+    cert.validity().time_to_expiration().map(|d| d.whole_days())
 }
 
 fn iso_from_asn1(t: x509_parser::time::ASN1Time) -> Option<String> {

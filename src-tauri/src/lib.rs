@@ -298,6 +298,52 @@ pub fn run() {
             // inside the scheduler.
             commands::artifacts::spawn_auto_clean_scheduler(app.handle().clone());
 
+            // Reopen previously-running projects, if the user enabled it. Runs in
+            // the background: waits for the PC daemon to accept commands, starts
+            // each project from the persisted session, then reconciles routing.
+            {
+                let app_h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let st: tauri::State<AppState> = app_h.state();
+                    if !st.preferences_snapshot().reopen_previous_projects {
+                        return;
+                    }
+                    let ids = commands::lifecycle::load_session(&st);
+                    if ids.is_empty() {
+                        return;
+                    }
+                    let Ok(client) = st.pc_client() else {
+                        return;
+                    };
+                    // Wait up to ~15s for the daemon to come up.
+                    let mut live = false;
+                    for _ in 0..30 {
+                        if client.live().await.unwrap_or(false) {
+                            live = true;
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    if !live {
+                        return;
+                    }
+                    let Ok(registry) =
+                        crate::registry::store::load_or_default(&st.registry_path, &st.domain_suffix)
+                    else {
+                        return;
+                    };
+                    for id in ids {
+                        if let Some(proc_id) = registry
+                            .get_project(&crate::registry::ProjectId::new(&id))
+                            .and_then(|p| p.process_compose_id())
+                        {
+                            let _ = client.start(&proc_id).await;
+                        }
+                    }
+                    let _ = st.reconciler.tick(&app_h).await;
+                });
+            }
+
             // Apply native macOS window vibrancy (liquid-glass blur backdrop).
             // Degrades silently on non-macOS builds via cfg gate.
             #[cfg(target_os = "macos")]
