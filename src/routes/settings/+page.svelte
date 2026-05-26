@@ -81,10 +81,40 @@
     `[mcp_servers.portbay]\ncommand = "${mcpPath}"`,
   );
 
+  // Antigravity (~/.gemini/antigravity/mcp_config.json) and OpenClaw
+  // (~/.openclaw/openclaw.json) both take the standard `mcpServers` JSON shape.
+  const antigravitySnippet = $derived(
+    JSON.stringify(
+      { mcpServers: { portbay: { command: mcpPath, args: [], env: {} } } },
+      null,
+      2,
+    ),
+  );
+  const openclawSnippet = $derived(
+    JSON.stringify(
+      { mcpServers: { portbay: { command: mcpPath, args: [], env: {} } } },
+      null,
+      2,
+    ),
+  );
+
+  // Hermes reads a YAML `mcp_servers` block from its config.yaml.
+  const hermesSnippet = $derived(
+    `mcp_servers:\n  portbay:\n    command: "${mcpPath}"\n    args: []`,
+  );
+
   // The integration panel shows one environment at a time, chosen from a
   // dropdown — most users wire up a single agent, so listing every client's
   // config at once just buried the one snippet they needed.
-  type EnvKey = "claude-code" | "claude-desktop" | "codex" | "cursor" | "vscode";
+  type EnvKey =
+    | "antigravity"
+    | "claude-code"
+    | "claude-desktop"
+    | "codex"
+    | "cursor"
+    | "hermes"
+    | "openclaw"
+    | "vscode";
   let selectedEnv = $state<EnvKey>("claude-code");
   /** Whether the environment picker menu is open (mirrors the "Open in" menu). */
   let envMenuOpen = $state<boolean>(false);
@@ -92,8 +122,10 @@
   interface IntegrationEnv {
     key: EnvKey;
     label: string;
-    /** App logo (served from static/apps), reused from the "Open in" menu. */
-    logo: string;
+    /** App logo (served from static/apps), reused from the "Open in" menu.
+     *  Omitted for clients we don't ship a brand mark for — a generic icon
+     *  stands in. */
+    logo?: string;
     /** Shown instead of a config path for command-style setup (Claude Code). */
     runHint?: string;
     /** Config file the snippet is pasted into. */
@@ -103,9 +135,15 @@
     deepLink?: { run: () => void; label: string; note: string };
   }
 
-  // Listed alphabetically by label (Claude Code, Claude Desktop, Codex,
-  // Cursor, VS Code).
+  // Listed alphabetically by label.
   const integrationEnvs = $derived<IntegrationEnv[]>([
+    {
+      key: "antigravity",
+      label: "Antigravity",
+      logo: "/apps/antigravity.png",
+      configPath: "~/.gemini/antigravity/mcp_config.json",
+      snippet: antigravitySnippet,
+    },
     {
       key: "claude-code",
       label: "Claude Code",
@@ -139,6 +177,18 @@
         label: "Add to Cursor",
         note: "opens Cursor's MCP install flow.",
       },
+    },
+    {
+      key: "hermes",
+      label: "Hermes",
+      configPath: "Hermes config.yaml (mcp_servers)",
+      snippet: hermesSnippet,
+    },
+    {
+      key: "openclaw",
+      label: "OpenClaw",
+      configPath: "~/.openclaw/openclaw.json",
+      snippet: openclawSnippet,
     },
     {
       key: "vscode",
@@ -985,11 +1035,20 @@
                      border border-border bg-bg hover:bg-surface-2 text-[12.5px]
                      text-fg transition-colors"
             >
-              <img
-                src={activeEnv.logo}
-                alt=""
-                class="w-4 h-4 rounded-[3px] object-cover flex-shrink-0"
-              />
+              {#if activeEnv.logo}
+                <img
+                  src={activeEnv.logo}
+                  alt=""
+                  class="w-4 h-4 rounded-[3px] object-cover flex-shrink-0"
+                />
+              {:else}
+                <span
+                  class="w-4 h-4 rounded-[3px] inline-flex items-center justify-center
+                         bg-fg-muted/15 text-fg-muted flex-shrink-0"
+                >
+                  <Icon name="sparkles" size={11} />
+                </span>
+              {/if}
               <span class="flex-1 text-left truncate">{activeEnv.label}</span>
               <Icon
                 name="chevron-down"
@@ -1020,11 +1079,20 @@
                       ? 'text-fg bg-surface-2/60'
                       : 'text-fg-muted hover:text-fg hover:bg-surface-2'}"
                   >
-                    <img
-                      src={env.logo}
-                      alt=""
-                      class="w-4 h-4 rounded-[3px] object-cover flex-shrink-0"
-                    />
+                    {#if env.logo}
+                      <img
+                        src={env.logo}
+                        alt=""
+                        class="w-4 h-4 rounded-[3px] object-cover flex-shrink-0"
+                      />
+                    {:else}
+                      <span
+                        class="w-4 h-4 rounded-[3px] inline-flex items-center justify-center
+                               bg-fg-muted/15 text-fg-muted flex-shrink-0"
+                      >
+                        <Icon name="sparkles" size={11} />
+                      </span>
+                    {/if}
                     <span class="flex-1 truncate">{env.label}</span>
                     {#if isSel}
                       <Icon
