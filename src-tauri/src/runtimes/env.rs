@@ -37,6 +37,28 @@ const SHELL_PATH_TIMEOUT: Duration = Duration::from_secs(8);
 /// since no rc files are sourced.
 const SHELL_PATH_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Path markers for competitor dev-environment apps PortBay must never *run*
+/// binaries from. PortBay ships and supervises its own services; launching a
+/// php-fpm / nginx / httpd that belongs to ServBay, Herd, MAMP, XAMPP or FlyEnv
+/// couples us to their install layout, breaks when they update or uninstall,
+/// and is the wrong thing for a tool that isn't associated with them.
+///
+/// This is strictly about *executing* their binaries. The migration importer
+/// (`crate::import`) still reads their configs to bring sites into PortBay —
+/// that's a different, intentional flow that never runs their tools.
+const COMPETITOR_PATH_MARKERS: &[&str] =
+    &["servbay", "xampp", "flyenv", "herd.app", "/herd/", "/mamp"];
+
+/// True if `path` resolves into a known competitor dev-environment app. The path
+/// is canonicalised first, so a neutral-looking symlink that points into a
+/// competitor bundle (e.g. `/usr/local/bin/php` → `/Applications/XAMPP/…/php`)
+/// is still caught.
+pub fn is_competitor_managed(path: &std::path::Path) -> bool {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let lower = real.to_string_lossy().to_ascii_lowercase();
+    COMPETITOR_PATH_MARKERS.iter().any(|m| lower.contains(m))
+}
+
 /// Resolve the user's login shell. Priority:
 ///   1. `$SHELL` (set by the OS when the user has a session)
 ///   2. `getpwuid` via `dscl . -read /Users/<user> UserShell` on macOS
@@ -398,5 +420,41 @@ mod tests {
     fn brew_formulae_matching_with_unknown_base_returns_empty() {
         let v = brew_formulae_matching("__no_such_formula_ever__");
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn competitor_managed_paths_are_rejected() {
+        use std::path::Path;
+        // Non-existent paths can't be canonicalised, so they fall back to the
+        // literal path — which is what these markers match on.
+        for p in [
+            "/Applications/ServBay/package/sbin/php-fpm",
+            "/Applications/ServBay/script/alias/nginx",
+            "/Applications/XAMPP/xamppfiles/bin/php-8.2.4",
+            "/Applications/MAMP/bin/php/php8.2/bin/php",
+            "/Users/me/Library/Application Support/Herd/bin/php",
+            "/Users/me/Library/Application Support/FlyEnv/php/8.3/bin/php",
+        ] {
+            assert!(
+                is_competitor_managed(Path::new(p)),
+                "expected competitor path to be rejected: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn neutral_paths_are_allowed() {
+        use std::path::Path;
+        for p in [
+            "/opt/homebrew/opt/php@8.3/sbin/php-fpm",
+            "/usr/local/bin/nginx",
+            "/usr/sbin/httpd",
+            "/Users/me/code/my-herd-project/bin/php", // "herd" in a project name must NOT trip it
+        ] {
+            assert!(
+                !is_competitor_managed(Path::new(p)),
+                "expected neutral path to be allowed: {p}"
+            );
+        }
     }
 }

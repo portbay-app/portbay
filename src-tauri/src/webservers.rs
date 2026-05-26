@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::process_compose::config::WebServerSpec;
-use crate::registry::{Project, ProjectType, Registry, WebServer};
+use crate::registry::{FpmTuning, Project, ProjectType, Registry, WebServer};
 
 pub fn specs_for(reg: &Registry, app_data: &Path, logs_dir: &Path) -> Vec<WebServerSpec> {
     let mut specs = Vec::new();
@@ -53,6 +53,15 @@ pub fn specs_for(reg: &Registry, app_data: &Path, logs_dir: &Path) -> Vec<WebSer
         }
 
         let socket_path = crate::php::lifecycle::fpm_socket_path(app_data, version);
+        // Same FPM tuning the Caddy reverse-proxy and the FPM pool reconciler
+        // use, so the web server dials PHP-FPM exactly where it's listening
+        // (unix socket vs. TCP) instead of always assuming a socket.
+        let tuning = reg
+            .runtimes
+            .php
+            .get(version)
+            .map(|cfg| cfg.fpm.clone())
+            .unwrap_or_default();
         let log_dir = logs_dir.join("webservers").join(project.id.as_str());
         if let Err(e) = std::fs::create_dir_all(&log_dir) {
             tracing::warn!(
@@ -71,7 +80,7 @@ pub fn specs_for(reg: &Registry, app_data: &Path, logs_dir: &Path) -> Vec<WebSer
                     continue;
                 };
                 let conf_path = conf_dir.join("nginx.conf");
-                let body = render_nginx_config(project, port, &socket_path, &log_dir);
+                let body = render_nginx_config(project, port, &socket_path, &tuning, &log_dir);
                 if let Err(e) = std::fs::write(&conf_path, body) {
                     tracing::warn!(
                         target: "reconciler",
@@ -100,8 +109,9 @@ pub fn specs_for(reg: &Registry, app_data: &Path, logs_dir: &Path) -> Vec<WebSer
                     continue;
                 };
                 let conf_path = conf_dir.join("httpd.conf");
-                let body =
-                    render_apache_config(project, port, &socket_path, &conf_dir, &log_dir, &bin);
+                let body = render_apache_config(
+                    project, port, &socket_path, &tuning, &conf_dir, &log_dir, &bin,
+                );
                 if let Err(e) = std::fs::write(&conf_path, body) {
                     tracing::warn!(
                         target: "reconciler",
@@ -129,21 +139,27 @@ pub fn specs_for(reg: &Registry, app_data: &Path, logs_dir: &Path) -> Vec<WebSer
     specs
 }
 
+// Discovery is restricted to neutral locations — Homebrew, the macOS system
+// binary, and the user's PATH. PortBay never runs a *competitor* dev-env app's
+// nginx/httpd (ServBay/Herd/MAMP/XAMPP/FlyEnv): borrowing their binaries couples
+// us to their layout and is the wrong thing for a tool not associated with them.
+// `is_competitor_managed` also canonicalises, so a competitor binary symlinked
+// onto PATH (e.g. `/usr/local/bin/php` → XAMPP) is still rejected.
 pub fn nginx_binary() -> Option<PathBuf> {
     first_existing(&[
-        "/Applications/ServBay/script/alias/nginx",
         "/opt/homebrew/opt/nginx/bin/nginx",
         "/usr/local/opt/nginx/bin/nginx",
+        "/opt/homebrew/sbin/nginx",
         "/opt/homebrew/bin/nginx",
+        "/usr/local/sbin/nginx",
         "/usr/local/bin/nginx",
     ])
     .or_else(|| which::which("nginx").ok())
+    .filter(|p| !crate::runtimes::env::is_competitor_managed(p))
 }
 
 pub fn apache_binary() -> Option<PathBuf> {
     first_existing(&[
-        "/Applications/ServBay/script/alias/httpd",
-        "/Applications/ServBay/script/alias/apachectl",
         "/opt/homebrew/opt/httpd/bin/httpd",
         "/usr/local/opt/httpd/bin/httpd",
         "/opt/homebrew/bin/httpd",
@@ -151,6 +167,7 @@ pub fn apache_binary() -> Option<PathBuf> {
         "/usr/sbin/httpd",
     ])
     .or_else(|| which::which("httpd").ok())
+    .filter(|p| !crate::runtimes::env::is_competitor_managed(p))
 }
 
 fn first_existing(paths: &[&str]) -> Option<PathBuf> {
@@ -174,13 +191,29 @@ fn doc_root(project: &Project) -> PathBuf {
         .unwrap_or_else(|| project.path.clone())
 }
 
-fn render_nginx_config(project: &Project, port: u16, socket_path: &Path, log_dir: &Path) -> String {
+fn render_nginx_config(
+    project: &Project,
+    port: u16,
+    socket_path: &Path,
+    tuning: &FpmTuning,
+    log_dir: &Path,
+) -> String {
     let root = doc_root(project);
     let access_log = log_dir.join("nginx-access.log");
     let error_log = log_dir.join("nginx-error.log");
+    // Dial PHP-FPM where it actually listens. The whole `unix:<path>` token is
+    // double-quoted so a socket path containing a space (every macOS install —
+    // "Application Support") parses; nginx rejects `unix:"<path>"` and any
+    // unquoted path with a space, so quoting the entire token is the only form
+    // that works. All file paths below are quoted for the same reason.
+    let fastcgi_pass = if tuning.listen == "tcp" {
+        format!("fastcgi_pass 127.0.0.1:{};", tuning.tcp_port)
+    } else {
+        format!("fastcgi_pass \"unix:{}\";", socket_path.display())
+    };
     format!(
         r#"worker_processes 1;
-error_log {error_log} warn;
+error_log "{error_log}" warn;
 pid nginx.pid;
 
 events {{
@@ -189,13 +222,13 @@ events {{
 
 http {{
     default_type application/octet-stream;
-    access_log {access_log};
+    access_log "{access_log}";
     sendfile on;
 
     server {{
         listen 127.0.0.1:{port};
         server_name {host};
-        root {root};
+        root "{root}";
         index index.php index.html index.htm;
 
         location / {{
@@ -203,7 +236,7 @@ http {{
         }}
 
         location ~ \.php(?:/|$) {{
-            fastcgi_pass unix:{socket};
+            {fastcgi_pass}
             fastcgi_index index.php;
             fastcgi_split_path_info ^(.+\.php)(/.+)$;
             fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
@@ -233,7 +266,6 @@ http {{
         error_log = error_log.display(),
         host = project.hostname,
         root = root.display(),
-        socket = socket_path.display(),
     )
 }
 
@@ -241,6 +273,7 @@ fn render_apache_config(
     project: &Project,
     port: u16,
     socket_path: &Path,
+    tuning: &FpmTuning,
     conf_dir: &Path,
     log_dir: &Path,
     httpd_bin: &Path,
@@ -255,17 +288,29 @@ fn render_apache_config(
             .map(|dir| format!("LoadModule {name}_module \"{}/{}\"\n", dir.display(), file))
             .unwrap_or_default()
     };
+    // FastCGI backend, matching where PHP-FPM actually listens. The whole value
+    // is double-quoted by the SetHandler template, so a socket path with a space
+    // is already safe here (unlike nginx's fastcgi_pass).
+    let fcgi_backend = if tuning.listen == "tcp" {
+        format!("proxy:fcgi://127.0.0.1:{}", tuning.tcp_port)
+    } else {
+        format!("proxy:unix:{}|fcgi://localhost/", socket_path.display())
+    };
 
+    // LoadModule lines come FIRST: Apache parses top-down, so a directive like
+    // `CustomLog` (mod_log_config) or `SetHandler proxy:` (mod_proxy*) fails if
+    // its module hasn't been loaded yet. `mod_log_config` was previously absent
+    // entirely *and* the block sat below `CustomLog` — either alone is fatal.
     format!(
         r#"ServerRoot "{server_root}"
 PidFile "{server_root}/httpd.pid"
 Listen 127.0.0.1:{port}
 ServerName {host}
+
+{mpm}{log_config}{authz_core}{authz_host}{dir}{mime}{rewrite}{proxy}{proxy_fcgi}{unixd}
 DocumentRoot "{root}"
 ErrorLog "{error_log}"
 CustomLog "{access_log}" common
-
-{mpm}{authz_core}{authz_host}{dir}{mime}{rewrite}{proxy}{proxy_fcgi}{unixd}
 TypesConfig /etc/apache2/mime.types
 DirectoryIndex index.php index.html index.htm
 
@@ -276,7 +321,7 @@ DirectoryIndex index.php index.html index.htm
 </Directory>
 
 <FilesMatch "\.php$">
-    SetHandler "proxy:unix:{socket}|fcgi://localhost/"
+    SetHandler "{fcgi_backend}"
 </FilesMatch>
 
 RewriteEngine On
@@ -289,8 +334,8 @@ RewriteRule "^" "/router.php" [L]
         root = root.display(),
         error_log = error_log.display(),
         access_log = access_log.display(),
-        socket = socket_path.display(),
         mpm = load_module("mpm_event", "mod_mpm_event.so"),
+        log_config = load_module("log_config", "mod_log_config.so"),
         authz_core = load_module("authz_core", "mod_authz_core.so"),
         authz_host = load_module("authz_host", "mod_authz_host.so"),
         dir = load_module("dir", "mod_dir.so"),
@@ -302,18 +347,57 @@ RewriteRule "^" "/router.php" [L]
     )
 }
 
+/// Resolve the directory holding this httpd's `mod_*.so` files. Rather than map
+/// hardcoded binary prefixes (which gets `/usr/sbin/httpd` → `/usr/libexec/apache2`
+/// right but breaks for every non-standard layout, and a pure `httpd -V` HTTPD_ROOT
+/// approach gets macOS *wrong* — it reports `/usr` while the modules live in
+/// `/usr/libexec/apache2`), we collect candidate dirs from the binary's install
+/// prefix, the binary's own reported `HTTPD_ROOT`, and known fallbacks, then pick
+/// the first that actually contains `mod_mpm_event.so` (a module Apache can't run
+/// without). Self-verifying, so a wrong guess never produces a config that fails
+/// `No MPM loaded`.
 fn apache_module_dir(httpd_bin: &Path) -> Option<PathBuf> {
-    let bin = httpd_bin.to_string_lossy();
-    if bin.starts_with("/opt/homebrew/") {
-        Some(PathBuf::from("/opt/homebrew/opt/httpd/lib/httpd/modules"))
-    } else if bin.starts_with("/usr/local/") {
-        Some(PathBuf::from("/usr/local/opt/httpd/lib/httpd/modules"))
-    } else if bin.starts_with("/usr/sbin/") {
-        Some(PathBuf::from("/usr/libexec/apache2"))
-    } else {
-        None
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(prefix) = httpd_bin.parent().and_then(Path::parent) {
+        for sub in [
+            "modules",
+            "lib/httpd/modules",
+            "libexec/apache2",
+            "lib/apache2/modules",
+        ] {
+            candidates.push(prefix.join(sub));
+        }
     }
-    .filter(|p| p.exists())
+    if let Some(root) = httpd_root(httpd_bin) {
+        for sub in ["modules", "libexec/apache2", "lib/httpd/modules"] {
+            candidates.push(root.join(sub));
+        }
+    }
+    candidates.push(PathBuf::from("/usr/libexec/apache2"));
+    candidates.push(PathBuf::from("/opt/homebrew/opt/httpd/lib/httpd/modules"));
+    candidates.push(PathBuf::from("/usr/local/opt/httpd/lib/httpd/modules"));
+
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("mod_mpm_event.so").exists())
+}
+
+/// Parse `HTTPD_ROOT` out of `httpd -V`. Best-effort; `None` if the binary
+/// can't be run or the line isn't present.
+fn httpd_root(httpd_bin: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new(httpd_bin)
+        .arg("-V")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("-D HTTPD_ROOT=\"") {
+            if let Some(val) = rest.strip_suffix('"') {
+                return Some(PathBuf::from(val));
+            }
+        }
+    }
+    None
 }
 
 fn shell_quote(s: &str) -> String {
@@ -323,5 +407,212 @@ fn shell_quote(s: &str) -> String {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::ProjectId;
+    use std::path::PathBuf;
+
+    /// A PHP project at a path with a space (the exact macOS hazard), serving
+    /// from `public/`, on the given web server.
+    fn php_project(web_server: WebServer) -> Project {
+        Project {
+            id: ProjectId::new("tribal-house-cms"),
+            name: "Tribal House CMS".into(),
+            path: PathBuf::from("/Volumes/DevSSD/projects/Clients/Tribal House/tribal-house-cms"),
+            kind: ProjectType::Php,
+            start_command: None,
+            port: Some(8090),
+            extra_ports: vec![],
+            hostname: "tribal-house-cms.portbay.test".into(),
+            https: false,
+            services: vec!["caddy".into(), "php-fpm".into()],
+            env: Default::default(),
+            readiness: None,
+            auto_start: false,
+            tags: vec![],
+            document_root: Some("public".into()),
+            php_version: Some("8.3".into()),
+            web_server: Some(web_server),
+            mobile_run: None,
+            runtime: None,
+            workspace: None,
+            cors: None,
+            sandbox: None,
+            domain: None,
+        }
+    }
+
+    /// Socket path carrying the unavoidable macOS "Application Support" space.
+    fn spaced_socket() -> PathBuf {
+        PathBuf::from("/Users/me/Library/Application Support/PortBay/php/8.3/php-fpm.sock")
+    }
+
+    #[test]
+    fn nginx_config_quotes_every_path_and_the_socket() {
+        let p = php_project(WebServer::Nginx);
+        let cfg = render_nginx_config(
+            &p,
+            8090,
+            &spaced_socket(),
+            &FpmTuning::default(),
+            Path::new("/tmp/logs"),
+        );
+        assert!(
+            cfg.contains(
+                "root \"/Volumes/DevSSD/projects/Clients/Tribal House/tribal-house-cms/public\";"
+            ),
+            "root must be quoted:\n{cfg}"
+        );
+        assert!(
+            cfg.contains(
+                "fastcgi_pass \"unix:/Users/me/Library/Application Support/PortBay/php/8.3/php-fpm.sock\";"
+            ),
+            "fastcgi_pass must wrap the whole unix: token in quotes:\n{cfg}"
+        );
+        assert!(cfg.contains("error_log \""), "error_log must be quoted");
+        assert!(cfg.contains("access_log \""), "access_log must be quoted");
+    }
+
+    #[test]
+    fn nginx_tcp_mode_dials_tcp_not_socket() {
+        let p = php_project(WebServer::Nginx);
+        let tuning = FpmTuning {
+            listen: "tcp".into(),
+            tcp_port: 9001,
+            ..FpmTuning::default()
+        };
+        let cfg = render_nginx_config(&p, 8090, &spaced_socket(), &tuning, Path::new("/tmp/logs"));
+        assert!(
+            cfg.contains("fastcgi_pass 127.0.0.1:9001;"),
+            "tcp dial expected:\n{cfg}"
+        );
+        assert!(!cfg.contains("unix:"), "must not dial a socket in tcp mode");
+    }
+
+    #[test]
+    fn apache_loads_log_config_before_customlog() {
+        let p = php_project(WebServer::Apache);
+        let cfg = render_apache_config(
+            &p,
+            8090,
+            &spaced_socket(),
+            &FpmTuning::default(),
+            Path::new("/tmp/conf"),
+            Path::new("/tmp/logs"),
+            Path::new("/usr/sbin/httpd"),
+        );
+        // The doc-root and socket are inside double-quoted directives, so spaces
+        // are safe. The load-order invariant is the real fix here.
+        if let (Some(m), Some(c)) = (cfg.find("mod_log_config.so"), cfg.find("CustomLog")) {
+            assert!(m < c, "mod_log_config must load before CustomLog:\n{cfg}");
+        }
+        assert!(
+            cfg.contains("SetHandler \"proxy:unix:"),
+            "socket-mode SetHandler expected:\n{cfg}"
+        );
+    }
+
+    #[test]
+    fn apache_tcp_mode_uses_fcgi_tcp_backend() {
+        let p = php_project(WebServer::Apache);
+        let tuning = FpmTuning {
+            listen: "tcp".into(),
+            tcp_port: 9001,
+            ..FpmTuning::default()
+        };
+        let cfg = render_apache_config(
+            &p,
+            8090,
+            &spaced_socket(),
+            &tuning,
+            Path::new("/tmp/conf"),
+            Path::new("/tmp/logs"),
+            Path::new("/usr/sbin/httpd"),
+        );
+        assert!(
+            cfg.contains("SetHandler \"proxy:fcgi://127.0.0.1:9001\""),
+            "tcp fcgi backend expected:\n{cfg}"
+        );
+    }
+
+    /// Validate the *actual* generated config against the real binary when a
+    /// neutral one is installed. Skips cleanly otherwise — competitor binaries
+    /// are filtered out, so this only runs where Homebrew/system nginx exists.
+    #[test]
+    fn generated_nginx_config_passes_nginx_t() {
+        let Some(bin) = nginx_binary() else {
+            return;
+        };
+        // Use the system temp root explicitly: a `TMPDIR` on an external volume
+        // can be unreadable by a sandboxed web-server binary ("Operation not
+        // permitted"), which would mask the real syntax check we're after.
+        let dir = tempfile::Builder::new()
+            .prefix("portbay-ws")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = dir.path().join("My Doc Root");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut p = php_project(WebServer::Nginx);
+        p.path = root;
+        p.document_root = None;
+        let sock = dir.path().join("php-fpm.sock");
+        let cfg = render_nginx_config(&p, 8190, &sock, &FpmTuning::default(), dir.path());
+        let conf = dir.path().join("nginx.conf");
+        std::fs::write(&conf, cfg).unwrap();
+        let out = std::process::Command::new(&bin)
+            .args(["-t", "-c"])
+            .arg(&conf)
+            .arg("-p")
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "nginx -t rejected the generated config:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn generated_apache_config_passes_httpd_t() {
+        let Some(bin) = apache_binary() else {
+            return;
+        };
+        // System temp root explicitly — see the nginx test for why.
+        let dir = tempfile::Builder::new()
+            .prefix("portbay-ws")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = dir.path().join("My Doc Root");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut p = php_project(WebServer::Apache);
+        p.path = root;
+        p.document_root = None;
+        let sock = dir.path().join("php-fpm.sock");
+        let cfg = render_apache_config(
+            &p,
+            8190,
+            &sock,
+            &FpmTuning::default(),
+            dir.path(),
+            dir.path(),
+            &bin,
+        );
+        let conf = dir.path().join("httpd.conf");
+        std::fs::write(&conf, cfg).unwrap();
+        let out = std::process::Command::new(&bin)
+            .args(["-t", "-f"])
+            .arg(&conf)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "httpd -t rejected the generated config:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
