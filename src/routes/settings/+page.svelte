@@ -990,8 +990,8 @@
     <div class="space-y-4">
       <!-- Intro -->
       <p class="text-[13px] text-fg-muted leading-relaxed">
-        Connect Claude Code, Cursor, VS Code, Codex, or any MCP-aware agent to
-        drive PortBay (register projects, start/stop, read logs).
+        Connect your MCP-aware agent to drive PortBay — register projects,
+        start and stop servers, and read logs without touching the app.
         <button
           type="button"
           onclick={() => openUrl("https://docs.portbay.app/agents/")}
