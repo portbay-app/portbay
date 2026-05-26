@@ -501,6 +501,259 @@ const RUNTIMES: LanguageView[] = [
       },
     ],
   },
+  {
+    id: "bun",
+    displayName: "Bun",
+    installHint: "brew install oven-sh/bun/bun",
+    defaultVersion: "1.1.42",
+    versions: [
+      {
+        install: {
+          version: "1.1.42",
+          binary: "/opt/homebrew/bin/bun",
+          source: "homebrew",
+        },
+        tabs: [
+          {
+            id: "info",
+            label: "Info",
+            rows: [
+              {
+                key: "binary",
+                label: "Binary",
+                value: "/opt/homebrew/bin/bun",
+                isPath: true,
+                field: { kind: "readonly" },
+              },
+              {
+                key: "source",
+                label: "Source",
+                value: "Homebrew",
+                field: { kind: "readonly" },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: "python",
+    displayName: "Python",
+    installHint: "brew install python",
+    defaultVersion: "3.13.1",
+    versions: [
+      {
+        install: {
+          version: "3.13.1",
+          binary: "/opt/homebrew/opt/python@3.13/bin/python3.13",
+          source: "homebrew",
+        },
+        tabs: [
+          {
+            id: "index",
+            label: "Package index",
+            editable: true,
+            rows: [
+              {
+                key: "index-url",
+                label: "Index URL",
+                value: "",
+                hint: "pip's package index (pip.conf [global] index-url). Blank uses the default PyPI (https://pypi.org/simple).",
+                field: { kind: "text" },
+              },
+              {
+                key: "config_file",
+                label: "Config file",
+                value: "/Users/dev/.config/pip/pip.conf",
+                isPath: true,
+                field: { kind: "readonly" },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        install: {
+          version: "3.12.7",
+          binary: "/Users/dev/.pyenv/versions/3.12.7/bin/python",
+          source: "pyenv",
+        },
+        tabs: [
+          {
+            id: "index",
+            label: "Package index",
+            editable: true,
+            rows: [
+              {
+                key: "index-url",
+                label: "Index URL",
+                value: "https://pypi.org/simple",
+                hint: "pip's package index (pip.conf [global] index-url). Blank uses the default PyPI (https://pypi.org/simple).",
+                field: { kind: "text" },
+              },
+              {
+                key: "config_file",
+                label: "Config file",
+                value: "/Users/dev/.config/pip/pip.conf",
+                isPath: true,
+                field: { kind: "readonly" },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: "flutter",
+    displayName: "Flutter",
+    installHint: "brew install --cask flutter",
+    defaultVersion: "3.27.1",
+    versions: [
+      {
+        install: {
+          version: "3.27.1",
+          binary: "/opt/homebrew/caskroom/flutter/bin/flutter",
+          source: "homebrew",
+        },
+        tabs: [
+          {
+            id: "info",
+            label: "Info",
+            rows: [
+              {
+                key: "binary",
+                label: "Binary",
+                value: "/opt/homebrew/caskroom/flutter/bin/flutter",
+                isPath: true,
+                field: { kind: "readonly" },
+              },
+              {
+                key: "source",
+                label: "Source",
+                value: "Homebrew",
+                field: { kind: "readonly" },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: "go",
+    displayName: "Go",
+    installHint: "brew install go",
+    defaultVersion: "1.23.4",
+    versions: [
+      {
+        install: {
+          version: "1.23.4",
+          binary: "/opt/homebrew/bin/go",
+          source: "homebrew",
+        },
+        tabs: [
+          {
+            id: "env",
+            label: "Environment",
+            editable: true,
+            rows: [
+              {
+                key: "GOPROXY",
+                label: "GOPROXY",
+                value: "https://proxy.golang.org,direct",
+                hint: "Module proxy. Blank uses Go's default (https://proxy.golang.org,direct). Accepts a comma list, `direct`, or `off`.",
+                field: { kind: "text" },
+              },
+              {
+                key: "GOPATH",
+                label: "GOPATH",
+                value: "/Users/dev/go",
+                hint: "Workspace root. Blank uses Go's default (~/go).",
+                field: { kind: "text" },
+              },
+              {
+                key: "env_file",
+                label: "Env file",
+                value: "/Users/dev/Library/Application Support/go/env",
+                isPath: true,
+                field: { kind: "readonly" },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: "ruby",
+    displayName: "Ruby",
+    installHint: "brew install ruby",
+    defaultVersion: "3.3.6",
+    versions: [
+      {
+        install: {
+          version: "3.3.6",
+          binary: "/opt/homebrew/opt/ruby/bin/ruby",
+          source: "homebrew",
+        },
+        tabs: [
+          {
+            id: "config",
+            label: "RubyGems",
+            editable: true,
+            rows: [
+              {
+                key: "gem",
+                label: "Default gem flags",
+                value: "--no-document",
+                hint: "Flags applied to every `gem` command via ~/.gemrc (e.g. --no-document). Blank removes the override.",
+                field: { kind: "text" },
+              },
+              {
+                key: "config_file",
+                label: "Config file",
+                value: "/Users/dev/.gemrc",
+                isPath: true,
+                field: { kind: "readonly" },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        install: {
+          version: "2.6.10",
+          binary: "/usr/bin/ruby",
+          source: "system",
+        },
+        tabs: [
+          {
+            id: "config",
+            label: "RubyGems",
+            editable: true,
+            rows: [
+              {
+                key: "gem",
+                label: "Default gem flags",
+                value: "",
+                hint: "Flags applied to every `gem` command via ~/.gemrc (e.g. --no-document). Blank removes the override.",
+                field: { kind: "text" },
+              },
+              {
+                key: "config_file",
+                label: "Config file",
+                value: "/Users/dev/.gemrc",
+                isPath: true,
+                field: { kind: "readonly" },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  },
 ];
 
 const DATABASE_ENGINES: DatabaseEngineView[] = [
@@ -514,6 +767,24 @@ const DATABASE_ENGINES: DatabaseEngineView[] = [
     installHint: "",
   },
   {
+    id: "mariadb",
+    label: "MariaDB",
+    installed: true,
+    version: "11.4.2",
+    defaultPort: 3306,
+    clientAvailable: true,
+    installHint: "",
+  },
+  {
+    id: "postgres",
+    label: "PostgreSQL",
+    installed: true,
+    version: "16.2",
+    defaultPort: 5432,
+    clientAvailable: true,
+    installHint: "",
+  },
+  {
     id: "redis",
     label: "Redis",
     installed: true,
@@ -523,13 +794,22 @@ const DATABASE_ENGINES: DatabaseEngineView[] = [
     installHint: "",
   },
   {
-    id: "postgres",
-    label: "PostgreSQL",
-    installed: false,
-    version: "16.2",
-    defaultPort: 5432,
+    id: "mongo",
+    label: "MongoDB",
+    installed: true,
+    version: "7.0.5",
+    defaultPort: 27017,
+    clientAvailable: true,
+    installHint: "",
+  },
+  {
+    id: "memcached",
+    label: "Memcached",
+    installed: true,
+    version: "1.6.31",
+    defaultPort: 11211,
     clientAvailable: false,
-    installHint: "brew install postgresql@16",
+    installHint: "",
   },
 ];
 
@@ -564,6 +844,72 @@ const DATABASE_INSTANCES: DatabaseInstanceView[] = [
     connectionUrl: "redis://127.0.0.1:6379",
     account: "",
     linkedProjects: [],
+    binaryAvailable: true,
+    provisioned: true,
+  },
+  {
+    id: "relay-mariadb",
+    name: "relay-mariadb",
+    engine: "mariadb",
+    engineLabel: "MariaDB",
+    version: "11.4.2",
+    port: 3307,
+    status: "running",
+    autoStart: true,
+    dataDir: "/Users/dev/Library/Application Support/PortBay/db/relay-mariadb",
+    socketPath: "/tmp/portbay-relay-mariadb.sock",
+    connectionUrl: "mysql://root@127.0.0.1:3307/",
+    account: "root",
+    linkedProjects: ["relay-api"],
+    binaryAvailable: true,
+    provisioned: true,
+  },
+  {
+    id: "hatchway-pg",
+    name: "hatchway-pg",
+    engine: "postgres",
+    engineLabel: "PostgreSQL",
+    version: "16.2",
+    port: 5432,
+    status: "running",
+    autoStart: true,
+    dataDir: "/Users/dev/Library/Application Support/PortBay/db/hatchway-pg",
+    socketPath: "/tmp/.s.PGSQL.5432",
+    connectionUrl: "postgresql://postgres@127.0.0.1:5432/postgres",
+    account: "postgres",
+    linkedProjects: ["hatchway-cms", "quill-docs"],
+    binaryAvailable: true,
+    provisioned: true,
+  },
+  {
+    id: "pinpoint-mongo",
+    name: "pinpoint-mongo",
+    engine: "mongo",
+    engineLabel: "MongoDB",
+    version: "7.0.5",
+    port: 27017,
+    status: "running",
+    autoStart: false,
+    dataDir: "/Users/dev/Library/Application Support/PortBay/db/pinpoint-mongo",
+    connectionUrl: "mongodb://127.0.0.1:27017",
+    account: "",
+    linkedProjects: ["pinpoint-maps"],
+    binaryAvailable: true,
+    provisioned: true,
+  },
+  {
+    id: "cobalt-cache",
+    name: "cobalt-cache",
+    engine: "memcached",
+    engineLabel: "Memcached",
+    version: "1.6.31",
+    port: 11211,
+    status: "stopped",
+    autoStart: false,
+    dataDir: "/Users/dev/Library/Application Support/PortBay/db/cobalt-cache",
+    connectionUrl: "memcached://127.0.0.1:11211",
+    account: "",
+    linkedProjects: ["cobalt-admin"],
     binaryAvailable: true,
     provisioned: true,
   },
