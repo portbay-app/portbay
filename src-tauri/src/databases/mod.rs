@@ -423,11 +423,15 @@ fn write_config(
         }
         DatabaseEngine::Redis => {
             let sock = sock.map(|s| s.display().to_string()).unwrap_or_default();
+            // `dir`/`unixsocket` values MUST be double-quoted: Redis splits config
+            // values on whitespace, and the data dir lives under
+            // `~/Library/Application Support/PortBay/…` (a space), which would
+            // otherwise truncate the path. Redis supports quoted string values.
             format!(
                 "port {port}\n\
                  bind 127.0.0.1\n\
-                 dir {data}\n\
-                 unixsocket {sock}\n\
+                 dir \"{data}\"\n\
+                 unixsocket \"{sock}\"\n\
                  daemonize no\n",
                 data = data.display(),
             )
