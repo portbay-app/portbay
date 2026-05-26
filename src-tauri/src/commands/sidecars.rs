@@ -108,8 +108,12 @@ async fn caddy_status(state: &AppState) -> SidecarStatus {
         .clone();
     let (status, detail) = match client {
         None => (SidecarState::Stopped, Some("not started".into())),
+        // Report the public edge ports Caddy serves (HTTPS :443, HTTP :80 — the
+        // standard ports the reconciler binds via find_free_https_port/`http_port`).
+        // The dashboard card surfaces the leading number as Caddy's port; a bare
+        // "alive" left it showing a dash.
         Some(c) => match c.is_alive().await {
-            Ok(true) => (SidecarState::Running, Some("alive".into())),
+            Ok(true) => (SidecarState::Running, Some("https :443 · http :80".into())),
             Ok(false) => (SidecarState::Unreachable, Some("unreachable".into())),
             Err(e) => (SidecarState::Unreachable, Some(e.to_string())),
         },

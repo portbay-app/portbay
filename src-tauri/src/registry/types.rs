@@ -144,8 +144,11 @@ pub struct Project {
     pub hostname: String,
 
     /// Whether Caddy should terminate TLS for this hostname using a
-    /// mkcert-issued certificate.
-    #[serde(default)]
+    /// mkcert-issued certificate. Defaults to `true`: PortBay issues a
+    /// locally-trusted cert on add, so `https://<host>` works out of the box
+    /// (the Herd/Valet convention). Every add path that omits the field —
+    /// import, portfile, legacy registries — inherits HTTPS-on.
+    #[serde(default = "default_true")]
     pub https: bool,
 
     /// Shared services the project depends on (e.g. `["caddy", "php-fpm", "mysql"]`).
