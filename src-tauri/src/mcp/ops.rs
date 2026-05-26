@@ -219,6 +219,14 @@ impl McpContext {
         let mut reg = self.load_registry()?;
         entitlements::check_can_add(reg.projects.len())
             .map_err(|cap| AppError::ProjectCapReached { cap })?;
+        if reg.hostname_conflict(&project.hostname, None) {
+            return Err(crate::registry::RegistryError::DuplicateHostname(project.hostname).into());
+        }
+        if let Some(port) = project.port {
+            if reg.port_conflict(port, None) {
+                return Err(crate::registry::RegistryError::DuplicatePort(port).into());
+            }
+        }
         reg.add_project(project.clone())?;
         if let Some(rt) = &project.runtime {
             // Best-effort: a missing marker file shouldn't fail registration.
@@ -242,6 +250,19 @@ impl McpContext {
     pub async fn update_project(&self, args: UpdateProjectArgs) -> AppResult<OpResult> {
         let pid = ProjectId::new(&args.id);
         let mut reg = self.load_registry()?;
+        if reg.get_project(&pid).is_none() {
+            return Err(AppError::NotFound(args.id.clone()));
+        }
+        if let Some(h) = args.hostname.as_deref() {
+            if reg.hostname_conflict(h, Some(&pid)) {
+                return Err(crate::registry::RegistryError::DuplicateHostname(h.to_string()).into());
+            }
+        }
+        if let Some(port) = args.port {
+            if reg.port_conflict(port, Some(&pid)) {
+                return Err(crate::registry::RegistryError::DuplicatePort(port).into());
+            }
+        }
         {
             let p = reg
                 .get_project_mut(&pid)

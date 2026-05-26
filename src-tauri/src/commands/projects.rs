@@ -172,6 +172,15 @@ pub async fn add_project(
         domain: None,
     };
 
+    if registry.hostname_conflict(&project.hostname, None) {
+        return Err(crate::registry::RegistryError::DuplicateHostname(project.hostname).into());
+    }
+    if let Some(port) = project.port {
+        if registry.port_conflict(port, None) {
+            return Err(crate::registry::RegistryError::DuplicatePort(port).into());
+        }
+    }
+
     registry.add_project(project.clone())?;
     if let Some(runtime) = &project.runtime {
         if let Err(err) = crate::project_runtime::ensure_marker_files(&project.path, runtime) {
@@ -218,6 +227,20 @@ pub async fn update_project(
             if let Err(cap) = crate::entitlements::check_can_sandbox(others) {
                 return Err(AppError::SandboxCapReached { cap });
             }
+        }
+    }
+
+    // Reject a hostname/port that another project already owns (excluding this
+    // one) before mutating — keeps two projects from silently sharing a Caddy
+    // route or a port.
+    if let Some(h) = patch.hostname.as_deref() {
+        if registry.hostname_conflict(h, Some(&pid)) {
+            return Err(crate::registry::RegistryError::DuplicateHostname(h.to_string()).into());
+        }
+    }
+    if let Some(port) = patch.port {
+        if registry.port_conflict(port, Some(&pid)) {
+            return Err(crate::registry::RegistryError::DuplicatePort(port).into());
         }
     }
 
@@ -578,6 +601,14 @@ pub async fn clone_git_project_sandboxed(
         sandbox: Some(SandboxConfig::enabled(input.network, input.ephemeral)),
         domain: None,
     };
+    if registry.hostname_conflict(&project.hostname, None) {
+        return Err(crate::registry::RegistryError::DuplicateHostname(project.hostname).into());
+    }
+    if let Some(port) = project.port {
+        if registry.port_conflict(port, None) {
+            return Err(crate::registry::RegistryError::DuplicatePort(port).into());
+        }
+    }
     registry.add_project(project.clone())?;
     save_registry(&state, &registry)?;
     state.reconciler.mark_dirty();

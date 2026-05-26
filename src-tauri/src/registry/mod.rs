@@ -160,12 +160,37 @@ impl Registry {
     }
 
     /// Insert a new project. Errors if the id is already taken.
+    ///
+    /// Hostname/port uniqueness is enforced one layer up, at the user-input
+    /// boundary (the add/update IPC commands and the MCP ops), via
+    /// [`Registry::hostname_conflict`] / [`Registry::port_conflict`] — so a
+    /// clear error reaches the user, while migrations, importers, and tests can
+    /// still construct registries freely.
     pub fn add_project(&mut self, project: Project) -> Result<()> {
         if self.get_project(&project.id).is_some() {
             return Err(RegistryError::DuplicateProjectId(project.id));
         }
         self.projects.push(project);
         Ok(())
+    }
+
+    /// True if another project already claims `hostname` (case-insensitive),
+    /// ignoring the project whose id equals `exclude` (pass the project's own id
+    /// when validating an update so it doesn't conflict with itself). Two
+    /// projects sharing a hostname make the second's Caddy route unreachable and
+    /// its traffic silently vanish, so the collision is rejected up front.
+    pub fn hostname_conflict(&self, hostname: &str, exclude: Option<&ProjectId>) -> bool {
+        self.projects
+            .iter()
+            .any(|p| Some(&p.id) != exclude && p.hostname.eq_ignore_ascii_case(hostname))
+    }
+
+    /// True if another project already binds `port`, ignoring `exclude`. A
+    /// duplicate port otherwise surfaces only as an opaque runtime bind failure.
+    pub fn port_conflict(&self, port: u16, exclude: Option<&ProjectId>) -> bool {
+        self.projects
+            .iter()
+            .any(|p| Some(&p.id) != exclude && p.port == Some(port))
     }
 
     /// Remove a project by id, returning the removed entry. Errors if missing.

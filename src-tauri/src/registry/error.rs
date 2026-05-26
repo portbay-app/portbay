@@ -27,6 +27,12 @@ pub enum RegistryError {
     #[error("project id `{0}` already exists")]
     DuplicateProjectId(ProjectId),
 
+    #[error("hostname `{0}` is already used by another project")]
+    DuplicateHostname(String),
+
+    #[error("port {0} is already used by another project")]
+    DuplicatePort(u16),
+
     #[error("group id `{0}` not found")]
     GroupNotFound(String),
 
