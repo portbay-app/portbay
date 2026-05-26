@@ -1,7 +1,7 @@
 <div align="center">
 
 <h1>
-  <img src="src/lib/assets/portbay-logo.png" alt="" height="56" valign="middle" />
+  <img src="src/lib/assets/portbay-logo.png" alt="" height="112" valign="middle" />
   &nbsp;PortBay
 </h1>
 
@@ -17,8 +17,8 @@ no container stack, no hand-rolled proxy and DNS config.
 
 `macOS` · Built with Tauri 2 · Rust · Svelte 5
 
-> **Status:** pre-1.0 but installable. Signed, notarized macOS builds (DMG +
-> Homebrew) are available — see [Getting started](#getting-started). Linux and
+> **Status:** released for macOS (Apple Silicon). Signed, notarized builds ship
+> via DMG and Homebrew — see [Getting started](#getting-started). Linux and
 > Windows are on the [roadmap](#roadmap).
 
 </div>
@@ -96,6 +96,15 @@ zoo. It's free and open source (AGPL-3.0); an optional, pay-what-you-want
 pull request — funds the project and unlocks hosted multi-device sync and a few
 power-user features. No subscription, and nothing you can't build yourself.
 
+For head-to-head breakdowns, see the in-depth comparisons — PortBay vs
+[Laravel Herd](https://docs.portbay.app/comparisons/portbay-vs-laravel-herd),
+[ServBay](https://docs.portbay.app/comparisons/portbay-vs-servbay),
+[MAMP](https://docs.portbay.app/comparisons/portbay-vs-mamp),
+[Docker](https://docs.portbay.app/comparisons/portbay-vs-docker),
+[Valet](https://docs.portbay.app/comparisons/portbay-vs-laravel-valet),
+[DDEV](https://docs.portbay.app/comparisons/portbay-vs-ddev), and
+[Local](https://docs.portbay.app/comparisons/portbay-vs-local).
+
 ## How it works
 
 ```
@@ -168,7 +177,7 @@ pnpm docs:build
 
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, CLI. *Working.*
 - **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases. *Working.*
-- **Release** — signed/notarized DMG, Homebrew cask, and auto-update. *Shipping.*
+- **Release** — signed/notarized DMG, Homebrew cask, and auto-update. *Shipped.*
 - **Platforms** — macOS Apple Silicon today; Intel + Linux, then Windows.
 
 ## Contributing

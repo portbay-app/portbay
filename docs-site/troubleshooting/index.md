@@ -1,3 +1,8 @@
+---
+title: PortBay Troubleshooting — Error Codes & Diagnostic Guide
+description: Fix PortBay errors fast — complete error code reference, port conflict resolution, sidecar restart steps, hostname failure checklist, and registry corruption recovery.
+---
+
 # Troubleshooting
 
 ## Error Envelope

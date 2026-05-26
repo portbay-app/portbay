@@ -83,3 +83,5 @@ src-tauri/binaries/portbay-mcp-*
 # Playwright E2E artifacts (interaction-latency harness).
 test-results/
 playwright-report/
+# Local working notes / analyses (not part of the published docs).
+claudedocs/

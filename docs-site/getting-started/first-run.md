@@ -1,3 +1,8 @@
+---
+title: PortBay First Run — Sidecars, Registry & Hostnames
+description: "What to verify after launching PortBay for the first time: registry location, sidecar health, dnsmasq wildcard DNS, and the expected macOS data directory layout."
+---
+
 # First Run
 
 The first run should establish three things: the registry location, the sidecar health state, and whether PortBay can safely route hostnames on this machine.

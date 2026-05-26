@@ -1,3 +1,8 @@
+---
+title: Mailpit Local Mail Catcher — PortBay SMTP Sink
+description: Catch and inspect all outgoing dev email with Mailpit bundled in PortBay — automatic SMTP env injection for Laravel and Symfony, loopback-only, no configuration needed.
+---
+
 # Mailpit — Local Mail Catcher
 
 Mailpit is a local SMTP sink bundled with PortBay. It receives all outgoing mail from your projects during development and lets you inspect each message in a web UI. Nothing leaves the machine: both listeners bind to `127.0.0.1` only.

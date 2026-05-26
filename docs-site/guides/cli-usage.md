@@ -1,3 +1,8 @@
+---
+title: PortBay CLI Usage — Terminal Parity with the App
+description: Use the portbay CLI to list, start, stop, and inspect local projects from your terminal — same Rust core as the GUI, with JSON output and registry override flags.
+---
+
 # CLI Usage
 
 The `portbay` CLI is a thin command-line interface over the same Rust core as the Tauri app.

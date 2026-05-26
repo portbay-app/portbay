@@ -1,6 +1,11 @@
+---
+title: Drive PortBay from an AI Agent via MCP
+description: Connect Claude Code, Cursor, Zed, or any MCP-aware agent to PortBay's MCP server to register projects, start servers, and diagnose failures without touching the GUI.
+---
+
 # Drive PortBay from an AI Agent (MCP)
 
-PortBay ships an [Model Context Protocol](https://modelcontextprotocol.io) server, `portbay-mcp`. Any MCP-aware agent — Claude Code, Cursor, Continue, Zed, Windsurf, and others — can drive PortBay directly: register projects, start and stop them, read logs, and diagnose failures, without clicking through the GUI or remembering CLI flags.
+PortBay ships an [Model Context Protocol](https://modelcontextprotocol.io) server, `portbay-mcp`. Any MCP-aware agent — Claude Code, Cursor, Codex, Continue, Zed, Windsurf, and others — can drive PortBay directly: register projects, start and stop them, read logs, and diagnose failures, without clicking through the GUI or remembering CLI flags.
 
 The agent spawns `portbay-mcp` as a subprocess over stdio. The process boundary **is** the trust boundary — there is no port to open and no extra auth layer.
 
@@ -118,6 +123,15 @@ mcpServers:
     }
   }
 }
+```
+
+### Codex
+
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.portbay]
+command = "/opt/homebrew/bin/portbay-mcp"
 ```
 
 After adding the config, restart the agent. PortBay's tools (all prefixed `portbay_`) appear in its tool list.

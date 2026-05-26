@@ -1,3 +1,8 @@
+---
+title: PortBay Command Palette — Keyboard-First Project Control
+description: Open the PortBay command palette with Cmd+K to search and run any lifecycle, navigation, sidecar, or group action without leaving the keyboard.
+---
+
 # Command Palette
 
 The command palette gives keyboard-first access to every action in the app — lifecycle controls, navigation, sidecar operations, and more — from a single searchable interface.

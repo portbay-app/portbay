@@ -1,3 +1,8 @@
+---
+title: PortBay CLI Reference — Commands, Flags & Exit Codes
+description: "Full reference for the portbay CLI: add, start, stop, logs, doctor, hosts, export, login, and license commands with all flags, defaults, and exit code meanings."
+---
+
 # CLI Reference
 
 The `portbay` CLI shares the same `portbay_lib` core as the Tauri GUI. It acts as a client: lifecycle commands (`start`, `stop`, `restart`) require the PortBay daemon (the GUI app, or a future `portbay daemon` subcommand) to be running and exposing Process Compose on a discoverable port.

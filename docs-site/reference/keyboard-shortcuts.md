@@ -1,3 +1,8 @@
+---
+title: PortBay Keyboard Shortcuts — Full Shortcut Reference
+description: "Every keyboard shortcut in PortBay: command palette, project table navigation, start/stop/restart keys, log viewer search, and save — scoped by context."
+---
+
 # Keyboard Shortcuts
 
 | Shortcut | Scope | Action |

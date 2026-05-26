@@ -1,3 +1,8 @@
+---
+title: PortBay Architecture — Tauri, Rust, Caddy & Process Compose
+description: "How PortBay is built: Tauri 2 + Svelte 5 GUI, shared Rust core, reconcile loop, bundled sidecars, and the Cargo workspace layout for contributors."
+---
+
 # Architecture
 
 PortBay is a native local development control plane built with Tauri 2, Rust, Svelte 5, Process Compose, Caddy, and mkcert.

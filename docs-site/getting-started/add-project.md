@@ -1,3 +1,8 @@
+---
+title: Add a Project to PortBay — GUI & CLI Walkthrough
+description: Register a local folder as a PortBay project via the GUI wizard or CLI, configure its hostname, port, type, and environment variables, then start it with one click.
+---
+
 # Add A Project
 
 Projects are registered from local folders. PortBay records the launch command, port, hostname, HTTPS setting, optional services, and readiness probe in the registry.

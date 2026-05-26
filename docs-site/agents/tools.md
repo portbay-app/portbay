@@ -1,3 +1,8 @@
+---
+title: PortBay MCP Tool Reference — All 19 Tools
+description: "Complete reference for every tool and resource exposed by portbay-mcp: project registration, lifecycle controls, diagnostics, scaffolding, and read-only resources."
+---
+
 # MCP Tool Reference
 
 The full surface exposed by `portbay-mcp`. Every tool returns `structuredContent` (typed JSON Schema output) plus a plain-text mirror for clients that don't support structured content. Tools declare behavior annotations: `readOnlyHint` for read-only tools, `destructiveHint` for destructive ones, `idempotentHint` where applicable.

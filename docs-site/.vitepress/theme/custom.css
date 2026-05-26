@@ -1,4 +1,23 @@
+/* Brand palette, fonts, and hero styling — shared across both themes.
+   Light-mode background/text come from VitePress defaults; the dark palette
+   below overrides them under .dark so the appearance toggle works. */
 :root {
+  --vp-c-brand-1: #1f6feb;
+  --vp-c-brand-2: #2f7adf;
+  --vp-c-brand-3: #4d9cff;
+  --vp-c-brand-soft: rgba(31, 111, 235, 0.14);
+  --vp-c-green-1: #1a8f48;
+  --vp-c-yellow-1: #b9791a;
+  --vp-c-red-1: #d92f4c;
+  --vp-font-family-base: Inter, ui-sans-serif, "SF Pro Text", system-ui, -apple-system, sans-serif;
+  --vp-font-family-mono: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Code", monospace;
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #1f6feb 0%, #2f7adf 45%, #1a8f48 100%);
+  --vp-home-hero-image-background-image: radial-gradient(circle at center, rgba(77, 156, 255, 0.18), transparent 66%);
+  --vp-home-hero-image-filter: blur(34px);
+}
+
+.dark {
   --vp-c-bg: #0b0f14;
   --vp-c-bg-alt: #101720;
   --vp-c-bg-elv: #161b22;
@@ -15,24 +34,22 @@
   --vp-c-green-1: #2ee36b;
   --vp-c-yellow-1: #f5c04c;
   --vp-c-red-1: #ff3b5c;
-  --vp-font-family-base: Inter, ui-sans-serif, "SF Pro Text", system-ui, -apple-system, sans-serif;
-  --vp-font-family-mono: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Code", monospace;
-  --vp-home-hero-name-color: transparent;
   --vp-home-hero-name-background: linear-gradient(120deg, #e6edf3 0%, #8cc5ff 45%, #2ee36b 100%);
-  --vp-home-hero-image-background-image: radial-gradient(circle at center, rgba(77, 156, 255, 0.18), transparent 66%);
-  --vp-home-hero-image-filter: blur(34px);
   color-scheme: dark;
 }
 
-.dark {
-  color-scheme: dark;
-}
-
+/* Frosted nav — translucency tinted per theme so the bar reads correctly in
+   both. */
 .VPNav,
 .VPNavBar.has-sidebar .content,
 .VPNavBar.has-sidebar .curtain {
-  background: rgba(11, 15, 20, 0.88);
   backdrop-filter: blur(18px);
+}
+
+.dark .VPNav,
+.dark .VPNavBar.has-sidebar .content,
+.dark .VPNavBar.has-sidebar .curtain {
+  background: rgba(11, 15, 20, 0.88);
 }
 
 .VPHomeHero .main {
@@ -46,6 +63,9 @@
 
 .VPFeature {
   border-radius: 8px;
+}
+
+.dark .VPFeature {
   background: linear-gradient(180deg, rgba(22, 27, 34, 0.96), rgba(16, 23, 32, 0.96));
 }
 
@@ -67,8 +87,10 @@
   border-color: var(--vp-c-border);
 }
 
+/* Theme-aware zebra striping (was a hard-coded white overlay that only worked
+   on the dark background). */
 .vp-doc tr:nth-child(2n) {
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--vp-c-bg-soft);
 }
 
 .custom-block {

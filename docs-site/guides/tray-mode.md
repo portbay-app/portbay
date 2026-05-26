@@ -1,3 +1,8 @@
+---
+title: PortBay Menu Bar (Tray Mode) — Quick Project Controls
+description: Access PortBay project controls from the macOS menu bar without switching windows — color-coded health indicator, per-project CPU sparklines, and one-click start/stop.
+---
+
 # Tray Mode (Menu Bar)
 
 PortBay places a persistent icon in the macOS menu bar. It provides quick access to project controls without switching focus to the main window.

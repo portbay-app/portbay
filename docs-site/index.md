@@ -1,5 +1,7 @@
 ---
 layout: home
+title: PortBay — Local Dev Environment for macOS
+description: Run Node, PHP, and static sites locally with real HTTPS .test hostnames, Caddy reverse proxy, managed DNS, bundled databases, and zero /etc/hosts editing.
 
 hero:
   name: PortBay
@@ -46,7 +48,7 @@ features:
 
 ## Current Release State
 
-PortBay is pre-1.0 but installable on macOS. Signed, notarized builds ship for Apple Silicon via the DMG and Homebrew cask; Linux and Windows are still ahead. The docs track the current implementation.
+PortBay is released for macOS (Apple Silicon). Signed, notarized builds ship via the DMG and Homebrew cask; Linux and Windows are still ahead. The docs track the current implementation.
 
 | Area | Status |
 | --- | --- |
@@ -73,3 +75,4 @@ Then add a project, choose its type and port, and use the row actions to start i
 - Running PHP projects: read [PHP Setup](/guides/php-setup).
 - Debugging failures: use [Troubleshooting](/troubleshooting/).
 - Automating from a terminal: use [CLI Usage](/guides/cli-usage) and the [CLI Reference](/reference/cli).
+- Choosing a tool: see how PortBay [compares to Herd, ServBay, Docker, and more](/comparisons/).

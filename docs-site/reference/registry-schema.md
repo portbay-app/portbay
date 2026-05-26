@@ -1,3 +1,8 @@
+---
+title: PortBay Registry Schema — Project & Portfile Reference
+description: The complete PortBay registry JSON schema — every project field, readiness policy types, group format, and the portable .portbay.json Portfile structure for sharing projects.
+---
+
 # Registry Schema
 
 The registry is a JSON file stored at:

@@ -1,3 +1,8 @@
+---
+title: Local HTTPS & Caddy Reverse Proxy
+description: How PortBay routes each project through Caddy to a real https://*.test hostname with mkcert certificates — plus a diagnostic checklist when routes or certs break.
+---
+
 # Caddy And HTTPS
 
 PortBay uses Caddy as the reverse proxy. The app generates route configuration from the registry and applies it through Caddy’s admin API.

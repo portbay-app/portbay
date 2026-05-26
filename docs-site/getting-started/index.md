@@ -1,3 +1,8 @@
+---
+title: Getting Started with PortBay — Install & First Project
+description: Install PortBay on macOS via Homebrew or DMG, launch it for the first time, and add your first local project with a real HTTPS .test hostname in minutes.
+---
+
 # Getting Started
 
 This section installs PortBay and adds your first project. Most people install the signed macOS app; contributors can also build from source.

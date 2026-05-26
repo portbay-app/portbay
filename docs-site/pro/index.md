@@ -1,3 +1,8 @@
+---
+title: PortBay Pro — Pricing, Features & How to Unlock
+description: PortBay Pro is pay-what-you-want and perpetual — unlock unlimited projects, encrypted multi-device sync, and early-access features by donating or merging a pull request.
+---
+
 # PortBay Pro
 
 PortBay is free and open source under Apache-2.0. **Pro is optional.** It is a

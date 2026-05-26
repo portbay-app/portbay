@@ -1,3 +1,8 @@
+---
+title: PHP Setup in PortBay — PHP-FPM, Laravel & Xdebug
+description: Configure PHP projects in PortBay with PHP-FPM, document root, php_version, and HTTPS — includes a Laravel registry example and Xdebug toggle via the command palette.
+---
+
 # PHP Setup
 
 PHP projects are modeled as `type: "php"` registry entries with optional PHP-specific fields.

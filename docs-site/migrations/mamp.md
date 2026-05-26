@@ -1,3 +1,8 @@
+---
+title: Migrate from MAMP to PortBay — PHP Sites & HTTPS
+description: Switch from MAMP to PortBay by mapping your document roots, hostnames, PHP versions, and ports to PortBay's registry — replace MAMP's SSL with mkcert-issued HTTPS certs.
+---
+
 # Migrating From MAMP
 
 This is a release placeholder. Full MAMP import documentation will land after the import UX is finalized.

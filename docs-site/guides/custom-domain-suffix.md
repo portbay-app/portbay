@@ -1,3 +1,8 @@
+---
+title: Custom Local Domain Suffix — PortBay .test & .localhost
+description: Change your PortBay project hostnames from .test to .localhost or a custom suffix — how to edit the registry, reconcile dnsmasq, and avoid stale /etc/hosts entries.
+---
+
 # Custom Domain Suffix
 
 PortBay defaults to local hostnames such as `project.test`. The suffix is part of each project hostname stored in the registry.

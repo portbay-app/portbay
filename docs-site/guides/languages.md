@@ -1,3 +1,8 @@
+---
+title: Languages & Runtimes in PortBay — PHP, Node, Python & More
+description: Detect and manage PHP, Node.js, Python, Go, Ruby, Bun, and Flutter runtimes in PortBay — set defaults, edit PHP-FPM config, and install missing versions via Homebrew.
+---
+
 # Languages and Runtimes
 
 PortBay uses a detect-first model: it scans your machine for runtimes that are already installed — via Homebrew, nvm, mise, asdf, pyenv, rbenv, ServBay, or the system PATH — and surfaces them without installing or bundling anything itself. Each language shows all detected versions, lets you pick a default for new projects, and (for runtimes that have daemon or package-manager config) exposes editable settings panels. The Languages screen provides a single place to see what is installed, where it came from, and how PortBay will use it.
