@@ -1,6 +1,13 @@
+---
+title: PortBay Log Viewer — Static Tail & Live Follow Mode
+description: View and search your local project's process logs in PortBay — snapshot the last 1000 lines or stream live output with follow mode, ANSI color rendering, and crash detection.
+---
+
 # Log Viewer
 
-The log viewer is a full-screen modal that shows output from a single project's process. It supports static snapshots and live streaming.
+The log viewer shows output from a single project's process. It supports static snapshots and live streaming.
+
+![PortBay log viewer](/screenshots/logs.png)
 
 ## Opening Logs
 

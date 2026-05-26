@@ -73,6 +73,12 @@
     // the dashboard could leave other routes looking at a stale or
     // emptied store.
     void projects.start();
+    // The setup banner and Settings "Setup" surface in this layout read sidecar
+    // health on every route, so the poll must run layout-wide — not only on the
+    // dashboard / Services / Web Servers pages that also start it. Without this,
+    // deep-linking to a page that doesn't start the poll leaves the store on its
+    // "loading…" placeholder, which falsely reads as "mkcert CA needs setup".
+    sidecars.start();
     void preferences.load();
     // Load the cached entitlement immediately (no network), then re-verify a
     // stored session in the background (rotates tokens, refetches the license).

@@ -1,3 +1,8 @@
+---
+title: PortBay HTTP Request Inspector — Live Caddy Traffic View
+description: Monitor live HTTP traffic through PortBay's Caddy reverse proxy — filter by project, status code, or path, and inspect request headers without any configuration.
+---
+
 # HTTP Request Inspector
 
 The HTTP Request Inspector is a live, DevTools-Network-style view of the traffic flowing through Caddy. It works by tailing Caddy's structured JSON access log in a background thread, parsing each line into a `RequestEntry`, mapping the request host to the matching PortBay project, and emitting a `portbay://request` event to the `/inspector` UI. The table shows method, host, path, status code, latency, response size, and matched project — but **not** request or response bodies; Caddy's access log does not include body content.

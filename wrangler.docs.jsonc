@@ -1,0 +1,25 @@
+{
+  // Hosted documentation — the VitePress site in docs-site/ built to static
+  // HTML and served as Cloudflare assets. NOT a Worker: there is no `main`, so
+  // this is a pure static deploy of `docs-site/.vitepress/dist`. Separate name
+  // and config from the web simulator (wrangler.jsonc) so the two never collide.
+  //
+  // Build with base "/" (root custom domain, not the GitHub Pages /portbay/
+  // subpath), then deploy:
+  //   pnpm deploy:docs        (builds docs, then `wrangler deploy -c wrangler.docs.jsonc`)
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "portbay-docs",
+  "compatibility_date": "2026-05-25",
+  "assets": {
+    "directory": "docs-site/.vitepress/dist",
+    "not_found_handling": "404-page"
+  },
+  // Public docs URL. `custom_domain` makes wrangler provision the DNS record +
+  // certificate on the portbay.app zone at deploy time.
+  "routes": [{ "pattern": "docs.portbay.app", "custom_domain": true }],
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true
+  }
+}

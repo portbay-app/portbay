@@ -1,3 +1,8 @@
+---
+title: PortBay Stack Recipes — One-Step Project Configuration
+description: Use PortBay stack recipes to register Laravel, Next.js, Vite, Symfony, and more in one MCP tool call — pre-filled PHP version, document root, HTTPS, and database hints.
+---
+
 # Stack Recipes
 
 A recipe is a named blueprint that configures a project's framework type, PHP version, document root, and HTTPS setting in one step. Pass a recipe id to `portbay_setup_from_recipe` and PortBay applies the blueprint to an existing folder deterministically — no model or guesswork on the PortBay side.

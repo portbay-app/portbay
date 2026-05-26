@@ -1,0 +1,68 @@
+name: Deploy docs (Cloudflare)
+
+# Publishes the VitePress docs to docs.portbay.app on Cloudflare. Runs
+# alongside the GitHub Pages deploy (docs.yml) — Pages stays as a mirror,
+# Cloudflare serves the canonical docs.portbay.app custom domain.
+#
+# Requires repo secrets CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID (same as
+# the web-simulator deploy). The token needs Workers Scripts:Edit and the
+# portbay.app zone's DNS:Edit so wrangler can provision the custom domain.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs-site/**
+      - wrangler.docs.jsonc
+      - package.json
+      - pnpm-lock.yaml
+      - .github/workflows/deploy-docs-cloudflare.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-docs-cloudflare-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10"
+
+jobs:
+  deploy:
+    name: docs.portbay.app
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: docs-portbay-app
+      url: https://docs.portbay.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build docs (root base)
+        run: pnpm docs:build
+        env:
+          DOCS_BASE: "/"
+
+      - name: Deploy docs to Cloudflare
+        run: pnpm exec wrangler deploy -c wrangler.docs.jsonc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

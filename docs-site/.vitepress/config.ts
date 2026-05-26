@@ -9,9 +9,15 @@ export default defineConfig({
   base,
   cleanUrls: true,
   lastUpdated: true,
+  sitemap: {
+    hostname: "https://docs.portbay.app",
+  },
   head: [
+    ["link", { rel: "icon", type: "image/png", href: "/favicon.png" }],
+    ["link", { rel: "apple-touch-icon", sizes: "180x180", href: "/apple-touch-icon.png" }],
     ["meta", { name: "theme-color", content: "#0b0f14" }],
     ["meta", { property: "og:type", content: "website" }],
+    ["meta", { property: "og:site_name", content: "PortBay" }],
     ["meta", { property: "og:title", content: "PortBay Documentation" }],
     [
       "meta",
@@ -21,12 +27,25 @@ export default defineConfig({
           "Install, configure, and operate PortBay for local projects, HTTPS, runtime services, and troubleshooting.",
       },
     ],
+    ["meta", { property: "og:url", content: "https://docs.portbay.app/" }],
+    ["meta", { property: "og:image", content: "https://docs.portbay.app/screenshots/projects-dark.png" }],
+    ["meta", { name: "twitter:card", content: "summary_large_image" }],
+    ["meta", { name: "twitter:title", content: "PortBay Documentation" }],
+    [
+      "meta",
+      {
+        name: "twitter:description",
+        content:
+          "Install, configure, and operate PortBay for local projects, HTTPS, runtime services, and troubleshooting.",
+      },
+    ],
+    ["meta", { name: "twitter:image", content: "https://docs.portbay.app/screenshots/projects-dark.png" }],
   ],
   markdown: {
     lineNumbers: true,
   },
   themeConfig: {
-    logo: { src: "/logo.svg", alt: "PortBay" },
+    logo: { src: "/portbay-logo.png", alt: "PortBay" },
     siteTitle: "PortBay",
     search: {
       provider: "local",
@@ -36,6 +55,7 @@ export default defineConfig({
       { text: "Guides", link: "/guides/" },
       { text: "Reference", link: "/reference/cli" },
       { text: "AI Agents", link: "/agents/" },
+      { text: "Compare", link: "/comparisons/" },
       { text: "Architecture", link: "/architecture/" },
       { text: "Pro", link: "/pro/" },
       { text: "Troubleshooting", link: "/troubleshooting/" },
@@ -96,6 +116,19 @@ export default defineConfig({
         items: [
           { text: "Overview", link: "/agents/" },
           { text: "Tool Reference", link: "/agents/tools" },
+        ],
+      },
+      {
+        text: "Comparisons",
+        items: [
+          { text: "Overview", link: "/comparisons/" },
+          { text: "vs Laravel Herd", link: "/comparisons/portbay-vs-laravel-herd" },
+          { text: "vs ServBay", link: "/comparisons/portbay-vs-servbay" },
+          { text: "vs MAMP / XAMPP", link: "/comparisons/portbay-vs-mamp" },
+          { text: "vs Docker / OrbStack", link: "/comparisons/portbay-vs-docker" },
+          { text: "vs Laravel Valet", link: "/comparisons/portbay-vs-laravel-valet" },
+          { text: "vs DDEV", link: "/comparisons/portbay-vs-ddev" },
+          { text: "vs Local", link: "/comparisons/portbay-vs-local" },
         ],
       },
       {

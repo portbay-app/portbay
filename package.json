@@ -28,6 +28,8 @@
     "build:web": "PUBLIC_SIMULATOR=true vite build",
     "preview:web": "pnpm build:web && pnpm exec sirv build --single --host 127.0.0.1 --port 4318",
     "deploy:web": "pnpm build:web && npx wrangler deploy",
+    "deploy:docs": "DOCS_BASE=/ pnpm docs:build && npx wrangler deploy -c wrangler.docs.jsonc",
+    "deploy:all": "pnpm deploy:web && pnpm deploy:docs",
     "tauri": "tauri"
   },
   "license": "AGPL-3.0-only",

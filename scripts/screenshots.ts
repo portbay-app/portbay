@@ -21,7 +21,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { test, expect, type Browser } from "@playwright/test";
+import { test, expect, type Browser, type Page } from "@playwright/test";
 
 import { DEMO_FIXTURES } from "../src/lib/simulator/fixtures";
 import { installSimulatorIpcBrowser } from "../src/lib/simulator/mockIpc";
@@ -55,10 +55,29 @@ const SHOTS: Shot[] = [
   { name: "services", route: "/services", title: "PortBay — Services" },
   { name: "domains", route: "/domains", title: "PortBay — Domains" },
   { name: "sandbox", route: "/sandbox", title: "PortBay — Sandbox" },
+  { name: "certificates", route: "/certificates", title: "PortBay — Certificates" },
+  { name: "web-servers", route: "/web-servers", title: "PortBay — Web Servers" },
+  { name: "tunnels", route: "/tunnels", title: "PortBay — Public Tunnels" },
+  { name: "logs", route: "/logs", title: "PortBay — Logs" },
+  { name: "settings", route: "/settings", title: "PortBay — Settings" },
 ];
 
 /** Kill animations/transitions so captures are deterministic. */
 const FREEZE_CSS = `*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;transition-duration:0s!important;transition-delay:0s!important;caret-color:transparent!important}`;
+
+/**
+ * Wait for the transient cold-start "N tool(s) need(s) setup" banner to clear.
+ * The sidecar store boots from a `loading…` placeholder that momentarily reads
+ * as "mkcert CA needs setup" until the first `sidecar_status` poll returns the
+ * healthy demo fixtures. We never want that amber banner in a marketing shot.
+ * Best-effort + bounded: if no banner ever appears, this returns immediately.
+ */
+async function dismissSetupBanner(page: Page): Promise<void> {
+  await page
+    .getByText(/needs? setup:/i)
+    .waitFor({ state: "detached", timeout: 6_000 })
+    .catch(() => {});
+}
 
 /** Capture a single route in a given theme; returns the raw PNG buffer. */
 async function capture(
@@ -84,11 +103,16 @@ async function capture(
   // route shows "All Systems Operational" instead of the cold-start setup nag.
   await page.goto(`${baseURL}/`, { waitUntil: "networkidle" });
   await page.waitForTimeout(300);
+  // Let the singleton sidecar poll settle to healthy on the dashboard before
+  // navigating — the store persists across client-side nav, so clearing the
+  // cold-start banner here keeps every captured route clean.
+  await dismissSetupBanner(page);
   if (route !== "/") {
     await page.locator(`a[href="${route}"]`).first().click();
     await page.waitForURL(`**${route}`);
     await page.waitForLoadState("networkidle");
   }
+  await dismissSetupBanner(page);
   await page.addStyleTag({ content: FREEZE_CSS });
   await page.waitForTimeout(500); // fonts + final layout settle
   const buf = await page.screenshot({ type: "png" });
@@ -138,7 +162,9 @@ async function frame(
 }
 
 test("generate screenshots", async ({ browser, baseURL }) => {
-  test.setTimeout(180_000);
+  // Generous budget: the whole shot list runs in one test, ~10s per capture
+  // × shots × themes. Bump this when adding shots so it never starves.
+  test.setTimeout(600_000);
   await mkdir(OUT_DIR, { recursive: true });
 
   const filter = process.env.SHOT;

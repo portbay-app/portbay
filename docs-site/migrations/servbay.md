@@ -1,3 +1,8 @@
+---
+title: Migrate from ServBay to PortBay — Sites, PHP & DNS
+description: Move ServBay sites to PortBay by matching hostname, PHP version, document root, and web server settings — covers Caddy, Nginx, and Apache PHP-FPM project types.
+---
+
 # Migrating From ServBay
 
 This is a release placeholder. The importer exists in the codebase, but the public migration workflow will be documented after the import UX is finalized.

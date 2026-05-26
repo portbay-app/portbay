@@ -1,3 +1,8 @@
+---
+title: Sandboxed Projects — Run Untrusted Code Safely in PortBay
+description: PortBay Pro's sandbox mode wraps external projects in a macOS sandbox-exec profile — restrict file writes and network access before you commit to running code locally.
+---
+
 # Sandboxed Projects
 
 Sandbox mode runs a project's process inside a macOS `sandbox-exec` profile that PortBay generates and manages. It is designed for one specific scenario: you have received a project from an external source — a GitHub URL, a share link, an unfamiliar repository — and you want to inspect it running before you commit to running it natively on your machine.

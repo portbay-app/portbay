@@ -1,3 +1,8 @@
+---
+title: Environment Variables in PortBay — Registry & Portfiles
+description: Store per-project environment variables in the PortBay registry, keep secrets out of committed files using .portbay.json templates, and share safe defaults across teammates.
+---
+
 # Environment Variables
 
 PortBay stores per-project environment variables in the registry and passes them to the project process when Process Compose launches it.

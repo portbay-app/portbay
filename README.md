@@ -1,29 +1,31 @@
 <div align="center">
 
-<img src="src/lib/assets/portbay-logo.png" alt="PortBay" width="100" height="100" />
-
-# PortBay
+<h1>
+  <img src="src/lib/assets/portbay-logo.png" alt="" height="112" valign="middle" />
+  &nbsp;PortBay
+</h1>
 
 **A lightweight, open-source manager for your local development environment.**
 
 One Play button per project. One Stop that always works. Real HTTPS hostnames,
 no container stack, no hand-rolled proxy and DNS config.
 
-[Documentation](https://portbay-app.github.io/portbay/) ·
+[Documentation](https://docs.portbay.app) ·
 [Architecture](./docs/ARCHITECTURE.md) ·
 [Roadmap](#roadmap) ·
 [Contributing](./CONTRIBUTING.md)
 
 `macOS` · Built with Tauri 2 · Rust · Svelte 5
 
-> **Status:** pre-1.0, in active development. The core runs; binaries and a
-> general-use release are on the way. See the [roadmap](#roadmap).
+> **Status:** released for macOS (Apple Silicon). Signed, notarized builds ship
+> via DMG and Homebrew — see [Getting started](#getting-started). Linux and
+> Windows are on the [roadmap](#roadmap).
 
 </div>
 
 <div align="center">
 
-<a href="https://try.portbay.app"><img src="docs-site/public/screenshots/projects.png" alt="PortBay managing local projects" width="840" /></a>
+<a href="https://try.portbay.app"><img src="docs-site/public/screenshots/projects-dark.png" alt="PortBay managing local projects" width="840" /></a>
 
 <sub><b><a href="https://try.portbay.app">▶ Try it in your browser</a></b> — the real interface with sample projects, no install required.</sub>
 
@@ -53,6 +55,8 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 - **Real HTTPS hostnames** like `https://myproject.test`, issued and trusted locally.
 - **Wildcard `.test` routing** via a bundled DNS resolver — no per-project hosts edits.
 - **Reverse-proxy routing** managed for you through [Caddy](https://caddyserver.com)'s admin API.
+- **Bundled databases** — PortBay-supervised MySQL, MariaDB, Postgres, and Redis.
+- **Public sharing** — expose any project over a [Cloudflare](https://www.cloudflare.com/products/tunnel/) tunnel with one click.
 - **A declarative registry** — projects live in JSON; the daemon reconciles reality to match.
 - **Live logs, status, and metrics** per project, plus a macOS menu-bar mode.
 
@@ -63,10 +67,12 @@ not the source of truth.
 
 |  |  |
 | :--: | :--: |
-| **HTTP request inspector** — live Caddy traffic | **Bundled databases** — MySQL, Postgres, Redis |
-| ![PortBay HTTP inspector](docs-site/public/screenshots/inspector.png) | ![PortBay databases](docs-site/public/screenshots/databases.png) |
-| **Languages** — detect-first runtimes | **Local DNS** — wildcard `.test` resolution |
-| ![PortBay languages](docs-site/public/screenshots/languages.png) | ![PortBay DNS](docs-site/public/screenshots/dns.png) |
+| **HTTP request inspector** — live Caddy traffic | **Bundled databases** — MySQL, MariaDB, Postgres, Redis |
+| ![PortBay HTTP inspector](docs-site/public/screenshots/inspector-dark.png) | ![PortBay databases](docs-site/public/screenshots/databases-dark.png) |
+| **Web servers** — per-project Caddy routes | **Public tunnels** — share over Cloudflare |
+| ![PortBay web servers](docs-site/public/screenshots/web-servers-dark.png) | ![PortBay public tunnels](docs-site/public/screenshots/tunnels-dark.png) |
+| **Certificates** — locally-trusted HTTPS | **Local DNS** — wildcard `.test` resolution |
+| ![PortBay certificates](docs-site/public/screenshots/certificates-dark.png) | ![PortBay DNS](docs-site/public/screenshots/dns-dark.png) |
 
 ## How it compares
 
@@ -90,6 +96,15 @@ zoo. It's free and open source (AGPL-3.0); an optional, pay-what-you-want
 pull request — funds the project and unlocks hosted multi-device sync and a few
 power-user features. No subscription, and nothing you can't build yourself.
 
+For head-to-head breakdowns, see the in-depth comparisons — PortBay vs
+[Laravel Herd](https://docs.portbay.app/comparisons/portbay-vs-laravel-herd),
+[ServBay](https://docs.portbay.app/comparisons/portbay-vs-servbay),
+[MAMP](https://docs.portbay.app/comparisons/portbay-vs-mamp),
+[Docker](https://docs.portbay.app/comparisons/portbay-vs-docker),
+[Valet](https://docs.portbay.app/comparisons/portbay-vs-laravel-valet),
+[DDEV](https://docs.portbay.app/comparisons/portbay-vs-ddev), and
+[Local](https://docs.portbay.app/comparisons/portbay-vs-local).
+
 ## How it works
 
 ```
@@ -107,8 +122,24 @@ principles are in [`docs/UX_DESIGN.md`](./docs/UX_DESIGN.md).
 
 ## Getting started
 
-A signed, downloadable build is coming with the first tagged release. Until then,
-run it from source.
+PortBay ships as a signed, notarized macOS app for Apple Silicon (macOS 11+).
+
+**Install with Homebrew:**
+
+```bash
+brew tap portbay-app/portbay
+brew install --cask portbay
+```
+
+**Or download the DMG:** grab the latest `PortBay-macos-arm64.dmg` from the
+[releases page](https://github.com/portbay-app/portbay/releases/latest), open it,
+and drag **PortBay.app** into Applications. Full install notes — uninstall,
+requirements, and Gatekeeper details — are in the
+[install guide](https://docs.portbay.app/getting-started/install).
+
+### Run from source
+
+For contributors, or anyone who'd rather build it themselves.
 
 **Prerequisites:** [Rust](https://rustup.rs), [pnpm](https://pnpm.io), and the
 Xcode command-line tools.
@@ -145,9 +176,9 @@ pnpm docs:build
 ## Roadmap
 
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, CLI. *Working.*
-- **GUI** — dashboard, project lifecycle, logs, metrics, certificates, DNS, databases. *In progress.*
-- **Release** — signed/notarized DMG, auto-update, first tagged version. *Next.*
-- **Platforms** — Intel + Linux, then Windows.
+- **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases. *Working.*
+- **Release** — signed/notarized DMG, Homebrew cask, and auto-update. *Shipped.*
+- **Platforms** — macOS Apple Silicon today; Intel + Linux, then Windows.
 
 ## Contributing
 

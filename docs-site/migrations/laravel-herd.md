@@ -1,3 +1,8 @@
+---
+title: Migrate from Laravel Herd to PortBay
+description: Move your Laravel Herd projects to PortBay — capture hostnames, PHP versions, certificates, and worker commands, then map them to PortBay's PHP registry format.
+---
+
 # Migrating From Laravel Herd
 
 This is a release placeholder. Full Herd import documentation will land after the import card is complete.

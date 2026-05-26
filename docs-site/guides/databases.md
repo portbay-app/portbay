@@ -1,3 +1,8 @@
+---
+title: Local Databases with PortBay — MySQL, Postgres, Redis & More
+description: Provision and manage local MySQL, MariaDB, PostgreSQL, Redis, MongoDB, and Memcached instances with PortBay — isolated data dirs, auto-start, and project env injection.
+---
+
 # Databases
 
 PortBay can provision, configure, and supervise local database instances on your machine. Each instance gets an isolated data directory, an engine-specific config file, and a dedicated port — all managed through Process Compose, the same supervision layer that runs your dev servers. Supported engines are MySQL, MariaDB, PostgreSQL, Redis, MongoDB, and Memcached. Instances can be linked to projects, which injects connection env vars (`DATABASE_URL`, `DB_*`) into the linked project's process on every start.

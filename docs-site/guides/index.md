@@ -1,3 +1,8 @@
+---
+title: PortBay Guides — Day-to-Day Operations
+description: "Guides for running projects with PortBay: HTTPS routing, PHP setup, custom domain suffixes, environment variables, project groups, and CLI usage."
+---
+
 # Guides
 
 These guides cover day-to-day operations once PortBay is installed.

@@ -1,3 +1,8 @@
+---
+title: PortBay Tauri Capabilities & Allowed Sidecars
+description: The Tauri 2 capability grants PortBay's main window needs — shell execute, sidecar spawn, dialog, and opener — and the exact sidecar binaries the app is permitted to run.
+---
+
 # Capabilities
 
 PortBay is a Tauri 2 app. The main window receives only the capabilities it needs for local development control.

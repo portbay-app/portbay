@@ -1,3 +1,8 @@
+---
+title: Contributing to PortBay — Guidelines & Feedback
+description: How to report bugs and submit feedback to PortBay before the public contribution workflow opens. Includes what to include in a useful bug report.
+---
+
 # Contributing
 
 PortBay is not open to external contributions yet. The project is still in early validation and release-readiness work.

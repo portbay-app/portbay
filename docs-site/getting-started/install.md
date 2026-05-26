@@ -1,3 +1,8 @@
+---
+title: Install PortBay — Homebrew, DMG & Build from Source
+description: Install PortBay on macOS with a single Homebrew command, download the signed DMG, or build from source with Tauri — full requirements and sidecar fetch steps included.
+---
+
 # Install
 
 PortBay ships as a signed macOS app. Developers can install the current release with Homebrew or download the DMG from GitHub Releases.

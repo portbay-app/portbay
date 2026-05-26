@@ -1,10 +1,12 @@
 ---
 layout: home
+title: PortBay — Local Dev Environment for macOS
+description: Run Node, PHP, and static sites locally with real HTTPS .test hostnames, Caddy reverse proxy, managed DNS, bundled databases, and zero /etc/hosts editing.
 
 hero:
   name: PortBay
-  text: Local development, managed as a small native control plane.
-  tagline: Register projects once, run them predictably, route them through local HTTPS hostnames, and keep the sidecars visible.
+  text: One Play button per project.
+  tagline: Run Node, PHP, and static sites with real HTTPS hostnames, managed DNS, and a reverse proxy you never touch. No containers, no hand-edited /etc/hosts.
   actions:
     - theme: brand
       text: Get started
@@ -46,29 +48,25 @@ features:
 
 ## Current Release State
 
-PortBay is pre-MVP software for macOS. The current codebase is useful for development and validation, but it is not yet packaged as a general-availability product. The docs are written against the active Phase 3 and Phase 4 implementation.
+PortBay is released for macOS (Apple Silicon). Signed, notarized builds ship via the DMG and Homebrew cask; Linux and Windows are still ahead. The docs track the current implementation.
 
 | Area | Status |
 | --- | --- |
-| macOS app | In active development |
-| Linux and Windows | Deferred |
-| Homebrew, notarized builds | Not available yet |
-| Process Compose sidecar | Bundled for local development |
-| Caddy, mkcert, Mailpit, cloudflared | Fetched per checkout for development |
+| macOS app (Apple Silicon) | Available — signed & notarized |
+| Linux and Windows | On the roadmap |
+| Homebrew cask, DMG, auto-update | Available |
+| Process Compose sidecar | Bundled in the app and for local development |
+| Caddy, mkcert, Mailpit, cloudflared | Bundled in the app; fetched per checkout when building from source |
 | Searchable public docs | This site |
 
 ## The Short Version
 
 ```bash
-pnpm install
-./scripts/fetch-caddy.sh
-./scripts/fetch-mkcert.sh
-./scripts/fetch-mailpit.sh
-./scripts/fetch-cloudflared.sh
-pnpm tauri dev
+brew tap portbay-app/portbay
+brew install --cask portbay
 ```
 
-Then add a project, choose its type and port, and use the row actions to start it, open its local URL, inspect logs, or stop it.
+Then add a project, choose its type and port, and use the row actions to start it, open its local URL, inspect logs, or stop it. Prefer to build it yourself? See [Install → Build From Source](/getting-started/install).
 
 ## Where To Go
 
@@ -77,3 +75,4 @@ Then add a project, choose its type and port, and use the row actions to start i
 - Running PHP projects: read [PHP Setup](/guides/php-setup).
 - Debugging failures: use [Troubleshooting](/troubleshooting/).
 - Automating from a terminal: use [CLI Usage](/guides/cli-usage) and the [CLI Reference](/reference/cli).
+- Choosing a tool: see how PortBay [compares to Herd, ServBay, Docker, and more](/comparisons/).

@@ -1,3 +1,8 @@
+---
+title: PortBay Project Groups — Start & Stop Related Services Together
+description: Group related PortBay projects — frontend, API, and workers — so you can start, stop, or restart a full stack with a single action from the GUI or command palette.
+---
+
 # Project Groups
 
 Groups cluster projects so they can be operated as a unit. A group is useful when a feature requires a frontend, API, worker, and local service to move together.
