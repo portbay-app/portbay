@@ -37,6 +37,7 @@ npm-debug.log*
 # Secrets, credentials, and private config — never commit these. Proprietary
 # Cloud/Pro configuration belongs in the private portbay-cloud repo, not here.
 secrets/
+.secrets/
 .secrets-local/
 *.secret
 *.secret.*

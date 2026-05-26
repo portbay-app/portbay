@@ -76,7 +76,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI3ODJDOEJBQUU0OEMxNzAKUldSd3dVaXV1c2lDSnpqRXlhWFI1c0hEaXVReTZhcU1EWTdLdWl3Q0VzL1Z3VmluYzYzRnBUZUQK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNBNEI4QjdFQzA4NkFBQjUKUldTMXFvYkFmb3RMT3J1MlZFdm51bDVlb3ZOU0cyNy94d0MvNjRKWGQ4eDRWUkxWR1poZ3VZMTgK",
       "endpoints": [
         "https://github.com/portbay-app/portbay/releases/latest/download/latest.json"
       ]
