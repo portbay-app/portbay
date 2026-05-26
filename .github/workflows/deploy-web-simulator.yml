@@ -14,7 +14,8 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  NODE_VERSION: "20"
+  # wrangler >= 4 requires Node.js >= 22; Node 20 is also deprecated on runners.
+  NODE_VERSION: "22"
   PNPM_VERSION: "10"
 
 jobs:
