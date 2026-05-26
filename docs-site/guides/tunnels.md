@@ -2,6 +2,8 @@
 
 Share a local project on a public URL — no account, no port-forwarding, no firewall rules.
 
+![PortBay public tunnels](/screenshots/tunnels.png)
+
 ## Concept
 
 Cloudflare offers a free anonymous tunneling tier via `trycloudflare.com`. PortBay bundles `cloudflared` as a sidecar binary and spawns one child process per project you choose to share. Once `cloudflared` connects to Cloudflare's edge, it prints an assigned URL to stdout (e.g. `https://random-name.trycloudflare.com`). PortBay tails that output, extracts the URL, and shows it in the Tunnels view.

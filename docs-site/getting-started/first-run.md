@@ -15,7 +15,7 @@ The first run should establish three things: the registry location, the sidecar 
 
 ## What To Check
 
-1. Open the app with `pnpm tauri dev`.
+1. Launch PortBay (the installed app, or `pnpm tauri dev` from a source checkout).
 2. Open Settings and confirm the UI theme, density, and sidecar status controls render.
 3. Open the Services view and confirm sidecar rows are visible.
 4. Open Projects and confirm the empty state renders without errors.

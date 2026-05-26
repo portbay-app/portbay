@@ -1,6 +1,8 @@
 # Log Viewer
 
-The log viewer is a full-screen modal that shows output from a single project's process. It supports static snapshots and live streaming.
+The log viewer shows output from a single project's process. It supports static snapshots and live streaming.
+
+![PortBay log viewer](/screenshots/logs.png)
 
 ## Opening Logs
 
