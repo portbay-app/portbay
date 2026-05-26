@@ -51,6 +51,7 @@ pub(super) async fn reconcile(
         &php_fpm_specs,
         &db_specs,
         &web_specs,
+        state.preferences_snapshot().store_logs_locally,
     ) {
         Ok(y) => y,
         Err(e) => return StepOutcome::failed(format!("yaml generation: {e}")),
@@ -81,7 +82,10 @@ pub(super) async fn reconcile(
 /// after Mailpit comes up will regenerate the YAML with the
 /// injections and restart PC once.
 pub fn build_initial_yaml(reg: &Registry, logs_dir: &Path) -> Result<String, String> {
-    process_compose::config::to_yaml(reg, logs_dir, None, &[], &[], &[]).map_err(|e| e.to_string())
+    // Cold boot: default to writing logs (true). The first reconcile tick applies
+    // the user's actual `store_logs_locally` setting.
+    process_compose::config::to_yaml(reg, logs_dir, None, &[], &[], &[], true)
+        .map_err(|e| e.to_string())
 }
 
 /// The PortBay app-data directory — `<logs_dir>/..`. Used to derive
@@ -355,9 +359,9 @@ mod tests {
         b.add_project(next_project("y", 3011)).unwrap();
         b.add_project(next_project("x", 3010)).unwrap();
         let y_a =
-            process_compose::config::to_yaml(&a, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+            process_compose::config::to_yaml(&a, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         let y_b =
-            process_compose::config::to_yaml(&b, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+            process_compose::config::to_yaml(&b, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         // YAML emit may be ordering-stable already; we don't depend on
         // that. We do depend on the hash being deterministic given a
         // string input.
@@ -372,11 +376,11 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
         let h1 = hash_string(
-            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap(),
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap(),
         );
         r.add_project(next_project("b", 3011)).unwrap();
         let h2 = hash_string(
-            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap(),
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap(),
         );
         assert_ne!(h1, h2);
     }

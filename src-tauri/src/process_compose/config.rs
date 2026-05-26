@@ -58,10 +58,36 @@ struct PcProcess {
 
     log_location: String,
 
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    /// Process Compose's `types.Environment` is a *sequence* of `KEY=value`
+    /// strings, not a YAML map — feeding it a map fails the config parse
+    /// fatally (`cannot unmarshal !!map into types.Environment`) and the daemon
+    /// exits on boot. We keep a `BTreeMap` internally (sorted, deduped by key)
+    /// and serialize it into the list form PC expects.
+    #[serde(
+        skip_serializing_if = "BTreeMap::is_empty",
+        serialize_with = "serialize_env_as_kv_list"
+    )]
     environment: BTreeMap<String, String>,
 
     shutdown: PcShutdown,
+}
+
+/// Serialize an environment map as the `["KEY=value", …]` sequence Process
+/// Compose's schema requires. Values may themselves contain `=`; PC splits on
+/// the first one, so no escaping is needed.
+fn serialize_env_as_kv_list<S>(
+    env: &BTreeMap<String, String>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(env.len()))?;
+    for (k, v) in env {
+        seq.serialize_element(&format!("{k}={v}"))?;
+    }
+    seq.end()
 }
 
 #[derive(Debug, Serialize)]
@@ -198,6 +224,9 @@ pub struct WebServerSpec {
 /// Database connection env vars are also injected into any project the
 /// instance is linked to (read from `reg.databases`), the same way Mailpit
 /// env is injected — project-level `env` always overrides.
+/// `write_logs` is the user's "Store logs locally" master switch. When `false`,
+/// every process's (and the global) `log_location` is pointed at `/dev/null` so
+/// no per-process logs are persisted; retention then has nothing to prune.
 pub fn to_yaml(
     reg: &Registry,
     logs_dir: &Path,
@@ -205,6 +234,7 @@ pub fn to_yaml(
     php_fpm_specs: &[PhpFpmSpec],
     db_specs: &[DatabaseDaemonSpec],
     web_specs: &[WebServerSpec],
+    write_logs: bool,
 ) -> Result<String> {
     let mut processes = BTreeMap::new();
     for p in &reg.projects {
@@ -233,10 +263,22 @@ pub fn to_yaml(
         );
     }
 
+    // Honour the "Store logs locally" switch: when off, route every process's
+    // log (and the global one) to /dev/null so nothing is persisted.
+    if !write_logs {
+        for proc in processes.values_mut() {
+            proc.log_location = "/dev/null".to_string();
+        }
+    }
+
     let global_log = logs_dir.join("process-compose.log");
     let doc = PcDocument {
         version: "0.5",
-        log_location: global_log.to_str(),
+        log_location: if write_logs {
+            global_log.to_str()
+        } else {
+            Some("/dev/null")
+        },
         log_level: "info",
         keep_project: true,
         processes,
@@ -562,7 +604,7 @@ mod tests {
     #[test]
     fn empty_registry_produces_minimal_yaml() {
         let r = Registry::new("test");
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         assert!(yaml.contains("version: '0.5'") || yaml.contains("version: \"0.5\""));
         assert!(yaml.contains("processes: {}"));
     }
@@ -571,7 +613,7 @@ mod tests {
     fn next_project_produces_process_with_http_probe() {
         let mut r = Registry::new("test");
         r.add_project(next_project("marketing-site", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[], true).unwrap();
         assert!(
             yaml.contains("marketing-site"),
             "process name missing: {yaml}"
@@ -599,12 +641,13 @@ mod tests {
         p.sandbox = Some(SandboxConfig::enabled(SandboxNetworkPolicy::Outbound, true));
         r.add_project(p).unwrap();
 
-        let yaml = to_yaml(&r, Path::new("/tmp/portbay/logs"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/portbay/logs"), None, &[], &[], &[], true).unwrap();
 
         assert!(yaml.contains("sandbox-exec -f"));
         assert!(yaml.contains("untrusted-app.sb"));
-        assert!(yaml.contains("PORTBAY_SANDBOX: '1'"));
-        assert!(yaml.contains("PORTBAY_SANDBOX_NETWORK: outbound"));
+        // Environment is emitted as a `KEY=value` sequence, not a YAML map.
+        assert!(yaml.contains("PORTBAY_SANDBOX=1"));
+        assert!(yaml.contains("PORTBAY_SANDBOX_NETWORK=outbound"));
     }
 
     #[test]
@@ -612,7 +655,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(php_project("api-gateway")).unwrap();
         r.add_project(next_project("marketing-site", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         assert!(!yaml.contains("api-gateway"));
         assert!(yaml.contains("marketing-site"));
     }
@@ -632,7 +675,7 @@ mod tests {
         });
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         assert!(
             yaml.contains("pnpm --filter @bookslash/web dev"),
             "expected the derived filter command in:\n{yaml}"
@@ -648,7 +691,7 @@ mod tests {
         p.env.insert("NODE_ENV".into(), "development".into());
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         assert!(yaml.contains("DATABASE_URL"));
         assert!(yaml.contains("postgres://x"));
         assert!(yaml.contains("NODE_ENV"));
@@ -675,16 +718,57 @@ mod tests {
         });
         r.add_project(p).unwrap();
 
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        let env = &doc["processes"]["runtime-path"]["environment"];
-        let path = env["PATH"].as_str().unwrap();
+        // `environment` is a sequence of `KEY=value` strings (PC's schema), so
+        // index it as such rather than as a map.
+        let env = env_kv_map(&doc["processes"]["runtime-path"]["environment"]);
+        let path = env.get("PATH").expect("PATH entry");
         assert!(
             path.starts_with(&bin_dir.to_string_lossy().to_string()),
             "expected runtime bin dir first in PATH, got {path}"
         );
-        assert_eq!(env["PORTBAY_RUNTIME_LANG"].as_str(), Some("node"));
-        assert_eq!(env["PORTBAY_RUNTIME_VERSION"].as_str(), Some("22.1.0"));
+        assert_eq!(env.get("PORTBAY_RUNTIME_LANG").map(String::as_str), Some("node"));
+        assert_eq!(
+            env.get("PORTBAY_RUNTIME_VERSION").map(String::as_str),
+            Some("22.1.0")
+        );
+    }
+
+    /// Parse a generated `environment` YAML node (a `["KEY=value", …]`
+    /// sequence) back into a lookup map for assertions.
+    fn env_kv_map(node: &serde_yaml::Value) -> std::collections::HashMap<String, String> {
+        node.as_sequence()
+            .expect("environment must serialize as a sequence")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter_map(|s| s.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn environment_is_emitted_as_kv_sequence_not_a_map() {
+        // Regression guard: PC v1.x rejects a YAML map for `environment` with
+        // `cannot unmarshal !!map into types.Environment`, which kills the
+        // daemon on boot. The generated node must be a sequence of `KEY=value`.
+        let mut p = next_project("env-shape", 3010);
+        p.env.insert("FOO".into(), "bar".into());
+        p.env.insert("DATABASE_URL".into(), "postgres://u:p@h/db?x=1".into());
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let node = &doc["processes"]["env-shape"]["environment"];
+        assert!(node.is_sequence(), "environment must be a sequence, got: {node:?}");
+        let env = env_kv_map(node);
+        assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+        // A value containing `=` survives intact (split on the first `=` only).
+        assert_eq!(
+            env.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://u:p@h/db?x=1")
+        );
     }
 
     #[test]
@@ -692,10 +776,10 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("withmail", 3010)).unwrap();
         let mail = MailpitEnv::with_smtp_port(1025);
-        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[], &[]).unwrap();
-        assert!(yaml.contains("MAIL_HOST: 127.0.0.1"));
-        assert!(yaml.contains("MAIL_PORT: '1025'") || yaml.contains("MAIL_PORT: \"1025\""));
-        assert!(yaml.contains("MAIL_MAILER: smtp"));
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[], &[], true).unwrap();
+        assert!(yaml.contains("MAIL_HOST=127.0.0.1"));
+        assert!(yaml.contains("MAIL_PORT=1025"));
+        assert!(yaml.contains("MAIL_MAILER=smtp"));
         assert!(yaml.contains("hello@example.local"));
     }
 
@@ -707,17 +791,17 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
         let mail = MailpitEnv::with_smtp_port(1025);
-        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), Some(&mail), &[], &[], &[], true).unwrap();
         // Project's explicit override wins; the default loopback is gone.
-        assert!(yaml.contains("MAIL_HOST: mail.production.test"));
-        assert!(!yaml.contains("MAIL_HOST: 127.0.0.1"));
+        assert!(yaml.contains("MAIL_HOST=mail.production.test"));
+        assert!(!yaml.contains("MAIL_HOST=127.0.0.1"));
     }
 
     #[test]
     fn no_mail_env_leaves_yaml_without_mail_vars() {
         let mut r = Registry::new("test");
         r.add_project(next_project("nomail", 3010)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         assert!(!yaml.contains("MAIL_HOST"));
         assert!(!yaml.contains("MAIL_PORT"));
     }
@@ -728,7 +812,7 @@ mod tests {
         p.readiness = Some(Readiness::Process);
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         assert!(!yaml.contains("readiness_probe"));
     }
 
@@ -737,7 +821,7 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
         r.add_project(next_project("b", 3011)).unwrap();
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         let back: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         // Just confirm structural validity — content was checked above.
         assert!(back.get("processes").is_some());
@@ -764,7 +848,7 @@ mod tests {
                 working_dir: PathBuf::from("/tmp/portbay/php/7.4"),
             },
         ];
-        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &specs, &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &specs, &[], &[], true).unwrap();
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         let procs = &doc["processes"];
 
@@ -801,7 +885,7 @@ mod tests {
             pool_config: PathBuf::from("/x/conf"),
             working_dir: PathBuf::from("/x"),
         };
-        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[spec], &[], &[]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[spec], &[], &[], true).unwrap();
         // The spec inserts AFTER the project loop, so it overwrites —
         // documenting that here. If we later want the project to win,
         // swap the iteration order.
@@ -820,7 +904,7 @@ mod tests {
             port: 9080,
             auto_start: true,
         };
-        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[spec]).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[spec], true).unwrap();
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         let proc = &doc["processes"]["web-nginx-cms"];
         assert_eq!(
