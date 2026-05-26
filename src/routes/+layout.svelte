@@ -14,7 +14,7 @@
 <script lang="ts">
   import "../app.css";
   import type { Snippet } from "svelte";
-  import { goto } from "$app/navigation";
+  import { goto, afterNavigate } from "$app/navigation";
   import { page } from "$app/state";
   import { Sidebar, TopBar, RightRail } from "$lib/components/shell";
   import { ToastHost } from "$lib/components/errors";
@@ -29,7 +29,7 @@
   import FeedbackPrompt from "$lib/components/lifecycle/FeedbackPrompt.svelte";
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { tunnels } from "$lib/stores/tunnels.svelte";
   import { onboarding } from "$lib/stores/onboarding.svelte";
@@ -223,6 +223,43 @@
   // bare <title> (the Tauri window title comes from tauri.conf.json), so these
   // marketing/share tags ship only when PUBLIC_SIMULATOR is set.
   const isSimulator = import.meta.env.PUBLIC_SIMULATOR === "true";
+
+  // ── Rail panel hygiene ─────────────────────────────────────────────────────
+  /** Close every rail panel and clear any dashboard selection. */
+  function closeRailPanels() {
+    if (projectDetailPanel.id !== null) projectDetailPanel.hide();
+    if (addProjectWizard.isOpen) addProjectWizard.hide();
+    if (databases.wizardOpen) databases.hideWizard();
+    if (groupEditor.isOpen) groupEditor.close();
+    if (projects.selectedId !== null) projects.select(null);
+  }
+
+  // (1) Navigating to another page closes any open side panel — a panel is
+  // never carried across routes.
+  afterNavigate((nav) => {
+    if (nav.from && nav.from.url.pathname !== nav.to?.url.pathname) {
+      closeRailPanels();
+    }
+  });
+
+  // (2) Single active panel: opening a higher-precedence panel clears the ones
+  // below it (precedence: create/edit wizards > project detail > dashboard
+  // rail), so closing the top panel never reveals a stale one and panels never
+  // layer or carry state. Writes are untracked so this only reacts to a panel
+  // *opening*, never to its own cleanup.
+  $effect(() => {
+    const anyWizard =
+      addProjectWizard.isOpen || databases.wizardOpen || groupEditor.isOpen;
+    const detailOpen = projectDetailPanel.id !== null;
+    untrack(() => {
+      if (anyWizard) {
+        if (projectDetailPanel.id !== null) projectDetailPanel.hide();
+        if (projects.selectedId !== null) projects.select(null);
+      } else if (detailOpen) {
+        if (projects.selectedId !== null) projects.select(null);
+      }
+    });
+  });
 
   // Same derivation the Settings "Setup required" surface uses, so the banner
   // count and that list can never disagree.

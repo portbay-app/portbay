@@ -636,7 +636,7 @@
        layout) — matches the project detail panel and every other side surface.
        Escape + the header close button dismiss it. -->
   <aside
-    class="h-full w-full bg-surface border-l border-border flex flex-col"
+    class="h-full w-full min-h-0 overflow-hidden bg-surface border-l border-border flex flex-col"
     aria-label="Add Project"
   >
     <header

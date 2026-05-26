@@ -105,7 +105,7 @@
   <!-- In-layout right-side panel (rendered into the grid rail by the root
        layout). Escape + the header close button dismiss it. -->
   <aside
-    class="h-full w-full bg-surface border-l border-border flex flex-col"
+    class="h-full w-full min-h-0 overflow-hidden bg-surface border-l border-border flex flex-col"
     aria-label={groupEditor.mode.kind === "edit" ? "Edit group" : "New group"}
   >
     <header

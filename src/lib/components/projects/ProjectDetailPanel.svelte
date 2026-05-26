@@ -459,7 +459,7 @@
        this into the grid's rail column so it matches the dashboard rail and
        every other page's side-panel language. Escape + the × button close it. -->
   <aside
-    class="h-full w-full bg-surface border-l border-border flex flex-col"
+    class="h-full w-full min-h-0 overflow-hidden bg-surface border-l border-border flex flex-col"
     aria-label="Project detail"
   >
     <!-- Header -->
