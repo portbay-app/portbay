@@ -8,21 +8,22 @@
 @custom-variant light (&:where(.light, .light *));
 
 @theme {
-  /* Surface — semi-transparent so native vibrancy blur shows through */
-  --color-bg: rgb(11 15 20 / 0.82);
-  --color-surface: rgb(22 27 34 / 0.88);
-  --color-surface-2: rgb(28 35 44 / 0.93);
-  --color-border: rgb(42 50 61 / 0.75);
-  --color-border-strong: #3a4453;
+  /* Theme: "ZFlow" (tweakcn) — neutral-gray base, blue primary. Surfaces keep
+     an alpha channel so the native vibrancy blur still shows through. */
+  --color-bg: oklch(0.2046 0 0 / 0.82);
+  --color-surface: oklch(0.2686 0 0 / 0.9);
+  --color-surface-2: oklch(0.3098 0 0 / 0.94);
+  --color-border: oklch(0.3715 0 0 / 0.8);
+  --color-border-strong: oklch(0.44 0 0);
 
   /* Foreground */
-  --color-fg: #e6edf3;
-  --color-fg-muted: #8b949e;
-  --color-fg-subtle: #6e7681;
+  --color-fg: oklch(0.9219 0 0);
+  --color-fg-muted: oklch(0.7155 0 0);
+  --color-fg-subtle: oklch(0.556 0 0);
 
-  /* Accent — used for active nav state, primary actions */
-  --color-accent: #4d9cff;
-  --color-accent-hover: #6bb0ff;
+  /* Accent — ZFlow primary (blue); used for active nav state, primary actions */
+  --color-accent: oklch(0.6225 0.2041 259.9027);
+  --color-accent-hover: oklch(0.69 0.185 259.9027);
   /* Foreground that sits on top of an accent / status fill. White in
      both themes because the status colours are saturated enough to
      swallow anything darker. */
@@ -71,21 +72,21 @@
   body[data-theme="light"] {
     color-scheme: light;
 
-    /* Surface — semi-transparent for vibrancy */
-    --color-bg: rgb(244 246 248 / 0.85);
-    --color-surface: rgb(255 255 255 / 0.90);
-    --color-surface-2: rgb(238 242 246 / 0.92);
-    --color-border: rgb(215 222 231 / 0.80);
-    --color-border-strong: #aeb9c7;
+    /* Surface — ZFlow light; semi-transparent for vibrancy */
+    --color-bg: oklch(0.9846 0.0017 247.84 / 0.85);
+    --color-surface: oklch(1 0 0 / 0.92);
+    --color-surface-2: oklch(0.9665 0.0045 258.32 / 0.94);
+    --color-border: oklch(0.9271 0.0075 260.73 / 0.85);
+    --color-border-strong: oklch(0.855 0.009 260.73);
 
     /* Foreground */
-    --color-fg: #111827;
-    --color-fg-muted: #526071;
-    --color-fg-subtle: #738093;
+    --color-fg: oklch(0.3211 0 0);
+    --color-fg-muted: oklch(0.5471 0.0321 263.29);
+    --color-fg-subtle: oklch(0.65 0.025 263.29);
 
-    /* Accent */
-    --color-accent: #2563eb;
-    --color-accent-hover: #1d4ed8;
+    /* Accent — ZFlow primary (shared with dark); darker hover for light */
+    --color-accent: oklch(0.6225 0.2041 259.9027);
+    --color-accent-hover: oklch(0.54 0.2 259.9027);
     --color-on-accent: #ffffff;
 
     /* Status taxonomy */

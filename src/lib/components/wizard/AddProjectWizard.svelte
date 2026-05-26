@@ -12,7 +12,6 @@
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { trapFocus } from "$lib/actions/trapFocus";
   import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -633,17 +632,11 @@
 <svelte:window onkeydown={onKeydown} />
 
 {#if addProjectWizard.isOpen}
-  <!-- Backdrop is a mouse convenience; Escape (window handler) and the
-       header close button cover keyboard users. -->
-  <div
-    class="fixed inset-0 z-40 bg-bg/60 backdrop-blur-sm"
-    onclick={close}
-    role="presentation"
-  ></div>
-
+  <!-- In-layout right-side panel (rendered into the grid rail by the root
+       layout) — matches the project detail panel and every other side surface.
+       Escape + the header close button dismiss it. -->
   <aside
-    use:trapFocus
-    class="fixed inset-y-0 right-0 z-50 w-[600px] max-w-[90vw] bg-surface border-l border-border shadow-2xl flex flex-col"
+    class="h-full w-full bg-surface border-l border-border flex flex-col"
     aria-label="Add Project"
   >
     <header

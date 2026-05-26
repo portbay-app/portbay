@@ -7,7 +7,6 @@
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { trapFocus } from "$lib/actions/trapFocus";
   import { openUrl } from "$lib/security/openUrl";
 
   import { DashboardCard, Icon, StatusPill } from "$lib/components/atoms";
@@ -456,17 +455,11 @@
 <svelte:window onkeydown={onKeydown} />
 
 {#if project}
-  <!-- Backdrop is a mouse convenience; Escape (window handler) and the
-       header close button cover keyboard users. -->
-  <div
-    class="fixed inset-0 z-40 bg-bg/60 backdrop-blur-sm"
-    onclick={() => !dirty && projectDetailPanel.hide()}
-    role="presentation"
-  ></div>
-
+  <!-- In-layout right-side panel (not a modal overlay): the root layout renders
+       this into the grid's rail column so it matches the dashboard rail and
+       every other page's side-panel language. Escape + the × button close it. -->
   <aside
-    use:trapFocus
-    class="fixed inset-y-0 right-0 z-50 w-[640px] max-w-[90vw] bg-surface border-l border-border shadow-2xl flex flex-col"
+    class="h-full w-full bg-surface border-l border-border flex flex-col"
     aria-label="Project detail"
   >
     <!-- Header -->
@@ -498,7 +491,7 @@
         </button>
       </div>
 
-      <div class="flex items-center gap-1.5">
+      <div class="flex flex-wrap items-center gap-1.5">
         <button
           type="button"
           onclick={openProjectUrl}

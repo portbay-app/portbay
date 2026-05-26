@@ -454,6 +454,20 @@ export function installSimulatorIpcBrowser(payload: {
       }
       case "plugin:event|unlisten":
         return Promise.resolve(null);
+      // Settings → Sync: the demo entitlement is Pro, so SyncSection calls
+      // `sync_state` on mount. The Rust command always returns a valid DTO;
+      // without this the default (null) crashes the Settings render.
+      case "sync_state":
+        return Promise.resolve({
+          signed_in: false,
+          is_pro: true,
+          enabled: false,
+          last_version: 0,
+        });
+      // Settings → Migration: ImportSection iterates the result, so it must be
+      // an array rather than the default null.
+      case "detect_sources":
+        return Promise.resolve([]);
       default:
         // Unknown list_* commands get an empty array (stores expecting arrays
         // don't throw on boot); everything else resolves null.

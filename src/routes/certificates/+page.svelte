@@ -207,7 +207,7 @@
       </p>
     {:else}
       <!-- Certificates table -->
-      <div class="rounded-xl border border-border overflow-hidden">
+      <div class="rounded-xl border border-border bg-surface overflow-hidden">
         <table class="w-full text-left border-collapse">
           <thead>
             <tr

@@ -10,14 +10,18 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import { MacPermissionDialog } from "$lib/components/permissions";
   import { sidecars } from "$lib/stores/sidecars.svelte";
   import { setupRequirements } from "$lib/stores/setup";
   import { safeInvoke } from "$lib/ipc";
 
   const reqs = $derived(setupRequirements(sidecars.value));
   let busy = $state<string | null>(null);
+  // When set, the privileged-helper explainer is shown; the install only runs
+  // once the user confirms there — never silently from the banner click.
+  let permFor = $state<{ key: string; command: string } | null>(null);
 
-  async function runFix(key: string, command: string) {
+  async function executeFix(key: string, command: string) {
     busy = key;
     try {
       await safeInvoke(command);
@@ -27,6 +31,16 @@
     } finally {
       busy = null;
     }
+  }
+
+  function runFix(key: string, command: string) {
+    // The privileged helper install triggers a macOS password prompt + a Login
+    // Items entry. Explain it first via the dialog instead of firing on click.
+    if (command === "install_privileged_helper") {
+      permFor = { key, command };
+      return;
+    }
+    void executeFix(key, command);
   }
 </script>
 
@@ -86,3 +100,11 @@
     </div>
   </section>
 {/if}
+
+<MacPermissionDialog
+  open={permFor !== null}
+  kind="login-items"
+  onConfirm={() =>
+    permFor ? executeFix(permFor.key, permFor.command) : undefined}
+  onClose={() => (permFor = null)}
+/>

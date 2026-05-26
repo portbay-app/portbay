@@ -25,6 +25,7 @@
   import { density, type Density } from "$lib/stores/density.svelte";
   import { theme, type Theme } from "$lib/stores/theme.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
+  import { updater } from "$lib/stores/updater.svelte";
   import type {
     AccentColor,
     DefaultSort,
@@ -1135,6 +1136,59 @@
               </dd>
             </dl>
           </div>
+        </div>
+
+        <!-- Updates -->
+        <div>
+          <h3 class="text-[12px] uppercase tracking-wide text-fg-subtle mb-2">
+            Updates
+          </h3>
+          <p class="text-[11.5px] text-fg-muted mb-2">
+            PortBay checks for new signed releases on launch. Updates are
+            verified against PortBay's public key before they install.
+          </p>
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={updater.status === "checking" ||
+                updater.status === "installing"}
+              onclick={() => updater.check()}
+              class="h-7 px-3 text-[11.5px] rounded-md border border-border
+                     text-fg-muted hover:text-fg hover:bg-surface-2
+                     transition-colors disabled:opacity-50"
+            >
+              {updater.status === "checking"
+                ? "Checking…"
+                : "Check for updates"}
+            </button>
+            {#if updater.available}
+              <button
+                type="button"
+                disabled={updater.status === "installing"}
+                onclick={() => updater.install()}
+                class="h-7 px-3 text-[11.5px] rounded-md bg-accent text-on-accent
+                       hover:bg-accent-hover transition-colors disabled:opacity-50"
+              >
+                {updater.status === "installing"
+                  ? "Installing…"
+                  : `Update to ${updater.available.version}`}
+              </button>
+            {/if}
+          </div>
+          <p class="text-[11px] text-fg-subtle mt-2">
+            {#if updater.status === "uptodate"}
+              You're on the latest version.
+            {:else if updater.status === "available" && updater.available}
+              Version {updater.available.version} is available.
+            {:else if updater.status === "error"}
+              Couldn't check for updates — try again later.
+            {/if}
+            {#if updater.lastChecked}
+              · Last checked {new Date(
+                updater.lastChecked,
+              ).toLocaleString()}
+            {/if}
+          </p>
         </div>
       </div>
     {/if}

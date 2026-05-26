@@ -60,7 +60,7 @@
 
 <header
   data-tauri-drag-region
-  class="relative h-14 shrink-0 flex items-center gap-3 px-4
+  class="relative z-30 h-14 shrink-0 flex items-center gap-3 px-4
          border-b border-border/60 bg-bg/95 backdrop-blur-sm select-none"
 >
   <!--

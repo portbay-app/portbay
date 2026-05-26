@@ -7,7 +7,6 @@
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
-  import { trapFocus } from "$lib/actions/trapFocus";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { groupEditor } from "$lib/stores/groupEditor.svelte";
@@ -103,15 +102,10 @@
 </script>
 
 {#if groupEditor.isOpen}
-  <div
-    class="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm"
-    onclick={cancel}
-    role="presentation"
-  ></div>
+  <!-- In-layout right-side panel (rendered into the grid rail by the root
+       layout). Escape + the header close button dismiss it. -->
   <aside
-    use:trapFocus
-    class="fixed inset-y-0 right-0 z-50 w-[min(440px,100vw)] bg-bg
-           border-l border-border shadow-2xl flex flex-col"
+    class="h-full w-full bg-surface border-l border-border flex flex-col"
     aria-label={groupEditor.mode.kind === "edit" ? "Edit group" : "New group"}
   >
     <header

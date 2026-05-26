@@ -162,7 +162,8 @@
         </p>
       </div>
     {:else}
-      <table class="w-full text-left border-collapse">
+      <div class="rounded-xl border border-border bg-surface overflow-hidden">
+        <table class="w-full text-left border-collapse">
         <thead>
           <tr class="text-[11px] uppercase tracking-wide text-fg-subtle">
             <th class="font-medium py-2 pr-3">Time</th>
@@ -229,7 +230,8 @@
             {/if}
           {/each}
         </tbody>
-      </table>
+        </table>
+      </div>
     {/if}
   </div>
 </div>
