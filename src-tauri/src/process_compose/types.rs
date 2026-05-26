@@ -34,6 +34,15 @@ pub struct Process {
     pub age: u64,
 }
 
+/// How long a process may be up-but-not-yet-ready before we stop calling it
+/// "Starting" and flag it Unhealthy. A cold Next.js/Vite build legitimately
+/// binds its port late — our default TCP readiness probe alone allows ~61s
+/// (initial_delay 1s + period 2s × failure_threshold 30) — so a snap "running
+/// but not passing readiness" error during a normal build is a false alarm.
+/// We stay patient for this window; only past it does persistent not-ready mean
+/// something is actually wrong. `age` from PC is nanoseconds (Go duration).
+const READINESS_GRACE_SECS: u64 = 120;
+
 impl Process {
     /// PortBay's authoritative "actually serving" predicate.
     ///
@@ -73,7 +82,17 @@ impl Process {
             (true, _, true) if self.is_ready == "Starting" || self.is_ready.is_empty() => {
                 ProjectStatus::Starting
             }
-            (true, _, true) => ProjectStatus::Unhealthy,
+            // Running with a readiness probe that hasn't reported "Ready" yet.
+            // During the build/boot window this is normal, so keep showing
+            // Starting; only once the process has been up past the grace window
+            // and still isn't serving do we call it Unhealthy.
+            (true, _, true) => {
+                if self.age / 1_000_000_000 < READINESS_GRACE_SECS {
+                    ProjectStatus::Starting
+                } else {
+                    ProjectStatus::Unhealthy
+                }
+            }
         }
     }
 }
@@ -171,11 +190,16 @@ mod tests {
             proc(true, "Starting", true, "Running", 0).portbay_status(),
             ProjectStatus::Starting
         );
-        // Unhealthy: running, probe present, not Ready, not Starting.
+        // Within the grace window: running, probe present, not yet Ready ⇒
+        // still Starting (a cold build legitimately binds its port late).
         assert_eq!(
             proc(true, "NotReady", true, "Running", 0).portbay_status(),
-            ProjectStatus::Unhealthy
+            ProjectStatus::Starting
         );
+        // Past the grace window and still not Ready ⇒ Unhealthy (genuinely stuck).
+        let mut stale = proc(true, "NotReady", true, "Running", 0);
+        stale.age = (READINESS_GRACE_SECS + 5) * 1_000_000_000;
+        assert_eq!(stale.portbay_status(), ProjectStatus::Unhealthy);
         assert_eq!(
             proc(false, "Completed", true, "Completed", 0).portbay_status(),
             ProjectStatus::Stopped

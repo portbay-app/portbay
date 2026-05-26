@@ -155,6 +155,19 @@ pub async fn update_domain_suffix(
     state: State<'_, AppState>,
     domain_suffix: String,
 ) -> AppResult<DomainMigration> {
+    // Customizing the domain suffix is a Pro feature. Community (anonymous/free)
+    // stays on the default — it already serves the purpose, and a misconfigured
+    // suffix breaks local DNS resolution for exactly the users least equipped to
+    // debug it. Enforced core-side so a disabled UI field can't be bypassed.
+    use crate::entitlements::EntitlementState;
+    if !matches!(
+        crate::entitlements::current().state,
+        EntitlementState::Pro | EntitlementState::ProGrace
+    ) {
+        return Err(AppError::BadInput(
+            "Customizing the domain suffix is a Pro feature — community projects use the default suffix.".into(),
+        ));
+    }
     let mut registry = store::load_or_default(&state.registry_path, &state.domain_suffix)?;
     let old_suffix = registry.domain_suffix.clone();
     let certs_root = certs_root();

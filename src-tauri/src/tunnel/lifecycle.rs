@@ -220,13 +220,24 @@ fn resolve_command(
     app: &AppHandle,
     upstream_url: &str,
 ) -> Result<tauri_plugin_shell::process::Command> {
-    let args = [
-        "tunnel",
-        "--url",
-        upstream_url,
-        "--no-autoupdate",
-        "--no-tls-verify",
-    ];
+    // `--config` is a global flag (before the subcommand) that isolates our
+    // quick tunnel from the user's own ~/.cloudflared/config.yml. A developer
+    // who runs a *named* tunnel has a config.yml whose ingress rules — typically
+    // ending in a catch-all `service: http_status:404` — would otherwise be
+    // applied to our quick tunnel and 404 every request, even though the origin
+    // is healthy. Pointing at an empty PortBay-owned file gives cloudflared a
+    // clean slate. Best-effort: if the file can't be created we fall back to
+    // cloudflared's default discovery rather than failing to start a tunnel.
+    let mut args: Vec<String> = Vec::with_capacity(7);
+    if let Some(cfg) = isolated_config_path() {
+        args.push("--config".into());
+        args.push(cfg.to_string_lossy().into_owned());
+    }
+    args.push("tunnel".into());
+    args.push("--url".into());
+    args.push(upstream_url.into());
+    args.push("--no-autoupdate".into());
+    args.push("--no-tls-verify".into());
 
     if let Ok(sidecar) = app.shell().sidecar("cloudflared") {
         return Ok(sidecar.args(args));
@@ -236,6 +247,22 @@ fn resolve_command(
         .shell()
         .command(path.to_string_lossy().into_owned())
         .args(args))
+}
+
+/// Path to an empty, PortBay-owned cloudflared config, created idempotently in
+/// the app-data dir. An empty file is a valid no-op config; passing it via
+/// `--config` stops cloudflared from loading the user's ~/.cloudflared/config.yml
+/// (and its ingress rules) into our quick tunnels. Returns `None` if the data
+/// dir or file can't be created.
+fn isolated_config_path() -> Option<std::path::PathBuf> {
+    let mut dir = dirs::data_dir()?;
+    dir.push("PortBay");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("cloudflared-empty.yml");
+    if !path.exists() {
+        std::fs::write(&path, b"").ok()?;
+    }
+    Some(path)
 }
 
 /// Parse the public `trycloudflare.com` URL from a cloudflared log
