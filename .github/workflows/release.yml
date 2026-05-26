@@ -26,9 +26,6 @@ env:
   RUST_TOOLCHAIN: "stable"
   NODE_VERSION: "20"
   PNPM_VERSION: "10"
-  # Run JS actions on Node 24 — Node 20 is deprecated on GitHub runners and
-  # forced off after 2026-06-02; opting in now silences the warnings.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-and-sign:
@@ -41,7 +38,7 @@ jobs:
     if: vars.RELEASE_SIGNING_ENABLED == 'true'
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -49,12 +46,12 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: ${{ env.PNPM_VERSION }}
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -121,7 +118,7 @@ jobs:
         run: pnpm tauri build --target aarch64-apple-darwin
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: portbay-macos-arm64
           path: |
@@ -140,10 +137,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: portbay-macos-arm64
           path: artifacts/
@@ -202,7 +199,7 @@ jobs:
           fi
 
       - name: Create release + attach updater manifest
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             artifacts/**/*.dmg
@@ -227,10 +224,10 @@ jobs:
     env:
       TAP_REPO: portbay-app/homebrew-portbay
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: portbay-macos-arm64
           path: artifacts/
@@ -255,7 +252,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout Homebrew tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.TAP_REPO }}
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -297,7 +294,7 @@ jobs:
 
       - name: Create tap update PR
         id: cpr
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-portbay
