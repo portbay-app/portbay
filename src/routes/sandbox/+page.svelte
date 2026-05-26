@@ -20,6 +20,7 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import type { IconName } from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
+  import StackIcon from "$lib/components/atoms/StackIcon.svelte";
 
   import { safeInvoke } from "$lib/ipc";
   import { projects } from "$lib/stores/projects.svelte";
@@ -328,12 +329,11 @@
             <!-- Card header -->
             <div class="flex items-start gap-4 px-5 pt-5 pb-4">
               <span
-                class="shrink-0 grid place-items-center w-11 h-11 rounded-xl {isoTint[
-                  policy.iso
-                ]} {isoText[policy.iso]}"
-                title="Network policy: {policy.label}"
+                class="shrink-0 grid place-items-center w-11 h-11 rounded-xl
+                       bg-surface-2 border border-border"
+                title={p.type}
               >
-                <Icon name={policy.icon} size={20} />
+                <StackIcon type={p.type} size={24} />
               </span>
 
               <div class="min-w-0 flex-1">
@@ -420,21 +420,17 @@
 
             <!-- Network policy banner — the honest "what this actually does" -->
             <div
-              class="mx-5 mb-4 flex items-start gap-2.5 rounded-lg {isoTint[
-                policy.iso
-              ]} px-3 py-2.5"
+              class="mx-5 mb-4 rounded-lg {isoTint[policy.iso]} px-3 py-2.5"
             >
-              <span
-                class="mt-px inline-block w-1.5 h-1.5 rounded-full shrink-0 {isoDot[
-                  policy.iso
-                ]}"
-                aria-hidden="true"
-              ></span>
               <p class="text-[12px] leading-relaxed">
-                <span class="font-semibold {isoText[policy.iso]}">
-                  {policy.label}
-                </span>
-                <span class="text-fg-muted"> — {policy.blurb}</span>
+                <span
+                  class="inline-block w-1.5 h-1.5 rounded-full align-middle mr-2 {isoDot[
+                    policy.iso
+                  ]}"
+                  aria-hidden="true"
+                ></span><span class="font-semibold {isoText[policy.iso]}"
+                  >{policy.label}</span
+                ><span class="text-fg-muted"> — {policy.blurb}</span>
               </p>
             </div>
 

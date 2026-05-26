@@ -186,6 +186,21 @@ jobs:
           echo "Wrote artifacts/latest.json for v$version:"
           cat artifacts/latest.json
 
+      # Attach a version-independent DMG name so the website download link
+      # (releases/latest/download/PortBay-macos-arm64.dmg) always resolves to
+      # the newest build. The versioned DMG is still attached too.
+      - name: Stable-name macOS DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(find artifacts -type f -name '*.dmg' ! -name 'PortBay-macos-arm64.dmg' | head -n 1)"
+          if [ -n "$dmg" ]; then
+            cp "$dmg" artifacts/PortBay-macos-arm64.dmg
+            echo "Copied $(basename "$dmg") -> PortBay-macos-arm64.dmg"
+          else
+            echo "::warning::No versioned DMG found to copy to the stable name."
+          fi
+
       - name: Create release + attach updater manifest
         uses: softprops/action-gh-release@v2
         with:

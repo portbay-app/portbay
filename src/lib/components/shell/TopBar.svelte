@@ -23,6 +23,12 @@
   import StopAllButton from "./StopAllButton.svelte";
   import NotificationsPanel from "./NotificationsPanel.svelte";
   import UserMenu from "./UserMenu.svelte";
+  import PlatformIcon from "$lib/components/marketing/PlatformIcon.svelte";
+  import { detectedPlatform } from "$lib/platform";
+
+  // Web-demo only: an OS-aware "Download" CTA next to the primary actions.
+  const isSimulator = import.meta.env.PUBLIC_SIMULATOR === "true";
+  const downloadTarget = detectedPlatform();
 
   let notificationsOpen = $state<boolean>(false);
   let userMenuOpen = $state<boolean>(false);
@@ -129,6 +135,22 @@
     </button>
 
     <StopAllButton />
+
+    {#if isSimulator}
+      <button
+        type="button"
+        onclick={() => void goto("/download")}
+        title="Download PortBay for {downloadTarget.label}"
+        aria-label="Download PortBay for {downloadTarget.label}"
+        class="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg
+               text-[13px] font-medium tracking-tight
+               border border-border text-fg-muted
+               hover:text-fg hover:bg-surface-2 transition-colors"
+      >
+        <PlatformIcon os={downloadTarget.os} size={14} />
+        Download for {downloadTarget.label}
+      </button>
+    {/if}
   </div>
 
   <!-- Divider -->
