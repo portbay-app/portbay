@@ -26,8 +26,8 @@
     <header class="text-center mb-10">
       <h1 class="text-2xl font-semibold text-fg">Download PortBay</h1>
       <p class="mt-2 text-[13px] text-fg-muted">
-        A local development environment manager for your machine. Pick your
-        platform to get started.
+        One Play button per project — real HTTPS hostnames, managed DNS, no
+        containers. Pick your platform to get started.
       </p>
     </header>
 

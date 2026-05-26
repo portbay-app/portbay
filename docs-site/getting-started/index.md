@@ -1,18 +1,19 @@
 # Getting Started
 
-This section gets PortBay running from a checkout and adds the first project. It is written for contributors and early testers until signed builds exist.
+This section installs PortBay and adds your first project. Most people install the signed macOS app; contributors can also build from source.
 
 ## Flow
 
-1. Install the toolchain.
-2. Fetch development sidecars into `src-tauri/binaries/`.
-3. Start the Tauri app.
-4. Add a project from a local folder.
-5. Start the project and open its generated local URL.
+1. Install PortBay — the Homebrew cask or the DMG (see [Install](/getting-started/install)).
+2. Launch the app and let it set up its bundled sidecars on first run.
+3. Add a project from a local folder.
+4. Start the project and open its generated local `.test` URL.
 
-## Screenshots
+## What it looks like
 
-Release screenshots will be added once the signed build and final launch copy are locked. For now, the pages below describe the exact controls and expected state changes.
+![PortBay managing local projects](/screenshots/projects.png)
+
+The pages below walk through each step with screenshots and the expected state changes.
 
 ## Next
 

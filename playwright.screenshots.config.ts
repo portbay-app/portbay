@@ -14,7 +14,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   reporter: "list",
-  timeout: 180_000,
+  timeout: 600_000,
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   use: { baseURL: `http://127.0.0.1:${PORT}` },
   webServer: {
