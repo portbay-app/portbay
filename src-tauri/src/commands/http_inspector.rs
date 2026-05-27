@@ -92,7 +92,11 @@ pub fn recent_requests(
     limit: Option<u32>,
 ) -> AppResult<Vec<RequestEntry>> {
     let reg = store::load_or_default(&state.registry_path, state.domain_suffix.clone())?;
-    Ok(read_recent(&state.logs_dir.join(ACCESS_LOG_FILE), limit, &reg))
+    Ok(read_recent(
+        &state.logs_dir.join(ACCESS_LOG_FILE),
+        limit,
+        &reg,
+    ))
 }
 
 /// `clear_requests()` — truncate the access log so the inspector starts fresh.

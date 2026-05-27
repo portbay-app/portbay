@@ -222,6 +222,39 @@ enum Cmd {
         #[arg(long)]
         apps: bool,
     },
+
+    /// Migrate sites from another local-dev tool (Laravel Herd, ServBay, MAMP)
+    /// into PortBay: detect installed sources, preview their sites, or import
+    /// them. The PortBay app provisions imported projects on its next reconcile.
+    /// (Importing a committed `.portbay.json` is `portbay add <path>`.)
+    #[command(subcommand)]
+    Import(ImportCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum ImportCmd {
+    /// List which migration sources (Herd, ServBay, MAMP) are installed and how
+    /// many sites each exposes.
+    Sources,
+
+    /// Preview a source's sites, flagged for id/path collisions with existing
+    /// projects. SOURCE is one of: herd, servbay, mamp.
+    Preview {
+        /// Source tool to scan: herd, servbay, or mamp.
+        source: String,
+    },
+
+    /// Import sites from a source into PortBay. Give the ids to import (from
+    /// `import preview`), or `--all` to import every site.
+    Projects {
+        /// Source tool to import from: herd, servbay, or mamp.
+        source: String,
+        /// Suggested ids to import (omit with `--all` to import everything).
+        ids: Vec<String>,
+        /// Import every site the source exposes, ignoring any listed ids.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -793,6 +826,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Cert(sub) => cmd_cert(&ctx, sub).await,
         Cmd::Sidecar(sub) => cmd_sidecar(&ctx, sub).await,
         Cmd::Detect { path, apps } => cmd_detect(&ctx, &path, apps).await,
+        Cmd::Import(sub) => cmd_import(&ctx, sub).await,
     }
 }
 
@@ -3695,6 +3729,135 @@ fn cli_say(ctx: &CliContext, msg: &str) {
             .write_line(&format!("{} {msg}", style("✓").green()))
             .ok();
     }
+}
+
+/// `portbay import …` — migrate sites from Herd / ServBay / MAMP. Writes
+/// Projects to the registry; the running app provisions them on its next
+/// reconcile. The site→Project mapping is shared with the GUI + MCP via
+/// `portbay_lib::import`.
+async fn cmd_import(ctx: &CliContext, sub: ImportCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::import::{self, ImportSource};
+
+    let parse_source = |s: &str| -> Result<ImportSource, CliError> {
+        ImportSource::parse(s).ok_or_else(|| {
+            CliError::BadInput(format!("unknown source `{s}` (valid: herd, servbay, mamp)"))
+        })
+    };
+
+    match sub {
+        ImportCmd::Sources => {
+            let sources = import::detect_all();
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&sources)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            for s in &sources {
+                let head = if s.present {
+                    style(format!("{} ({} site(s))", s.label, s.site_count)).bold()
+                } else {
+                    style(format!("{} — not installed", s.label)).dim()
+                };
+                ctx.term.write_line(&format!("  {head}")).ok();
+                if let Some(note) = &s.note {
+                    ctx.term
+                        .write_line(&format!("    {}", style(note).dim()))
+                        .ok();
+                }
+            }
+        }
+
+        ImportCmd::Preview { source } => {
+            let src = parse_source(&source)?;
+            let reg = ctx.load_registry()?;
+            let rows = import::preview(src, &reg).map_err(|e| CliError::Other(e.to_string()))?;
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            if rows.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} No sites found for {}.",
+                        style("·").dim(),
+                        src.label()
+                    ))
+                    .ok();
+                return Ok(ExitCode::SUCCESS);
+            }
+            for r in &rows {
+                let flag = match (r.id_collision, r.path_collision) {
+                    (false, false) => style("new".to_string()).green(),
+                    (true, _) => style("id exists".to_string()).yellow(),
+                    (_, true) => style("path exists".to_string()).yellow(),
+                };
+                ctx.term
+                    .write_line(&format!(
+                        "  {} {} {} [{}]",
+                        style(&r.site.suggested_id).bold(),
+                        style(&r.site.hostname).dim(),
+                        style(&r.site.path).dim(),
+                        flag
+                    ))
+                    .ok();
+            }
+        }
+
+        ImportCmd::Projects { source, ids, all } => {
+            let src = parse_source(&source)?;
+            let mut reg = ctx.load_registry()?;
+            let ids: Vec<String> = if all || ids.is_empty() {
+                import::site_ids(src).map_err(|e| CliError::Other(e.to_string()))?
+            } else {
+                ids
+            };
+            let result =
+                import::import_selected(src, &ids, &mut reg).map_err(|e| CliError::Other(e.to_string()))?;
+            if !result.imported.is_empty() {
+                ctx.save_registry(&reg)?;
+            }
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            if result.imported.is_empty() && result.skipped.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} Nothing to import from {}.",
+                        style("·").dim(),
+                        src.label()
+                    ))
+                    .ok();
+                return Ok(ExitCode::SUCCESS);
+            }
+            if !result.imported.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} Imported {}: {}",
+                        style("✓").green(),
+                        result.imported.len(),
+                        result.imported.join(", ")
+                    ))
+                    .ok();
+                ctx.term
+                    .write_line(&format!(
+                        "  {}",
+                        style("the PortBay app provisions them on its next reconcile (≤30s)").dim()
+                    ))
+                    .ok();
+            }
+            for s in &result.skipped {
+                ctx.term
+                    .write_line(&format!(
+                        "  {} {} — {}",
+                        style("skipped").yellow(),
+                        s.site.suggested_id,
+                        s.reason
+                    ))
+                    .ok();
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn hosts_warnings(outcome: &std::result::Result<(), HostsError>) -> Vec<String> {

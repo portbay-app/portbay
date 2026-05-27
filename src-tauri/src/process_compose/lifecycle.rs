@@ -72,7 +72,12 @@ impl SidecarManager {
     /// Picks a free port starting from `DEFAULT_PORT`, skipping any in `avoid`
     /// (typically the registered projects' declared ports). Returns a ready-to-use
     /// `PcClient`.
-    pub fn start(&mut self, app: &AppHandle, config_path: &Path, avoid: &[u16]) -> Result<PcClient> {
+    pub fn start(
+        &mut self,
+        app: &AppHandle,
+        config_path: &Path,
+        avoid: &[u16],
+    ) -> Result<PcClient> {
         if self.child.is_some() {
             // Idempotent: already running, hand back the existing client.
             return Ok(PcClient::new(self.port));

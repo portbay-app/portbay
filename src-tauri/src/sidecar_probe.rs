@@ -79,7 +79,9 @@ pub async fn probe(pc_port: u16, suffix: &str) -> Vec<SidecarProbe> {
         name: "dnsmasq",
         state: ProbeState::Unknown,
         detail: match (installed, port) {
-            (true, Some(p)) => format!("resolver routes *.{suffix} → 127.0.0.1:{p} (liveness in-app)"),
+            (true, Some(p)) => {
+                format!("resolver routes *.{suffix} → 127.0.0.1:{p} (liveness in-app)")
+            }
             (true, None) => format!("resolver installed for .{suffix} (liveness in-app)"),
             (false, _) => "no resolver file — names resolve via /etc/hosts".into(),
         },
@@ -142,7 +144,14 @@ mod tests {
         assert_eq!(probes[0].name, "process-compose");
         assert_eq!(probes[0].state, ProbeState::Stopped);
         let names: Vec<&str> = probes.iter().map(|p| p.name).collect();
-        for expected in ["process-compose", "dnsmasq", "hosts", "caddy", "mkcert", "mailpit"] {
+        for expected in [
+            "process-compose",
+            "dnsmasq",
+            "hosts",
+            "caddy",
+            "mkcert",
+            "mailpit",
+        ] {
             assert!(names.contains(&expected), "missing {expected}");
         }
     }

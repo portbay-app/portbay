@@ -814,6 +814,13 @@ pub struct RuntimeSettings {
     /// Manually-added installs (a binary path the detector didn't find).
     #[serde(default)]
     pub manual: Vec<ManualRuntime>,
+    /// PortBay-managed runtimes — our own lean builds fetched on demand into
+    /// `Application Support/PortBay/runtimes/<lang>/<version>/` (the Herd
+    /// delivery model). These are preferred over any detected install when
+    /// resolving a project's binary: they're ours, signed, and never a
+    /// competitor's. Populated by the download manager (a follow-up slice).
+    #[serde(default)]
+    pub managed: Vec<ManagedRuntime>,
     /// Default version per language id (e.g. `{"php": "8.3"}`). New projects
     /// inherit this when their runtime can't be auto-detected.
     #[serde(default)]
@@ -956,6 +963,23 @@ pub struct ManualRuntime {
     pub version: String,
     /// Absolute path to the binary the user browsed to.
     pub binary: PathBuf,
+}
+
+/// One PortBay-managed runtime install: a lean build PortBay downloaded (or
+/// bundled) and owns end-to-end. Unlike [`ManualRuntime`], the binary lives
+/// inside PortBay's own `Application Support` tree, so its arch is recorded for
+/// integrity checks and to ignore a stale entry left by an OS migration.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedRuntime {
+    /// Language id this install belongs to ("php", "nginx", …).
+    pub lang: String,
+    /// Full version of the build, e.g. "8.3.14".
+    pub version: String,
+    /// Absolute path to the primary binary inside PortBay's runtimes tree.
+    pub binary: PathBuf,
+    /// Architecture this build targets ("aarch64" / "x86_64").
+    pub arch: String,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]

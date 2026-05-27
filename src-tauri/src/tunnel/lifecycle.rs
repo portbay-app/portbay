@@ -259,7 +259,9 @@ fn quick_tunnel_config_path() -> Option<PathBuf> {
 fn isolated_config_path() -> Result<PathBuf> {
     let path = quick_tunnel_config_path()
         .ok_or_else(|| TunnelError::SpawnFailed("no data dir".to_string()))?;
-    let dir = path.parent().expect("config path always has a cloudflared parent dir");
+    let dir = path
+        .parent()
+        .expect("config path always has a cloudflared parent dir");
     std::fs::create_dir_all(dir)
         .map_err(|e| TunnelError::SpawnFailed(format!("mkdir cloudflared dir: {e}")))?;
     // PortBay quick tunnel: intentionally minimal so the user's ~/.cloudflared/config.yml
@@ -493,7 +495,8 @@ mod tests {
     #[test]
     fn stale_sweep_never_targets_self() {
         let marker = "/data/PortBay/cloudflared/tunnel-quick.yml";
-        let ps = format!("  777     1 cloudflared tunnel --config {marker} --url http://127.0.0.1:80");
+        let ps =
+            format!("  777     1 cloudflared tunnel --config {marker} --url http://127.0.0.1:80");
         // When the matching pid is us, it must be excluded (we'd never sweep the
         // live process driving the sweep).
         assert!(stale_cloudflared_pids(&ps, marker, 777).is_empty());

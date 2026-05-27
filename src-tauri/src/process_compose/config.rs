@@ -295,8 +295,8 @@ fn php_fpm_to_pc_process(spec: &PhpFpmSpec, logs_dir: &Path) -> PcProcess {
     // with spaces and trust the absolute paths.
     let command = format!(
         "{bin} -F -y {cfg}",
-        bin = spec.php_fpm_bin.to_string_lossy(),
-        cfg = spec.pool_config.to_string_lossy(),
+        bin = shell_quote(&spec.php_fpm_bin.to_string_lossy()),
+        cfg = shell_quote(&spec.pool_config.to_string_lossy()),
     );
     PcProcess {
         description: Some(format!("PHP-FPM {}", spec.version)),
@@ -315,6 +315,21 @@ fn php_fpm_to_pc_process(spec: &PhpFpmSpec, logs_dir: &Path) -> PcProcess {
             timeout_seconds: 5,
         },
     }
+}
+
+/// Minimal POSIX single-quote shell quoting for paths embedded in Process
+/// Compose command strings. PC runs commands through `/bin/sh -c`, so managed
+/// runtimes under macOS `Application Support` must be quoted.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".into();
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@' | '='))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Emit a PC process for a supervised database daemon. The daemon gets a
@@ -641,7 +656,16 @@ mod tests {
         p.sandbox = Some(SandboxConfig::enabled(SandboxNetworkPolicy::Outbound, true));
         r.add_project(p).unwrap();
 
-        let yaml = to_yaml(&r, Path::new("/tmp/portbay/logs"), None, &[], &[], &[], true).unwrap();
+        let yaml = to_yaml(
+            &r,
+            Path::new("/tmp/portbay/logs"),
+            None,
+            &[],
+            &[],
+            &[],
+            true,
+        )
+        .unwrap();
 
         assert!(yaml.contains("sandbox-exec -f"));
         assert!(yaml.contains("untrusted-app.sb"));
@@ -728,7 +752,10 @@ mod tests {
             path.starts_with(&bin_dir.to_string_lossy().to_string()),
             "expected runtime bin dir first in PATH, got {path}"
         );
-        assert_eq!(env.get("PORTBAY_RUNTIME_LANG").map(String::as_str), Some("node"));
+        assert_eq!(
+            env.get("PORTBAY_RUNTIME_LANG").map(String::as_str),
+            Some("node")
+        );
         assert_eq!(
             env.get("PORTBAY_RUNTIME_VERSION").map(String::as_str),
             Some("22.1.0")
@@ -754,14 +781,18 @@ mod tests {
         // daemon on boot. The generated node must be a sequence of `KEY=value`.
         let mut p = next_project("env-shape", 3010);
         p.env.insert("FOO".into(), "bar".into());
-        p.env.insert("DATABASE_URL".into(), "postgres://u:p@h/db?x=1".into());
+        p.env
+            .insert("DATABASE_URL".into(), "postgres://u:p@h/db?x=1".into());
         let mut r = Registry::new("test");
         r.add_project(p).unwrap();
 
         let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         let node = &doc["processes"]["env-shape"]["environment"];
-        assert!(node.is_sequence(), "environment must be a sequence, got: {node:?}");
+        assert!(
+            node.is_sequence(),
+            "environment must be a sequence, got: {node:?}"
+        );
         let env = env_kv_map(node);
         assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
         // A value containing `=` survives intact (split on the first `=` only).
@@ -868,6 +899,29 @@ mod tests {
             let desc = p["description"].as_str().unwrap();
             assert!(desc.starts_with("PHP-FPM "), "description shape: {desc}");
         }
+    }
+
+    #[test]
+    fn php_fpm_command_quotes_paths_with_spaces() {
+        let r = Registry::new("test");
+        let spec = PhpFpmSpec {
+            process_id: "php-fpm-8-4".into(),
+            version: "8.4".into(),
+            php_fpm_bin: PathBuf::from(
+                "/Users/me/Library/Application Support/PortBay/runtimes/php/8.4/sbin/php-fpm",
+            ),
+            pool_config: PathBuf::from(
+                "/Users/me/Library/Application Support/PortBay/php/8.4/php-fpm.conf",
+            ),
+            working_dir: PathBuf::from("/Users/me/Library/Application Support/PortBay/php/8.4"),
+        };
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[spec], &[], &[], true).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let cmd = doc["processes"]["php-fpm-8-4"]["command"]
+            .as_str()
+            .unwrap();
+        assert!(cmd.contains("'/Users/me/Library/Application Support/PortBay/runtimes/php/8.4/sbin/php-fpm'"));
+        assert!(cmd.contains(" -y '/Users/me/Library/Application Support/PortBay/php/8.4/php-fpm.conf'"));
     }
 
     #[test]

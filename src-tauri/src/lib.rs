@@ -244,7 +244,10 @@ pub fn run() {
             // leftover; reap it before the user starts a fresh share.
             let tunnels_reaped = tunnel::sweep_stale_cloudflared();
             if tunnels_reaped > 0 {
-                tracing::info!(count = tunnels_reaped, "reaped stale cloudflared tunnels at boot");
+                tracing::info!(
+                    count = tunnels_reaped,
+                    "reaped stale cloudflared tunnels at boot"
+                );
             }
             // Clear the cross-process tunnel mirror: nothing of ours is tunneling
             // at boot, so a stale file from a crashed prior run must not make the
@@ -343,9 +346,10 @@ pub fn run() {
                     if !live {
                         return;
                     }
-                    let Ok(registry) =
-                        crate::registry::store::load_or_default(&st.registry_path, &st.domain_suffix)
-                    else {
+                    let Ok(registry) = crate::registry::store::load_or_default(
+                        &st.registry_path,
+                        &st.domain_suffix,
+                    ) else {
                         return;
                     };
                     for id in ids {
@@ -538,6 +542,7 @@ pub fn run() {
             commands::runtimes::list_runtimes,
             commands::runtimes::add_runtime_by_path,
             commands::runtimes::remove_runtime_path,
+            commands::runtimes::remove_managed_runtime,
             commands::runtimes::set_default_runtime,
             commands::runtimes::update_runtime_config,
             commands::runtimes::install_runtime,

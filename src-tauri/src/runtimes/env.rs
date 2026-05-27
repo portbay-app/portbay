@@ -511,8 +511,15 @@ mod tests {
 
         // Linked opt php + unlinked Cellar php both surface; nothing else does.
         assert!(names.contains(&"php@8.3"), "opt php@8.3 should be found");
-        assert!(names.contains(&"php@8.2"), "unlinked Cellar php@8.2 should be found");
-        assert_eq!(got.len(), 2, "node / php-cs-fixer / ruby must be excluded: {names:?}");
+        assert!(
+            names.contains(&"php@8.2"),
+            "unlinked Cellar php@8.2 should be found"
+        );
+        assert_eq!(
+            got.len(),
+            2,
+            "node / php-cs-fixer / ruby must be excluded: {names:?}"
+        );
 
         // The Cellar hit descends to the version dir so it holds `bin/`.
         let cellar_hit = got.iter().find(|(n, _)| n == "php@8.2").unwrap();

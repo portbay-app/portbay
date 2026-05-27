@@ -13,7 +13,10 @@ use crate::reconciler::StepOutcome;
 use crate::state::AppState;
 
 #[tauri::command]
-pub async fn sidecar_status(app: AppHandle, state: State<'_, AppState>) -> AppResult<SidecarHealth> {
+pub async fn sidecar_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<SidecarHealth> {
     let process_compose = pc_status(&state).await;
     let caddy = caddy_status(&state).await;
     let mkcert_ca = mkcert_status(&state);

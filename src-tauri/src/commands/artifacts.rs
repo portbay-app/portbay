@@ -405,17 +405,18 @@ async fn run_log_retention(app: &AppHandle) {
         .await
         .unwrap_or(0);
     if removed > 0 {
-        tracing::info!(removed, retention_days = retention, "log retention: pruned stale logs");
+        tracing::info!(
+            removed,
+            retention_days = retention,
+            "log retention: pruned stale logs"
+        );
     }
 }
 
 /// Scan `folder`'s immediate subdirectories for project-like dirs not already
 /// registered. "Project-like" = a recognised framework dev command, or a PHP
 /// app — plain/empty folders are ignored so we don't surface noise.
-fn scan_workspace(
-    folder: &Path,
-    registered: &std::collections::HashSet<PathBuf>,
-) -> Vec<PathBuf> {
+fn scan_workspace(folder: &Path, registered: &std::collections::HashSet<PathBuf>) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
     };
@@ -499,9 +500,8 @@ async fn run_auto_detect(app: &AppHandle) {
 fn notify_detected(count: usize) {
     #[cfg(target_os = "macos")]
     {
-        let body = format!(
-            "Found {count} new project(s) in your workspace — open PortBay to add them."
-        );
+        let body =
+            format!("Found {count} new project(s) in your workspace — open PortBay to add them.");
         let script = format!("display notification \"{body}\" with title \"PortBay\"");
         let _ = std::process::Command::new("/usr/bin/osascript")
             .args(["-e", &script])

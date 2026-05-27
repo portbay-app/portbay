@@ -11,25 +11,30 @@
 //!   - `remove_runtime_path(lang, version)` — drop a manual entry.
 //!   - `set_default_runtime(lang, version)` — set/clear the default version a
 //!     new project inherits for that language.
-//!   - `install_runtime(lang)` — the on-request convenience that delegates to
-//!     Homebrew, streaming `brew install`'s output to the UI. PortBay still
-//!     never bundles a runtime; this just runs the command we'd otherwise tell
-//!     the user to run by hand.
+//!   - `install_runtime(lang, version)` — downloads a signed PortBay-managed
+//!     runtime archive, verifies it, extracts it into Application Support, and
+//!     persists it into the managed-runtime registry.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, State};
-use tauri_plugin_shell::process::CommandEvent;
-use tauri_plugin_shell::ShellExt;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::projects::{load_registry, save_registry};
 use crate::error::{AppError, AppResult};
-use crate::registry::ManualRuntime;
+use crate::registry::{ManagedRuntime, ManualRuntime};
 use crate::runtimes::{self, major_minor, runtime_by_id, LanguageView};
 use crate::state::AppState;
+
+const RUNTIME_INSTALL_CHANNEL: &str = "portbay://runtime-install";
+const RUNTIME_MANIFEST_URL: &str =
+    "https://github.com/portbay-app/portbay-runtimes/releases/latest/download/manifest.json";
+const RUNTIME_MANIFEST_SIGNATURE_URL: &str =
+    "https://github.com/portbay-app/portbay-runtimes/releases/latest/download/manifest.json.sig";
+const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNBNEI4QjdFQzA4NkFBQjUKUldTMXFvYkFmb3RMT3J1MlZFdm51bDVlb3ZOU0cyNy94d0MvNjRKWGQ4eDRWUkxWR1poZ3VZMTgK";
 
 #[tauri::command]
 pub async fn list_runtimes(state: State<'_, AppState>) -> AppResult<Vec<LanguageView>> {
@@ -99,6 +104,34 @@ pub async fn remove_runtime_path(
     Ok(runtimes::list_all(&reg.runtimes))
 }
 
+/// Remove a PortBay-managed runtime and delete its owned install directory.
+/// Manual and detected runtimes are intentionally untouched.
+#[tauri::command]
+pub async fn remove_managed_runtime(
+    state: State<'_, AppState>,
+    lang: String,
+    version: String,
+) -> AppResult<Vec<LanguageView>> {
+    let mut reg = load_registry(&state)?;
+    let Some(idx) = reg
+        .runtimes
+        .managed
+        .iter()
+        .position(|m| m.lang == lang && m.version == version)
+    else {
+        return Ok(runtimes::list_all(&reg.runtimes));
+    };
+    let removed = reg.runtimes.managed.remove(idx);
+    if let Some(install_dir) = removed.binary.parent().and_then(Path::parent) {
+        if install_dir.starts_with(runtime_dest_root()?) {
+            std::fs::remove_dir_all(install_dir)?;
+        }
+    }
+    save_registry(&state, &reg)?;
+    state.reconciler.mark_dirty();
+    Ok(runtimes::list_all(&reg.runtimes))
+}
+
 /// Set (or clear, when `version` is empty/None) the default version a new
 /// project inherits for `lang`.
 #[tauri::command]
@@ -127,72 +160,247 @@ pub async fn set_default_runtime(
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum InstallEvent {
     Log { line: String },
+    Progress { downloaded: u64, total: Option<u64> },
     Done { success: bool },
 }
 
-/// Install a runtime by delegating to Homebrew. PortBay never bundles a
-/// runtime — this runs the same `brew install <formula>` the sidebar otherwise
-/// shows as a hint, streaming brew's stdout/stderr to the UI line by line. The
-/// formula comes from the runtime's own [`brew_formula`], so the action stays
-/// in sync with the hint. The frontend re-lists runtimes on success so the new
-/// version appears without a manual refresh.
-///
-/// [`brew_formula`]: crate::runtimes::LanguageRuntime::brew_formula
+/// Download and install a PortBay-managed runtime from the signed manifest.
+/// `version = None` picks the newest manifest entry for this language and
+/// architecture; callers that know the desired pin should pass it explicitly.
 #[tauri::command]
 pub async fn install_runtime(
     app: AppHandle,
+    state: State<'_, AppState>,
     lang: String,
+    version: Option<String>,
     on_event: Channel<InstallEvent>,
 ) -> AppResult<()> {
-    let runtime = runtime_by_id(&lang)
-        .ok_or_else(|| AppError::BadInput(format!("unknown language `{lang}`")))?;
-    let formula = runtime.brew_formula().ok_or_else(|| {
-        AppError::BadInput(format!(
-            "{} can't be installed via Homebrew automatically",
-            runtime.display_name()
-        ))
-    })?;
-    drop(runtime);
-
-    let _ = on_event.send(InstallEvent::Log {
-        line: format!("$ brew install {formula}"),
-    });
-
-    let (mut rx, _child) = app
-        .shell()
-        .command("brew")
-        .args(["install", &formula])
-        .spawn()
-        .map_err(|e| {
-            AppError::Internal(format!(
-                "couldn't start Homebrew — is `brew` installed and on PATH? ({e})"
-            ))
-        })?;
-
-    // brew streams progress to stderr and results to stdout; forward both.
-    let mut exit_code: Option<i32> = None;
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
-                let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
-                if !line.is_empty() {
-                    let _ = on_event.send(InstallEvent::Log { line });
-                }
-            }
-            CommandEvent::Terminated(payload) => {
-                exit_code = payload.code;
-            }
-            _ => {}
-        }
-    }
-
-    let success = exit_code == Some(0);
-    let _ = on_event.send(InstallEvent::Done { success });
-    if !success {
-        return Err(AppError::Internal(format!(
-            "`brew install {formula}` exited with code {exit_code:?}"
+    if !is_installable_runtime(&lang) {
+        return Err(AppError::BadInput(format!(
+            "no PortBay-managed download is wired for `{lang}`"
         )));
     }
+
+    let manifest_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_URL")
+        .unwrap_or_else(|_| RUNTIME_MANIFEST_URL.to_string());
+    let signature_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_SIGNATURE_URL")
+        .unwrap_or_else(|_| RUNTIME_MANIFEST_SIGNATURE_URL.to_string());
+
+    let _ = on_event.send(InstallEvent::Log {
+        line: "Fetching signed PortBay runtime manifest…".into(),
+    });
+    let manifest_bytes = reqwest::get(&manifest_url)
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
+        .error_for_status()
+        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest read failed: {e}")))?;
+    let signature = reqwest::get(&signature_url)
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
+        .error_for_status()
+        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
+        .text()
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest signature read failed: {e}")))?;
+
+    let manifest = crate::runtimes::download::manifest::verify_and_parse(
+        &manifest_bytes,
+        &signature,
+        UPDATER_PUBKEY,
+    )
+    .map_err(|e| AppError::Internal(format!("runtime manifest verification failed: {e}")))?;
+    let arch = crate::runtimes::download::manifest::current_arch();
+    let requested = version.as_deref().unwrap_or("");
+    let entry = if requested.is_empty() {
+        newest_entry(&manifest, &lang, arch)
+    } else {
+        manifest.select(&lang, requested, arch).cloned()
+    }
+    .ok_or_else(|| {
+        AppError::BadInput(format!(
+            "no PortBay runtime build found for {lang}{} on {arch}",
+            if requested.is_empty() {
+                "".to_string()
+            } else {
+                format!(" {requested}")
+            }
+        ))
+    })?;
+
+    let dest_root = runtime_dest_root()?;
+    let expected_binary = expected_binary_rel(&entry.lang)?;
+    let install_lang = entry.lang.clone();
+    let install_version = entry.version.clone();
+    let install_arch = entry.arch.clone();
+    let app_for_progress = app.clone();
+    let channel_for_progress = on_event.clone();
+    let probe_lang = install_lang.clone();
+    let probe_version = install_version.clone();
+    let _ = on_event.send(InstallEvent::Log {
+        line: format!(
+            "Installing PortBay {} {} ({})…",
+            install_lang, install_version, install_arch
+        ),
+    });
+    let binary = crate::runtimes::download::install::fetch_and_install(
+        &entry,
+        &dest_root,
+        expected_binary,
+        move |downloaded, total| {
+            let event = InstallEvent::Progress { downloaded, total };
+            let _ = channel_for_progress.send(event.clone());
+            let _ = app_for_progress.emit(RUNTIME_INSTALL_CHANNEL, event);
+        },
+        |bin| probe_runtime(&probe_lang, &probe_version, bin),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("runtime install failed: {e}")))?;
+
+    let install_dir = binary
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| AppError::Internal("installed runtime path is malformed".into()))?;
+    strip_quarantine(install_dir)?;
+
+    let mut reg = load_registry(&state)?;
+    reg.runtimes.managed.retain(|m| {
+        !(m.lang == install_lang
+            && crate::runtimes::version_matches(&m.version, &install_version)
+            && m.arch == install_arch)
+    });
+    reg.runtimes.managed.push(ManagedRuntime {
+        lang: install_lang,
+        version: install_version,
+        binary,
+        arch: install_arch,
+    });
+    save_registry(&state, &reg)?;
+    state.reconciler.mark_dirty();
+
+    let done = InstallEvent::Done { success: true };
+    let _ = app.emit(RUNTIME_INSTALL_CHANNEL, done.clone());
+    let _ = on_event.send(done);
+    Ok(())
+}
+
+fn newest_entry(
+    manifest: &crate::runtimes::download::manifest::RuntimeManifest,
+    lang: &str,
+    arch: &str,
+) -> Option<crate::runtimes::download::manifest::RuntimeEntry> {
+    let mut entries = manifest
+        .entries
+        .iter()
+        .filter(|e| e.lang == lang && e.arch == arch)
+        .cloned()
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| b.version.cmp(&a.version));
+    entries.into_iter().next()
+}
+
+fn runtime_dest_root() -> AppResult<PathBuf> {
+    let mut dir =
+        dirs::data_dir().ok_or_else(|| AppError::Internal("no data directory available".into()))?;
+    dir.push("PortBay");
+    dir.push("runtimes");
+    Ok(dir)
+}
+
+/// Runtimes PortBay can install as its own managed builds: the detect-first
+/// language runtimes (php, …) plus the bundled web servers (nginx, apache).
+/// The web servers aren't in the `runtimes::registry()` language list, so they
+/// are allow-listed here explicitly.
+fn is_installable_runtime(lang: &str) -> bool {
+    matches!(lang, "nginx" | "apache") || runtime_by_id(lang).is_some()
+}
+
+/// Relative path to the primary binary inside a managed archive, per lang.
+/// This is the layout the runtimes-build CI must produce.
+fn expected_binary_rel(lang: &str) -> AppResult<&'static Path> {
+    match lang {
+        "php" => Ok(Path::new("bin/php")),
+        "nginx" => Ok(Path::new("sbin/nginx")),
+        "apache" => Ok(Path::new("bin/httpd")),
+        _ => Err(AppError::BadInput(format!(
+            "PortBay-managed downloads are not wired for `{lang}` yet"
+        ))),
+    }
+}
+
+fn probe_runtime(lang: &str, version: &str, bin: &Path) -> bool {
+    match lang {
+        "php" => {
+            let Some(install_dir) = bin.parent().and_then(Path::parent) else {
+                return false;
+            };
+            if !install_dir.join("sbin/php-fpm").is_file() {
+                return false;
+            }
+            Command::new(bin)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    text.contains("PHP") && text.contains(&major_minor(version))
+                })
+                .unwrap_or(false)
+        }
+        // nginx prints `nginx version: nginx/1.x` to stderr on `-v`.
+        "nginx" => Command::new(bin)
+            .arg("-v")
+            .output()
+            .ok()
+            .map(|out| {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                text.to_lowercase().contains("nginx")
+            })
+            .unwrap_or(false),
+        // httpd prints `Server version: Apache/2.x` on `-v`.
+        "apache" => Command::new(bin)
+            .arg("-v")
+            .output()
+            .ok()
+            .map(|out| {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                text.contains("Apache")
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn strip_quarantine(path: &Path) -> AppResult<()> {
+    let status = Command::new("xattr")
+        .args(["-dr", "com.apple.quarantine"])
+        .arg(path)
+        .status()
+        .map_err(|e| AppError::Internal(format!("couldn't clear runtime quarantine: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Internal(format!(
+            "couldn't clear runtime quarantine from {}",
+            path.display()
+        )))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn strip_quarantine(_path: &Path) -> AppResult<()> {
     Ok(())
 }
 

@@ -182,6 +182,9 @@ mod tests {
         // a port at or beyond start+2 — never one a project already claims.
         let avoid = [DEFAULT_SMTP_PORT, DEFAULT_SMTP_PORT + 1];
         let port = find_free_port(DEFAULT_SMTP_PORT, 16, &avoid).expect("a free port");
-        assert!(port >= DEFAULT_SMTP_PORT + 2, "must skip avoided ports, got {port}");
+        assert!(
+            port >= DEFAULT_SMTP_PORT + 2,
+            "must skip avoided ports, got {port}"
+        );
     }
 }

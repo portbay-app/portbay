@@ -749,3 +749,28 @@ pub struct RecentRequestsArgs {
     #[serde(default)]
     pub project: Option<String>,
 }
+
+// =============================================================================
+// Migration-import tool inputs (Herd / ServBay / MAMP → PortBay)
+// =============================================================================
+
+/// Preview the sites a migration source exposes before importing.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PreviewImportArgs {
+    /// The source tool to scan: `herd`, `servbay`, or `mamp`.
+    pub source: String,
+}
+
+/// Import sites from a migration source into the registry.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ImportProjectsArgs {
+    /// The source tool to import from: `herd`, `servbay`, or `mamp`.
+    pub source: String,
+    /// Suggested ids (from `portbay_preview_import`) to import. Omit or leave
+    /// empty together with `all: true` to import every site the source exposes.
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
+    /// Import every site the source exposes, ignoring `ids`. Defaults to false.
+    #[serde(default)]
+    pub all: Option<bool>,
+}

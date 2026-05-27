@@ -119,9 +119,8 @@ pub(super) async fn reconcile(
         if reg.list_projects().iter().any(|p| !p.https) {
             let caddy_pid = state.caddy.lock().expect("caddy mutex poisoned").pid();
             if let Some(holder) = crate::port_holder::find(http_port) {
-                let is_ours = caddy_pid.is_some_and(|pid| {
-                    holder.pid == pid || holder.descends_from(pid)
-                });
+                let is_ours =
+                    caddy_pid.is_some_and(|pid| holder.pid == pid || holder.descends_from(pid));
                 if !is_ours {
                     return StepOutcome::failed(format!(
                         "port {http_port} is in use by {} — stop it or switch the project to HTTPS",

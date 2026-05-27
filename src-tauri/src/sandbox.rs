@@ -520,7 +520,10 @@ mod tests {
             SandboxNetworkPolicy::Full,
             SandboxNetworkPolicy::Blocked,
         ] {
-            assert_eq!(parse_network_policy(network_policy_key(policy)), Some(policy));
+            assert_eq!(
+                parse_network_policy(network_policy_key(policy)),
+                Some(policy)
+            );
         }
         // CLI-friendly aliases + spelling tolerance.
         assert_eq!(

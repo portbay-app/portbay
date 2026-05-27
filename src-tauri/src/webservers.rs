@@ -75,7 +75,8 @@ pub fn specs_for(reg: &Registry, app_data: &Path, logs_dir: &Path) -> Vec<WebSer
         match server {
             WebServer::Caddy => {}
             WebServer::Nginx => {
-                let Some(bin) = nginx_binary() else {
+                let Some(bin) = managed_web_server_binary(reg, "nginx").or_else(nginx_binary)
+                else {
                     warn_missing(project, "nginx");
                     continue;
                 };
@@ -104,13 +105,20 @@ pub fn specs_for(reg: &Registry, app_data: &Path, logs_dir: &Path) -> Vec<WebSer
                 });
             }
             WebServer::Apache => {
-                let Some(bin) = apache_binary() else {
+                let Some(bin) = managed_web_server_binary(reg, "apache").or_else(apache_binary)
+                else {
                     warn_missing(project, "httpd");
                     continue;
                 };
                 let conf_path = conf_dir.join("httpd.conf");
                 let body = render_apache_config(
-                    project, port, &socket_path, &tuning, &conf_dir, &log_dir, &bin,
+                    project,
+                    port,
+                    &socket_path,
+                    &tuning,
+                    &conf_dir,
+                    &log_dir,
+                    &bin,
                 );
                 if let Err(e) = std::fs::write(&conf_path, body) {
                     tracing::warn!(
@@ -145,6 +153,20 @@ pub fn specs_for(reg: &Registry, app_data: &Path, logs_dir: &Path) -> Vec<WebSer
 // us to their layout and is the wrong thing for a tool not associated with them.
 // `is_competitor_managed` also canonicalises, so a competitor binary symlinked
 // onto PATH (e.g. `/usr/local/bin/php` → XAMPP) is still rejected.
+/// A PortBay-managed nginx/apache build for the current arch, when one has been
+/// downloaded. Preferred over neutral host discovery so PortBay runs **its own**
+/// web server (the same managed-runtime model as PHP-FPM); falls through to
+/// Homebrew/system when absent. `lang` is `"nginx"` or `"apache"`.
+fn managed_web_server_binary(reg: &Registry, lang: &str) -> Option<PathBuf> {
+    let arch = crate::runtimes::download::manifest::current_arch();
+    reg.runtimes
+        .managed
+        .iter()
+        .find(|m| m.lang == lang && m.arch == arch)
+        .map(|m| m.binary.clone())
+        .filter(|p| p.exists())
+}
+
 pub fn nginx_binary() -> Option<PathBuf> {
     first_existing(&[
         "/opt/homebrew/opt/nginx/bin/nginx",
@@ -491,6 +513,40 @@ mod tests {
     }
 
     #[test]
+    fn managed_web_server_binary_is_preferred_over_host() {
+        use crate::registry::{ManagedRuntime, Registry};
+        // A PortBay-managed nginx must win over any host nginx: its binary path
+        // shows up in the generated PC command regardless of what's on the box.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("sbin").join("nginx");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+
+        let mut reg = Registry::new("portbay.test");
+        let mut p = php_project(WebServer::Nginx);
+        p.start_command = None;
+        reg.add_project(p).unwrap();
+        reg.runtimes.managed.push(ManagedRuntime {
+            lang: "nginx".into(),
+            version: "1.27.0".into(),
+            binary: bin.clone(),
+            arch: crate::runtimes::download::manifest::current_arch().into(),
+        });
+
+        let data = tempfile::tempdir().unwrap();
+        let specs = specs_for(&reg, data.path(), data.path());
+        let nginx = specs
+            .iter()
+            .find(|s| s.process_id.starts_with("web-nginx-"))
+            .expect("a managed nginx should produce a web-server spec");
+        assert!(
+            nginx.command.contains(&*bin.to_string_lossy()),
+            "managed nginx binary should be used, got: {}",
+            nginx.command
+        );
+    }
+
+    #[test]
     fn nginx_config_quotes_every_path_and_the_socket() {
         let p = php_project(WebServer::Nginx);
         let cfg = render_nginx_config(
@@ -589,7 +645,10 @@ mod tests {
         let issue = web_server_issue(&p);
         assert_eq!(issue.is_some(), nginx_binary().is_none());
         if let Some(msg) = issue {
-            assert!(msg.contains("brew install nginx"), "needs an install hint: {msg}");
+            assert!(
+                msg.contains("brew install nginx"),
+                "needs an install hint: {msg}"
+            );
             assert!(
                 msg.to_lowercase().contains("caddy"),
                 "needs the switch-to-Caddy escape hatch: {msg}"
@@ -604,7 +663,10 @@ mod tests {
         let issue = web_server_issue(&p);
         assert_eq!(issue.is_some(), apache_binary().is_none());
         if let Some(msg) = issue {
-            assert!(msg.contains("brew install httpd"), "needs an install hint: {msg}");
+            assert!(
+                msg.contains("brew install httpd"),
+                "needs an install hint: {msg}"
+            );
         }
     }
 
@@ -619,13 +681,19 @@ mod tests {
         // reverse-proxies to it), so the managed nginx/apache path is irrelevant.
         let mut dev = php_project(WebServer::Nginx);
         dev.start_command = Some("php -S 127.0.0.1:8000 router.php".into());
-        assert!(web_server_issue(&dev).is_none(), "a dev-command project serves itself");
+        assert!(
+            web_server_issue(&dev).is_none(),
+            "a dev-command project serves itself"
+        );
 
         // Non-PHP projects never delegate to a managed web server.
         let mut node = php_project(WebServer::Nginx);
         node.kind = ProjectType::Next;
         node.start_command = None;
-        assert!(web_server_issue(&node).is_none(), "non-PHP never uses a managed web server");
+        assert!(
+            web_server_issue(&node).is_none(),
+            "non-PHP never uses a managed web server"
+        );
     }
 
     /// Validate the *actual* generated config against the real binary when a

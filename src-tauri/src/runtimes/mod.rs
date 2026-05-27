@@ -25,6 +25,7 @@
 //!   follow-up commits on the same kanban card.
 
 pub mod bun;
+pub mod download;
 pub mod env;
 pub mod flutter;
 pub mod go;
@@ -43,6 +44,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstallSource {
+    /// A PortBay-managed build — our own lean runtime, downloaded (or bundled)
+    /// and owned end-to-end. Preferred over every detected install.
+    PortBay,
     /// Homebrew formula (Apple Silicon or Intel prefix).
     Homebrew,
     /// ServBay-managed package.
@@ -392,6 +396,7 @@ pub trait LanguageRuntime: Send + Sync {
 /// Human label for a source, used in tabs + the sidebar pill.
 pub fn source_label(s: InstallSource) -> &'static str {
     match s {
+        InstallSource::PortBay => "PortBay",
         InstallSource::Homebrew => "Homebrew",
         InstallSource::ServBay => "ServBay",
         InstallSource::FlyEnv => "FlyEnv",
@@ -448,12 +453,26 @@ pub fn list_all(settings: &crate::registry::RuntimeSettings) -> Vec<LanguageView
             // are the deliberate escape hatch and stay exempt.
             installs.retain(|i| !env::is_competitor_managed(&i.binary));
 
-            // Fold in manual installs for this language, skipping any whose
-            // binary the detector already found (dedup by canonical path).
+            // Fold in PortBay-managed and manual installs for this language,
+            // skipping any whose binary the detector already found (dedup by
+            // canonical path). Both are deliberate, PortBay-owned-or-explicit
+            // entries and so stay exempt from the competitor filter above.
             let detected: HashSet<PathBuf> = installs
                 .iter()
                 .map(|i| i.binary.canonicalize().unwrap_or_else(|_| i.binary.clone()))
                 .collect();
+            for m in settings.managed.iter().filter(|m| m.lang == id) {
+                let canon = m.binary.canonicalize().unwrap_or_else(|_| m.binary.clone());
+                if detected.contains(&canon) {
+                    continue;
+                }
+                installs.push(RuntimeInstall {
+                    version: m.version.clone(),
+                    binary: m.binary.clone(),
+                    source: InstallSource::PortBay,
+                    config_dir: None,
+                });
+            }
             for m in settings.manual.iter().filter(|m| m.lang == id) {
                 let canon = m.binary.canonicalize().unwrap_or_else(|_| m.binary.clone());
                 if detected.contains(&canon) {
@@ -497,11 +516,27 @@ pub fn resolve_binary(
     settings: &crate::registry::RuntimeSettings,
 ) -> Option<PathBuf> {
     let lang = runtime_by_id(&runtime.lang)?;
-    let mut installs = lang.detect();
-    // Same competitor block as `list_all`: PortBay must never *run* a
-    // competitor's binary to serve a project, only ever a neutral or
-    // manually-registered one.
-    installs.retain(|i| !env::is_competitor_managed(&i.binary));
+    // Resolution order (matches the managed-runtime card):
+    //   (1) PortBay-managed — our own lean, signed builds win outright;
+    //   (2) neutral detected (Homebrew / version-manager / system), with the
+    //       same competitor block as `list_all` — PortBay must never *run* a
+    //       competitor's binary, only ever a neutral or PortBay-owned one;
+    //   (3) the user's manual escape-hatch installs.
+    // `find` returns the first version match, so insertion order *is* priority.
+    let mut installs: Vec<RuntimeInstall> = settings
+        .managed
+        .iter()
+        .filter(|m| m.lang == runtime.lang)
+        .map(|m| RuntimeInstall {
+            version: m.version.clone(),
+            binary: m.binary.clone(),
+            source: InstallSource::PortBay,
+            config_dir: None,
+        })
+        .collect();
+    let mut detected = lang.detect();
+    detected.retain(|i| !env::is_competitor_managed(&i.binary));
+    installs.append(&mut detected);
     for manual in settings.manual.iter().filter(|m| m.lang == runtime.lang) {
         installs.push(RuntimeInstall {
             version: manual.version.clone(),
@@ -516,7 +551,7 @@ pub fn resolve_binary(
         .map(|install| install.binary)
 }
 
-fn version_matches(installed: &str, requested: &str) -> bool {
+pub fn version_matches(installed: &str, requested: &str) -> bool {
     installed == requested
         || installed.starts_with(&format!("{requested}."))
         || requested.starts_with(&format!("{installed}."))
@@ -686,6 +721,58 @@ mod tests {
             .iter()
             .any(|v| v.install.version == "99.9"
                 && matches!(v.install.source, InstallSource::Manual)));
+    }
+
+    #[test]
+    fn managed_install_is_surfaced_with_portbay_source() {
+        // A PortBay-managed binary (our own download) appears under its language
+        // tagged as the PortBay source, like a manual install but ours.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("php");
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        let settings = crate::registry::RuntimeSettings {
+            managed: vec![crate::registry::ManagedRuntime {
+                lang: "php".into(),
+                version: "8.3.14".into(),
+                binary: bin,
+                arch: download::manifest::current_arch().into(),
+            }],
+            ..Default::default()
+        };
+        let views = list_all(&settings);
+        let php = views.iter().find(|v| v.id == "php").unwrap();
+        assert!(php
+            .versions
+            .iter()
+            .any(|v| v.install.version == "8.3.14"
+                && matches!(v.install.source, InstallSource::PortBay)));
+    }
+
+    #[test]
+    fn resolve_binary_prefers_managed_over_other_sources() {
+        // With a PortBay-managed php registered, resolving a project's php pin
+        // returns the managed binary — our own build wins the resolution order.
+        let tmp = tempfile::tempdir().unwrap();
+        let managed_bin = tmp.path().join("php");
+        std::fs::write(&managed_bin, b"#!/bin/sh\n").unwrap();
+        let settings = crate::registry::RuntimeSettings {
+            managed: vec![crate::registry::ManagedRuntime {
+                lang: "php".into(),
+                version: "8.3.14".into(),
+                binary: managed_bin.clone(),
+                arch: download::manifest::current_arch().into(),
+            }],
+            ..Default::default()
+        };
+        // A major/minor pin still resolves to the managed full build.
+        let resolved = resolve_binary(
+            &crate::registry::Runtime {
+                lang: "php".into(),
+                version: "8.3".into(),
+            },
+            &settings,
+        );
+        assert_eq!(resolved.as_deref(), Some(managed_bin.as_path()));
     }
 
     #[test]

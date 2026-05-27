@@ -248,11 +248,11 @@ impl AppState {
         config_path: &Path,
     ) -> Result<(), crate::error::AppError> {
         let avoid = self.registered_project_ports();
-        let client = self
-            .pc
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .start(app, config_path, &avoid)?;
+        let client =
+            self.pc
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .start(app, config_path, &avoid)?;
         *self.pc_client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
         Ok(())
     }
@@ -276,12 +276,11 @@ impl AppState {
     ///   without the lifecycle thinking the slot is free.
     pub async fn boot_caddy(&self, app: &AppHandle) -> Result<(), crate::error::AppError> {
         let avoid = self.registered_project_ports();
-        let admin_port =
-            find_free_port(DEFAULT_ADMIN_PORT, ADMIN_SCAN_RANGE, &avoid).ok_or(
-                CaddyError::NoFreePort {
-                    start: DEFAULT_ADMIN_PORT,
-                },
-            )?;
+        let admin_port = find_free_port(DEFAULT_ADMIN_PORT, ADMIN_SCAN_RANGE, &avoid).ok_or(
+            CaddyError::NoFreePort {
+                start: DEFAULT_ADMIN_PORT,
+            },
+        )?;
         let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT, &avoid);
         // Persist the chosen HTTPS port so tunnel commands can route cloudflared
         // through Caddy's HTTPS listener (enabling Origin/Host normalisation).
@@ -329,8 +328,8 @@ impl AppState {
         let avoid = self.registered_project_ports();
         let port = dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE, &avoid)
             .ok_or(crate::dnsmasq::DnsmasqError::NoFreePort {
-                start: DNSMASQ_DEFAULT_PORT,
-            })?;
+            start: DNSMASQ_DEFAULT_PORT,
+        })?;
         // The registry is the source of truth for both the wildcard suffix
         // and the tunable dnsmasq settings; `self.domain_suffix` is only the
         // first-run fallback. Reading it here means a suffix migration or a

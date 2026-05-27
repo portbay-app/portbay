@@ -71,6 +71,7 @@ pub struct PhpInstall {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PhpSource {
+    PortBay,
     Homebrew,
     ServBay,
     FlyEnv,
@@ -123,7 +124,7 @@ pub fn detect_all() -> Vec<PhpInstall> {
 /// derived this candidate from a known prefix; for the bare `php`
 /// formula or a PATH probe it's `""` and we parse the version from
 /// `php --version`.
-fn probe(bin: &Path, version_hint: &str, source: PhpSource) -> Option<PhpInstall> {
+pub fn probe(bin: &Path, version_hint: &str, source: PhpSource) -> Option<PhpInstall> {
     let version = if version_hint.is_empty() {
         version_from_bin(bin)?
     } else {

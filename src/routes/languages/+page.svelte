@@ -34,13 +34,14 @@
   /** Streamed progress from the `install_runtime` backend command. */
   type InstallEvent =
     | { kind: "log"; line: string }
+    | { kind: "progress"; downloaded: number; total?: number | null }
     | { kind: "done"; success: boolean };
 
   let languages = $state<LanguageView[]>([]);
   let loading = $state<boolean>(true);
 
-  // The language currently being brew-installed, and the latest line of
-  // brew's output (shown inline on the install button).
+  // The language currently being installed from PortBay's signed runtime
+  // manifest, and the latest status line shown inline on the install button.
   let installingLang = $state<string | null>(null);
   let installLine = $state<string>("");
 
@@ -103,6 +104,8 @@
    * silently drop them.
    */
   const sourceClass: Record<InstallSource, string> = {
+    port_bay:
+      "bg-indigo-500/15 text-indigo-300 light:text-indigo-700 border-indigo-500/30",
     homebrew:
       "bg-amber-500/15 text-amber-300 light:text-amber-700 border-amber-500/30",
     serv_bay:
@@ -172,22 +175,44 @@
     }
   }
 
+  /** Remove a PortBay-managed install and its owned runtime directory. */
+  async function removeManaged(langId: string, version: string) {
+    try {
+      languages = await safeInvoke<LanguageView[]>("remove_managed_runtime", {
+        lang: langId,
+        version,
+      });
+      if (selectedKey?.langId === langId && selectedKey?.version === version) {
+        selectedKey = null;
+      }
+    } catch {
+      /* toast */
+    }
+  }
+
   /**
-   * Install a missing runtime by delegating to Homebrew. PortBay never bundles
-   * a runtime — this streams `brew install`'s output (the latest line shows on
-   * the button) and re-lists runtimes on success so the new version appears.
+   * Install a missing runtime from PortBay's signed runtime manifest. The
+   * backend verifies the manifest + archive, extracts into Application Support,
+   * strips macOS quarantine, persists the managed runtime, then we re-list.
    */
-  async function installViaBrew(langId: string) {
+  async function installPortBayRuntime(langId: string) {
     if (installingLang) return;
     installingLang = langId;
-    installLine = "Starting Homebrew…";
+    installLine = "Fetching manifest…";
     const channel = new Channel<InstallEvent>();
     channel.onmessage = (ev) => {
       if (ev.kind === "log") installLine = ev.line;
+      if (ev.kind === "progress") {
+        const total = ev.total ?? 0;
+        installLine = total > 0
+          ? `${Math.round((ev.downloaded / total) * 100)}% downloaded`
+          : `${Math.round(ev.downloaded / 1024 / 1024)} MB downloaded`;
+      }
     };
     try {
       await safeInvoke<void>("install_runtime", {
         lang: langId,
+        version: null,
         onEvent: channel,
       });
       await refresh();
@@ -356,16 +381,16 @@
             {#if !isCollapsed}
               <div class="mt-0.5 space-y-0.5 pl-1">
                 {#if !installed}
-                  {#if lang.installHint.startsWith("brew install ")}
+                  {#if lang.id === "php"}
                     <button
                       type="button"
-                      onclick={() => installViaBrew(lang.id)}
+                      onclick={() => installPortBayRuntime(lang.id)}
                       disabled={installingLang !== null}
                       class="w-full flex items-center gap-2 px-2.5 py-2 ml-1 rounded-md
                              text-left text-[11px] text-accent hover:bg-accent/10
                              border border-dashed border-accent/40
                              disabled:opacity-50 transition-colors"
-                      title="Install this runtime via Homebrew"
+                      title="Install this runtime from PortBay"
                     >
                       <Icon
                         name={installingLang === lang.id ? "refresh-cw" : "package"}
@@ -375,7 +400,7 @@
                       <span class="min-w-0 truncate">
                         {installingLang === lang.id
                           ? installLine || "Installing…"
-                          : "Install via Homebrew"}
+                          : "Install (PortBay)"}
                       </span>
                     </button>
                   {/if}
@@ -477,8 +502,9 @@
           </p>
           {#if languages.every((l) => l.versions.length === 0)}
             <p class="mt-2 text-[12px] text-fg-subtle leading-relaxed">
-              Install one via Homebrew, asdf, mise, nvm, or pyenv — PortBay
-              picks it up on the next rescan.
+              Install PHP with PortBay, or add an existing neutral runtime by
+              path. Homebrew, asdf, mise, nvm, and pyenv installs appear on
+              rescan.
             </p>
           {/if}
         </div>
@@ -547,6 +573,20 @@
                          hover:text-status-crashed hover:border-status-crashed/50
                          transition-colors"
                   title="Remove this manually-added entry (the binary is left untouched)"
+                >
+                  <Icon name="x" size={11} />
+                  Remove
+                </button>
+              {:else if version.install.source === "port_bay"}
+                <button
+                  type="button"
+                  onclick={() =>
+                    removeManaged(lang.id, version.install.version)}
+                  class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md
+                         text-[11px] border border-border text-fg-muted
+                         hover:text-status-crashed hover:border-status-crashed/50
+                         transition-colors"
+                  title="Remove this PortBay-managed runtime"
                 >
                   <Icon name="x" size={11} />
                   Remove

@@ -31,4 +31,8 @@ paths = [
   '''src-tauri/src/portfile/.*\.rs''',
   '''pnpm-lock\.yaml''',
   '''src-tauri/Cargo\.lock''',
+  # Managed-runtime manifest tests: a throwaway minisign *public* key + a sample
+  # manifest signed with it (the private key was never committed). Public test
+  # fixtures, not secrets — gitleaks decodes the base64 and flags the key id.
+  '''src-tauri/src/runtimes/download/fixtures/.*''',
 ]

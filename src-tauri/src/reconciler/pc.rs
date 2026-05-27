@@ -98,9 +98,10 @@ fn data_dir_from_logs(logs_dir: &Path) -> &Path {
 /// Build a [`PhpFpmSpec`] for every PHP version any project uses, and
 /// materialise the pool config files those specs point at.
 ///
-/// We probe `crate::php::detect_all()` once per tick. Detection runs
-/// `php --ini` / `php -m` per candidate which costs ~10–30 ms total
-/// on a typical Homebrew install — fine for the reconcile cadence.
+/// Managed PortBay PHP builds win before neutral host installs. We still probe
+/// `crate::php::detect_all()` once per tick for the fallback path; detection
+/// runs `php --ini` / `php -m` per candidate which costs ~10–30 ms total on a
+/// typical Homebrew install — fine for the reconcile cadence.
 ///
 /// Versions whose probe doesn't yield a `php-fpm` binary are silently
 /// skipped (the user already sees a warning on `/php`). Pool-config
@@ -121,15 +122,20 @@ fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::co
         return Vec::new();
     }
 
-    let installs = crate::php::detect_all();
+    let host_installs = crate::php::detect_all();
     let mut specs = Vec::with_capacity(used_versions.len());
     for ver in &used_versions {
-        let Some(install) = installs.iter().find(|i| &i.version == ver) else {
+        let Some(install) = managed_php_install(reg, ver).or_else(|| {
+            host_installs
+                .iter()
+                .find(|i| crate::runtimes::version_matches(&i.version, ver))
+                .cloned()
+        }) else {
             tracing::warn!(
                 target: "reconciler",
                 "PHP {ver} requested by a project but not installed — \
-                 PC entry skipped. Run `brew install php@{ver}` then \
-                 re-detect from the /php panel."
+                 PC entry skipped. Install a PortBay PHP runtime from the \
+                 Languages panel, or install a neutral host PHP."
             );
             continue;
         };
@@ -188,7 +194,7 @@ fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::co
                 .open(crate::php::lifecycle::fpm_access_log_path(data_dir, ver));
         }
         let pool_body = crate::php::lifecycle::render_pool_config(
-            install,
+            &install,
             &socket_path,
             &php_cfg.fpm,
             &php_cfg.ini,
@@ -212,6 +218,32 @@ fn php_fpm_specs_for(reg: &Registry, data_dir: &Path) -> Vec<process_compose::co
     }
     specs.sort_by(|a, b| a.process_id.cmp(&b.process_id));
     specs
+}
+
+fn managed_php_install(reg: &Registry, requested: &str) -> Option<crate::php::PhpInstall> {
+    let managed = reg.runtimes.managed.iter().find(|m| {
+        m.lang == "php"
+            && m.arch == crate::runtimes::download::manifest::current_arch()
+            && crate::runtimes::version_matches(&m.version, requested)
+    })?;
+    let install_dir = managed.binary.parent()?.parent()?;
+    let fpm_bin = install_dir.join("sbin/php-fpm");
+    if !fpm_bin.is_file() {
+        tracing::warn!(
+            target: "reconciler",
+            "PortBay PHP {} is registered at {}, but sbin/php-fpm is missing",
+            managed.version,
+            install_dir.display()
+        );
+        return None;
+    }
+    let mut install = crate::php::probe(
+        &managed.binary,
+        &managed.version,
+        crate::php::PhpSource::PortBay,
+    )?;
+    install.php_fpm_bin = Some(fpm_bin);
+    Some(install)
 }
 
 /// Build a [`DatabaseDaemonSpec`] for every database instance whose daemon
@@ -359,9 +391,11 @@ mod tests {
         b.add_project(next_project("y", 3011)).unwrap();
         b.add_project(next_project("x", 3010)).unwrap();
         let y_a =
-            process_compose::config::to_yaml(&a, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+            process_compose::config::to_yaml(&a, Path::new("/tmp"), None, &[], &[], &[], true)
+                .unwrap();
         let y_b =
-            process_compose::config::to_yaml(&b, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+            process_compose::config::to_yaml(&b, Path::new("/tmp"), None, &[], &[], &[], true)
+                .unwrap();
         // YAML emit may be ordering-stable already; we don't depend on
         // that. We do depend on the hash being deterministic given a
         // string input.
@@ -376,11 +410,13 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("a", 3010)).unwrap();
         let h1 = hash_string(
-            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap(),
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true)
+                .unwrap(),
         );
         r.add_project(next_project("b", 3011)).unwrap();
         let h2 = hash_string(
-            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap(),
+            &process_compose::config::to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true)
+                .unwrap(),
         );
         assert_ne!(h1, h2);
     }

@@ -230,7 +230,12 @@ pub fn detect(engine: DatabaseEngine) -> EngineDetection {
 
 /// Raw `--version` output for a daemon binary; empty string on failure.
 fn probe_version_raw(binary: &Path) -> String {
-    run_capture(&binary.to_path_buf(), &["--version"], Duration::from_secs(3)).unwrap_or_default()
+    run_capture(
+        &binary.to_path_buf(),
+        &["--version"],
+        Duration::from_secs(3),
+    )
+    .unwrap_or_default()
 }
 
 /// Disambiguate the MySQL/MariaDB pair from a daemon's raw `--version` output.
@@ -639,13 +644,17 @@ mod tests {
     fn mariadb_and_mysql_daemon_identity_is_disambiguated() {
         // Real-world `--version` lines from each engine's daemon.
         let mysql = "/opt/homebrew/opt/mysql/bin/mysqld  Ver 8.4.9 for macos15 on arm64 (Homebrew)";
-        let mariadb = "/opt/homebrew/opt/mariadb/bin/mariadbd  Ver 11.4.3-MariaDB Source distribution";
+        let mariadb =
+            "/opt/homebrew/opt/mariadb/bin/mariadbd  Ver 11.4.3-MariaDB Source distribution";
         // Older MariaDB ships its daemon as `mysqld` but still reports MariaDB.
         let mariadb_as_mysqld = "mysqld  Ver 10.11.6-MariaDB on macos";
 
         // MariaDB must accept only MariaDB version strings — never MySQL's mysqld.
         assert!(daemon_identity_matches(DatabaseEngine::Mariadb, mariadb));
-        assert!(daemon_identity_matches(DatabaseEngine::Mariadb, mariadb_as_mysqld));
+        assert!(daemon_identity_matches(
+            DatabaseEngine::Mariadb,
+            mariadb_as_mysqld
+        ));
         assert!(
             !daemon_identity_matches(DatabaseEngine::Mariadb, mysql),
             "MariaDB must not claim MySQL's mysqld"
@@ -667,7 +676,10 @@ mod tests {
             DatabaseEngine::Postgres,
             "postgres (PostgreSQL) 16.2"
         ));
-        assert!(daemon_identity_matches(DatabaseEngine::Redis, "Redis server v=7.2.6"));
+        assert!(daemon_identity_matches(
+            DatabaseEngine::Redis,
+            "Redis server v=7.2.6"
+        ));
     }
 
     fn instance(engine: DatabaseEngine, port: u16) -> DatabaseInstance {

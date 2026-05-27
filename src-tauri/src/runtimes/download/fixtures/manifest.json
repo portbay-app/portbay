@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-05-27T00:00:00Z",
+  "entries": [
+    {
+      "lang": "php",
+      "version": "8.3.14",
+      "arch": "aarch64",
+      "url": "https://github.com/portbay-app/portbay-runtimes/releases/download/php-8.3.14/php-fpm-8.3.14-aarch64.tar.zst",
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "size": 18874368,
+      "compression": "zstd"
+    },
+    {
+      "lang": "php",
+      "version": "8.3.14",
+      "arch": "x86_64",
+      "url": "https://github.com/portbay-app/portbay-runtimes/releases/download/php-8.3.14/php-fpm-8.3.14-x86_64.tar.zst",
+      "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+      "size": 19922944,
+      "compression": "zstd"
+    }
+  ]
+}

@@ -53,6 +53,9 @@ pub enum ToolGroup {
     Inspector,
     /// Local-HTTPS certificates: per-project cert info, reissue.
     Certs,
+    /// Migration import from other local-dev tools (Herd / ServBay / MAMP):
+    /// detect sources, preview their sites, import into the registry.
+    Migrate,
 }
 
 impl ToolGroup {
@@ -70,6 +73,7 @@ impl ToolGroup {
             ToolGroup::Sandbox,
             ToolGroup::Inspector,
             ToolGroup::Certs,
+            ToolGroup::Migrate,
         ]
     }
 
@@ -89,9 +93,11 @@ impl ToolGroup {
             "sandbox" => Ok(vec![ToolGroup::Sandbox]),
             "inspector" => Ok(vec![ToolGroup::Inspector]),
             "certs" => Ok(vec![ToolGroup::Certs]),
+            "migrate" => Ok(vec![ToolGroup::Migrate]),
             other => Err(format!(
                 "unknown toolset `{other}` (valid: projects, lifecycle, diagnostics, scaffold, \
-                 groups, tunnels, runtimes, databases, dns, sandbox, inspector, certs, all)"
+                 groups, tunnels, runtimes, databases, dns, sandbox, inspector, certs, migrate, \
+                 all)"
             )),
         }
     }
@@ -180,7 +186,11 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_restart_database", ToolGroup::Databases, true),
     ("portbay_link_database", ToolGroup::Databases, true),
     ("portbay_unlink_database", ToolGroup::Databases, true),
-    ("portbay_set_database_auto_start", ToolGroup::Databases, true),
+    (
+        "portbay_set_database_auto_start",
+        ToolGroup::Databases,
+        true,
+    ),
     ("portbay_dns_status", ToolGroup::Dns, false),
     ("portbay_list_dns_records", ToolGroup::Dns, false),
     ("portbay_set_domain_suffix", ToolGroup::Dns, true),
@@ -192,6 +202,9 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_clear_requests", ToolGroup::Inspector, true),
     ("portbay_cert_info", ToolGroup::Certs, false),
     ("portbay_reissue_cert", ToolGroup::Certs, true),
+    ("portbay_detect_import_sources", ToolGroup::Migrate, false),
+    ("portbay_preview_import", ToolGroup::Migrate, false),
+    ("portbay_import_projects", ToolGroup::Migrate, true),
 ];
 
 /// The PortBay MCP server. Holds the operations context and the (possibly
@@ -626,11 +639,7 @@ impl PortbayMcp {
                        its member project ids, a `known_ids` subset (members that still exist \
                        in the registry), and a `member_count`. Use this to discover group ids \
                        before calling start/stop/restart/update/remove group tools.",
-        annotations(
-            title = "List groups",
-            read_only_hint = true,
-            open_world_hint = false
-        )
+        annotations(title = "List groups", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_groups(&self) -> Result<CallToolResult, McpError> {
         finish(self.ctx.list_groups())
@@ -653,10 +662,7 @@ impl PortbayMcp {
         &self,
         Parameters(args): Parameters<CreateGroupArgs>,
     ) -> Result<CallToolResult, McpError> {
-        finish(
-            self.ctx
-                .create_group(args.id, args.name, args.project_ids),
-        )
+        finish(self.ctx.create_group(args.id, args.name, args.project_ids))
     }
 
     #[tool(
@@ -676,10 +682,7 @@ impl PortbayMcp {
         &self,
         Parameters(args): Parameters<UpdateGroupArgs>,
     ) -> Result<CallToolResult, McpError> {
-        finish(
-            self.ctx
-                .update_group(args.id, args.name, args.project_ids),
-        )
+        finish(self.ctx.update_group(args.id, args.name, args.project_ids))
     }
 
     #[tool(
@@ -767,11 +770,7 @@ impl PortbayMcp {
                        includes the project id, upstream URL, public share URL (or null while \
                        Cloudflare is still assigning one), running state, and origin reachability. \
                        Read-only — start or stop a share from the PortBay app.",
-        annotations(
-            title = "List tunnels",
-            read_only_hint = true,
-            open_world_hint = false
-        )
+        annotations(title = "List tunnels", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_tunnels(&self) -> Result<CallToolResult, McpError> {
         finish(self.ctx.list_tunnels())
@@ -1078,10 +1077,7 @@ impl PortbayMcp {
         &self,
         Parameters(args): Parameters<SetDatabaseAutoStartArgs>,
     ) -> Result<CallToolResult, McpError> {
-        finish(
-            self.ctx
-                .set_database_auto_start(&args.id, args.auto_start),
-        )
+        finish(self.ctx.set_database_auto_start(&args.id, args.auto_start))
     }
 
     // ---- DNS / domains ------------------------------------------------------
@@ -1238,7 +1234,10 @@ impl PortbayMcp {
         &self,
         Parameters(args): Parameters<RecentRequestsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        finish(self.ctx.recent_requests(args.limit, args.project.as_deref()))
+        finish(
+            self.ctx
+                .recent_requests(args.limit, args.project.as_deref()),
+        )
     }
 
     #[tool(
@@ -1296,6 +1295,62 @@ impl PortbayMcp {
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.reissue_cert(&args.id))
     }
+
+    // ---- Migration import (Herd / ServBay / MAMP) ---------------------------
+
+    #[tool(
+        name = "portbay_detect_import_sources",
+        description = "List which local-dev migration sources (Laravel Herd, ServBay, MAMP) are \
+                       installed on this machine and how many sites each exposes. Read-only — use \
+                       this first, then portbay_preview_import to inspect a source's sites.",
+        annotations(
+            title = "Detect import sources",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn detect_import_sources(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.detect_import_sources())
+    }
+
+    #[tool(
+        name = "portbay_preview_import",
+        description = "Preview the sites a migration source (`herd`, `servbay`, or `mamp`) exposes, \
+                       each flagged for whether its id or path already collides with an existing \
+                       PortBay project. Read-only — confirm with the user before \
+                       portbay_import_projects.",
+        annotations(
+            title = "Preview import",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn preview_import(
+        &self,
+        Parameters(args): Parameters<PreviewImportArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.preview_import(&args.source))
+    }
+
+    #[tool(
+        name = "portbay_import_projects",
+        description = "Import sites from a migration source (`herd`, `servbay`, or `mamp`) into \
+                       PortBay. Pass the `ids` to import (from portbay_preview_import), or set \
+                       `all: true` to import every site. Returns which ids landed and which were \
+                       skipped (with a reason). The running PortBay app provisions the new \
+                       projects — certs, Caddy routes, hosts — on its next reconcile (≤30s).",
+        annotations(
+            title = "Import projects",
+            read_only_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn import_projects(
+        &self,
+        Parameters(args): Parameters<ImportProjectsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.import_projects(args))
+    }
 }
 
 const INSTRUCTIONS: &str = "\
@@ -1349,7 +1404,11 @@ Key facts:
 - Sidecars: portbay_sidecar_status reports what's observable from outside the app — process-compose \
   (live), the dnsmasq resolver file, and managed /etc/hosts; Caddy/mkcert/Mailpit are app-owned and \
   read `unknown`. Restarting a sidecar (caddy/process-compose/dnsmasq) is done from the PortBay app, \
-  which owns those processes.";
+  which owns those processes.
+- Migrate: portbay_detect_import_sources lists which local-dev tools (Laravel Herd, ServBay, MAMP) are \
+  installed and how many sites each has. portbay_preview_import shows a source's sites with id/path \
+  collision flags; portbay_import_projects imports the chosen ids (or all) into the registry, and the \
+  app provisions them on its next reconcile. (Importing a committed .portbay.json is portbay_import_config.)";
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PortbayMcp {

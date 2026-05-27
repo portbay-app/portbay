@@ -79,9 +79,7 @@ impl McpContext {
 
     /// The data directory containing `registry.json` and the tunnel state file.
     fn data_dir(&self) -> &std::path::Path {
-        self.registry_path
-            .parent()
-            .unwrap_or(&self.registry_path)
+        self.registry_path.parent().unwrap_or(&self.registry_path)
     }
 
     fn load_registry(&self) -> AppResult<Registry> {
@@ -286,7 +284,10 @@ impl McpContext {
     /// Find a specific tunnel by `project_id`. Returns `None` when not found
     /// or when the state file is absent.
     pub fn tunnel_status(&self, id: &str) -> AppResult<Option<crate::tunnel::TunnelStatus>> {
-        Ok(self.list_tunnels()?.into_iter().find(|t| t.project_id == id))
+        Ok(self
+            .list_tunnels()?
+            .into_iter()
+            .find(|t| t.project_id == id))
     }
 
     // -------------------------------------------------------------------------
@@ -334,7 +335,9 @@ impl McpContext {
         }
         if let Some(h) = args.hostname.as_deref() {
             if reg.hostname_conflict(h, Some(&pid)) {
-                return Err(crate::registry::RegistryError::DuplicateHostname(h.to_string()).into());
+                return Err(
+                    crate::registry::RegistryError::DuplicateHostname(h.to_string()).into(),
+                );
             }
         }
         if let Some(port) = args.port {
@@ -494,6 +497,51 @@ impl McpContext {
             project: Some(summary(&project, None)),
             warnings,
         })
+    }
+
+    // -------------------------------------------------------------------------
+    // Migration import (Herd / ServBay / MAMP → PortBay). Reads the source
+    // tool's config off disk and writes Projects to the registry; the app's
+    // reconcile then provisions them. Shared site→Project mapping lives in
+    // `crate::import` so this can't drift from the GUI/CLI.
+    // -------------------------------------------------------------------------
+
+    /// List which migration sources (Herd, ServBay, MAMP) are present locally
+    /// and how many sites each exposes. Read-only; no daemon needed.
+    pub fn detect_import_sources(&self) -> AppResult<Vec<crate::import::DetectedSource>> {
+        Ok(crate::import::detect_all())
+    }
+
+    /// Preview a source's sites against the current registry, flagging id/path
+    /// collisions so the agent can confirm before importing. Read-only.
+    pub fn preview_import(&self, source: &str) -> AppResult<Vec<crate::import::ImportPreviewRow>> {
+        let src = parse_import_source(source)?;
+        let reg = self.load_registry()?;
+        crate::import::preview(src, &reg).map_err(|e| AppError::Internal(e.to_string()))
+    }
+
+    /// Import the chosen sites (or all, with `all: true`) into the registry. The
+    /// running app converges certs/Caddy/hosts for the new projects on its next
+    /// reconcile (≤30s).
+    pub fn import_projects(
+        &self,
+        args: ImportProjectsArgs,
+    ) -> AppResult<crate::import::ImportResult> {
+        let src = parse_import_source(&args.source)?;
+        let mut reg = self.load_registry()?;
+        let ids: Vec<String> = if args.all.unwrap_or(false)
+            || args.ids.as_ref().map(|v| v.is_empty()).unwrap_or(true)
+        {
+            crate::import::site_ids(src).map_err(|e| AppError::Internal(e.to_string()))?
+        } else {
+            args.ids.unwrap_or_default()
+        };
+        let result = crate::import::import_selected(src, &ids, &mut reg)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        if !result.imported.is_empty() {
+            self.save_registry(&reg)?;
+        }
+        Ok(result)
     }
 
     // -------------------------------------------------------------------------
@@ -898,9 +946,8 @@ impl McpContext {
                 // Reject a version that list_all doesn't surface.
                 let views = crate::runtimes::list_all(&reg.runtimes);
                 let lang_view = views.iter().find(|lv| lv.id == lang);
-                let version_known = lang_view.is_some_and(|lv| {
-                    lv.versions.iter().any(|vv| vv.install.version == *v)
-                });
+                let version_known = lang_view
+                    .is_some_and(|lv| lv.versions.iter().any(|vv| vv.install.version == *v));
                 if !version_known {
                     return Err(AppError::BadInput(format!(
                         "version `{v}` is not currently detected for `{lang}` \
@@ -942,9 +989,7 @@ impl McpContext {
         let version = crate::runtimes::major_minor(&version);
 
         let mut reg = self.load_registry()?;
-        let canon = binary
-            .canonicalize()
-            .unwrap_or_else(|_| binary.clone());
+        let canon = binary.canonicalize().unwrap_or_else(|_| binary.clone());
         let exists = reg
             .runtimes
             .manual
@@ -1075,7 +1120,8 @@ impl McpContext {
         };
 
         let detection = crate::databases::detect(eng);
-        crate::databases::provision(eng, &daemon, &app_data, &id, port).map_err(AppError::Internal)?;
+        crate::databases::provision(eng, &daemon, &app_data, &id, port)
+            .map_err(AppError::Internal)?;
 
         let instance = DatabaseInstance {
             id: DatabaseInstanceId::new(id.clone()),
@@ -1109,7 +1155,11 @@ impl McpContext {
     }
 
     /// Stop (best-effort) + deregister an instance; optionally delete its data.
-    pub async fn remove_database(&self, id: &str, delete_data: bool) -> AppResult<DatabaseOpResult> {
+    pub async fn remove_database(
+        &self,
+        id: &str,
+        delete_data: bool,
+    ) -> AppResult<DatabaseOpResult> {
         let did = DatabaseInstanceId::new(id);
         let app_data = self.data_dir().to_path_buf();
         // Best-effort stop so we don't orphan a running daemon.
@@ -1186,7 +1236,11 @@ impl McpContext {
         Ok(self.db_summary_ack(id, format!("Unlinked project {project_id} from {id}.")))
     }
 
-    pub fn set_database_auto_start(&self, id: &str, auto_start: bool) -> AppResult<DatabaseOpResult> {
+    pub fn set_database_auto_start(
+        &self,
+        id: &str,
+        auto_start: bool,
+    ) -> AppResult<DatabaseOpResult> {
         let did = DatabaseInstanceId::new(id);
         let mut reg = self.load_registry()?;
         let inst = reg
@@ -1568,11 +1622,8 @@ impl McpContext {
 
     pub fn list_groups(&self) -> AppResult<Vec<GroupSummary>> {
         let reg = self.load_registry()?;
-        let known: std::collections::HashSet<&str> = reg
-            .list_projects()
-            .iter()
-            .map(|p| p.id.as_str())
-            .collect();
+        let known: std::collections::HashSet<&str> =
+            reg.list_projects().iter().map(|p| p.id.as_str()).collect();
         Ok(reg
             .list_groups()
             .iter()
@@ -1610,11 +1661,9 @@ impl McpContext {
             name,
             projects: project_ids.into_iter().map(ProjectId::new).collect(),
         };
-        reg.add_group(group.clone())
-            .map_err(AppError::Registry)?;
+        reg.add_group(group.clone()).map_err(AppError::Registry)?;
         self.save_registry(&reg)?;
-        let known_ref: std::collections::HashSet<&str> =
-            known.iter().map(|s| s.as_str()).collect();
+        let known_ref: std::collections::HashSet<&str> = known.iter().map(|s| s.as_str()).collect();
         Ok(group_summary(&group, &known_ref))
     }
 
@@ -1639,21 +1688,16 @@ impl McpContext {
                 .map(|ids| ids.into_iter().map(ProjectId::new).collect())
                 .unwrap_or(current.projects),
         };
-        reg.update_group(next.clone())
-            .map_err(AppError::Registry)?;
+        reg.update_group(next.clone()).map_err(AppError::Registry)?;
         self.save_registry(&reg)?;
-        let known: std::collections::HashSet<&str> = reg
-            .list_projects()
-            .iter()
-            .map(|p| p.id.as_str())
-            .collect();
+        let known: std::collections::HashSet<&str> =
+            reg.list_projects().iter().map(|p| p.id.as_str()).collect();
         Ok(group_summary(&next, &known))
     }
 
     pub fn remove_group(&self, id: String) -> AppResult<()> {
         let mut reg = self.load_registry()?;
-        reg.remove_group(&id)
-            .map_err(AppError::Registry)?;
+        reg.remove_group(&id).map_err(AppError::Registry)?;
         self.save_registry(&reg)?;
         Ok(())
     }
@@ -2230,7 +2274,11 @@ enum GroupOp {
 // =============================================================================
 
 fn group_summary(g: &Group, known: &std::collections::HashSet<&str>) -> GroupSummary {
-    let project_ids: Vec<String> = g.projects.iter().map(|id| id.as_str().to_string()).collect();
+    let project_ids: Vec<String> = g
+        .projects
+        .iter()
+        .map(|id| id.as_str().to_string())
+        .collect();
     let known_ids: Vec<String> = project_ids
         .iter()
         .filter(|id| known.contains(id.as_str()))
@@ -2290,6 +2338,14 @@ fn canonical_dir(path: &str) -> AppResult<PathBuf> {
         )));
     }
     Ok(p)
+}
+
+fn parse_import_source(source: &str) -> AppResult<crate::import::ImportSource> {
+    crate::import::ImportSource::parse(source).ok_or_else(|| {
+        AppError::BadInput(format!(
+            "unknown import source `{source}` (valid: herd, servbay, mamp)"
+        ))
+    })
 }
 
 fn dir_name_of(p: &std::path::Path) -> String {
@@ -2514,7 +2570,10 @@ mod tests {
         let result = ctx
             .detect_workspace_apps(&proj.path().to_string_lossy())
             .unwrap();
-        assert!(result.is_none(), "plain folder should not be detected as a monorepo");
+        assert!(
+            result.is_none(),
+            "plain folder should not be detected as a monorepo"
+        );
     }
 
     #[tokio::test]
@@ -2536,9 +2595,17 @@ mod tests {
             r#"{"name":"monorepo","workspaces":["apps/*"]}"#,
         )
         .unwrap();
-        fs::write(root.path().join("pnpm-workspace.yaml"), "packages:\n  - 'apps/*'\n").unwrap();
+        fs::write(
+            root.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'apps/*'\n",
+        )
+        .unwrap();
         // lockfile so detect_package_manager picks pnpm.
-        fs::write(root.path().join("pnpm-lock.yaml"), "lockfileVersion: '6.0'\n").unwrap();
+        fs::write(
+            root.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '6.0'\n",
+        )
+        .unwrap();
         fs::write(
             apps_web.join("package.json"),
             r#"{"name":"@acme/web","scripts":{"dev":"next dev"}}"#,
@@ -2555,7 +2622,10 @@ mod tests {
         let app = &scan.apps[0];
         assert_eq!(app.package, "@acme/web");
         assert_eq!(app.suggested_id, "web");
-        assert!(app.suggested_hostname.ends_with(".portbay.test") || app.suggested_hostname.contains('.'));
+        assert!(
+            app.suggested_hostname.ends_with(".portbay.test")
+                || app.suggested_hostname.contains('.')
+        );
         assert_eq!(app.suggested_start_command.as_deref(), Some("pnpm dev"));
     }
 
@@ -2677,9 +2747,7 @@ mod tests {
         let ctx = ctx_in(home.path());
 
         ctx.create_group(None, "Dev".into(), vec![]).unwrap();
-        let err = ctx
-            .create_group(None, "Dev".into(), vec![])
-            .unwrap_err();
+        let err = ctx.create_group(None, "Dev".into(), vec![]).unwrap_err();
         assert!(matches!(err, AppError::Registry(_)));
     }
 
@@ -2810,7 +2878,11 @@ mod tests {
 
         // After adding B, list_groups still shows same group (stale not auto-cleaned).
         let groups = ctx.list_groups().unwrap();
-        assert_eq!(groups[0].known_ids.len(), 1, "only A is known; stale still stale");
+        assert_eq!(
+            groups[0].known_ids.len(),
+            1,
+            "only A is known; stale still stale"
+        );
     }
 
     #[tokio::test]
@@ -2892,7 +2964,11 @@ mod tests {
         assert!(ids.contains(&"ruby"), "ruby missing");
         // All entries have non-empty install hints.
         for l in &runtimes {
-            assert!(!l.install_hint.is_empty(), "{} has empty install hint", l.id);
+            assert!(
+                !l.install_hint.is_empty(),
+                "{} has empty install hint",
+                l.id
+            );
         }
     }
 
@@ -3020,7 +3096,14 @@ mod tests {
         let engines = ctx.list_database_engines();
         assert_eq!(engines.len(), 6);
         let ids: Vec<&str> = engines.iter().map(|e| e.id.as_str()).collect();
-        for want in ["mysql", "postgres", "mariadb", "redis", "mongo", "memcached"] {
+        for want in [
+            "mysql",
+            "postgres",
+            "mariadb",
+            "redis",
+            "mongo",
+            "memcached",
+        ] {
             assert!(ids.contains(&want), "missing engine {want}");
         }
         for e in &engines {
@@ -3053,7 +3136,11 @@ mod tests {
         // Connection details reflect the instance.
         let conn = ctx.database_connection("cache").unwrap();
         assert_eq!(conn.engine, "redis");
-        assert!(conn.connection_url.contains("6390"), "url: {}", conn.connection_url);
+        assert!(
+            conn.connection_url.contains("6390"),
+            "url: {}",
+            conn.connection_url
+        );
 
         // Auto-start toggle persists.
         ctx.set_database_auto_start("cache", true).unwrap();
@@ -3146,7 +3233,10 @@ mod tests {
 
         let st = ctx.dns_status().unwrap();
         assert_eq!(st.suffix, "pbtest-unique-7c3.test");
-        assert!(!st.resolver_installed, "no resolver file for a unique suffix");
+        assert!(
+            !st.resolver_installed,
+            "no resolver file for a unique suffix"
+        );
         assert!(st.resolver_port.is_none());
         assert!(st.resolver_path.contains("pbtest-unique-7c3.test"));
     }

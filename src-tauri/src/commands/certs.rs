@@ -82,7 +82,10 @@ pub async fn install_mkcert_ca(state: State<'_, AppState>) -> AppResult<()> {
 /// state, not an error; `Err` only on a present-but-unreadable/corrupt cert.
 /// Shared by the `cert_info` command and the out-of-process CLI / MCP server,
 /// which read certs straight off disk without the bundled mkcert binary.
-pub fn read_cert_info(certs_root: &std::path::Path, project_id: &str) -> AppResult<Option<CertInfo>> {
+pub fn read_cert_info(
+    certs_root: &std::path::Path,
+    project_id: &str,
+) -> AppResult<Option<CertInfo>> {
     let Some(paths) = crate::mkcert::cert_paths_in(certs_root, project_id) else {
         return Ok(None);
     };
