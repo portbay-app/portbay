@@ -47,7 +47,9 @@ use portbay_lib::hosts_helper::HostsHelperClient;
 use portbay_lib::process_compose::{
     PcClient, Process, ProjectStatus, DEFAULT_PORT as PC_DEFAULT_PORT,
 };
-use portbay_lib::registry::{self, store, Project, ProjectId, ProjectType, Readiness, Registry};
+use portbay_lib::commands::projects::detect_kind;
+use portbay_lib::registry::{self, store, Group, Project, ProjectId, ProjectType, Readiness, Registry, WorkspaceTool};
+use portbay_lib::registry::workspace as workspace_detect;
 
 /// Domain suffix used when no registry exists yet. Kept in sync with the
 /// GUI's `lib.rs::DEFAULT_DOMAIN_SUFFIX` so the CLI and app agree.
@@ -152,6 +154,25 @@ enum Cmd {
 
     /// Sign out and clear the saved session.
     Logout,
+
+    /// Manage project groups (batch start/stop/restart and organisational
+    /// clusters of projects).
+    #[command(subcommand)]
+    Group(GroupCmd),
+
+    /// Inspect a folder and print detection results: detected framework,
+    /// suggested id, hostname, port, and start command. With `--apps`, list
+    /// the runnable apps inside a JS monorepo instead (one row per app).
+    Detect {
+        /// Absolute or relative path to the project or monorepo root to inspect.
+        path: String,
+
+        /// Scan the folder as a JS monorepo and list individual runnable apps.
+        /// Prints "not a monorepo" when the folder has no recognised workspace
+        /// layout. Without this flag, single-project detection is run instead.
+        #[arg(long)]
+        apps: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -314,6 +335,72 @@ impl From<CliWebServer> for portbay_lib::registry::WebServer {
     }
 }
 
+#[derive(Subcommand, Debug)]
+enum GroupCmd {
+    /// List all project groups.
+    List,
+
+    /// Create a new project group.
+    Create(GroupCreateArgs),
+
+    /// Update a group's name or member list.
+    Update(GroupUpdateArgs),
+
+    /// Remove a group (members are not affected).
+    Remove {
+        /// Group id (slug).
+        id: String,
+    },
+
+    /// Start every project in a group (requires running daemon).
+    Start {
+        /// Group id (slug).
+        id: String,
+    },
+
+    /// Stop every project in a group (requires running daemon).
+    Stop {
+        /// Group id (slug).
+        id: String,
+    },
+
+    /// Restart every project in a group (requires running daemon).
+    Restart {
+        /// Group id (slug).
+        id: String,
+    },
+}
+
+#[derive(Args, Debug)]
+struct GroupCreateArgs {
+    /// Human-readable group name (e.g. "Backend services").
+    name: String,
+
+    /// Explicit group id (url-safe slug). Defaults to a slug of `name`.
+    #[arg(long)]
+    id: Option<String>,
+
+    /// Project ids to include in the group (repeatable).
+    #[arg(long = "project", value_name = "PROJECT_ID")]
+    projects: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct GroupUpdateArgs {
+    /// Group id (slug) to update.
+    id: String,
+
+    /// New display name.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Full replacement member list (repeatable). When provided, replaces the
+    /// entire member list — it is not a merge. Pass multiple times to set
+    /// several members: `--project blog --project api`.
+    #[arg(long = "project", value_name = "PROJECT_ID")]
+    projects: Vec<String>,
+}
+
 // =============================================================================
 // Entry
 // =============================================================================
@@ -373,6 +460,8 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Login(args) => cmd_login(args).await,
         Cmd::License => cmd_license(),
         Cmd::Logout => cmd_logout(),
+        Cmd::Group(sub) => cmd_group(&ctx, sub).await,
+        Cmd::Detect { path, apps } => cmd_detect(&ctx, &path, apps).await,
     }
 }
 
@@ -1352,6 +1441,517 @@ async fn cmd_hosts(ctx: &CliContext, sub: HostsCmd) -> Result<ExitCode, CliError
     Ok(ExitCode::SUCCESS)
 }
 
+/// `portbay detect <path>` — single-project or monorepo app detection.
+///
+/// Without `--apps`: detect the framework at `path` and print the suggested
+/// registration defaults (kind, id, hostname, port, start command).
+///
+/// With `--apps`: treat `path` as a JS monorepo root and list the individual
+/// runnable apps inside it. Prints "not a monorepo" when no workspace layout
+/// is found (the caller should retry without `--apps`).
+async fn cmd_detect(ctx: &CliContext, path: &str, apps: bool) -> Result<ExitCode, CliError> {
+    let canonical = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| CliError::BadInput(format!("path: {e}")))?;
+
+    if apps {
+        // --- Monorepo / workspace app detection ---
+        let Some(layout) = workspace_detect::detect(&canonical) else {
+            if ctx.json {
+                println!("{}", serde_json::json!({ "monorepo": false, "apps": [] }));
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} Not a monorepo (no recognised workspace layout).",
+                        style("·").dim()
+                    ))
+                    .ok();
+                ctx.term
+                    .write_line(&format!(
+                        "  {} Try `portbay detect {}` without --apps for single-project detection.",
+                        style("hint:").dim(),
+                        path
+                    ))
+                    .ok();
+            }
+            return Ok(ExitCode::SUCCESS);
+        };
+
+        let reg = ctx.load_registry()?;
+        let suffix = &reg.domain_suffix;
+
+        // Build the per-app summary list, mirroring detect_workspace_apps in ops.rs.
+        let detected_apps: Vec<serde_json::Value> = layout
+            .packages
+            .iter()
+            .map(|pkg| {
+                let leaf = std::path::Path::new(&pkg.rel_dir)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&pkg.rel_dir);
+                let id = slugify(leaf);
+                let detected = detect_kind(&pkg.abs_dir);
+                let start_command = detected
+                    .start_command
+                    .map(|_| cli_standalone_dev_command(layout.tool));
+                serde_json::json!({
+                    "package":                pkg.name,
+                    "rel_dir":                pkg.rel_dir,
+                    "path":                   pkg.abs_dir.display().to_string(),
+                    "kind":                   format!("{:?}", detected.kind).to_lowercase(),
+                    "suggested_id":           id.clone(),
+                    "suggested_hostname":     format!("{id}.{suffix}"),
+                    "suggested_port":         detected.port,
+                    "suggested_start_command": start_command,
+                })
+            })
+            .collect();
+
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "monorepo": true,
+                    "root":     canonical.display().to_string(),
+                    "tool":     format!("{:?}", layout.tool).to_lowercase(),
+                    "apps":     detected_apps,
+                })
+            );
+        } else {
+            ctx.term
+                .write_line(&format!(
+                    "{} Monorepo detected ({} app(s), tool: {:?})",
+                    style("✓").green(),
+                    detected_apps.len(),
+                    layout.tool,
+                ))
+                .ok();
+            for app in &detected_apps {
+                ctx.term
+                    .write_line(&format!(
+                        "  {id}  {host}  {kind}{cmd}",
+                        id   = style(app["suggested_id"].as_str().unwrap_or("")).bold(),
+                        host = style(app["suggested_hostname"].as_str().unwrap_or("")).dim(),
+                        kind = style(app["kind"].as_str().unwrap_or("")).dim(),
+                        cmd  = app["suggested_start_command"]
+                            .as_str()
+                            .map(|c| format!("  ({})", style(c).dim()))
+                            .unwrap_or_default(),
+                    ))
+                    .ok();
+            }
+        }
+    } else {
+        // --- Single-project detection ---
+        let dir_name = canonical
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
+        let reg = ctx.load_registry()?;
+        let id = slugify(&dir_name);
+        let detected = detect_kind(&canonical);
+        let hostname = format!("{id}.{}", reg.domain_suffix);
+
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "kind":                    format!("{:?}", detected.kind).to_lowercase(),
+                    "suggested_id":            id,
+                    "suggested_name":          dir_name,
+                    "suggested_hostname":      hostname,
+                    "suggested_port":          detected.port,
+                    "suggested_start_command": detected.start_command,
+                    "suggested_document_root": detected.document_root,
+                    "suggested_php_version":   detected.php_version,
+                })
+            );
+        } else {
+            ctx.term
+                .write_line(&format!(
+                    "{} {} detected as {}",
+                    style("✓").green(),
+                    style(&id).bold(),
+                    style(format!("{:?}", detected.kind).to_lowercase()).dim(),
+                ))
+                .ok();
+            ctx.term
+                .write_line(&format!(
+                    "  hostname:  {}",
+                    style(&hostname).dim()
+                ))
+                .ok();
+            if let Some(port) = detected.port {
+                ctx.term
+                    .write_line(&format!("  port:      {}", style(port).dim()))
+                    .ok();
+            }
+            if let Some(cmd) = &detected.start_command {
+                ctx.term
+                    .write_line(&format!("  start:     {}", style(cmd).dim()))
+                    .ok();
+            }
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Standalone dev command for a single app by its package manager, mirroring
+/// `commands::projects::standalone_dev_command` and `mcp::ops::standalone_dev_command`.
+fn cli_standalone_dev_command(tool: WorkspaceTool) -> String {
+    match tool {
+        WorkspaceTool::Pnpm | WorkspaceTool::Turbo => "pnpm dev".into(),
+        WorkspaceTool::Npm => "npm run dev".into(),
+        WorkspaceTool::Yarn => "yarn dev".into(),
+        WorkspaceTool::Bun => "bun run dev".into(),
+    }
+}
+
+async fn cmd_group(ctx: &CliContext, sub: GroupCmd) -> Result<ExitCode, CliError> {
+    // Group operations follow the same pattern as all other CliContext commands:
+    // registry CRUD via ctx.load_registry/save_registry, lifecycle via ctx.pc().
+    // The MCP server does the same through McpContext (same underlying calls).
+    match sub {
+        GroupCmd::List => {
+            let reg = ctx.load_registry()?;
+            let known: std::collections::HashSet<&str> =
+                reg.list_projects().iter().map(|p| p.id.as_str()).collect();
+            let groups: Vec<serde_json::Value> = reg
+                .list_groups()
+                .iter()
+                .map(|g| {
+                    let project_ids: Vec<&str> =
+                        g.projects.iter().map(|id| id.as_str()).collect();
+                    let known_ids: Vec<&str> = project_ids
+                        .iter()
+                        .filter(|id| known.contains(*id))
+                        .copied()
+                        .collect();
+                    serde_json::json!({
+                        "id": g.id,
+                        "name": g.name,
+                        "project_ids": project_ids,
+                        "known_ids": known_ids,
+                        "member_count": project_ids.len(),
+                    })
+                })
+                .collect();
+
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&groups)?);
+            } else if groups.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} No groups. Create one with `portbay group create <name>`.",
+                        style("·").dim()
+                    ))
+                    .ok();
+            } else {
+                for g in &groups {
+                    ctx.term
+                        .write_line(&format!(
+                            "  {id}  {name}  ({n} member(s))",
+                            id = style(g["id"].as_str().unwrap_or("")).bold(),
+                            name = style(g["name"].as_str().unwrap_or("")).dim(),
+                            n = g["member_count"].as_u64().unwrap_or(0),
+                        ))
+                        .ok();
+                }
+            }
+        }
+
+        GroupCmd::Create(args) => {
+            let name = args.name.trim().to_string();
+            if name.is_empty() {
+                return Err(CliError::BadInput("group name cannot be empty".into()));
+            }
+            let id = args
+                .id
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| slugify(&name));
+            if id.is_empty() {
+                return Err(CliError::BadInput(
+                    "group id couldn't be derived from name".into(),
+                ));
+            }
+            let mut reg = ctx.load_registry()?;
+            let group = Group {
+                id: id.clone(),
+                name: name.clone(),
+                projects: args.projects.into_iter().map(ProjectId::new).collect(),
+            };
+            reg.add_group(group.clone()).map_err(CliError::Registry)?;
+            ctx.save_registry(&reg)?;
+
+            if ctx.json {
+                let known: std::collections::HashSet<&str> =
+                    reg.list_projects().iter().map(|p| p.id.as_str()).collect();
+                let project_ids: Vec<&str> =
+                    group.projects.iter().map(|id| id.as_str()).collect();
+                let known_ids: Vec<&str> = project_ids
+                    .iter()
+                    .filter(|id| known.contains(*id))
+                    .copied()
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": group.id,
+                        "name": group.name,
+                        "project_ids": project_ids,
+                        "known_ids": known_ids,
+                        "member_count": project_ids.len(),
+                    })
+                );
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} group {} created ({} member(s)).",
+                        style("\u{2713}").green(),
+                        style(&id).bold(),
+                        group.projects.len(),
+                    ))
+                    .ok();
+            }
+        }
+
+        GroupCmd::Update(args) => {
+            let mut reg = ctx.load_registry()?;
+            let current = reg
+                .get_group(&args.id)
+                .ok_or_else(|| CliError::BadInput(format!("group `{}` not found", args.id)))?
+                .clone();
+            let next = Group {
+                id: current.id.clone(),
+                name: args
+                    .name
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(current.name),
+                projects: if args.projects.is_empty() {
+                    current.projects
+                } else {
+                    args.projects.into_iter().map(ProjectId::new).collect()
+                },
+            };
+            reg.update_group(next.clone())
+                .map_err(CliError::Registry)?;
+            ctx.save_registry(&reg)?;
+
+            if ctx.json {
+                let known: std::collections::HashSet<&str> =
+                    reg.list_projects().iter().map(|p| p.id.as_str()).collect();
+                let project_ids: Vec<&str> =
+                    next.projects.iter().map(|id| id.as_str()).collect();
+                let known_ids: Vec<&str> = project_ids
+                    .iter()
+                    .filter(|id| known.contains(*id))
+                    .copied()
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": next.id,
+                        "name": next.name,
+                        "project_ids": project_ids,
+                        "known_ids": known_ids,
+                        "member_count": project_ids.len(),
+                    })
+                );
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} group {} updated ({} member(s)).",
+                        style("\u{2713}").green(),
+                        style(&next.id).bold(),
+                        next.projects.len(),
+                    ))
+                    .ok();
+            }
+        }
+
+        GroupCmd::Remove { id } => {
+            let mut reg = ctx.load_registry()?;
+            reg.remove_group(&id).map_err(CliError::Registry)?;
+            ctx.save_registry(&reg)?;
+            if ctx.json {
+                println!("{}", serde_json::json!({ "ok": true, "removed": id }));
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} group {} removed.",
+                        style("\u{2713}").green(),
+                        style(&id).bold(),
+                    ))
+                    .ok();
+            }
+        }
+
+        GroupCmd::Start { id } => {
+            let r = cmd_group_fanout(ctx, &id, GroupFanoutOp::Start).await?;
+            print_group_fanout_result(ctx, &r)?;
+        }
+
+        GroupCmd::Stop { id } => {
+            let r = cmd_group_fanout(ctx, &id, GroupFanoutOp::Stop).await?;
+            print_group_fanout_result(ctx, &r)?;
+        }
+
+        GroupCmd::Restart { id } => {
+            let r = cmd_group_fanout(ctx, &id, GroupFanoutOp::Restart).await?;
+            print_group_fanout_result(ctx, &r)?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Local result type for group fanout — mirrors the MCP layer's GroupFanoutResult
+/// so JSON output is identical across both surfaces.
+#[derive(serde::Serialize)]
+struct CliFanoutResult {
+    group_id: String,
+    succeeded: usize,
+    failed: usize,
+    results: Vec<CliFanoutMember>,
+}
+
+#[derive(serde::Serialize)]
+struct CliFanoutMember {
+    project_id: String,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum GroupFanoutOp {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// Fan out a start/stop/restart over every member of a group, mirroring the
+/// logic in `McpContext::fanout_group`. The daemon must be reachable.
+async fn cmd_group_fanout(
+    ctx: &CliContext,
+    group_id: &str,
+    op: GroupFanoutOp,
+) -> Result<CliFanoutResult, CliError> {
+    let client = ctx.pc();
+    // Check daemon reachability — surface a Pc error if it's down.
+    let is_live = client.live().await.unwrap_or(false);
+    if !is_live {
+        return Err(CliError::Other(
+            "daemon not reachable — open PortBay.app to start the daemon".into(),
+        ));
+    }
+
+    let reg = ctx.load_registry()?;
+    let group = reg
+        .get_group(group_id)
+        .ok_or_else(|| CliError::BadInput(format!("group `{group_id}` not found")))?
+        .clone();
+
+    let projects_by_id: std::collections::HashMap<&str, &Project> = reg
+        .list_projects()
+        .iter()
+        .map(|p| (p.id.as_str(), p))
+        .collect();
+
+    let mut result = CliFanoutResult {
+        group_id: group_id.to_string(),
+        succeeded: 0,
+        failed: 0,
+        results: Vec::with_capacity(group.projects.len()),
+    };
+
+    for pid in &group.projects {
+        let id_str = pid.as_str().to_string();
+        let Some(project) = projects_by_id.get(id_str.as_str()) else {
+            result.failed += 1;
+            result.results.push(CliFanoutMember {
+                project_id: id_str,
+                ok: false,
+                error: Some("project not in registry".into()),
+            });
+            continue;
+        };
+        let process_id = project.process_compose_id();
+        if process_id.is_none() {
+            // No managed process (e.g. mobile/Xcode) — count as ok.
+            result.succeeded += 1;
+            result.results.push(CliFanoutMember {
+                project_id: id_str,
+                ok: true,
+                error: None,
+            });
+            continue;
+        }
+        let process_id = process_id.expect("checked above");
+        let res = match op {
+            GroupFanoutOp::Start => client.start(&process_id).await,
+            GroupFanoutOp::Stop => client.stop(&process_id).await,
+            GroupFanoutOp::Restart => client.restart(&process_id).await,
+        };
+        match res {
+            Ok(()) => {
+                result.succeeded += 1;
+                result.results.push(CliFanoutMember {
+                    project_id: id_str,
+                    ok: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                result.failed += 1;
+                result.results.push(CliFanoutMember {
+                    project_id: id_str,
+                    ok: false,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn print_group_fanout_result(ctx: &CliContext, r: &CliFanoutResult) -> Result<(), CliError> {
+    if ctx.json {
+        println!("{}", serde_json::to_string_pretty(r)?);
+        return Ok(());
+    }
+    ctx.term
+        .write_line(&format!(
+            "{} group {}: {} ok, {} failed.",
+            if r.failed == 0 {
+                style("\u{2713}").green()
+            } else {
+                style("!").yellow()
+            },
+            style(&r.group_id).bold(),
+            r.succeeded,
+            r.failed,
+        ))
+        .ok();
+    for m in &r.results {
+        if !m.ok {
+            ctx.term
+                .write_line(&format!(
+                    "    {} {}  {}",
+                    style("\u{2717}").red(),
+                    style(&m.project_id).bold(),
+                    style(m.error.as_deref().unwrap_or("unknown error")).dim(),
+                ))
+                .ok();
+        }
+    }
+    Ok(())
+}
+
 fn add_host_best_effort(
     ctx: &CliContext,
     hostname: &str,
@@ -1616,5 +2216,88 @@ mod tests {
     fn cli_project_type_round_trip() {
         let t: ProjectType = CliProjectType::Next.into();
         assert!(matches!(t, ProjectType::Next));
+    }
+
+    #[test]
+    fn cli_parses_group_list() {
+        let cli = Cli::try_parse_from(["portbay", "group", "list"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Group(GroupCmd::List))));
+    }
+
+    #[test]
+    fn cli_parses_group_create_with_members() {
+        let cli = Cli::try_parse_from([
+            "portbay",
+            "group",
+            "create",
+            "Backend",
+            "--project",
+            "api",
+            "--project",
+            "worker",
+        ])
+        .unwrap();
+        let Some(Cmd::Group(GroupCmd::Create(args))) = cli.cmd else {
+            panic!("expected Group::Create")
+        };
+        assert_eq!(args.name, "Backend");
+        assert_eq!(args.projects, vec!["api", "worker"]);
+        assert!(args.id.is_none());
+    }
+
+    #[test]
+    fn cli_parses_group_create_with_explicit_id() {
+        let cli =
+            Cli::try_parse_from(["portbay", "group", "create", "Dev", "--id", "dev-group"])
+                .unwrap();
+        let Some(Cmd::Group(GroupCmd::Create(args))) = cli.cmd else {
+            panic!("expected Group::Create")
+        };
+        assert_eq!(args.id, Some("dev-group".into()));
+    }
+
+    #[test]
+    fn cli_parses_group_update() {
+        let cli = Cli::try_parse_from([
+            "portbay",
+            "group",
+            "update",
+            "my-group",
+            "--name",
+            "Renamed",
+            "--project",
+            "blog",
+        ])
+        .unwrap();
+        let Some(Cmd::Group(GroupCmd::Update(args))) = cli.cmd else {
+            panic!("expected Group::Update")
+        };
+        assert_eq!(args.id, "my-group");
+        assert_eq!(args.name, Some("Renamed".into()));
+        assert_eq!(args.projects, vec!["blog"]);
+    }
+
+    #[test]
+    fn cli_parses_group_remove() {
+        let cli =
+            Cli::try_parse_from(["portbay", "group", "remove", "old-group"]).unwrap();
+        let Some(Cmd::Group(GroupCmd::Remove { id })) = cli.cmd else {
+            panic!("expected Group::Remove")
+        };
+        assert_eq!(id, "old-group");
+    }
+
+    #[test]
+    fn cli_parses_group_start_stop_restart() {
+        for verb in ["start", "stop", "restart"] {
+            let cli =
+                Cli::try_parse_from(["portbay", "group", verb, "g1"]).unwrap();
+            assert!(matches!(
+                cli.cmd,
+                Some(Cmd::Group(
+                    GroupCmd::Start { .. } | GroupCmd::Stop { .. } | GroupCmd::Restart { .. }
+                ))
+            ));
+        }
     }
 }

@@ -766,17 +766,17 @@ fn canonical_project_folder(path: &str) -> AppResult<PathBuf> {
     Ok(p)
 }
 
-pub(crate) struct ProjectDetection {
-    pub(crate) kind: ProjectType,
-    pub(crate) port: Option<u16>,
-    pub(crate) start_command: Option<String>,
-    pub(crate) document_root: Option<String>,
-    pub(crate) php_version: Option<String>,
-    pub(crate) web_server: Option<WebServer>,
-    pub(crate) mobile_run: Option<MobileRunConfig>,
+pub struct ProjectDetection {
+    pub kind: ProjectType,
+    pub port: Option<u16>,
+    pub start_command: Option<String>,
+    pub document_root: Option<String>,
+    pub php_version: Option<String>,
+    pub web_server: Option<WebServer>,
+    pub mobile_run: Option<MobileRunConfig>,
 }
 
-pub(crate) fn detect_kind(path: &Path) -> ProjectDetection {
+pub fn detect_kind(path: &Path) -> ProjectDetection {
     let pkg = path.join("package.json");
     if pkg.exists() {
         let body = std::fs::read_to_string(&pkg).unwrap_or_default();

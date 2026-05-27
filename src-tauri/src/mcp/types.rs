@@ -433,3 +433,91 @@ pub struct ExportResult {
     /// Names of secret env vars the file references (values are never written).
     pub secret_names: Vec<String>,
 }
+
+// =============================================================================
+// Group tool inputs
+// =============================================================================
+
+/// Reference a group by its id.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct GroupIdArgs {
+    /// The group id (slug), as returned by `portbay_list_groups`.
+    pub id: String,
+}
+
+/// Create a new project group.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct CreateGroupArgs {
+    /// Human-readable display name for the group (e.g. `"Backend services"`).
+    pub name: String,
+    /// Explicit group id (url-safe slug). When omitted, derived from `name`.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Project ids (slugs) to include in the group. May be empty — members
+    /// can be added later via `portbay_update_group`.
+    #[serde(default)]
+    pub project_ids: Vec<String>,
+}
+
+/// Patch an existing group. Only the fields you set are changed.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct UpdateGroupArgs {
+    /// The group id (slug) to update — as returned by `portbay_list_groups`.
+    pub id: String,
+    /// New display name. Leave unset to keep the current name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Full replacement member list. Leave unset to keep the current members.
+    /// When set, this replaces the entire list — it is not a merge.
+    #[serde(default)]
+    pub project_ids: Option<Vec<String>>,
+}
+
+/// List the runnable apps inside a JS monorepo so the agent can register just
+/// one instead of the whole turbo fan-out. Returns `null` for a plain
+/// (non-monorepo) folder — use `portbay_detect_project` instead.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DetectWorkspaceAppsArgs {
+    /// Absolute path to the folder to inspect (typically the monorepo root).
+    pub path: String,
+}
+
+// =============================================================================
+// Workspace detection outputs
+// =============================================================================
+
+/// One runnable app found inside a JS monorepo.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct WorkspaceAppSummary {
+    /// The package's `name` from its `package.json` (may include a scope prefix
+    /// such as `@acme/web`).
+    pub package: String,
+    /// Directory path relative to the monorepo root (e.g. `apps/web`).
+    pub rel_dir: String,
+    /// Absolute path to the package directory.
+    pub path: String,
+    /// Detected framework (`next`, `vite`, `node`, …).
+    pub kind: String,
+    /// Suggested PortBay project id (url-safe slug derived from the leaf dir).
+    pub suggested_id: String,
+    /// Suggested hostname (e.g. `web.portbay.test`).
+    pub suggested_hostname: String,
+    /// Dev-server port detected from the framework, when applicable.
+    pub suggested_port: Option<u16>,
+    /// Shell command that starts this app in isolation (e.g. `pnpm dev`).
+    pub suggested_start_command: Option<String>,
+}
+
+/// Result of `portbay_detect_workspace_apps`. When the path is not a
+/// recognised JS monorepo, this is `null` — the caller should fall back to
+/// `portbay_detect_project` for single-project detection.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct WorkspaceScanResult {
+    /// Absolute path of the detected monorepo root.
+    pub root: String,
+    /// Package manager / build tool detected from the lockfile
+    /// (`pnpm`, `npm`, `yarn`, `bun`).
+    pub tool: String,
+    /// Runnable apps found in the monorepo (those declaring a `dev` script).
+    pub apps: Vec<WorkspaceAppSummary>,
+}

@@ -36,6 +36,9 @@ pub enum ToolGroup {
     Diagnostics,
     /// setup_from_template — runs upstream scaffolders (network access).
     Scaffold,
+    /// Group CRUD + batch lifecycle: list, create, update, remove,
+    /// start, stop, restart.
+    Groups,
 }
 
 impl ToolGroup {
@@ -45,6 +48,7 @@ impl ToolGroup {
             ToolGroup::Lifecycle,
             ToolGroup::Diagnostics,
             ToolGroup::Scaffold,
+            ToolGroup::Groups,
         ]
     }
 
@@ -56,8 +60,10 @@ impl ToolGroup {
             "lifecycle" => Ok(vec![ToolGroup::Lifecycle]),
             "diagnostics" => Ok(vec![ToolGroup::Diagnostics]),
             "scaffold" => Ok(vec![ToolGroup::Scaffold]),
+            "groups" => Ok(vec![ToolGroup::Groups]),
             other => Err(format!(
-                "unknown toolset `{other}` (valid: projects, lifecycle, diagnostics, scaffold, all)"
+                "unknown toolset `{other}` \
+                 (valid: projects, lifecycle, diagnostics, scaffold, groups, all)"
             )),
         }
     }
@@ -106,6 +112,7 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_list_projects", ToolGroup::Projects, false),
     ("portbay_status", ToolGroup::Projects, false),
     ("portbay_detect_project", ToolGroup::Projects, false),
+    ("portbay_detect_workspace_apps", ToolGroup::Projects, false),
     ("portbay_list_recipes", ToolGroup::Projects, false),
     ("portbay_setup_from_recipe", ToolGroup::Projects, true),
     ("portbay_add_project", ToolGroup::Projects, true),
@@ -122,6 +129,13 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_doctor", ToolGroup::Diagnostics, false),
     ("portbay_sidecar_status", ToolGroup::Diagnostics, false),
     ("portbay_setup_from_template", ToolGroup::Scaffold, true),
+    ("portbay_list_groups", ToolGroup::Groups, false),
+    ("portbay_create_group", ToolGroup::Groups, true),
+    ("portbay_update_group", ToolGroup::Groups, true),
+    ("portbay_remove_group", ToolGroup::Groups, true),
+    ("portbay_start_group", ToolGroup::Groups, true),
+    ("portbay_stop_group", ToolGroup::Groups, true),
+    ("portbay_restart_group", ToolGroup::Groups, true),
 ];
 
 /// The PortBay MCP server. Holds the operations context and the (possibly
@@ -237,6 +251,27 @@ impl PortbayMcp {
         Parameters(args): Parameters<DetectArgs>,
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.detect_project(&args.path))
+    }
+
+    #[tool(
+        name = "portbay_detect_workspace_apps",
+        description = "List the runnable apps inside a JS monorepo so you can register just one \
+                       as a standalone PortBay project (instead of a root `turbo run dev` fan-out). \
+                       Returns `null` for a plain (non-monorepo) folder — use \
+                       `portbay_detect_project` instead for those. Each app entry carries \
+                       suggested id, hostname, port, and start command ready for \
+                       `portbay_add_project`.",
+        annotations(
+            title = "Detect workspace apps",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn detect_workspace_apps(
+        &self,
+        Parameters(args): Parameters<DetectWorkspaceAppsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.detect_workspace_apps(&args.path))
     }
 
     #[tool(
@@ -525,6 +560,147 @@ impl PortbayMcp {
         Parameters(args): Parameters<SetupFromTemplateArgs>,
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.setup_from_template(args).await)
+    }
+
+    // ---- Groups -------------------------------------------------------------
+
+    #[tool(
+        name = "portbay_list_groups",
+        description = "List every project group registered with PortBay. Each group carries \
+                       its member project ids, a `known_ids` subset (members that still exist \
+                       in the registry), and a `member_count`. Use this to discover group ids \
+                       before calling start/stop/restart/update/remove group tools.",
+        annotations(
+            title = "List groups",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_groups(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.list_groups())
+    }
+
+    #[tool(
+        name = "portbay_create_group",
+        description = "Create a named group of projects. Groups let you start, stop, or restart \
+                       multiple projects in one call. Provide a `name` (the id is derived from it \
+                       automatically, or pass an explicit `id`). Pass `project_ids` as an array of \
+                       slugs (e.g. `[\"blog\", \"api\"]`). The projects don't need to exist yet — \
+                       unknown ids are tracked and surfaced via `known_ids` on list.",
+        annotations(
+            title = "Create group",
+            read_only_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_group(
+        &self,
+        Parameters(args): Parameters<CreateGroupArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(
+            self.ctx
+                .create_group(args.id, args.name, args.project_ids),
+        )
+    }
+
+    #[tool(
+        name = "portbay_update_group",
+        description = "Rename a group or replace its member list. Only the fields you set are \
+                       changed. Pass `project_ids` to fully replace the member list (not a merge — \
+                       any id not in the new list is removed). Pass `name` to rename without \
+                       touching membership.",
+        annotations(
+            title = "Update group",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn update_group(
+        &self,
+        Parameters(args): Parameters<UpdateGroupArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(
+            self.ctx
+                .update_group(args.id, args.name, args.project_ids),
+        )
+    }
+
+    #[tool(
+        name = "portbay_remove_group",
+        description = "Delete a group. The member projects are NOT affected — only the group \
+                       record itself is removed. This is irreversible from PortBay's side — \
+                       confirm with the user first.",
+        annotations(
+            title = "Remove group",
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn remove_group(
+        &self,
+        Parameters(args): Parameters<GroupIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.remove_group(args.id))
+    }
+
+    #[tool(
+        name = "portbay_start_group",
+        description = "Start every project in a group. Members that have no managed process \
+                       (e.g. mobile/Xcode projects) are counted as succeeded and skipped. \
+                       Stale members (removed from the registry but still listed in the group) \
+                       are counted as failed. Requires the PortBay daemon to be running.",
+        annotations(
+            title = "Start group",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn start_group(
+        &self,
+        Parameters(args): Parameters<GroupIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.start_group(args.id).await)
+    }
+
+    #[tool(
+        name = "portbay_stop_group",
+        description = "Stop every project in a group. Members that have no managed process are \
+                       counted as succeeded and skipped. Stale members are counted as failed. \
+                       Requires the PortBay daemon to be running.",
+        annotations(
+            title = "Stop group",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn stop_group(
+        &self,
+        Parameters(args): Parameters<GroupIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.stop_group(args.id).await)
+    }
+
+    #[tool(
+        name = "portbay_restart_group",
+        description = "Restart every project in a group (stop then start). Members that have no \
+                       managed process are counted as succeeded and skipped. Stale members are \
+                       counted as failed. Requires the PortBay daemon to be running.",
+        annotations(
+            title = "Restart group",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn restart_group(
+        &self,
+        Parameters(args): Parameters<GroupIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.restart_group(args.id).await)
     }
 }
 

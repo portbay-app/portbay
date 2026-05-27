@@ -27,8 +27,9 @@ use crate::error::{AppError, AppResult};
 use crate::hosts::{HostsError, HostsManager};
 use crate::hosts_helper::HostsHelperClient;
 use crate::process_compose::{PcClient, Process, ProjectStatus, DEFAULT_PORT};
-use crate::registry::{store, Project, ProjectId, ProjectType, Readiness, Registry, WebServer};
+use crate::registry::{store, Group, Project, ProjectId, ProjectType, Readiness, Registry, WebServer, WorkspaceTool};
 use crate::util::slugify;
+use rmcp::schemars;
 
 use super::types::*;
 
@@ -195,6 +196,56 @@ impl McpContext {
             suggested_document_root: d.document_root,
             suggested_php_version: d.php_version,
         })
+    }
+
+    /// If `path` is a JS monorepo root, return the runnable apps inside it
+    /// (each with framework-detected defaults ready to pass to `add_project`).
+    /// Returns `None` for a plain folder — the caller should use
+    /// `detect_project` instead.
+    pub fn detect_workspace_apps(&self, path: &str) -> AppResult<Option<WorkspaceScanResult>> {
+        let root = canonical_dir(path)?;
+        let Some(layout) = crate::registry::workspace::detect(&root) else {
+            return Ok(None);
+        };
+
+        let reg = self.load_registry()?;
+        let suffix = &reg.domain_suffix;
+
+        let apps = layout
+            .packages
+            .iter()
+            .map(|pkg| {
+                // Use the directory leaf (e.g. `apps/web` → `web`) for the id
+                // and hostname; the package name may carry a scope prefix.
+                let leaf = std::path::Path::new(&pkg.rel_dir)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&pkg.rel_dir);
+                let id = slugify(leaf);
+                let detected = detect_kind(&pkg.abs_dir);
+                // Honour the repo's own package manager for the dev command;
+                // only emit one when the framework detects a dev script.
+                let start_command = detected
+                    .start_command
+                    .map(|_| standalone_dev_command(layout.tool));
+                WorkspaceAppSummary {
+                    package: pkg.name.clone(),
+                    rel_dir: pkg.rel_dir.clone(),
+                    path: pkg.abs_dir.display().to_string(),
+                    kind: kind_str(detected.kind),
+                    suggested_id: id.clone(),
+                    suggested_hostname: format!("{id}.{suffix}"),
+                    suggested_port: detected.port,
+                    suggested_start_command: start_command,
+                }
+            })
+            .collect();
+
+        Ok(Some(WorkspaceScanResult {
+            root: root.display().to_string(),
+            tool: format!("{:?}", layout.tool).to_lowercase(),
+            apps,
+        }))
     }
 
     pub async fn logs(&self, id: &str, lines: u32, offset: u64) -> AppResult<LogsResult> {
@@ -790,6 +841,189 @@ impl McpContext {
     }
 
     // -------------------------------------------------------------------------
+    // Group CRUD + lifecycle (mirrors commands/groups.rs, no app-state deps)
+    // -------------------------------------------------------------------------
+
+    pub fn list_groups(&self) -> AppResult<Vec<GroupSummary>> {
+        let reg = self.load_registry()?;
+        let known: std::collections::HashSet<&str> = reg
+            .list_projects()
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        Ok(reg
+            .list_groups()
+            .iter()
+            .map(|g| group_summary(g, &known))
+            .collect())
+    }
+
+    pub fn create_group(
+        &self,
+        id: Option<String>,
+        name: String,
+        project_ids: Vec<String>,
+    ) -> AppResult<GroupSummary> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(AppError::BadInput("group name cannot be empty".into()));
+        }
+        let id = id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| slugify(&name));
+        if id.is_empty() {
+            return Err(AppError::BadInput(
+                "group id couldn't be derived from name".into(),
+            ));
+        }
+        let mut reg = self.load_registry()?;
+        let known: std::collections::HashSet<String> = reg
+            .list_projects()
+            .iter()
+            .map(|p| p.id.as_str().to_string())
+            .collect();
+        let group = Group {
+            id: id.clone(),
+            name,
+            projects: project_ids.into_iter().map(ProjectId::new).collect(),
+        };
+        reg.add_group(group.clone())
+            .map_err(|e| AppError::Registry(e))?;
+        self.save_registry(&reg)?;
+        let known_ref: std::collections::HashSet<&str> =
+            known.iter().map(|s| s.as_str()).collect();
+        Ok(group_summary(&group, &known_ref))
+    }
+
+    pub fn update_group(
+        &self,
+        id: String,
+        name: Option<String>,
+        project_ids: Option<Vec<String>>,
+    ) -> AppResult<GroupSummary> {
+        let mut reg = self.load_registry()?;
+        let current = reg
+            .get_group(&id)
+            .ok_or_else(|| AppError::NotFound(format!("group:{id}")))?
+            .clone();
+        let next = Group {
+            id: current.id.clone(),
+            name: name
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(current.name),
+            projects: project_ids
+                .map(|ids| ids.into_iter().map(ProjectId::new).collect())
+                .unwrap_or(current.projects),
+        };
+        reg.update_group(next.clone())
+            .map_err(|e| AppError::Registry(e))?;
+        self.save_registry(&reg)?;
+        let known: std::collections::HashSet<&str> = reg
+            .list_projects()
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        Ok(group_summary(&next, &known))
+    }
+
+    pub fn remove_group(&self, id: String) -> AppResult<()> {
+        let mut reg = self.load_registry()?;
+        reg.remove_group(&id)
+            .map_err(|e| AppError::Registry(e))?;
+        self.save_registry(&reg)?;
+        Ok(())
+    }
+
+    pub async fn start_group(&self, id: String) -> AppResult<GroupFanoutResult> {
+        self.fanout_group(&id, GroupOp::Start).await
+    }
+
+    pub async fn stop_group(&self, id: String) -> AppResult<GroupFanoutResult> {
+        self.fanout_group(&id, GroupOp::Stop).await
+    }
+
+    pub async fn restart_group(&self, id: String) -> AppResult<GroupFanoutResult> {
+        self.fanout_group(&id, GroupOp::Restart).await
+    }
+
+    async fn fanout_group(&self, group_id: &str, op: GroupOp) -> AppResult<GroupFanoutResult> {
+        self.ensure_daemon(false).await?;
+        let reg = self.load_registry()?;
+        let group = reg
+            .get_group(group_id)
+            .ok_or_else(|| AppError::NotFound(format!("group:{group_id}")))?
+            .clone();
+
+        let projects_by_id: HashMap<&str, &crate::registry::Project> = reg
+            .list_projects()
+            .iter()
+            .map(|p| (p.id.as_str(), p))
+            .collect();
+        let client = self.pc();
+
+        let mut result = GroupFanoutResult {
+            group_id: group_id.to_string(),
+            succeeded: 0,
+            failed: 0,
+            results: Vec::with_capacity(group.projects.len()),
+        };
+
+        for pid in &group.projects {
+            let id_str = pid.as_str().to_string();
+            let Some(project) = projects_by_id.get(id_str.as_str()) else {
+                // Stale member — count as failed so the caller sees the drift.
+                result.failed += 1;
+                result.results.push(GroupMemberResult {
+                    project_id: id_str,
+                    ok: false,
+                    error: Some("project not in registry".into()),
+                });
+                continue;
+            };
+            let process_id = project.process_compose_id();
+            if process_id.is_none() {
+                // No process to manage (e.g. mobile / Xcode project) — count ok.
+                result.succeeded += 1;
+                result.results.push(GroupMemberResult {
+                    project_id: id_str,
+                    ok: true,
+                    error: None,
+                });
+                continue;
+            }
+            let process_id = process_id.expect("checked above");
+            // Note: mark_stop_requested is app-only state; OMIT here (cross-process).
+            let res = match op {
+                GroupOp::Start => client.start(&process_id).await,
+                GroupOp::Stop => client.stop(&process_id).await,
+                GroupOp::Restart => client.restart(&process_id).await,
+            };
+            match res {
+                Ok(()) => {
+                    result.succeeded += 1;
+                    result.results.push(GroupMemberResult {
+                        project_id: id_str,
+                        ok: true,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    result.failed += 1;
+                    result.results.push(GroupMemberResult {
+                        project_id: id_str,
+                        ok: false,
+                        error: Some(e.to_string()),
+                    });
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    // -------------------------------------------------------------------------
     // Project construction (mirrors the CLI's `cmd_add`)
     // -------------------------------------------------------------------------
 
@@ -881,8 +1115,72 @@ impl McpContext {
 }
 
 // =============================================================================
+// Group result types (separate from Tauri IPC shapes in commands/groups.rs)
+// =============================================================================
+
+/// One group's registry view, returned by CRUD operations.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct GroupSummary {
+    /// Stable slug id — use this in start/stop/restart/update/remove calls.
+    pub id: String,
+    pub name: String,
+    /// All member project ids recorded in the group (may include stale ids if
+    /// a member was removed from the registry without updating the group).
+    pub project_ids: Vec<String>,
+    /// Subset of `project_ids` that currently exist in the registry.
+    /// When `known_ids.len() < project_ids.len()`, the group has stale
+    /// members — call `portbay_update_group` to clean them up.
+    pub known_ids: Vec<String>,
+    pub member_count: usize,
+}
+
+/// Per-member result for a group lifecycle fanout.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct GroupMemberResult {
+    pub project_id: String,
+    pub ok: bool,
+    /// Error detail when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Result of `portbay_start_group`, `portbay_stop_group`,
+/// `portbay_restart_group`.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct GroupFanoutResult {
+    pub group_id: String,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub results: Vec<GroupMemberResult>,
+}
+
+// Internal op tag — not exposed.
+#[derive(Clone, Copy)]
+enum GroupOp {
+    Start,
+    Stop,
+    Restart,
+}
+
+// =============================================================================
 // Free helpers
 // =============================================================================
+
+fn group_summary(g: &Group, known: &std::collections::HashSet<&str>) -> GroupSummary {
+    let project_ids: Vec<String> = g.projects.iter().map(|id| id.as_str().to_string()).collect();
+    let known_ids: Vec<String> = project_ids
+        .iter()
+        .filter(|id| known.contains(id.as_str()))
+        .cloned()
+        .collect();
+    GroupSummary {
+        id: g.id.clone(),
+        name: g.name.clone(),
+        member_count: project_ids.len(),
+        project_ids,
+        known_ids,
+    }
+}
 
 fn summary(p: &Project, proc: Option<&Process>) -> ProjectSummary {
     let scheme = if p.https { "https" } else { "http" };
@@ -971,6 +1269,18 @@ fn best_effort_remove_host(suffix: &str, hostname: &str) -> Vec<String> {
     match HostsManager::system().remove(hostname) {
         Ok(()) => vec![],
         Err(e) => vec![format!("hosts: {e}")],
+    }
+}
+
+/// The dev command that starts a single app from its own directory, using the
+/// monorepo's package manager. Mirrors `commands::projects::standalone_dev_command`
+/// — kept here so `ops` doesn't need a pub re-export from the commands layer.
+fn standalone_dev_command(tool: WorkspaceTool) -> String {
+    match tool {
+        WorkspaceTool::Pnpm | WorkspaceTool::Turbo => "pnpm dev".into(),
+        WorkspaceTool::Npm => "npm run dev".into(),
+        WorkspaceTool::Yarn => "yarn dev".into(),
+        WorkspaceTool::Bun => "bun run dev".into(),
     }
 }
 
@@ -1133,6 +1443,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detect_workspace_apps_returns_none_for_plain_folder() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        // A bare directory (no package.json with workspaces) → None.
+        let result = ctx
+            .detect_workspace_apps(&proj.path().to_string_lossy())
+            .unwrap();
+        assert!(result.is_none(), "plain folder should not be detected as a monorepo");
+    }
+
+    #[tokio::test]
+    async fn detect_workspace_apps_finds_apps_in_pnpm_monorepo() {
+        use std::fs;
+        let home = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        // Build a minimal pnpm monorepo layout:
+        //   root/
+        //     package.json          (workspaces field)
+        //     pnpm-workspace.yaml   (triggers pnpm detection)
+        //     apps/web/package.json (has a "dev" script)
+        let apps_web = root.path().join("apps").join("web");
+        fs::create_dir_all(&apps_web).unwrap();
+        fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"monorepo","workspaces":["apps/*"]}"#,
+        )
+        .unwrap();
+        fs::write(root.path().join("pnpm-workspace.yaml"), "packages:\n  - 'apps/*'\n").unwrap();
+        // lockfile so detect_package_manager picks pnpm.
+        fs::write(root.path().join("pnpm-lock.yaml"), "lockfileVersion: '6.0'\n").unwrap();
+        fs::write(
+            apps_web.join("package.json"),
+            r#"{"name":"@acme/web","scripts":{"dev":"next dev"}}"#,
+        )
+        .unwrap();
+
+        let result = ctx
+            .detect_workspace_apps(&root.path().to_string_lossy())
+            .unwrap();
+
+        let scan = result.expect("pnpm monorepo should be detected");
+        assert_eq!(scan.tool, "pnpm");
+        assert_eq!(scan.apps.len(), 1);
+        let app = &scan.apps[0];
+        assert_eq!(app.package, "@acme/web");
+        assert_eq!(app.suggested_id, "web");
+        assert!(app.suggested_hostname.ends_with(".portbay.test") || app.suggested_hostname.contains('.'));
+        assert_eq!(app.suggested_start_command.as_deref(), Some("pnpm dev"));
+    }
+
+    #[tokio::test]
     async fn setup_from_recipe_applies_blueprint_and_flags_pending_services() {
         let home = tempdir().unwrap();
         let proj = tempdir().unwrap();
@@ -1207,6 +1571,192 @@ mod tests {
             .id;
 
         let err = ctx.start(&id, false).await.unwrap_err();
+        assert!(matches!(err, AppError::SidecarDown(_)));
+    }
+
+    // =========================================================================
+    // Group tests — no daemon needed; all CRUD is registry-only.
+    // =========================================================================
+
+    #[tokio::test]
+    async fn create_group_roundtrips_in_list() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        let g = ctx
+            .create_group(None, "My Cluster".into(), vec!["blog".into(), "api".into()])
+            .unwrap();
+        assert_eq!(g.id, "my-cluster");
+        assert_eq!(g.name, "My Cluster");
+        assert_eq!(g.member_count, 2);
+        // Neither "blog" nor "api" are registered, so known_ids is empty.
+        assert!(g.known_ids.is_empty());
+
+        let groups = ctx.list_groups().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, "my-cluster");
+    }
+
+    #[tokio::test]
+    async fn create_group_explicit_id_is_used() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        let g = ctx
+            .create_group(Some("cluster-1".into()), "Cluster One".into(), vec![])
+            .unwrap();
+        assert_eq!(g.id, "cluster-1");
+    }
+
+    #[tokio::test]
+    async fn create_group_duplicate_id_errors() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        ctx.create_group(None, "Dev".into(), vec![]).unwrap();
+        let err = ctx
+            .create_group(None, "Dev".into(), vec![])
+            .unwrap_err();
+        assert!(matches!(err, AppError::Registry(_)));
+    }
+
+    #[tokio::test]
+    async fn update_group_patches_name_and_members() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        // Register a real project so known_ids reflects it.
+        let p = ctx
+            .add_project(AddProjectArgs {
+                path: proj.path().to_string_lossy().to_string(),
+                name: Some("API".into()),
+                hostname: Some("api.test".into()),
+                kind: Some(McpProjectKind::Node),
+                port: Some(4000),
+                start_command: Some("node index.js".into()),
+                https: Some(false),
+                auto_start: Some(false),
+                php_version: None,
+                document_root: None,
+            })
+            .await
+            .unwrap()
+            .project
+            .unwrap();
+
+        ctx.create_group(None, "old name".into(), vec![]).unwrap();
+
+        let updated = ctx
+            .update_group(
+                "old-name".into(),
+                Some("New Name".into()),
+                Some(vec![p.id.clone(), "ghost".into()]),
+            )
+            .unwrap();
+
+        assert_eq!(updated.id, "old-name"); // id is immutable
+        assert_eq!(updated.name, "New Name");
+        assert_eq!(updated.member_count, 2);
+        // Only the real project shows up in known_ids.
+        assert_eq!(updated.known_ids, vec![p.id.clone()]);
+    }
+
+    #[tokio::test]
+    async fn update_group_name_only_leaves_members_unchanged() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        ctx.create_group(None, "alpha".into(), vec!["x".into(), "y".into()])
+            .unwrap();
+        let g = ctx
+            .update_group("alpha".into(), Some("beta".into()), None)
+            .unwrap();
+        assert_eq!(g.name, "beta");
+        assert_eq!(g.member_count, 2);
+    }
+
+    #[tokio::test]
+    async fn remove_group_is_clean() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        ctx.create_group(None, "temp".into(), vec![]).unwrap();
+        ctx.remove_group("temp".into()).unwrap();
+        assert!(ctx.list_groups().unwrap().is_empty());
+        // Second remove is a clean error.
+        let err = ctx.remove_group("temp".into()).unwrap_err();
+        assert!(matches!(err, AppError::Registry(_)));
+    }
+
+    #[tokio::test]
+    async fn group_known_ids_reflects_registered_projects() {
+        let home = tempdir().unwrap();
+        let proj_a = tempdir().unwrap();
+        let proj_b = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        // Write a signal file so detect_kind gives Static (port 8000) not
+        // Custom (port 3000), avoiding the port-conflict on the second add.
+        std::fs::write(proj_a.path().join("index.html"), "").unwrap();
+        std::fs::write(proj_b.path().join("index.html"), "").unwrap();
+
+        // Register project A (Static, port 8000 from detection).
+        let a_id = ctx
+            .add_project(AddProjectArgs {
+                path: proj_a.path().to_string_lossy().to_string(),
+                name: Some("A".into()),
+                hostname: Some("a.test".into()),
+                kind: Some(McpProjectKind::Static),
+                port: None,
+                start_command: None,
+                https: Some(false),
+                auto_start: Some(false),
+                php_version: None,
+                document_root: None,
+            })
+            .await
+            .unwrap()
+            .project
+            .unwrap()
+            .id;
+
+        // Create a group with a registered member and a stale one.
+        let g = ctx
+            .create_group(None, "mixed".into(), vec![a_id.clone(), "stale".into()])
+            .unwrap();
+        assert_eq!(g.known_ids, vec![a_id.clone()]);
+        assert_eq!(g.project_ids.len(), 2);
+
+        // Register project B — same kind + port, different hostname only.
+        // Use explicit port 8001 to avoid the duplicate-8000 conflict with A.
+        ctx.add_project(AddProjectArgs {
+            path: proj_b.path().to_string_lossy().to_string(),
+            name: Some("B".into()),
+            hostname: Some("b.test".into()),
+            kind: Some(McpProjectKind::Static),
+            port: Some(8001),
+            start_command: None,
+            https: Some(false),
+            auto_start: Some(false),
+            php_version: None,
+            document_root: None,
+        })
+        .await
+        .expect("project B should register without conflict");
+
+        // After adding B, list_groups still shows same group (stale not auto-cleaned).
+        let groups = ctx.list_groups().unwrap();
+        assert_eq!(groups[0].known_ids.len(), 1, "only A is known; stale still stale");
+    }
+
+    #[tokio::test]
+    async fn fanout_group_without_daemon_is_sidecar_down() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        ctx.create_group(None, "test".into(), vec!["x".into()])
+            .unwrap();
+        let err = ctx.start_group("test".into()).await.unwrap_err();
         assert!(matches!(err, AppError::SidecarDown(_)));
     }
 }
