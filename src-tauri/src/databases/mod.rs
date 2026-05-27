@@ -198,27 +198,54 @@ pub struct EngineDetection {
 pub fn detect(engine: DatabaseEngine) -> EngineDetection {
     let daemon = daemon_binary(engine);
     let client = client_binary(engine);
-    let version = daemon
+
+    // Probe the daemon's raw `--version` once — needed both to extract the
+    // numeric version and to disambiguate the MySQL/MariaDB pair, which share
+    // the `mysqld` binary name. Without this, when only one of the two is
+    // installed, `resolve_in`'s global-PATH fallback lets the *other* engine
+    // claim that `mysqld` (e.g. MariaDB reported as installed at MySQL's version).
+    let raw = daemon
         .as_ref()
-        .map(|b| probe_version(b))
+        .map(|b| probe_version_raw(b))
         .unwrap_or_default();
-    EngineDetection {
-        installed: daemon.is_some(),
-        version,
-        daemon,
-        client,
+
+    if daemon_identity_matches(engine, &raw) {
+        EngineDetection {
+            installed: daemon.is_some(),
+            version: extract_version(&raw),
+            daemon,
+            client,
+        }
+    } else {
+        // The resolved daemon belongs to the other engine — report this one as
+        // not installed (its client resolution is cross-contaminated too).
+        EngineDetection {
+            installed: false,
+            version: String::new(),
+            daemon: None,
+            client: None,
+        }
     }
 }
 
-fn probe_version(binary: &Path) -> String {
-    let Ok(out) = run_capture(
-        &binary.to_path_buf(),
-        &["--version"],
-        Duration::from_secs(3),
-    ) else {
-        return String::new();
-    };
-    extract_version(&out)
+/// Raw `--version` output for a daemon binary; empty string on failure.
+fn probe_version_raw(binary: &Path) -> String {
+    run_capture(&binary.to_path_buf(), &["--version"], Duration::from_secs(3)).unwrap_or_default()
+}
+
+/// Disambiguate the MySQL/MariaDB pair from a daemon's raw `--version` output.
+/// They share the `mysqld` binary name; MariaDB's version string contains
+/// "MariaDB", MySQL's does not. Returns true when `raw` is consistent with
+/// `engine` — and, conservatively, when `raw` is empty (keep an unverifiable
+/// install rather than hide a real one). Engines with unique daemon binaries
+/// always match.
+fn daemon_identity_matches(engine: DatabaseEngine, raw: &str) -> bool {
+    let looks_like_mariadb = raw.to_lowercase().contains("mariadb");
+    match engine {
+        DatabaseEngine::Mariadb => raw.is_empty() || looks_like_mariadb,
+        DatabaseEngine::Mysql => raw.is_empty() || !looks_like_mariadb,
+        _ => true,
+    }
 }
 
 /// Pull the first semver-ish token out of a `--version` line. Handles
@@ -607,6 +634,41 @@ fn truncate(s: &str, limit: usize) -> &str {
 mod tests {
     use super::*;
     use crate::registry::{DatabaseInstance, DatabaseInstanceId};
+
+    #[test]
+    fn mariadb_and_mysql_daemon_identity_is_disambiguated() {
+        // Real-world `--version` lines from each engine's daemon.
+        let mysql = "/opt/homebrew/opt/mysql/bin/mysqld  Ver 8.4.9 for macos15 on arm64 (Homebrew)";
+        let mariadb = "/opt/homebrew/opt/mariadb/bin/mariadbd  Ver 11.4.3-MariaDB Source distribution";
+        // Older MariaDB ships its daemon as `mysqld` but still reports MariaDB.
+        let mariadb_as_mysqld = "mysqld  Ver 10.11.6-MariaDB on macos";
+
+        // MariaDB must accept only MariaDB version strings — never MySQL's mysqld.
+        assert!(daemon_identity_matches(DatabaseEngine::Mariadb, mariadb));
+        assert!(daemon_identity_matches(DatabaseEngine::Mariadb, mariadb_as_mysqld));
+        assert!(
+            !daemon_identity_matches(DatabaseEngine::Mariadb, mysql),
+            "MariaDB must not claim MySQL's mysqld"
+        );
+
+        // MySQL must reject MariaDB's daemon (the reverse contamination).
+        assert!(daemon_identity_matches(DatabaseEngine::Mysql, mysql));
+        assert!(
+            !daemon_identity_matches(DatabaseEngine::Mysql, mariadb),
+            "MySQL must not claim MariaDB's daemon"
+        );
+
+        // Empty probe output (e.g. --version failed) is kept conservatively.
+        assert!(daemon_identity_matches(DatabaseEngine::Mariadb, ""));
+        assert!(daemon_identity_matches(DatabaseEngine::Mysql, ""));
+
+        // Engines with unique daemon binaries always match.
+        assert!(daemon_identity_matches(
+            DatabaseEngine::Postgres,
+            "postgres (PostgreSQL) 16.2"
+        ));
+        assert!(daemon_identity_matches(DatabaseEngine::Redis, "Redis server v=7.2.6"));
+    }
 
     fn instance(engine: DatabaseEngine, port: u16) -> DatabaseInstance {
         DatabaseInstance {
