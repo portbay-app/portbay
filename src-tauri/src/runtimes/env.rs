@@ -246,6 +246,26 @@ pub fn brew_opt_prefixes() -> Vec<PathBuf> {
     prefixes
 }
 
+/// Return every Homebrew **Cellar** directory — where kegs are actually
+/// installed, as `<prefix>/Cellar/<formula>/<version>`. The Cellar is the
+/// sibling of `opt/` under each prefix, so we derive it from the same prefixes
+/// [`brew_opt_prefixes`] discovers. Scanning the Cellar (in addition to `opt`)
+/// lets detection find a formula whose `opt/<formula>` symlink is missing — an
+/// install left unlinked or interrupted still shows up.
+pub fn brew_cellar_prefixes() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for opt in brew_opt_prefixes() {
+        // `<prefix>/opt` → `<prefix>` → `<prefix>/Cellar`.
+        if let Some(cellar) = opt.parent().map(|p| p.join("Cellar")) {
+            if cellar.is_dir() && seen.insert(cellar.clone()) {
+                out.push(cellar);
+            }
+        }
+    }
+    out
+}
+
 fn brew_prefix_via_cli() -> Option<PathBuf> {
     let out = Command::new("brew").arg("--prefix").output().ok()?;
     if !out.status.success() {
@@ -381,20 +401,66 @@ fn home_subdir(child: &str) -> Option<PathBuf> {
 /// Returns `(formula_name, install_path)` pairs. `install_path` is
 /// the directory itself (e.g. `<prefix>/opt/php@8.3`).
 pub fn brew_formulae_matching(base: &str) -> Vec<(String, PathBuf)> {
-    let mut out = Vec::new();
+    collect_brew_formulae(&brew_opt_prefixes(), &brew_cellar_prefixes(), base)
+}
+
+/// Pure core of [`brew_formulae_matching`], split out so the scan logic is unit
+/// testable without a real Homebrew install. Given the `opt` dirs and `Cellar`
+/// dirs to scan, return `(formula_name, install_dir)` for every formula named
+/// `<base>` or `<base>@<version>`.
+///
+/// - In `opt/`, a formula is a single dir (`opt/php@8.3`) that already contains
+///   `bin/` (via symlink into the Cellar).
+/// - In `Cellar/`, a formula has an extra version layer
+///   (`Cellar/php@8.3/8.3.13`); we descend one level so the returned dir
+///   contains `bin/` like the opt case.
+///
+/// Callers dedupe by canonical binary path, so an `opt` symlink and the Cellar
+/// keg it points at collapse into a single install — listing both here is safe.
+fn collect_brew_formulae(
+    opt_dirs: &[PathBuf],
+    cellar_dirs: &[PathBuf],
+    base: &str,
+) -> Vec<(String, PathBuf)> {
     let prefix_match = format!("{base}@");
-    for opt_dir in brew_opt_prefixes() {
-        let Ok(entries) = std::fs::read_dir(&opt_dir) else {
+    let matches_name = |s: &str| s == base || s.starts_with(&prefix_match);
+    let mut out = Vec::new();
+
+    // Linked formulae — the common case.
+    for opt_dir in opt_dirs {
+        let Ok(entries) = std::fs::read_dir(opt_dir) else {
             continue;
         };
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let s = name.to_string_lossy().into_owned();
-            if s == base || s.starts_with(&prefix_match) {
+            let s = entry.file_name().to_string_lossy().into_owned();
+            if matches_name(&s) {
                 out.push((s, entry.path()));
             }
         }
     }
+
+    // Installed kegs whose `opt` symlink may be absent (unlinked/interrupted
+    // install). Descend the version layer so the returned dir holds `bin/`.
+    for cellar in cellar_dirs {
+        let Ok(entries) = std::fs::read_dir(cellar) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let s = entry.file_name().to_string_lossy().into_owned();
+            if !matches_name(&s) {
+                continue;
+            }
+            let Ok(versions) = std::fs::read_dir(entry.path()) else {
+                continue;
+            };
+            for v in versions.flatten() {
+                if v.path().is_dir() {
+                    out.push((s.clone(), v.path()));
+                }
+            }
+        }
+    }
+
     out
 }
 
@@ -420,6 +486,37 @@ mod tests {
     fn brew_formulae_matching_with_unknown_base_returns_empty() {
         let v = brew_formulae_matching("__no_such_formula_ever__");
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn collect_brew_formulae_scans_opt_and_unlinked_cellar_kegs() {
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // opt/: a linked php + an unrelated formula + a non-matching language.
+        let opt = root.join("opt");
+        fs::create_dir_all(opt.join("php@8.3")).unwrap();
+        fs::create_dir_all(opt.join("node")).unwrap();
+        fs::create_dir_all(opt.join("php-cs-fixer")).unwrap(); // must NOT match "php"
+
+        // Cellar/: a php keg with NO opt symlink (the unlinked-install case),
+        // plus a ruby keg that must be ignored.
+        let cellar = root.join("Cellar");
+        fs::create_dir_all(cellar.join("php@8.2").join("8.2.10").join("bin")).unwrap();
+        fs::create_dir_all(cellar.join("ruby").join("3.3.0")).unwrap();
+
+        let got = collect_brew_formulae(&[opt], &[cellar], "php");
+        let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+
+        // Linked opt php + unlinked Cellar php both surface; nothing else does.
+        assert!(names.contains(&"php@8.3"), "opt php@8.3 should be found");
+        assert!(names.contains(&"php@8.2"), "unlinked Cellar php@8.2 should be found");
+        assert_eq!(got.len(), 2, "node / php-cs-fixer / ruby must be excluded: {names:?}");
+
+        // The Cellar hit descends to the version dir so it holds `bin/`.
+        let cellar_hit = got.iter().find(|(n, _)| n == "php@8.2").unwrap();
+        assert!(cellar_hit.1.ends_with("8.2.10"));
     }
 
     #[test]

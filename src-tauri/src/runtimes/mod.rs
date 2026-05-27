@@ -438,6 +438,15 @@ pub fn list_all(settings: &crate::registry::RuntimeSettings) -> Vec<LanguageView
         .map(|lang| {
             let id = lang.id();
             let mut installs = lang.detect();
+            // Never surface a competitor-app-managed runtime (ServBay / Herd /
+            // MAMP / XAMPP / FlyEnv). PortBay reuses neutral installs (Homebrew,
+            // version managers, system) and bundles its own; running another
+            // tool's binary couples us to their layout and breaks on their
+            // update/uninstall. Enforced here — at the single aggregation point —
+            // so the policy is uniform across every language rather than
+            // re-implemented per detector. Manual installs (folded in just below)
+            // are the deliberate escape hatch and stay exempt.
+            installs.retain(|i| !env::is_competitor_managed(&i.binary));
 
             // Fold in manual installs for this language, skipping any whose
             // binary the detector already found (dedup by canonical path).
@@ -489,6 +498,10 @@ pub fn resolve_binary(
 ) -> Option<PathBuf> {
     let lang = runtime_by_id(&runtime.lang)?;
     let mut installs = lang.detect();
+    // Same competitor block as `list_all`: PortBay must never *run* a
+    // competitor's binary to serve a project, only ever a neutral or
+    // manually-registered one.
+    installs.retain(|i| !env::is_competitor_managed(&i.binary));
     for manual in settings.manual.iter().filter(|m| m.lang == runtime.lang) {
         installs.push(RuntimeInstall {
             version: manual.version.clone(),
