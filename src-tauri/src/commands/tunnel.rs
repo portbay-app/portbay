@@ -2,18 +2,15 @@
 //!
 //! Three surfaces:
 //!
-//! - `start_tunnel(id)` — spawn cloudflared against the project's
-//!   Caddy HTTPS route (so Origin/Host normalisation applies), block
-//!   until the public `trycloudflare.com` URL is announced, trigger
-//!   a Caddy reconcile so the route flips to `normalize_all = true`,
-//!   and return the full status.
+//! - `start_tunnel(id)` — spawn cloudflared against the project's Caddy
+//!   `:80` route (so Origin/Host normalisation applies), block until the
+//!   public `trycloudflare.com` URL is announced, trigger a Caddy reconcile
+//!   so the route flips to `normalize_all = true`, and return the full status.
 //! - `stop_tunnel(id)` — kill the per-project cloudflared child, then
 //!   trigger a Caddy reconcile to flip the route back to no-normalise.
 //! - `list_tunnels()` — every active tunnel + its public URL.
 //! - `tunnel_status(id)` — single-project lookup (used by polling
 //!   modals while the URL is still being assigned).
-
-use std::sync::atomic::Ordering;
 
 use tauri::{AppHandle, State};
 
@@ -30,25 +27,20 @@ pub async fn start_tunnel(
     id: String,
 ) -> AppResult<TunnelStatus> {
     // Route the tunnel back through Caddy so the per-project route's
-    // Origin/Host normalisation applies; cloudflared sends the project
-    // hostname as the `Host` header (`--http-host-header`) so Caddy matches
-    // the right route. The listener differs by scheme: HTTPS projects live on
-    // Caddy's TLS listener (find_free_https_port — 443 if bindable, else a
-    // high port like 8443), while HTTP-only projects live on Caddy's `:80`
-    // server. Dialing the wrong one yields a 502 (no matching route there).
+    // Origin/Host normalisation applies; cloudflared sends the project hostname
+    // as the `Host` header (`--http-host-header`) so Caddy matches the route.
     let registry = load_registry(&state)?;
     let project = registry
         .get_project(&ProjectId::new(&id))
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
     let hostname = project.hostname.clone();
 
-    let upstream_url = if project.https {
-        let caddy_https_port = state.caddy_https_port.load(Ordering::Relaxed);
-        format!("https://127.0.0.1:{caddy_https_port}")
-    } else {
-        // Caddy's HTTP server is the reconciler's hardcoded `:80`.
-        "http://127.0.0.1:80".to_string()
-    };
+    // Always reach Caddy over plain HTTP on :80. While the tunnel is active the
+    // project's :80 route serves (with Origin/Host normalisation) rather than
+    // redirecting to https — even for https projects — so cloudflared never has
+    // to do TLS to Caddy by IP (which can't carry SNI, so Caddy would have no
+    // cert to present and the handshake would fail → 502).
+    let upstream_url = "http://127.0.0.1:80".to_string();
 
     // Spawn + pull out the URL handle under one brief lock — we then
     // drop the lock before awaiting, because `MutexGuard` isn't `Send`

@@ -269,7 +269,18 @@ where
         let normalize_all = shared_project_ids.contains(p.id.as_str());
         if p.https {
             https_routes.push(project_to_route(p, php_socket_dir, reg, normalize_all));
-            http_routes.push(https_redirect_route(p));
+            // While a project is actively shared over a tunnel, also serve it on
+            // :80 (with normalisation) instead of the usual https-redirect, so
+            // cloudflared can reach the origin over plain HTTP. Dialing Caddy's
+            // TLS port by IP can't send SNI, so Caddy has no cert to present and
+            // the handshake fails — routing the share through :80 sidesteps that
+            // entirely. Local https access still works via the :8443 route above.
+            // No active tunnel ⇒ the redirect, so the no-tunnel output is unchanged.
+            if normalize_all {
+                http_routes.push(project_to_route(p, php_socket_dir, reg, true));
+            } else {
+                http_routes.push(https_redirect_route(p));
+            }
             if let Some(paths) = cert_lookup(p.id.as_str()) {
                 cert_files.push(TlsCertFile {
                     certificate: paths.certificate,
@@ -1133,8 +1144,8 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(next_project("site", 3010, true)).unwrap();
 
-        let cfg_base = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs)
-            .unwrap();
+        let cfg_base =
+            build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
         let cfg_filtered = build_config_filtered(
             &r,
             2019,
@@ -1150,8 +1161,7 @@ mod tests {
         let base_json = serde_json::to_vec(&cfg_base).unwrap();
         let filtered_json = serde_json::to_vec(&cfg_filtered).unwrap();
         assert_eq!(
-            base_json,
-            filtered_json,
+            base_json, filtered_json,
             "no-tunnel output must be byte-for-byte identical"
         );
     }
@@ -1198,10 +1208,7 @@ mod tests {
         assert_eq!(set["Origin"][0], "http://localhost:3010");
         assert_eq!(set["Host"][0], "localhost:3010");
         assert_eq!(set["X-Forwarded-Host"][0], "localhost:3010");
-        assert_eq!(
-            plain["handle"][0]["upstreams"][0]["dial"],
-            "127.0.0.1:3010"
-        );
+        assert_eq!(plain["handle"][0]["upstreams"][0]["dial"], "127.0.0.1:3010");
     }
 
     /// Without a tunnel the plain route must have NO header rewrite block.
@@ -1211,17 +1218,14 @@ mod tests {
         let mut r = Registry::new("test");
         r.add_project(p.clone()).unwrap();
 
-        let cfg = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs)
-            .unwrap();
+        let cfg =
+            build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
 
         let http = cfg.apps.http.servers.get("portbay_http").unwrap();
         let sub = &http.routes[0].handle[0];
         let plain = &sub["routes"][1];
         // No "headers" key at all on the plain route's handler.
         assert!(plain["handle"][0]["headers"].is_null());
-        assert_eq!(
-            plain["handle"][0]["upstreams"][0]["dial"],
-            "127.0.0.1:3010"
-        );
+        assert_eq!(plain["handle"][0]["upstreams"][0]["dial"], "127.0.0.1:3010");
     }
 }
