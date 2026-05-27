@@ -11,9 +11,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use std::sync::atomic::Ordering;
+
 use crate::caddy::{
-    build_config_filtered, find_free_https_port, with_access_log, CaddyClient, CertPaths,
-    ACCESS_LOG_FILE, DEFAULT_HTTPS_PORT,
+    build_config_filtered, with_access_log, CaddyClient, CertPaths, ACCESS_LOG_FILE,
 };
 use crate::process_compose::{Process, ProjectStatus};
 use crate::reconciler::report::StepOutcome;
@@ -51,7 +52,13 @@ pub(super) async fn reconcile(
         .lock()
         .expect("caddy mutex poisoned")
         .admin_port();
-    let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT, &[]);
+    // Use the HTTPS port Caddy actually bound at boot (persisted in AppState),
+    // NOT a fresh probe. Re-probing here is wrong: once Caddy holds :443 the
+    // wildcard bind-test fails (address in use) and falls back to :8443, so the
+    // resulting `/load` would move Caddy off :443 on the very first reconcile
+    // tick — and `https://<project>.test` (port 443) would find nothing. The
+    // boot path (`boot_caddy`) is the single place that picks the port.
+    let https_port = state.caddy_https_port.load(Ordering::Relaxed);
     // Plain-HTTP projects are served on the standard :80. PortBay must own it
     // (no other local web server can be holding it).
     let http_port = 80;
