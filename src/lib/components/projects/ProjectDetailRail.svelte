@@ -30,7 +30,6 @@
   import ProjectAvatar from "$lib/components/atoms/ProjectAvatar.svelte";
 
   import { safeInvoke } from "$lib/ipc";
-  import { errorBus } from "$lib/stores/errors.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { groups } from "$lib/stores/groups.svelte";
   import { sidecars } from "$lib/stores/sidecars.svelte";
@@ -117,17 +116,10 @@
     projects.select(null);
   }
 
-  async function copyToClipboard(text: string, label: string) {
+  async function copyToClipboard(text: string, _label: string) {
+    // No notification — copying is self-evident. Quietly ignore a missing perm.
     try {
       await navigator.clipboard.writeText(text);
-      errorBus.push({
-        code: "COPIED",
-        whatHappened: `${label} copied.`,
-        whyItMatters: "Paste anywhere.",
-        whoCausedIt: "system",
-        severity: "success",
-        actions: [],
-      });
     } catch {
       /* quiet — no clipboard permission */
     }

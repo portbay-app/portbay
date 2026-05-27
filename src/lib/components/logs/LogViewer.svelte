@@ -15,7 +15,6 @@
 
   import { Icon, StatusPill } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
-  import { errorBus } from "$lib/stores/errors.svelte";
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
@@ -189,16 +188,9 @@
   }
 
   async function copyAll() {
+    // No notification — copying is self-evident. Quietly ignore a missing perm.
     try {
       await navigator.clipboard.writeText(parsed.map((p) => p.text).join("\n"));
-      errorBus.push({
-        code: "COPIED",
-        whatHappened: "Log copied.",
-        whyItMatters: "Paste anywhere.",
-        whoCausedIt: "system",
-        severity: "success",
-        actions: [],
-      });
     } catch {
       /* silently fail */
     }

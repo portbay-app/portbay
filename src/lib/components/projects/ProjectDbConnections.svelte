@@ -16,7 +16,6 @@
 
   import { DashboardCard, Icon } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
-  import { errorBus } from "$lib/stores/errors.svelte";
   import type { ProjectDbConnection } from "$lib/types/databases";
   import type { ProjectView } from "$lib/types/projects";
 
@@ -58,18 +57,11 @@
     revealed = next;
   }
 
-  async function copy(text: string, label: string) {
+  async function copy(text: string, _label: string) {
     if (!text) return;
+    // No notification — copying is self-evident. Quietly ignore a missing perm.
     try {
       await navigator.clipboard.writeText(text);
-      errorBus.push({
-        code: "COPIED",
-        whatHappened: `${label} copied.`,
-        whyItMatters: "",
-        whoCausedIt: "system",
-        severity: "success",
-        actions: [],
-      });
     } catch {
       /* no clipboard permission — quietly ignore */
     }

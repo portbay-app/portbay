@@ -428,17 +428,11 @@
     }
   }
 
-  async function copyToClipboard(text: string, label: string) {
+  async function copyToClipboard(text: string, _label: string) {
+    // Copying is a trivial, self-evident action — no notification (the user
+    // just clicked Copy). Failures fall through silently (no clipboard perm).
     try {
       await navigator.clipboard.writeText(text);
-      errorBus.push({
-        code: "COPIED",
-        whatHappened: `${label} copied.`,
-        whyItMatters: "Paste anywhere.",
-        whoCausedIt: "system",
-        severity: "success",
-        actions: [],
-      });
     } catch {
       // No clipboard permission — quietly fail.
     }

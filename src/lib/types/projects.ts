@@ -8,6 +8,7 @@
  * Source of truth: `src-tauri/src/commands/dto.rs`.
  */
 import type { PortbayStatus } from "./status";
+import type { CommandError } from "./error";
 
 export type ProjectType =
   | "next"
@@ -212,4 +213,33 @@ export function effectiveWebServer(p: ProjectView): WebServer | null {
   if (p.type !== "php") return null;
   if (p.startCommand && p.startCommand.trim() !== "") return null;
   return p.webServer ?? "caddy";
+}
+
+/**
+ * Turn the backend's `webServerWarning` (one what-sentence + one why-sentence)
+ * into an inline warning envelope, or null when there's nothing to surface.
+ * Shared by ProjectRow (list) and ProjectCard (grid) so both views render the
+ * same advisory: a PHP project whose nginx/apache binary is missing falls back
+ * to PortBay's placeholder, and this explains why + how to fix it. Clears itself
+ * on the next list fetch once the binary is installed or the project switches
+ * to Caddy.
+ */
+export function webServerWarningEnvelope(
+  msg: string | undefined | null,
+): CommandError | null {
+  if (!msg) return null;
+  const split = msg.indexOf(". ");
+  const what = split > 0 ? msg.slice(0, split + 1) : msg;
+  const why =
+    split > 0
+      ? msg.slice(split + 2)
+      : "Switch to Caddy, or install the web server.";
+  return {
+    code: "WEB_SERVER_MISSING",
+    whatHappened: what,
+    whyItMatters: why,
+    whoCausedIt: "user",
+    actions: [],
+    severity: "warning",
+  };
 }

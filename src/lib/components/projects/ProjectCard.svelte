@@ -23,6 +23,7 @@
     typeLabel,
     effectiveWebServer,
     webServerLabel,
+    webServerWarningEnvelope,
   } from "$lib/types/projects";
 
   import ProjectRowMenu from "./ProjectRowMenu.svelte";
@@ -43,6 +44,12 @@
     display === "running" || display === "starting" || display === "stopping",
   );
   const inlineError = $derived(projects.lastErrors[project.id] ?? null);
+  // Same web-server setup advisory the list view shows — without it, a PHP
+  // project whose nginx/apache binary is missing renders only PortBay's
+  // placeholder in the grid with no explanation. Derived; clears when fixed.
+  const webServerWarning = $derived(
+    webServerWarningEnvelope(project.webServerWarning),
+  );
 
   async function run(op: "start" | "stop") {
     if (busy) return;
@@ -199,6 +206,13 @@
         envelope={inlineError}
         onDismiss={() => projects.clearError(project.id)}
       />
+    </div>
+  {/if}
+
+  <!-- Web-server setup advisory (derived; no dismiss — clears when fixed) -->
+  {#if webServerWarning}
+    <div onclick={(e) => e.stopPropagation()} role="presentation">
+      <ErrorEnvelope envelope={webServerWarning} tone="inline" />
     </div>
   {/if}
 </div>

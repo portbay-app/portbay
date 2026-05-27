@@ -34,6 +34,7 @@
     typeLabel,
     effectiveWebServer,
     webServerLabel,
+    webServerWarningEnvelope,
   } from "$lib/types/projects";
 
   import ProjectRowMenu from "./ProjectRowMenu.svelte";
@@ -76,21 +77,9 @@
   // serves PortBay's placeholder explains itself instead of looking broken.
   // Split the backend's one-sentence-each message into the envelope's
   // what/why lines; clears itself on the next list fetch once the binary is in.
-  const webServerWarning = $derived.by<CommandError | null>(() => {
-    const msg = project.webServerWarning;
-    if (!msg) return null;
-    const split = msg.indexOf(". ");
-    const what = split > 0 ? msg.slice(0, split + 1) : msg;
-    const why = split > 0 ? msg.slice(split + 2) : "Switch to Caddy, or install the web server.";
-    return {
-      code: "WEB_SERVER_MISSING",
-      whatHappened: what,
-      whyItMatters: why,
-      whoCausedIt: "user",
-      actions: [],
-      severity: "warning",
-    };
-  });
+  const webServerWarning = $derived(
+    webServerWarningEnvelope(project.webServerWarning),
+  );
 
   // Subtitle = first group the project belongs to. Projects in zero
   // groups fall back to the type label so the row never feels empty.

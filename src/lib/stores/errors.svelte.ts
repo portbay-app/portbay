@@ -1,15 +1,23 @@
 /**
- * Toast bus — global queue of active error envelopes shown by `ToastHost`.
+ * Toast bus — the bottom-right surface shown by `ToastHost`.
  *
- * Auto-dismiss policy:
+ * Notification routing: every push is recorded in the bell (`notifications`),
+ * which is the home for all notifications. The bottom-right toast is reserved
+ * for high-priority items that need the user's attention right now — actual
+ * errors, or anything offering an action the user must decide on (see
+ * `isHighPriority`). Success / info / plain-warning notifications go to the
+ * bell only and never toast.
+ *
+ * Auto-dismiss policy (for the toasts that do show):
  *   - Toasts with `actions.length === 0` auto-dismiss after 8 s.
  *   - Toasts with at least one action stay until the user clicks an
  *     action or the dismiss (×) button. Actions imply something the user
  *     should consciously decide; we don't decide for them.
  *
  * Deduplication: identical envelopes (same `code` + `whatHappened`) pushed
- * within a 2 s window are coalesced into the first toast's slot — useful
- * when a flaky operation retries internally and would otherwise stack.
+ * within a 2 s window are coalesced — checked against the bell history so it
+ * covers toasted and bell-only notifications alike (a flaky operation
+ * retrying internally won't stack).
  */
 import type { CommandError } from "$lib/types/error";
 import { notifications } from "./notifications.svelte";
@@ -33,6 +41,18 @@ function createErrorBus() {
     return `${e.code}::${e.whatHappened}`;
   }
 
+  /**
+   * Whether an envelope earns a bottom-right toast (vs. living in the bell
+   * only). High priority = a genuine error, or anything carrying an action the
+   * user must decide on. Severity falls back to the same `whoCausedIt` mapping
+   * the renderer uses (user → warning, system → error) when unset, so a plain
+   * informational/success notification stays out of the corner.
+   */
+  function isHighPriority(e: CommandError): boolean {
+    const severity = e.severity ?? (e.whoCausedIt === "user" ? "warning" : "error");
+    return severity === "error" || e.actions.length > 0;
+  }
+
   function dismiss(id: string) {
     const idx = toasts.findIndex((t) => t.id === id);
     if (idx === -1) return;
@@ -44,17 +64,22 @@ function createErrorBus() {
     const now = Date.now();
     const fp = fingerprint(envelope);
 
-    // Dedup: if the same fingerprint pushed within the dedup window, return
-    // the existing id without queueing a new entry.
-    const existing = toasts.find(
-      (t) => fingerprint(t.envelope) === fp && now - t.pushedAt < DEDUP_WINDOW_MS,
+    // Dedup against the bell history (which records every push), so coalescing
+    // applies to toasted and bell-only notifications alike. When a duplicate is
+    // suppressed, hand back the live toast id if one is still showing for it.
+    const dup = notifications.value.find(
+      (n) => fingerprint(n.envelope) === fp && now - n.receivedAt < DEDUP_WINDOW_MS,
     );
-    if (existing) return existing.id;
+    if (dup) {
+      return toasts.find((t) => fingerprint(t.envelope) === fp)?.id ?? "";
+    }
 
-    // Mirror into the persistent history so the bell can surface this
-    // event after the toast has auto-dismissed. Dedupped pushes don't
-    // get a history entry because they didn't add a toast either.
+    // The bell is the home for every notification; record it unconditionally.
     notifications.push(envelope);
+
+    // The bottom-right toast is reserved for high-priority items — actual
+    // errors or action-required envelopes. Everything else stays in the bell.
+    if (!isHighPriority(envelope)) return "";
 
     const id = crypto.randomUUID();
     const entry: ToastEntry = {
