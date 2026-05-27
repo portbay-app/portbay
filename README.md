@@ -13,7 +13,7 @@ stack from your editor, your terminal, or your AI agent.
 
 [Documentation](https://docs.portbay.app) ·
 [Architecture](./docs/ARCHITECTURE.md) ·
-[Roadmap](#roadmap) ·
+[Status](#status) ·
 [Contributing](./CONTRIBUTING.md)
 
 `macOS` · Built with Tauri 2 · Rust · Svelte 5
@@ -178,12 +178,19 @@ pnpm docs:dev      # local preview
 pnpm docs:build
 ```
 
-## Roadmap
+## Status
 
-- **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, CLI. *Working.*
-- **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases. *Working.*
-- **Release** — signed/notarized DMG, Homebrew cask, and auto-update. *Shipped.*
-- **Platforms** — macOS Apple Silicon today; Intel + Linux, then Windows.
+PortBay is released and in active use on macOS (Apple Silicon). Most of what
+follows is already shipped — not planned.
+
+- **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, full CLI. *Shipped.*
+- **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, and one-step import from Herd / ServBay / MAMP. *Shipped.*
+- **AI & automation** — an MCP server (58 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed. *Shipped.*
+- **Release** — signed & notarized DMG, Homebrew cask, and in-app auto-update. *Shipped.*
+
+### On the roadmap
+
+- **More platforms** — Apple Silicon today; Intel and Linux next, then Windows.
 
 ## Contributing
 
@@ -207,11 +214,11 @@ time — and keep the project independent. If your team relies on it, please con
 manager for individuals and teams who want a clean, transparent way to run
 projects locally. It is fully usable offline, with no account and no network.
 
-**PortBay Cloud and Pro** are developed separately and may include team sync,
+**PortBay Pro** is developed separately and may include team sync,
 cloud backups, remote access, hosted recipes, billing, organization management,
-enterprise policy controls, and managed infrastructure. They build on the
+enterprise policy controls, and managed infrastructure. It builds on the
 Community app through documented public APIs — the Community edition is never
-crippled to upsell them, and this repository contains no proprietary Cloud/Pro
+crippled to upsell it, and this repository contains no proprietary Pro
 code. See [Community vs Pro](./docs/pages/community-vs-pro.md) and the
 [repo boundaries](./docs/architecture/repo-boundaries.md).
 
@@ -220,7 +227,7 @@ code. See [Community vs Pro](./docs/pages/community-vs-pro.md) and the
 PortBay Community is licensed under the **GNU Affero General Public License v3.0
 only** ([`AGPL-3.0-only`](./LICENSE)) — you may use, study, modify, and share it,
 and if you distribute it or run a modified version as a network service, the
-AGPL's terms apply. PortBay Cloud/Pro is separate commercial software.
+AGPL's terms apply. PortBay Pro is separate commercial software.
 
 - Plain-English summary: [docs/pages/license.md](./docs/pages/license.md)
 - License map and policy: [docs/legal/licensing.md](./docs/legal/licensing.md)
