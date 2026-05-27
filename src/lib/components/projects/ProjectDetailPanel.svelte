@@ -15,7 +15,7 @@
   import ProjectDbConnections from "./ProjectDbConnections.svelte";
   import ArtifactsSection from "./ArtifactsSection.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
-  import { safeInvoke } from "$lib/ipc";
+  import { safeInvoke, invokeQuiet } from "$lib/ipc";
   import { startProject } from "$lib/actions/startProject";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
@@ -227,7 +227,7 @@
     if (!project) return;
     logLoading = true;
     try {
-      logTail = await safeInvoke<string[]>("tail_logs", {
+      logTail = await invokeQuiet<string[]>("tail_logs", {
         id: project.id,
         limit: 50,
       });
@@ -683,12 +683,6 @@
               <Icon name="link" size={11} />
             </button>
           </dd>
-
-          <dt class="text-fg-muted">Hostname</dt>
-          <dd class="text-fg font-mono">{project.hostname}</dd>
-
-          <dt class="text-fg-muted">Port</dt>
-          <dd class="text-fg font-mono">{project.port ?? "—"}</dd>
 
           <dt class="text-fg-muted">Type</dt>
           <dd class="text-fg">{typeLabel[project.type]}</dd>

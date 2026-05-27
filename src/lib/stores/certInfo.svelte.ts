@@ -14,7 +14,7 @@
  * $effect(() => { void cert.load(project); });
  * ```
  */
-import { safeInvoke } from "$lib/ipc";
+import { invokeQuiet } from "$lib/ipc";
 import type { CertInfo } from "$lib/types/certs";
 import type { CommandError } from "$lib/types/error";
 
@@ -44,7 +44,7 @@ export function createCertInfo(): CertInfoStore {
     loading = true;
     error = null;
     try {
-      info = await safeInvoke<CertInfo>("cert_info", { id: project.id });
+      info = await invokeQuiet<CertInfo>("cert_info", { id: project.id });
     } catch (e) {
       info = null;
       const err = e as CommandError | undefined;

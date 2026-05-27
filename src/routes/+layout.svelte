@@ -201,13 +201,13 @@
   );
 
   // grid-template-columns:
-  //   sidebar  user-resizable (160–360 px), or forced 180 in compact
+  //   sidebar  user-resizable (160–360 px), or a 60px icon-only strip in compact
   //   main     1fr (greedy; min-w-0 lets it shrink so the grid never overflows)
   //   rail     responsive per active panel — clamp(floor, vw, natural max) so it
   //            scales with the window: never wider than its natural size (no
   //            overflow on small windows) and never cramped (the floor).
   const sidebarCol = $derived(
-    density.value === "compact" ? "180px" : `${sidebar.width}px`,
+    density.value === "compact" ? "60px" : `${sidebar.width}px`,
   );
   const railCol = $derived(
     showAddProject
@@ -334,7 +334,8 @@
   </div>
 {:else}
   <div
-    class="h-screen w-screen grid grid-rows-[minmax(0,1fr)] overflow-hidden"
+    class="h-screen w-screen grid grid-rows-[minmax(0,1fr)] overflow-hidden
+           transition-[grid-template-columns] duration-200 ease-out motion-reduce:transition-none"
     style:grid-template-columns={gridCols}
     data-theme-current={currentTheme}
   >

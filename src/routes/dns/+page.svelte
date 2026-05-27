@@ -22,6 +22,7 @@
   import { confirmDialog } from "$lib/stores/confirm.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
+  import { entitlements } from "$lib/stores/entitlements.svelte";
   import { MAX_DNS_CACHE_SIZE, MAX_DNS_LOCAL_TTL } from "$lib/types/dns";
   import type { DnsRecord, ManagedHostsEntry } from "$lib/types/dns";
 
@@ -134,6 +135,10 @@
   }
 
   async function saveSuffix() {
+    // The domain suffix is a Pro feature — `update_domain_suffix` is gated
+    // core-side, so the community plan stays on the default ".test". Guard the
+    // UI too so a non-Pro user never reaches the confirm dialog or a backend error.
+    if (!entitlements.isPro) return;
     const next = suffixInput.trim().replace(/^\.+|\.+$/g, "").toLowerCase();
     if (!next || next === dns.status?.suffix) return;
     const choice = await confirmDialog.open({
@@ -474,10 +479,25 @@
           <header class="flex items-center gap-2 mb-3.5">
             <Icon name="link" size={13} class="text-fg-muted" />
             <h3 class="text-[13px] font-semibold text-fg">Domain suffix</h3>
+            {#if !entitlements.isPro}
+              <span
+                class="ml-auto shrink-0 px-1.5 py-0.5 rounded-md bg-accent/15 text-accent
+                       text-[10px] font-semibold leading-none tracking-wide"
+                title="Custom domain suffixes are a Pro feature"
+              >
+                Pro
+              </span>
+            {/if}
           </header>
           <p class="text-[11.5px] text-fg-muted mb-3 leading-relaxed">
-            Projects resolve at <code class="font-mono">&lt;project&gt;.{dns.status?.suffix ?? "portbay.test"}</code>.
-            Changing this renames every hostname and reissues HTTPS certs.
+            {#if entitlements.isPro}
+              Projects resolve at <code class="font-mono">&lt;project&gt;.{dns.status?.suffix ?? "portbay.test"}</code>.
+              Changing this renames every hostname and reissues HTTPS certs.
+            {:else}
+              Projects resolve at <code class="font-mono">&lt;project&gt;.{dns.status?.suffix ?? "portbay.test"}</code>.
+              A custom suffix is reserved for Pro — the community plan stays on
+              the default <code class="font-mono">.test</code> suffix.
+            {/if}
           </p>
           <div class="flex items-stretch gap-1.5">
             <input
@@ -486,13 +506,17 @@
               spellcheck="false"
               autocapitalize="off"
               autocorrect="off"
+              disabled={!entitlements.isPro}
+              title={!entitlements.isPro ? "Custom domain suffixes are a Pro feature" : undefined}
               class="flex-1 min-w-0 px-3 h-9 rounded-md bg-surface-2/60 border border-border/60
-                     text-[12px] font-mono text-fg focus:outline-none focus:ring-1 focus:ring-accent/50"
+                     text-[12px] font-mono text-fg focus:outline-none focus:ring-1 focus:ring-accent/50
+                     disabled:opacity-40 disabled:cursor-not-allowed"
             />
             <button
               type="button"
               onclick={saveSuffix}
-              disabled={!suffixDirty || dns.isBusy("suffix")}
+              disabled={!entitlements.isPro || !suffixDirty || dns.isBusy("suffix")}
+              title={!entitlements.isPro ? "Custom domain suffixes are a Pro feature" : undefined}
               class="shrink-0 inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-[12px] font-medium
                      text-on-accent bg-accent hover:brightness-110 active:brightness-95
                      disabled:opacity-40 disabled:cursor-not-allowed transition"

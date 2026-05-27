@@ -24,7 +24,7 @@
 </script>
 
 <aside
-  class="h-full overflow-y-auto bg-surface border-l border-border p-4"
+  class="h-full min-h-0 overflow-y-auto bg-surface border-l border-border p-4"
   class:hidden={density.value === "compact"}
   aria-label="Status panel"
 >

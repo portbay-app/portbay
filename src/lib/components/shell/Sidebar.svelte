@@ -44,6 +44,11 @@
    *  fixed sidebar width there, so a drag handle wouldn't do anything. */
   const showHandle = $derived(density.value !== "compact");
 
+  /** Compact density renders the rail as an icon-only strip. Driven by the
+   *  same density preference the Settings page toggles, so "compact" means
+   *  both a denser layout and a collapsed sidebar. */
+  const collapsed = $derived(density.value === "compact");
+
   let groupsOpen = $state<boolean>(true);
 
   onMount(() => {
@@ -164,180 +169,226 @@
 </script>
 
 <aside
-  class="relative h-full flex flex-col bg-surface border-r border-border"
+  class="relative h-full min-h-0 flex flex-col bg-surface border-r border-border"
   aria-label="Primary navigation"
 >
   <!-- Brand row — pt-9 reserves space for the macOS traffic lights -->
   <div
     data-tauri-drag-region
-    class="shrink-0 pt-9 pb-4 px-4 select-none cursor-default flex items-center gap-3"
+    class="shrink-0 pt-9 pb-4 select-none cursor-default flex items-center gap-3
+           {collapsed ? 'px-0 flex-col gap-2' : 'px-4'}"
   >
     <span class="text-fg shrink-0">
-      <LighthouseLogo size={36} />
+      <LighthouseLogo size={collapsed ? 30 : 36} />
     </span>
-    <div class="min-w-0 leading-tight flex items-center gap-1.5">
-      <div class="text-[15px] font-semibold tracking-tight">PortBay</div>
-      {#if entitlements.isPro}
-        <span
-          class="shrink-0 px-1.5 py-0.5 rounded-md bg-accent text-on-accent
-                 text-[10px] font-semibold leading-none tracking-wide"
-        >
-          Pro
-        </span>
-      {/if}
-    </div>
+    {#if !collapsed}
+      <div class="min-w-0 leading-tight flex items-center gap-1.5">
+        <div class="text-[15px] font-semibold tracking-tight">PortBay</div>
+        {#if entitlements.isPro}
+          <span
+            class="shrink-0 px-1.5 py-0.5 rounded-md bg-accent text-on-accent
+                   text-[10px] font-semibold leading-none tracking-wide"
+          >
+            Pro
+          </span>
+        {/if}
+      </div>
+    {/if}
+    <!-- Collapse / expand toggle — flips the density preference, so it stays
+         in sync with the Settings density control. -->
+    <button
+      type="button"
+      onclick={() => density.toggle()}
+      title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      aria-pressed={collapsed}
+      class="shrink-0 p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2
+             transition-colors {collapsed ? '' : 'ml-auto'}"
+    >
+      <Icon name={collapsed ? "panel-left-open" : "panel-left-close"} size={15} />
+    </button>
   </div>
 
   <!-- Nav -->
-  <nav class="flex-1 min-h-0 px-2 py-1 overflow-y-auto space-y-0.5">
-    <SidebarItem href="/" icon="home" label="Projects" />
+  <nav
+    class="flex-1 min-h-0 overflow-y-auto space-y-0.5
+           {collapsed ? 'px-1.5 py-1' : 'px-2 py-1'}"
+  >
+    <SidebarItem href="/" icon="home" label="Projects" {collapsed} />
 
-    <!-- Groups submenu — collapsible cluster list. -->
+    <!-- Groups submenu — collapsible cluster list. In compact density the
+         header is hidden and each group renders as a centered status dot. -->
     <div class="pt-2">
-      <div class="flex items-center justify-between gap-1 px-2 py-1">
-        <button
-          type="button"
-          onclick={() => (groupsOpen = !groupsOpen)}
-          aria-expanded={groupsOpen}
-          aria-controls="sidebar-groups-list"
-          class="flex items-center gap-1.5 text-[11px] uppercase tracking-wide
-                 text-fg-subtle hover:text-fg-muted transition-colors"
-        >
-          <Icon
-            name={groupsOpen ? "chevron-down" : "chevron-right"}
-            size={10}
-          />
-          Groups
-          {#if groups.value.length > 0}
-            <span class="text-fg-subtle font-mono">{groups.value.length}</span>
-          {/if}
-        </button>
-        <button
-          type="button"
-          onclick={() => groupEditor.create()}
-          title="New group"
-          aria-label="New group"
-          class="p-0.5 rounded text-fg-subtle hover:text-accent hover:bg-surface-2 transition-colors"
-        >
-          <Icon name="plus" size={11} />
-        </button>
-      </div>
+      {#if !collapsed}
+        <div class="flex items-center justify-between gap-1 px-2 py-1">
+          <button
+            type="button"
+            onclick={() => (groupsOpen = !groupsOpen)}
+            aria-expanded={groupsOpen}
+            aria-controls="sidebar-groups-list"
+            class="flex items-center gap-1.5 text-[11px] uppercase tracking-wide
+                   text-fg-subtle hover:text-fg-muted transition-colors"
+          >
+            <Icon
+              name={groupsOpen ? "chevron-down" : "chevron-right"}
+              size={10}
+            />
+            Groups
+            {#if groups.value.length > 0}
+              <span class="text-fg-subtle font-mono">{groups.value.length}</span>
+            {/if}
+          </button>
+          <button
+            type="button"
+            onclick={() => groupEditor.create()}
+            title="New group"
+            aria-label="New group"
+            class="p-0.5 rounded text-fg-subtle hover:text-accent hover:bg-surface-2 transition-colors"
+          >
+            <Icon name="plus" size={11} />
+          </button>
+        </div>
+      {/if}
 
-      {#if groupsOpen}
-        <div id="sidebar-groups-list">
-        {#if groups.value.length === 0}
-          <p class="px-2 py-1 text-[11px] text-fg-subtle">
-            No groups yet. Cluster projects for one-click batch actions.
-          </p>
-        {:else}
-          {#each groups.value as g (g.id)}
-            {@const live = runningCount(g.knownIds)}
-            <a
-              href="/groups/{g.id}"
-              class="group flex items-center gap-2 px-2 py-1.5 rounded-md text-sm
-                     text-fg-muted hover:bg-surface-2 hover:text-fg transition-colors"
-              title="{g.memberCount} member{g.memberCount === 1 ? '' : 's'}"
-            >
-              <StatusDot
-                status={live > 0 ? "running" : "stopped"}
-                size="sm"
-              />
-              <span class="flex-1 min-w-0 truncate">{g.name}</span>
-              <span class="text-[10px] tabular-nums text-fg-subtle">
-                {live}/{g.memberCount}
-              </span>
-            </a>
-          {/each}
-        {/if}
+      {#if collapsed || groupsOpen}
+        <div id="sidebar-groups-list" class="space-y-0.5">
+          {#if groups.value.length === 0}
+            {#if !collapsed}
+              <p class="px-2 py-1 text-[11px] text-fg-subtle">
+                No groups yet. Cluster projects for one-click batch actions.
+              </p>
+            {/if}
+          {:else}
+            {#each groups.value as g (g.id)}
+              {@const live = runningCount(g.knownIds)}
+              <a
+                href="/groups/{g.id}"
+                title={collapsed
+                  ? g.name
+                  : `${g.memberCount} member${g.memberCount === 1 ? "" : "s"}`}
+                aria-label={collapsed ? g.name : undefined}
+                class="group flex items-center rounded-md text-sm
+                       text-fg-muted hover:bg-surface-2 hover:text-fg transition-colors
+                       {collapsed ? 'justify-center px-0 py-2' : 'gap-2 px-2 py-1.5'}"
+              >
+                <StatusDot
+                  status={live > 0 ? "running" : "stopped"}
+                  size="sm"
+                />
+                {#if !collapsed}
+                  <span class="flex-1 min-w-0 truncate">{g.name}</span>
+                  <span class="text-[10px] tabular-nums text-fg-subtle">
+                    {live}/{g.memberCount}
+                  </span>
+                {/if}
+              </a>
+            {/each}
+          {/if}
         </div>
       {/if}
     </div>
 
     <div class="pt-2 space-y-0.5">
-      <SidebarItem href="/domains" icon="link" label="Domains" matchPrefix />
-      <SidebarItem href="/dns" icon="globe" label="DNS" matchPrefix />
-      <SidebarItem href="/services" icon="server" label="Services" matchPrefix />
+      <SidebarItem href="/domains" icon="link" label="Domains" matchPrefix {collapsed} />
+      <SidebarItem href="/dns" icon="globe" label="DNS" matchPrefix {collapsed} />
+      <SidebarItem href="/services" icon="server" label="Services" matchPrefix {collapsed} />
       <SidebarItem
         href="/web-servers"
         icon="server-cog"
         label="Web Server"
         matchPrefix
+        {collapsed}
       />
       <SidebarItem
         href="/certificates"
         icon="shield"
         label="Certificates"
         matchPrefix
+        {collapsed}
       />
       <SidebarItem
         href="/sandbox"
         icon="package"
         label="Sandbox"
         matchPrefix
+        {collapsed}
       />
-      <SidebarItem href="/logs" icon="file-text" label="Logs" matchPrefix />
+      <SidebarItem href="/logs" icon="file-text" label="Logs" matchPrefix {collapsed} />
       <SidebarItem
         href="/inspector"
         icon="activity"
         label="Inspector"
         matchPrefix
+        {collapsed}
       />
       <SidebarItem
         href="/languages"
         icon="file-code"
         label="Languages"
         matchPrefix
+        {collapsed}
       />
       <SidebarItem
         href="/databases"
         icon="database"
         label="Databases"
         matchPrefix
+        {collapsed}
       />
-      <SidebarItem href="/tunnels" icon="cloud" label="Tunnels" matchPrefix />
+      <SidebarItem href="/tunnels" icon="cloud" label="Tunnels" matchPrefix {collapsed} />
       <SidebarItem
         href="/settings"
         icon="settings"
         label="Settings"
         matchPrefix
+        {collapsed}
       />
     </div>
   </nav>
 
   <!-- System footer — health pill, meters, version row -->
   <div class="shrink-0 border-t border-border">
-    <!-- Health pill / expander -->
-    <button
-      type="button"
-      onclick={toggleFooter}
-      class="w-full flex items-center justify-between gap-2 px-3 py-2.5
-             text-left hover:bg-surface-2 transition-colors"
-      aria-expanded={footerOpen}
-      aria-controls="sidebar-system-meters"
-    >
-      <span class="flex items-center gap-2 min-w-0">
+    <!-- Health pill / expander. Collapsed density shows only the status dot
+         (the title + meters need horizontal room the strip doesn't have). -->
+    {#if collapsed}
+      <div
+        class="flex items-center justify-center px-1.5 py-3"
+        title="{pillTitle} — {pillSubtitle}"
+      >
         <StatusDot status={pillStatus} size="md" />
-        <span class="min-w-0 leading-tight">
-          <span class="block text-[12px] font-medium text-fg truncate">
-            {pillTitle}
-          </span>
-          <span class="block text-[10.5px] text-fg-subtle truncate">
-            {pillSubtitle}
+      </div>
+    {:else}
+      <button
+        type="button"
+        onclick={toggleFooter}
+        class="w-full flex items-center justify-between gap-2 px-3 py-2.5
+               text-left hover:bg-surface-2 transition-colors"
+        aria-expanded={footerOpen}
+        aria-controls="sidebar-system-meters"
+      >
+        <span class="flex items-center gap-2 min-w-0">
+          <StatusDot status={pillStatus} size="md" />
+          <span class="min-w-0 leading-tight">
+            <span class="block text-[12px] font-medium text-fg truncate">
+              {pillTitle}
+            </span>
+            <span class="block text-[10.5px] text-fg-subtle truncate">
+              {pillSubtitle}
+            </span>
           </span>
         </span>
-      </span>
-      <Icon
-        name={footerOpen ? "chevron-down" : "chevron-up"}
-        size={12}
-        class="text-fg-subtle shrink-0"
-      />
-    </button>
+        <Icon
+          name={footerOpen ? "chevron-down" : "chevron-up"}
+          size={12}
+          class="text-fg-subtle shrink-0"
+        />
+      </button>
 
-    {#if footerOpen}
-      <div
-        id="sidebar-system-meters"
-        class="px-3 pb-3 pt-1 space-y-2 border-t border-border/60"
-      >
+      {#if footerOpen}
+        <div
+          id="sidebar-system-meters"
+          class="px-3 pb-3 pt-1 space-y-2 border-t border-border/60"
+        >
         <!-- CPU -->
         <div class="space-y-1">
           <div class="flex items-baseline justify-between text-[11px]">
@@ -384,17 +435,22 @@
               style:width="{diskPct ?? 0}%"
             ></div>
           </div>
+          </div>
         </div>
-      </div>
+      {/if}
     {/if}
 
-    <!-- Version + GitHub -->
+    <!-- Version + GitHub. Collapsed density drops the version text and
+         centers the GitHub mark. -->
     <div
-      class="flex items-center justify-between gap-2 px-3 py-2 border-t border-border/60"
+      class="flex items-center gap-2 px-3 py-2 border-t border-border/60
+             {collapsed ? 'justify-center' : 'justify-between'}"
     >
-      <span class="text-[10.5px] font-mono text-fg-subtle">
-        PortBay{appVersion ? ` ${appVersion}` : ""}
-      </span>
+      {#if !collapsed}
+        <span class="text-[10.5px] font-mono text-fg-subtle">
+          PortBay{appVersion ? ` ${appVersion}` : ""}
+        </span>
+      {/if}
       <button
         type="button"
         onclick={openGithub}

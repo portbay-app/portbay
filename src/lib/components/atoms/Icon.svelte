@@ -66,7 +66,9 @@
     | "shield"
     | "server-cog"
     | "sliders-horizontal"
-    | "power";
+    | "power"
+    | "panel-left-close"
+    | "panel-left-open";
 </script>
 
 <script lang="ts">
@@ -124,6 +126,8 @@
     ServerCog,
     SlidersHorizontal,
     Power,
+    PanelLeftClose,
+    PanelLeftOpen,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -196,6 +200,8 @@
     "server-cog": ServerCog,
     "sliders-horizontal": SlidersHorizontal,
     power: Power,
+    "panel-left-close": PanelLeftClose,
+    "panel-left-open": PanelLeftOpen,
   };
 
   const Component = $derived(iconMap[name]);
