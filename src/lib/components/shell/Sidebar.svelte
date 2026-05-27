@@ -169,7 +169,7 @@
 </script>
 
 <aside
-  class="relative h-full min-h-0 flex flex-col bg-surface border-r border-border"
+  class="relative h-full min-h-0 flex flex-col bg-sidebar border-r border-border"
   aria-label="Primary navigation"
 >
   <!-- Brand row — pt-9 reserves space for the macOS traffic lights -->

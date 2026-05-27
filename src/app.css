@@ -13,6 +13,15 @@
   --color-bg: oklch(0.2046 0 0 / 0.82);
   --color-surface: oklch(0.2686 0 0 / 0.9);
   --color-surface-2: oklch(0.3098 0 0 / 0.94);
+
+  /* Opaque app canvas. The scrollable content region paints solid so SPA
+     route swaps (and WebKit's per-repaint clear) never expose the webview's
+     white backing — the long-standing macOS nav flash. Vibrancy is therefore
+     confined to the static sidebar, which never swaps and so never flashes. */
+  --color-app: oklch(0.2046 0 0);
+  /* Translucent sidebar glass — low alpha lets the native NSVisualEffectView
+     (Sidebar material) blur read through. Tune the alpha for taste. */
+  --color-sidebar: oklch(0.2686 0 0 / 0.55);
   --color-border: oklch(0.3715 0 0 / 0.8);
   --color-border-strong: oklch(0.44 0 0);
 
@@ -76,6 +85,10 @@
     --color-bg: oklch(0.9846 0.0017 247.84 / 0.85);
     --color-surface: oklch(1 0 0 / 0.92);
     --color-surface-2: oklch(0.9665 0.0045 258.32 / 0.94);
+
+    /* Opaque canvas + translucent sidebar glass (see dark theme above). */
+    --color-app: oklch(0.9846 0.0017 247.84);
+    --color-sidebar: oklch(1 0 0 / 0.6);
     --color-border: oklch(0.9271 0.0075 260.73 / 0.85);
     --color-border-strong: oklch(0.855 0.009 260.73);
 

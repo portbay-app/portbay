@@ -72,11 +72,15 @@
     if (!isSimulator) {
       requestAnimationFrame(() =>
         requestAnimationFrame(() => {
-          try {
-            void getCurrentWindow().show();
-          } catch {
-            /* not running inside a Tauri window — nothing to reveal */
-          }
+          // `show()` returns a promise — a synchronous try/catch can't catch
+          // its rejection, so swallow it on the promise itself. Otherwise a
+          // denied/absent window surfaces as an unhandled rejection (and the
+          // crash reporter logs it on every launch).
+          void getCurrentWindow()
+            .show()
+            .catch(() => {
+              /* not in a Tauri window, or show not permitted — nothing to do */
+            });
         }),
       );
     }
@@ -261,7 +265,15 @@
   // (1) Navigating to another page closes any open side panel — a panel is
   // never carried across routes.
   afterNavigate((nav) => {
-    if (nav.from && nav.from.url.pathname !== nav.to?.url.pathname) {
+    // Null-safe throughout: an exception thrown in an afterNavigate callback
+    // propagates into SvelteKit's client navigation and forces a hard
+    // `location.href` reload — which tears down the whole shell (sidebar
+    // included) and reads as a full page refresh. `nav.from`/`nav.to` and
+    // their `url` can be absent on the first navigation, so optional-chain all
+    // the way down and only act when the pathname actually changes.
+    const fromPath = nav.from?.url?.pathname;
+    const toPath = nav.to?.url?.pathname;
+    if (fromPath && fromPath !== toPath) {
       closeRailPanels();
     }
   });
@@ -345,7 +357,7 @@
     surface, including the macOS traffic-light area.
   -->
   <div
-    class="h-screen w-screen overflow-hidden bg-bg"
+    class="h-screen w-screen overflow-hidden bg-app"
     data-theme-current={currentTheme}
   >
     {@render children()}
@@ -359,7 +371,7 @@
   >
     <Sidebar />
 
-    <div class="flex flex-col min-w-0 min-h-0">
+    <div class="flex flex-col min-w-0 min-h-0 bg-app">
       <TopBar />
       {#if needsSetup}
         <div
@@ -379,7 +391,7 @@
           >
         </div>
       {/if}
-      <main class="flex-1 min-h-0 overflow-y-auto bg-bg">
+      <main class="flex-1 min-h-0 overflow-y-auto bg-app">
         {@render children()}
       </main>
     </div>
