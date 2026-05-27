@@ -127,14 +127,13 @@ impl TunnelManager {
         app: &AppHandle,
         project_id: &str,
         hostname: &str,
-        caddy_https_port: u16,
+        upstream_url: &str,
     ) -> Result<TunnelStatus> {
         if self.tunnels.contains_key(project_id) {
             return Err(TunnelError::AlreadyRunning(project_id.to_string()));
         }
 
-        let upstream_url = format!("https://127.0.0.1:{caddy_https_port}");
-        let cmd = resolve_command(app, &upstream_url, hostname)?;
+        let cmd = resolve_command(app, upstream_url, hostname)?;
         let (mut rx, child) = cmd
             .spawn()
             .map_err(|e| TunnelError::SpawnFailed(e.to_string()))?;
@@ -171,7 +170,7 @@ impl TunnelManager {
 
         let tunnel = Tunnel {
             project_id: project_id.to_string(),
-            upstream_url,
+            upstream_url: upstream_url.to_string(),
             public_url,
             started_at_ms,
             child: Some(child),

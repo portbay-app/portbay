@@ -29,25 +29,33 @@ pub async fn start_tunnel(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<TunnelStatus> {
-    // Resolve the project's hostname from the registry. cloudflared routes
-    // through Caddy's HTTPS listener so Origin/Host normalisation applies;
-    // it needs the project hostname as the `Host` header so Caddy matches
-    // the correct route.
+    // Route the tunnel back through Caddy so the per-project route's
+    // Origin/Host normalisation applies; cloudflared sends the project
+    // hostname as the `Host` header (`--http-host-header`) so Caddy matches
+    // the right route. The listener differs by scheme: HTTPS projects live on
+    // Caddy's TLS listener (find_free_https_port — 443 if bindable, else a
+    // high port like 8443), while HTTP-only projects live on Caddy's `:80`
+    // server. Dialing the wrong one yields a 502 (no matching route there).
     let registry = load_registry(&state)?;
     let project = registry
         .get_project(&ProjectId::new(&id))
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
     let hostname = project.hostname.clone();
 
-    // Read the Caddy HTTPS port that was stored when Caddy booted.
-    let caddy_https_port = state.caddy_https_port.load(Ordering::Relaxed);
+    let upstream_url = if project.https {
+        let caddy_https_port = state.caddy_https_port.load(Ordering::Relaxed);
+        format!("https://127.0.0.1:{caddy_https_port}")
+    } else {
+        // Caddy's HTTP server is the reconciler's hardcoded `:80`.
+        "http://127.0.0.1:80".to_string()
+    };
 
     // Spawn + pull out the URL handle under one brief lock — we then
     // drop the lock before awaiting, because `MutexGuard` isn't `Send`
     // and Tauri requires the command future to be `Send`.
     let url_handle = {
         let mut mgr = state.tunnels.lock().expect("tunnels mutex poisoned");
-        mgr.start(&app, &id, &hostname, caddy_https_port)?;
+        mgr.start(&app, &id, &hostname, &upstream_url)?;
         mgr.url_handle(&id)?
     };
 
