@@ -39,6 +39,10 @@ pub enum ToolGroup {
     /// Group CRUD + batch lifecycle: list, create, update, remove,
     /// start, stop, restart.
     Groups,
+    /// Read-only tunnel visibility: list active public tunnels, look up one by id.
+    Tunnels,
+    /// Runtime management: list detected versions, set defaults, add/remove manual paths.
+    Runtimes,
 }
 
 impl ToolGroup {
@@ -49,6 +53,8 @@ impl ToolGroup {
             ToolGroup::Diagnostics,
             ToolGroup::Scaffold,
             ToolGroup::Groups,
+            ToolGroup::Tunnels,
+            ToolGroup::Runtimes,
         ]
     }
 
@@ -61,9 +67,11 @@ impl ToolGroup {
             "diagnostics" => Ok(vec![ToolGroup::Diagnostics]),
             "scaffold" => Ok(vec![ToolGroup::Scaffold]),
             "groups" => Ok(vec![ToolGroup::Groups]),
+            "tunnels" => Ok(vec![ToolGroup::Tunnels]),
+            "runtimes" => Ok(vec![ToolGroup::Runtimes]),
             other => Err(format!(
                 "unknown toolset `{other}` \
-                 (valid: projects, lifecycle, diagnostics, scaffold, groups, all)"
+                 (valid: projects, lifecycle, diagnostics, scaffold, groups, tunnels, runtimes, all)"
             )),
         }
     }
@@ -136,6 +144,12 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_start_group", ToolGroup::Groups, true),
     ("portbay_stop_group", ToolGroup::Groups, true),
     ("portbay_restart_group", ToolGroup::Groups, true),
+    ("portbay_list_tunnels", ToolGroup::Tunnels, false),
+    ("portbay_tunnel_status", ToolGroup::Tunnels, false),
+    ("portbay_list_runtimes", ToolGroup::Runtimes, false),
+    ("portbay_set_default_runtime", ToolGroup::Runtimes, true),
+    ("portbay_add_runtime_path", ToolGroup::Runtimes, true),
+    ("portbay_remove_runtime_path", ToolGroup::Runtimes, true),
 ];
 
 /// The PortBay MCP server. Holds the operations context and the (possibly
@@ -702,6 +716,124 @@ impl PortbayMcp {
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.restart_group(args.id).await)
     }
+
+    // ---- Tunnels (read-only) ------------------------------------------------
+
+    #[tool(
+        name = "portbay_list_tunnels",
+        description = "List active public tunnels (their trycloudflare share URLs). Each entry \
+                       includes the project id, upstream URL, public share URL (or null while \
+                       Cloudflare is still assigning one), running state, and origin reachability. \
+                       Read-only — start or stop a share from the PortBay app.",
+        annotations(
+            title = "List tunnels",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_tunnels(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.list_tunnels())
+    }
+
+    #[tool(
+        name = "portbay_tunnel_status",
+        description = "Get the tunnel details for one project by id: public share URL, running \
+                       state, origin reachability, and when it started. Returns null when no \
+                       tunnel exists for the given project. Read-only — start or stop a share \
+                       from the PortBay app.",
+        annotations(
+            title = "Tunnel status",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn tunnel_status(
+        &self,
+        Parameters(args): Parameters<TunnelStatusArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.tunnel_status(&args.id))
+    }
+
+    // ---- Runtimes -----------------------------------------------------------
+
+    #[tool(
+        name = "portbay_list_runtimes",
+        description = "List every language PortBay knows about (PHP, Node.js, Python, Go, Ruby, \
+                       Bun, Flutter) with all detected installs on this machine, their source \
+                       (Homebrew, asdf, mise, nvm, system, manual), and which version is the \
+                       configured default. No daemon required — all data comes from the local \
+                       registry and binary detection. Installing a new language version and \
+                       editing PHP FPM/ini config are done from the PortBay app.",
+        annotations(
+            title = "List runtimes",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_runtimes(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.list_runtimes())
+    }
+
+    #[tool(
+        name = "portbay_set_default_runtime",
+        description = "Set (or clear) the default version for a language. The default is \
+                       inherited by new projects when no version-manager file (.nvmrc, .tool-versions, \
+                       etc.) is detected in the project folder. Omit `version` or pass `null` to \
+                       clear the current default. The version must already be detected on this \
+                       machine — call `portbay_list_runtimes` to see available versions.",
+        annotations(
+            title = "Set default runtime",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_default_runtime(
+        &self,
+        Parameters(args): Parameters<SetDefaultRuntimeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.set_default_runtime(args.lang, args.version))
+    }
+
+    #[tool(
+        name = "portbay_add_runtime_path",
+        description = "Register an existing binary as a manual runtime install for a language. \
+                       PortBay probes the binary for its version string — if it doesn't report \
+                       one, the call is rejected. The binary is reused in place (never copied). \
+                       Deduplicates by canonical path against already-detected installs. Returns \
+                       the updated language list.",
+        annotations(
+            title = "Add runtime path",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn add_runtime_path(
+        &self,
+        Parameters(args): Parameters<AddRuntimePathArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.add_runtime_path(args.lang, args.path))
+    }
+
+    #[tool(
+        name = "portbay_remove_runtime_path",
+        description = "Remove a manually-added runtime install by language id and version label. \
+                       No-op when the version is not present or was not manually added. Returns \
+                       the updated language list.",
+        annotations(
+            title = "Remove runtime path",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn remove_runtime_path(
+        &self,
+        Parameters(args): Parameters<RemoveRuntimePathArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.remove_runtime_path(args.lang, args.version))
+    }
 }
 
 const INSTRUCTIONS: &str = "\
@@ -727,7 +859,11 @@ Key facts:
   next step.
 - A project's `id` is a stable slug; pass it to lifecycle/update/remove tools. Project caps \
   apply (anonymous 3 / free 6 / Pro unlimited); PROJECT_CAP_REACHED means the user should \
-  sign in or upgrade.";
+  sign in or upgrade.
+- Runtimes: `portbay_list_runtimes` shows every detected language version and the configured \
+  default. Use `portbay_set_default_runtime` to change which version new projects inherit. Use \
+  `portbay_add_runtime_path` / `portbay_remove_runtime_path` to manage manually-added binaries. \
+  Installing a new language version and editing PHP FPM/ini config are done from the PortBay app.";
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PortbayMcp {

@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use crate::caddy::{
-    build_config_filtered, with_access_log, CaddyClient, CertPaths, ACCESS_LOG_FILE,
+    build_config_filtered, with_access_log, CaddyClient, CaddyPorts, CertPaths, ACCESS_LOG_FILE,
 };
 use crate::process_compose::{Process, ProjectStatus};
 use crate::reconciler::report::StepOutcome;
@@ -84,9 +84,11 @@ pub(super) async fn reconcile(
 
     let cfg = match build_config_filtered(
         reg,
-        admin_port,
-        http_port,
-        https_port,
+        CaddyPorts {
+            admin: admin_port,
+            http: http_port,
+            https: https_port,
+        },
         &php_socket_dir,
         &suppressed,
         &shared_project_ids,

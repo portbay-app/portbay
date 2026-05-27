@@ -68,8 +68,13 @@ pub async fn start_tunnel(
             .expect("tunnels mutex poisoned")
             .stop(&id);
         state.reconciler.mark_dirty();
+        state.persist_tunnel_state();
         return Err(AppError::Tunnel(e));
     }
+
+    // Mirror the now-active tunnel (with its public URL) so the CLI / MCP
+    // server can see it without reaching into our in-memory manager.
+    state.persist_tunnel_state();
 
     state
         .tunnels
@@ -91,6 +96,7 @@ pub async fn stop_tunnel(state: State<'_, AppState>, id: String) -> AppResult<()
     // so the route flips back to normalize_all = false (CSRF intact,
     // plain requests untouched for local .test access).
     state.reconciler.mark_dirty();
+    state.persist_tunnel_state();
 
     Ok(())
 }
@@ -105,6 +111,8 @@ pub async fn list_tunnels(state: State<'_, AppState>) -> AppResult<Vec<TunnelSta
             t.origin_reachable = Some(probe_origin(&t.upstream_url).await);
         }
     }
+    // Keep the cross-process mirror fresh with the origin-probed view.
+    state.mirror_tunnels(&tunnels);
     Ok(tunnels)
 }
 

@@ -20,7 +20,8 @@
         "minHeight": 560,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "transparent": true
+        "transparent": true,
+        "visible": false
       },
       {
         "label": "tray-panel",

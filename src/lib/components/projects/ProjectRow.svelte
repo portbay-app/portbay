@@ -71,6 +71,27 @@
 
   const inlineError = $derived(projects.lastErrors[project.id] ?? null);
 
+  // Web-server setup advisory (e.g. nginx/apache not installed) — derived
+  // backend state, shown as an inline *warning* envelope so a project that only
+  // serves PortBay's placeholder explains itself instead of looking broken.
+  // Split the backend's one-sentence-each message into the envelope's
+  // what/why lines; clears itself on the next list fetch once the binary is in.
+  const webServerWarning = $derived.by<CommandError | null>(() => {
+    const msg = project.webServerWarning;
+    if (!msg) return null;
+    const split = msg.indexOf(". ");
+    const what = split > 0 ? msg.slice(0, split + 1) : msg;
+    const why = split > 0 ? msg.slice(split + 2) : "Switch to Caddy, or install the web server.";
+    return {
+      code: "WEB_SERVER_MISSING",
+      whatHappened: what,
+      whyItMatters: why,
+      whoCausedIt: "user",
+      actions: [],
+      severity: "warning",
+    };
+  });
+
   // Subtitle = first group the project belongs to. Projects in zero
   // groups fall back to the type label so the row never feels empty.
   const groupSubtitle = $derived.by<string>(() => {
@@ -341,6 +362,18 @@
           <Icon name="x" size={14} />
         </button>
       </div>
+    </td>
+  </tr>
+{/if}
+
+<!-- Web-server setup advisory (derived; no dismiss — clears when fixed) -->
+{#if webServerWarning}
+  <tr
+    class="bg-surface-2/50"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <td colspan="6" class="px-4 py-2">
+      <ErrorEnvelope envelope={webServerWarning} tone="inline" />
     </td>
   </tr>
 {/if}

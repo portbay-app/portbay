@@ -33,6 +33,7 @@ pub mod telemetry;
 pub mod tray;
 pub mod tunnel;
 pub mod util;
+pub mod vibrancy;
 pub mod webservers;
 
 use std::path::PathBuf;
@@ -235,6 +236,20 @@ pub fn run() {
                 );
             }
 
+            // Same recover-on-boot half for cloudflared: a crash / SIGKILL runs
+            // no `Drop`, so a quick tunnel can outlive the app — orphaned to
+            // launchd and still tunneling a dead origin. Nothing of ours is up
+            // yet at boot, so any cloudflared on our `--config` marker is a
+            // leftover; reap it before the user starts a fresh share.
+            let tunnels_reaped = tunnel::sweep_stale_cloudflared();
+            if tunnels_reaped > 0 {
+                tracing::info!(count = tunnels_reaped, "reaped stale cloudflared tunnels at boot");
+            }
+            // Clear the cross-process tunnel mirror: nothing of ours is tunneling
+            // at boot, so a stale file from a crashed prior run must not make the
+            // CLI / MCP server report phantom tunnels.
+            state.persist_tunnel_state();
+
             state.boot_pc(app.handle(), &yaml_path).map_err(boxed)?;
 
             let app_handle = app.handle().clone();
@@ -344,18 +359,14 @@ pub fn run() {
                 });
             }
 
-            // Apply native macOS window vibrancy (liquid-glass blur backdrop).
-            // Degrades silently on non-macOS builds via cfg gate.
-            #[cfg(target_os = "macos")]
-            {
-                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-                if let Some(main_win) = app.get_webview_window("main") {
-                    let _ = apply_vibrancy(&main_win, NSVisualEffectMaterial::Menu, None, None);
-                }
-                if let Some(tray_panel) = app.get_webview_window("tray-panel") {
-                    let _ =
-                        apply_vibrancy(&tray_panel, NSVisualEffectMaterial::HudWindow, None, None);
-                }
+            // Native window vibrancy for the translucent shell. Platform-aware:
+            // a real NSVisualEffectView on macOS, safe no-op fallbacks elsewhere
+            // (Windows Mica placeholder, Linux unchanged). See `crate::vibrancy`.
+            if let Some(main_win) = app.get_webview_window("main") {
+                crate::vibrancy::apply_main(&main_win);
+            }
+            if let Some(tray_panel) = app.get_webview_window("tray-panel") {
+                crate::vibrancy::apply_tray_panel(&tray_panel);
             }
 
             // Install the menu-bar tray if the user hasn't disabled it.

@@ -160,6 +160,17 @@ enum Cmd {
     #[command(subcommand)]
     Group(GroupCmd),
 
+    /// View active public tunnels (shares) created from the PortBay app.
+    /// Read-only — create or stop a share from the app.
+    #[command(subcommand)]
+    Tunnel(TunnelCmd),
+
+    /// Manage language runtime installations (detect, set defaults, add/remove paths).
+    /// Installing a new language version and editing PHP FPM/ini config are done
+    /// from the PortBay app.
+    #[command(subcommand)]
+    Runtime(RuntimeCmd),
+
     /// Inspect a folder and print detection results: detected framework,
     /// suggested id, hostname, port, and start command. With `--apps`, list
     /// the runnable apps inside a JS monorepo instead (one row per app).
@@ -401,6 +412,56 @@ struct GroupUpdateArgs {
     projects: Vec<String>,
 }
 
+#[derive(Subcommand, Debug)]
+enum TunnelCmd {
+    /// List all active public tunnels.
+    List,
+
+    /// Show the tunnel for one project by id.
+    Status {
+        /// Project id (slug) whose tunnel you want.
+        id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RuntimeCmd {
+    /// List detected language runtimes (optionally filter to one language).
+    List {
+        /// Filter output to one language id (e.g. php, node, python).
+        #[arg(long, value_name = "LANG")]
+        lang: Option<String>,
+    },
+
+    /// Set (or clear) the default version for a language.
+    SetDefault {
+        /// Language id (e.g. php, node).
+        lang: String,
+        /// Version label to set as the default (e.g. 8.3, 20).
+        /// Omit (or combine with --clear) to clear the current default.
+        version: Option<String>,
+        /// Clear the current default for this language.
+        #[arg(long)]
+        clear: bool,
+    },
+
+    /// Register an existing binary as a manual runtime install.
+    AddPath {
+        /// Language id (e.g. php, node).
+        lang: String,
+        /// Absolute path to the runtime binary.
+        path: String,
+    },
+
+    /// Remove a manually-added runtime install by language and version.
+    RemovePath {
+        /// Language id (e.g. php, node).
+        lang: String,
+        /// Version label as shown by `portbay runtime list` (e.g. 8.3).
+        version: String,
+    },
+}
+
 // =============================================================================
 // Entry
 // =============================================================================
@@ -461,6 +522,8 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::License => cmd_license(),
         Cmd::Logout => cmd_logout(),
         Cmd::Group(sub) => cmd_group(&ctx, sub).await,
+        Cmd::Tunnel(sub) => cmd_tunnel(&ctx, sub).await,
+        Cmd::Runtime(sub) => cmd_runtime(&ctx, sub).await,
         Cmd::Detect { path, apps } => cmd_detect(&ctx, &path, apps).await,
     }
 }
@@ -1441,6 +1504,383 @@ async fn cmd_hosts(ctx: &CliContext, sub: HostsCmd) -> Result<ExitCode, CliError
     Ok(ExitCode::SUCCESS)
 }
 
+/// `portbay tunnel list` / `portbay tunnel status <id>` — read-only view of
+/// the active public tunnels mirrored by the running app to a state file.
+/// Creating or stopping a share is done from the PortBay app.
+async fn cmd_tunnel(ctx: &CliContext, sub: TunnelCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::tunnel::read_state;
+
+    // The data dir is the parent of registry.json.
+    let data_dir = ctx
+        .registry_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| ctx.registry_path.clone());
+
+    match sub {
+        TunnelCmd::List => {
+            let tunnels = read_state(&data_dir);
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&tunnels)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            if tunnels.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} No active tunnels. Start a share from the PortBay app.",
+                        style("·").dim()
+                    ))
+                    .ok();
+                return Ok(ExitCode::SUCCESS);
+            }
+            let id_w = tunnels
+                .iter()
+                .map(|t| t.project_id.len())
+                .max()
+                .unwrap_or(2);
+            for t in &tunnels {
+                let running_badge = if t.running {
+                    style("●").green()
+                } else {
+                    style("○").dim()
+                };
+                let origin = match t.origin_reachable {
+                    Some(true) => style("origin ok").dim(),
+                    Some(false) => style("origin unreachable").yellow(),
+                    None => style("origin unknown").dim(),
+                };
+                let public = t
+                    .public_url
+                    .as_deref()
+                    .unwrap_or("(assigning…)");
+                ctx.term
+                    .write_line(&format!(
+                        "  {running_badge} {id:<id_w$}  {pub_url}  {origin}",
+                        id = style(&t.project_id).bold(),
+                        pub_url = style(public).dim(),
+                    ))
+                    .ok();
+            }
+        }
+
+        TunnelCmd::Status { id } => {
+            let tunnels = read_state(&data_dir);
+            let t = tunnels.into_iter().find(|t| t.project_id == id);
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&t)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            match t {
+                None => {
+                    ctx.term
+                        .write_line(&format!(
+                            "{} No active tunnel for `{id}`. Start a share from the PortBay app.",
+                            style("·").dim()
+                        ))
+                        .ok();
+                }
+                Some(ref t) => {
+                    let running_badge = if t.running {
+                        style("●").green()
+                    } else {
+                        style("○").dim()
+                    };
+                    let public = t
+                        .public_url
+                        .as_deref()
+                        .unwrap_or("(assigning…)");
+                    ctx.term
+                        .write_line(&format!(
+                            "  {running_badge} {}  {}",
+                            style(&t.project_id).bold(),
+                            style(public).dim(),
+                        ))
+                        .ok();
+                    let origin = match t.origin_reachable {
+                        Some(true) => "reachable",
+                        Some(false) => "unreachable",
+                        None => "unknown",
+                    };
+                    ctx.term
+                        .write_line(&format!(
+                            "      running={}  origin={}  upstream={}",
+                            t.running,
+                            origin,
+                            style(&t.upstream_url).dim(),
+                        ))
+                        .ok();
+                }
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `portbay runtime <...>` — language runtime management.
+///
+/// All operations are registry-only and do not require the daemon.
+/// Installing a new language version and editing PHP FPM/ini config are
+/// done from the PortBay app.
+async fn cmd_runtime(ctx: &CliContext, sub: RuntimeCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::registry::ManualRuntime;
+    use portbay_lib::runtimes::{self, major_minor, runtime_by_id};
+
+    match sub {
+        RuntimeCmd::List { lang } => {
+            let reg = ctx.load_registry()?;
+            let mut views = runtimes::list_all(&reg.runtimes);
+            if let Some(ref filter_lang) = lang {
+                views.retain(|v| &v.id == filter_lang);
+                if views.is_empty() {
+                    return Err(CliError::BadInput(format!(
+                        "unknown language `{filter_lang}` — valid ids: php, node, bun, python, go, ruby, flutter"
+                    )));
+                }
+            }
+            if ctx.json {
+                let out: Vec<serde_json::Value> = views
+                    .iter()
+                    .map(|lv| {
+                        serde_json::json!({
+                            "id": lv.id,
+                            "display_name": lv.display_name,
+                            "default_version": lv.default_version,
+                            "install_hint": lv.install_hint,
+                            "versions": lv.versions.iter().map(|vv| serde_json::json!({
+                                "version": vv.install.version,
+                                "source": runtimes::source_label(vv.install.source),
+                                "binary": vv.install.binary.to_string_lossy(),
+                                "is_default": lv.default_version.as_deref()
+                                    .is_some_and(|d| d == vv.install.version),
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            if views.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} No language runtimes detected.",
+                        style("·").dim()
+                    ))
+                    .ok();
+                return Ok(ExitCode::SUCCESS);
+            }
+            for lv in &views {
+                let default_label = lv
+                    .default_version
+                    .as_deref()
+                    .map(|v| format!("  (default: {})", style(v).bold()))
+                    .unwrap_or_default();
+                ctx.term
+                    .write_line(&format!(
+                        "  {} {}{}",
+                        style(&lv.id).bold(),
+                        style(&lv.display_name).dim(),
+                        default_label,
+                    ))
+                    .ok();
+                if lv.versions.is_empty() {
+                    ctx.term
+                        .write_line(&format!(
+                            "      {} no versions detected  {}",
+                            style("·").dim(),
+                            style(&lv.install_hint).dim(),
+                        ))
+                        .ok();
+                } else {
+                    for vv in &lv.versions {
+                        let is_default = lv
+                            .default_version
+                            .as_deref()
+                            .is_some_and(|d| d == vv.install.version);
+                        let def_mark = if is_default {
+                            style(" *").green().to_string()
+                        } else {
+                            String::new()
+                        };
+                        ctx.term
+                            .write_line(&format!(
+                                "      {} {}  {}{}",
+                                style("·").dim(),
+                                style(&vv.install.version).bold(),
+                                style(runtimes::source_label(vv.install.source)).dim(),
+                                def_mark,
+                            ))
+                            .ok();
+                    }
+                }
+            }
+        }
+
+        RuntimeCmd::SetDefault { lang, version, clear } => {
+            // If --clear is set or no version provided, remove the default.
+            let effective_version: Option<String> = if clear {
+                None
+            } else {
+                version.filter(|v| !v.trim().is_empty())
+            };
+
+            if runtime_by_id(&lang).is_none() {
+                return Err(CliError::BadInput(format!("unknown language `{lang}`")));
+            }
+
+            let mut reg = ctx.load_registry()?;
+
+            if let Some(ref v) = effective_version {
+                // Validate the version is currently detected.
+                let views = runtimes::list_all(&reg.runtimes);
+                let lang_view = views.iter().find(|lv| lv.id == lang);
+                let version_known = lang_view.is_some_and(|lv| {
+                    lv.versions.iter().any(|vv| vv.install.version == *v)
+                });
+                if !version_known {
+                    return Err(CliError::BadInput(format!(
+                        "version `{v}` is not currently detected for `{lang}` \
+                         — run `portbay runtime list --lang {lang}` to see available versions"
+                    )));
+                }
+                reg.runtimes.defaults.insert(lang.clone(), v.clone());
+            } else {
+                reg.runtimes.defaults.remove(&lang);
+            }
+            ctx.save_registry(&reg)?;
+
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "lang": lang,
+                        "default_version": effective_version,
+                    })
+                );
+            } else {
+                match effective_version {
+                    Some(v) => ctx.term.write_line(&format!(
+                        "{} default for {} set to {}",
+                        style("\u{2713}").green(),
+                        style(&lang).bold(),
+                        style(&v).bold(),
+                    )).ok(),
+                    None => ctx.term.write_line(&format!(
+                        "{} default for {} cleared",
+                        style("\u{2713}").green(),
+                        style(&lang).bold(),
+                    )).ok(),
+                };
+            }
+        }
+
+        RuntimeCmd::AddPath { lang, path } => {
+            let runtime = runtime_by_id(&lang)
+                .ok_or_else(|| CliError::BadInput(format!("unknown language `{lang}`")))?;
+
+            let binary = std::path::PathBuf::from(&path);
+            if !binary.is_file() {
+                return Err(CliError::BadInput(format!("no binary found at {path}")));
+            }
+
+            let version = runtime.probe_version(&binary).ok_or_else(|| {
+                CliError::BadInput(format!(
+                    "{path} didn't report a {lang} version — is it the right binary?"
+                ))
+            })?;
+            let version = major_minor(&version);
+
+            let mut reg = ctx.load_registry()?;
+            let canon = binary.canonicalize().unwrap_or_else(|_| binary.clone());
+            let exists = reg
+                .runtimes
+                .manual
+                .iter()
+                .any(|m| m.binary.canonicalize().unwrap_or_else(|_| m.binary.clone()) == canon);
+            if !exists {
+                reg.runtimes.manual.push(ManualRuntime {
+                    lang: lang.clone(),
+                    version: version.clone(),
+                    binary: binary.clone(),
+                });
+                ctx.save_registry(&reg)?;
+            }
+
+            if ctx.json {
+                let views = runtimes::list_all(&reg.runtimes);
+                let lang_view = views.iter().find(|lv| lv.id == lang);
+                let out: Vec<serde_json::Value> = lang_view
+                    .into_iter()
+                    .map(|lv| serde_json::json!({
+                        "id": lv.id,
+                        "display_name": lv.display_name,
+                        "default_version": lv.default_version,
+                        "versions": lv.versions.iter().map(|vv| serde_json::json!({
+                            "version": vv.install.version,
+                            "source": runtimes::source_label(vv.install.source),
+                            "binary": vv.install.binary.to_string_lossy(),
+                        })).collect::<Vec<_>>(),
+                    }))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} added {} {} at {}",
+                        style("\u{2713}").green(),
+                        style(&lang).bold(),
+                        style(&version).bold(),
+                        style(&path).dim(),
+                    ))
+                    .ok();
+            }
+        }
+
+        RuntimeCmd::RemovePath { lang, version } => {
+            let mut reg = ctx.load_registry()?;
+            let before = reg.runtimes.manual.len();
+            reg.runtimes
+                .manual
+                .retain(|m| !(m.lang == lang && m.version == version));
+            let removed = reg.runtimes.manual.len() != before;
+            if removed {
+                ctx.save_registry(&reg)?;
+            }
+
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "lang": lang,
+                        "version": version,
+                        "removed": removed,
+                    })
+                );
+            } else if removed {
+                ctx.term
+                    .write_line(&format!(
+                        "{} removed manual {} {} install",
+                        style("\u{2713}").green(),
+                        style(&lang).bold(),
+                        style(&version).bold(),
+                    ))
+                    .ok();
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} no manual {} {} install found (nothing changed)",
+                        style("·").dim(),
+                        style(&lang).bold(),
+                        style(&version).bold(),
+                    ))
+                    .ok();
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// `portbay detect <path>` — single-project or monorepo app detection.
 ///
 /// Without `--apps`: detect the framework at `path` and print the suggested
@@ -2299,5 +2739,89 @@ mod tests {
                 ))
             ));
         }
+    }
+
+    #[test]
+    fn cli_parses_tunnel_list() {
+        let cli = Cli::try_parse_from(["portbay", "tunnel", "list"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Tunnel(TunnelCmd::List))));
+    }
+
+    #[test]
+    fn cli_parses_tunnel_status() {
+        let cli = Cli::try_parse_from(["portbay", "tunnel", "status", "blog"]).unwrap();
+        let Some(Cmd::Tunnel(TunnelCmd::Status { id })) = cli.cmd else {
+            panic!("expected Tunnel::Status")
+        };
+        assert_eq!(id, "blog");
+    }
+
+    #[test]
+    fn cli_parses_runtime_list() {
+        let cli = Cli::try_parse_from(["portbay", "runtime", "list"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Runtime(RuntimeCmd::List { lang: None }))));
+    }
+
+    #[test]
+    fn cli_parses_runtime_list_with_lang_filter() {
+        let cli =
+            Cli::try_parse_from(["portbay", "runtime", "list", "--lang", "php"]).unwrap();
+        let Some(Cmd::Runtime(RuntimeCmd::List { lang })) = cli.cmd else {
+            panic!("expected Runtime::List")
+        };
+        assert_eq!(lang.as_deref(), Some("php"));
+    }
+
+    #[test]
+    fn cli_parses_runtime_set_default() {
+        let cli = Cli::try_parse_from([
+            "portbay", "runtime", "set-default", "node", "20",
+        ])
+        .unwrap();
+        let Some(Cmd::Runtime(RuntimeCmd::SetDefault { lang, version, clear })) = cli.cmd else {
+            panic!("expected Runtime::SetDefault")
+        };
+        assert_eq!(lang, "node");
+        assert_eq!(version.as_deref(), Some("20"));
+        assert!(!clear);
+    }
+
+    #[test]
+    fn cli_parses_runtime_set_default_clear_flag() {
+        let cli = Cli::try_parse_from([
+            "portbay", "runtime", "set-default", "php", "--clear",
+        ])
+        .unwrap();
+        let Some(Cmd::Runtime(RuntimeCmd::SetDefault { lang, clear, .. })) = cli.cmd else {
+            panic!("expected Runtime::SetDefault")
+        };
+        assert_eq!(lang, "php");
+        assert!(clear);
+    }
+
+    #[test]
+    fn cli_parses_runtime_add_path() {
+        let cli = Cli::try_parse_from([
+            "portbay", "runtime", "add-path", "node", "/usr/local/bin/node",
+        ])
+        .unwrap();
+        let Some(Cmd::Runtime(RuntimeCmd::AddPath { lang, path })) = cli.cmd else {
+            panic!("expected Runtime::AddPath")
+        };
+        assert_eq!(lang, "node");
+        assert_eq!(path, "/usr/local/bin/node");
+    }
+
+    #[test]
+    fn cli_parses_runtime_remove_path() {
+        let cli = Cli::try_parse_from([
+            "portbay", "runtime", "remove-path", "php", "8.3",
+        ])
+        .unwrap();
+        let Some(Cmd::Runtime(RuntimeCmd::RemovePath { lang, version })) = cli.cmd else {
+            panic!("expected Runtime::RemovePath")
+        };
+        assert_eq!(lang, "php");
+        assert_eq!(version, "8.3");
     }
 }

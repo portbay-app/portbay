@@ -213,14 +213,26 @@ where
 {
     build_config_filtered(
         reg,
-        admin_port,
-        http_port,
-        https_port,
+        CaddyPorts {
+            admin: admin_port,
+            http: http_port,
+            https: https_port,
+        },
         php_socket_dir,
         &HashSet::new(),
         &HashSet::new(),
         cert_lookup,
     )
+}
+
+/// The TCP ports the generated Caddy config binds: the admin API, the
+/// plain-HTTP server (`:80`), and the HTTPS-terminating server (`:443`).
+/// Grouped so [`build_config_filtered`] stays within a sane argument count.
+#[derive(Debug, Clone, Copy)]
+pub struct CaddyPorts {
+    pub admin: u16,
+    pub http: u16,
+    pub https: u16,
 }
 
 /// Like [`build_config`] but omits the routes of any project id in
@@ -241,9 +253,7 @@ where
 /// path.
 pub fn build_config_filtered<F>(
     reg: &Registry,
-    admin_port: u16,
-    http_port: u16,
-    https_port: u16,
+    ports: CaddyPorts,
     php_socket_dir: &std::path::Path,
     suppressed: &HashSet<String>,
     shared_project_ids: &HashSet<String>,
@@ -252,6 +262,11 @@ pub fn build_config_filtered<F>(
 where
     F: Fn(&str) -> Option<CertPaths>,
 {
+    let CaddyPorts {
+        admin: admin_port,
+        http: http_port,
+        https: https_port,
+    } = ports;
     // Two servers: HTTPS-terminating projects on `https_port` (:443), plain
     // HTTP projects on `http_port` (:80). Each ends with a catch-all that
     // serves PortBay's placeholder, and an error subroute that serves the
@@ -573,6 +588,7 @@ fn static_handler(p: &Project) -> serde_json::Value {
 /// **`normalize_all = false` (default, no active tunnel):**
 /// - WebSocket upgrades get `Origin` rewritten (HMR fix, unchanged).
 /// - Plain requests are forwarded as-is (CSRF intact).
+///
 /// Output is byte-for-byte identical to the pre-tunnel implementation.
 ///
 /// **`normalize_all = true` (project has an active Cloudflare tunnel):**
@@ -1158,9 +1174,11 @@ mod tests {
             build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
         let cfg_filtered = build_config_filtered(
             &r,
-            2019,
-            80,
-            8443,
+            CaddyPorts {
+                admin: 2019,
+                http: 80,
+                https: 8443,
+            },
             Path::new("/tmp/portbay-php"),
             &HashSet::new(), // suppressed
             &HashSet::new(), // shared_project_ids (empty — no tunnels)
@@ -1190,9 +1208,11 @@ mod tests {
 
         let cfg = build_config_filtered(
             &r,
-            2019,
-            80,
-            8443,
+            CaddyPorts {
+                admin: 2019,
+                http: 80,
+                https: 8443,
+            },
             Path::new("/tmp/portbay-php"),
             &HashSet::new(),
             &shared,

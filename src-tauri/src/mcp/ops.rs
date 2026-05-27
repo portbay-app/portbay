@@ -27,7 +27,7 @@ use crate::error::{AppError, AppResult};
 use crate::hosts::{HostsError, HostsManager};
 use crate::hosts_helper::HostsHelperClient;
 use crate::process_compose::{PcClient, Process, ProjectStatus, DEFAULT_PORT};
-use crate::registry::{store, Group, Project, ProjectId, ProjectType, Readiness, Registry, WebServer, WorkspaceTool};
+use crate::registry::{store, Group, ManualRuntime, Project, ProjectId, ProjectType, Readiness, Registry, WebServer, WorkspaceTool};
 use crate::util::slugify;
 use rmcp::schemars;
 
@@ -70,6 +70,13 @@ impl McpContext {
 
     fn pc(&self) -> PcClient {
         PcClient::new(self.pc_port)
+    }
+
+    /// The data directory containing `registry.json` and the tunnel state file.
+    fn data_dir(&self) -> &std::path::Path {
+        self.registry_path
+            .parent()
+            .unwrap_or(&self.registry_path)
     }
 
     fn load_registry(&self) -> AppResult<Registry> {
@@ -259,6 +266,22 @@ impl McpContext {
             id: id.to_string(),
             lines,
         })
+    }
+
+    // -------------------------------------------------------------------------
+    // Tunnel visibility (read-only — mirror file written by the running app)
+    // -------------------------------------------------------------------------
+
+    /// Return every tunnel the app is currently tracking. Returns an empty vec
+    /// when the state file is absent (app not running or no tunnels started).
+    pub fn list_tunnels(&self) -> AppResult<Vec<crate::tunnel::TunnelStatus>> {
+        Ok(crate::tunnel::read_state(self.data_dir()))
+    }
+
+    /// Find a specific tunnel by `project_id`. Returns `None` when not found
+    /// or when the state file is absent.
+    pub fn tunnel_status(&self, id: &str) -> AppResult<Option<crate::tunnel::TunnelStatus>> {
+        Ok(self.list_tunnels()?.into_iter().find(|t| t.project_id == id))
     }
 
     // -------------------------------------------------------------------------
@@ -841,6 +864,120 @@ impl McpContext {
     }
 
     // -------------------------------------------------------------------------
+    // Runtime CRUD (mirrors commands/runtimes.rs, no app-state deps)
+    // All operations are registry-only; no daemon needed.
+    // -------------------------------------------------------------------------
+
+    /// List every language PortBay knows about, with all detected and
+    /// manually-added installs. No daemon required.
+    pub fn list_runtimes(&self) -> AppResult<Vec<RuntimeLanguageSummary>> {
+        let reg = self.load_registry()?;
+        let views = crate::runtimes::list_all(&reg.runtimes);
+        Ok(views.into_iter().map(language_summary).collect())
+    }
+
+    /// Set (or clear) the default version for a language. Clearing happens
+    /// when `version` is `None` or empty. Rejects a version string not
+    /// currently surfaced by `list_all`.
+    pub fn set_default_runtime(
+        &self,
+        lang: String,
+        version: Option<String>,
+    ) -> AppResult<Vec<RuntimeLanguageSummary>> {
+        let mut reg = self.load_registry()?;
+
+        // Validate that the language exists.
+        if crate::runtimes::runtime_by_id(&lang).is_none() {
+            return Err(AppError::BadInput(format!("unknown language `{lang}`")));
+        }
+
+        match version {
+            Some(ref v) if !v.trim().is_empty() => {
+                // Reject a version that list_all doesn't surface.
+                let views = crate::runtimes::list_all(&reg.runtimes);
+                let lang_view = views.iter().find(|lv| lv.id == lang);
+                let version_known = lang_view.is_some_and(|lv| {
+                    lv.versions.iter().any(|vv| vv.install.version == *v)
+                });
+                if !version_known {
+                    return Err(AppError::BadInput(format!(
+                        "version `{v}` is not currently detected for `{lang}` \
+                         — call portbay_list_runtimes to see available versions"
+                    )));
+                }
+                reg.runtimes.defaults.insert(lang, v.clone());
+            }
+            _ => {
+                reg.runtimes.defaults.remove(&lang);
+            }
+        }
+        self.save_registry(&reg)?;
+        let views = crate::runtimes::list_all(&reg.runtimes);
+        Ok(views.into_iter().map(language_summary).collect())
+    }
+
+    /// Register an existing binary as a manual install. The binary is probed
+    /// for its version; a binary that doesn't report one is rejected. Dedupes
+    /// by canonical path.
+    pub fn add_runtime_path(
+        &self,
+        lang: String,
+        path: String,
+    ) -> AppResult<Vec<RuntimeLanguageSummary>> {
+        let runtime = crate::runtimes::runtime_by_id(&lang)
+            .ok_or_else(|| AppError::BadInput(format!("unknown language `{lang}`")))?;
+
+        let binary = std::path::PathBuf::from(&path);
+        if !binary.is_file() {
+            return Err(AppError::BadInput(format!("no binary found at {path}")));
+        }
+
+        let version = runtime.probe_version(&binary).ok_or_else(|| {
+            AppError::BadInput(format!(
+                "{path} didn't report a {lang} version — is it the right binary?"
+            ))
+        })?;
+        let version = crate::runtimes::major_minor(&version);
+
+        let mut reg = self.load_registry()?;
+        let canon = binary
+            .canonicalize()
+            .unwrap_or_else(|_| binary.clone());
+        let exists = reg
+            .runtimes
+            .manual
+            .iter()
+            .any(|m| m.binary.canonicalize().unwrap_or_else(|_| m.binary.clone()) == canon);
+        if !exists {
+            reg.runtimes.manual.push(ManualRuntime {
+                lang: lang.clone(),
+                version,
+                binary,
+            });
+            self.save_registry(&reg)?;
+        }
+
+        let views = crate::runtimes::list_all(&reg.runtimes);
+        Ok(views.into_iter().map(language_summary).collect())
+    }
+
+    /// Remove a manually-added install by language + version. No-op if it
+    /// wasn't manual or isn't present.
+    pub fn remove_runtime_path(
+        &self,
+        lang: String,
+        version: String,
+    ) -> AppResult<Vec<RuntimeLanguageSummary>> {
+        let mut reg = self.load_registry()?;
+        reg.runtimes
+            .manual
+            .retain(|m| !(m.lang == lang && m.version == version));
+        self.save_registry(&reg)?;
+        let views = crate::runtimes::list_all(&reg.runtimes);
+        Ok(views.into_iter().map(language_summary).collect())
+    }
+
+    // -------------------------------------------------------------------------
     // Group CRUD + lifecycle (mirrors commands/groups.rs, no app-state deps)
     // -------------------------------------------------------------------------
 
@@ -889,7 +1026,7 @@ impl McpContext {
             projects: project_ids.into_iter().map(ProjectId::new).collect(),
         };
         reg.add_group(group.clone())
-            .map_err(|e| AppError::Registry(e))?;
+            .map_err(AppError::Registry)?;
         self.save_registry(&reg)?;
         let known_ref: std::collections::HashSet<&str> =
             known.iter().map(|s| s.as_str()).collect();
@@ -918,7 +1055,7 @@ impl McpContext {
                 .unwrap_or(current.projects),
         };
         reg.update_group(next.clone())
-            .map_err(|e| AppError::Registry(e))?;
+            .map_err(AppError::Registry)?;
         self.save_registry(&reg)?;
         let known: std::collections::HashSet<&str> = reg
             .list_projects()
@@ -931,7 +1068,7 @@ impl McpContext {
     pub fn remove_group(&self, id: String) -> AppResult<()> {
         let mut reg = self.load_registry()?;
         reg.remove_group(&id)
-            .map_err(|e| AppError::Registry(e))?;
+            .map_err(AppError::Registry)?;
         self.save_registry(&reg)?;
         Ok(())
     }
@@ -1111,6 +1248,33 @@ impl McpContext {
             sandbox: None,
             domain: None,
         })
+    }
+}
+
+// =============================================================================
+// Runtime result helpers (converts runtimes::LanguageView into the MCP shape)
+// =============================================================================
+
+fn language_summary(lv: crate::runtimes::LanguageView) -> RuntimeLanguageSummary {
+    let versions = lv
+        .versions
+        .into_iter()
+        .map(|vv| RuntimeVersionSummary {
+            is_default: lv
+                .default_version
+                .as_deref()
+                .is_some_and(|d| d == vv.install.version),
+            version: vv.install.version,
+            source: crate::runtimes::source_label(vv.install.source).to_string(),
+            binary: vv.install.binary.to_string_lossy().into_owned(),
+        })
+        .collect();
+    RuntimeLanguageSummary {
+        id: lv.id,
+        display_name: lv.display_name,
+        default_version: lv.default_version,
+        versions,
+        install_hint: lv.install_hint,
     }
 }
 
@@ -1758,5 +1922,172 @@ mod tests {
             .unwrap();
         let err = ctx.start_group("test".into()).await.unwrap_err();
         assert!(matches!(err, AppError::SidecarDown(_)));
+    }
+
+    // =========================================================================
+    // Tunnel visibility tests — no daemon needed; reads/writes the state file.
+    // =========================================================================
+
+    #[test]
+    fn list_tunnels_empty_when_no_state_file() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        // No state file has been written, so the result is an empty vec.
+        let tunnels = ctx.list_tunnels().unwrap();
+        assert!(tunnels.is_empty());
+    }
+
+    #[test]
+    fn list_tunnels_and_tunnel_status_round_trip() {
+        use crate::tunnel::{write_state, TunnelStatus};
+
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let data_dir = home.path();
+
+        let entry = TunnelStatus {
+            project_id: "blog".into(),
+            upstream_url: "http://localhost:3000".into(),
+            public_url: Some("https://example.trycloudflare.com".into()),
+            running: true,
+            origin_reachable: Some(true),
+            started_at_ms: 1_000_000,
+        };
+        write_state(data_dir, std::slice::from_ref(&entry)).expect("write_state should succeed");
+
+        let tunnels = ctx.list_tunnels().unwrap();
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0].project_id, "blog");
+        assert_eq!(
+            tunnels[0].public_url.as_deref(),
+            Some("https://example.trycloudflare.com")
+        );
+        assert!(tunnels[0].running);
+
+        // tunnel_status finds by project_id.
+        let found = ctx.tunnel_status("blog").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().project_id, "blog");
+
+        // Unknown id returns None.
+        let missing = ctx.tunnel_status("does-not-exist").unwrap();
+        assert!(missing.is_none());
+    }
+
+    // =========================================================================
+    // Runtime tests — registry-only, no daemon needed.
+    // =========================================================================
+
+    #[test]
+    fn list_runtimes_returns_all_languages() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let runtimes = ctx.list_runtimes().unwrap();
+        // Every supported language must appear.
+        let ids: Vec<&str> = runtimes.iter().map(|l| l.id.as_str()).collect();
+        assert!(ids.contains(&"php"), "php missing");
+        assert!(ids.contains(&"node"), "node missing");
+        assert!(ids.contains(&"bun"), "bun missing");
+        assert!(ids.contains(&"python"), "python missing");
+        assert!(ids.contains(&"go"), "go missing");
+        assert!(ids.contains(&"ruby"), "ruby missing");
+        // All entries have non-empty install hints.
+        for l in &runtimes {
+            assert!(!l.install_hint.is_empty(), "{} has empty install hint", l.id);
+        }
+    }
+
+    #[test]
+    fn set_default_unknown_lang_errors() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let err = ctx
+            .set_default_runtime("notareal".into(), Some("1.0".into()))
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadInput(_)));
+    }
+
+    #[test]
+    fn set_default_clear_roundtrips() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        // Clear when nothing is set is a no-op (no error).
+        let views = ctx.set_default_runtime("node".into(), None).unwrap();
+        let node = views.iter().find(|l| l.id == "node").unwrap();
+        assert!(node.default_version.is_none());
+    }
+
+    #[test]
+    fn set_default_unknown_version_errors() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        // Version "99.99" is not on any real machine.
+        let err = ctx
+            .set_default_runtime("node".into(), Some("99.99".into()))
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadInput(_)));
+    }
+
+    #[test]
+    fn add_runtime_path_unknown_lang_errors() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let err = ctx
+            .add_runtime_path("notareal".into(), "/usr/bin/php".into())
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadInput(_)));
+    }
+
+    #[test]
+    fn add_runtime_path_missing_binary_errors() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let err = ctx
+            .add_runtime_path("node".into(), "/nonexistent/path/to/node".into())
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadInput(_)));
+    }
+
+    #[test]
+    fn remove_runtime_path_noop_when_not_present() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        // No manual entries — removing is a no-op, not an error.
+        let views = ctx
+            .remove_runtime_path("node".into(), "20.0.0".into())
+            .unwrap();
+        assert!(views.iter().any(|l| l.id == "node"));
+    }
+
+    #[test]
+    fn remove_runtime_path_drops_matching_entry() {
+        use crate::registry::ManualRuntime;
+
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        // Manually write a registry with one manual entry.
+        let mut reg = ctx.load_registry().unwrap();
+        // Use a tempdir as the fake binary path; we won't probe it here.
+        let fake_bin = home.path().join("fake-node");
+        std::fs::write(&fake_bin, b"#!/bin/sh\necho 20.0.0").unwrap();
+        reg.runtimes.manual.push(ManualRuntime {
+            lang: "node".into(),
+            version: "20.0.0".into(),
+            binary: fake_bin.clone(),
+        });
+        ctx.save_registry(&reg).unwrap();
+
+        // Remove it.
+        let views = ctx
+            .remove_runtime_path("node".into(), "20.0.0".into())
+            .unwrap();
+        let node = views.iter().find(|l| l.id == "node").unwrap();
+        assert!(
+            node.versions
+                .iter()
+                .all(|v| v.binary != fake_bin.to_string_lossy()),
+            "manual entry should be gone after remove"
+        );
     }
 }

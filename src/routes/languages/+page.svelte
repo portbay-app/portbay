@@ -293,7 +293,7 @@
   >
     <div
       class="sticky top-0 z-10 px-4 pt-4 pb-3 flex items-center justify-between
-             bg-surface/40 backdrop-blur-sm border-b border-border/40"
+             bg-surface/95 border-b border-border/40"
     >
       <h2
         class="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle"
@@ -561,7 +561,7 @@
       {#if version.tabs.length > 0}
         <div
           class="px-8 border-b border-border/70 flex gap-1 sticky top-0
-                 bg-bg/95 backdrop-blur-sm z-10"
+                 bg-bg/95 z-10"
           role="tablist"
           aria-label="Configuration tabs"
         >

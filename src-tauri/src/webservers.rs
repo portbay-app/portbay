@@ -183,6 +183,45 @@ fn warn_missing(project: &Project, binary: &str) {
     );
 }
 
+/// A user-facing reason a PHP project's selected web server can't serve, derived
+/// from the project plus current binary availability — `None` when it's fine
+/// (Caddy, a dev-command project, a non-PHP project, or the chosen server is
+/// installed). Surfaced on `ProjectView` so the dashboard explains *why* a
+/// project only renders PortBay's placeholder: a missing nginx/apache is logged
+/// (`warn_missing`) and its supervised entry skipped, but Caddy still
+/// reverse-proxies to a dead loopback port — without this the user sees the
+/// placeholder with no clue what to fix.
+///
+/// Recomputed wherever the DTO is built, so it tracks the live state: install
+/// the binary (or switch to Caddy) and the next fetch clears it.
+pub fn web_server_issue(project: &Project) -> Option<String> {
+    // Only PHP projects that delegate to a managed nginx/apache (i.e. no dev
+    // command of their own) can hit the missing-binary skip in `specs_for`.
+    if project.kind != ProjectType::Php || project.start_command.is_some() {
+        return None;
+    }
+    match project.web_server_effective() {
+        WebServer::Caddy => None,
+        WebServer::Nginx => nginx_binary()
+            .is_none()
+            .then(|| missing_binary_msg("nginx", "nginx")),
+        WebServer::Apache => apache_binary()
+            .is_none()
+            .then(|| missing_binary_msg("Apache", "httpd")),
+    }
+}
+
+/// Actionable message for an absent web-server binary: what broke + the two ways
+/// out (install the neutral binary, or switch the project to Caddy).
+fn missing_binary_msg(server_label: &str, brew_formula: &str) -> String {
+    format!(
+        "{server_label} isn't installed, so this project falls back to PortBay's \
+         placeholder instead of serving PHP. Install it with `brew install \
+         {brew_formula}`, or switch this project's web server to Caddy in its \
+         detail panel."
+    )
+}
+
 fn doc_root(project: &Project) -> PathBuf {
     project
         .document_root
@@ -537,6 +576,56 @@ mod tests {
             cfg.contains("SetHandler \"proxy:fcgi://127.0.0.1:9001\""),
             "tcp fcgi backend expected:\n{cfg}"
         );
+    }
+
+    #[test]
+    fn nginx_project_warns_iff_binary_absent() {
+        // The warning is derived from live binary availability, so assert it
+        // agrees with `nginx_binary()` on this machine rather than hardcoding a
+        // present/absent expectation. When present (a CI/dev box with Homebrew
+        // nginx) → None; when absent → an actionable message.
+        let mut p = php_project(WebServer::Nginx);
+        p.start_command = None;
+        let issue = web_server_issue(&p);
+        assert_eq!(issue.is_some(), nginx_binary().is_none());
+        if let Some(msg) = issue {
+            assert!(msg.contains("brew install nginx"), "needs an install hint: {msg}");
+            assert!(
+                msg.to_lowercase().contains("caddy"),
+                "needs the switch-to-Caddy escape hatch: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn apache_project_warns_iff_binary_absent() {
+        let mut p = php_project(WebServer::Apache);
+        p.start_command = None;
+        let issue = web_server_issue(&p);
+        assert_eq!(issue.is_some(), apache_binary().is_none());
+        if let Some(msg) = issue {
+            assert!(msg.contains("brew install httpd"), "needs an install hint: {msg}");
+        }
+    }
+
+    #[test]
+    fn caddy_dev_command_and_non_php_have_no_web_server_issue() {
+        // Caddy projects serve via the edge directly — never a missing-binary case.
+        let mut caddy = php_project(WebServer::Caddy);
+        caddy.start_command = None;
+        assert!(web_server_issue(&caddy).is_none());
+
+        // A PHP project with its own dev command runs that command (and Caddy
+        // reverse-proxies to it), so the managed nginx/apache path is irrelevant.
+        let mut dev = php_project(WebServer::Nginx);
+        dev.start_command = Some("php -S 127.0.0.1:8000 router.php".into());
+        assert!(web_server_issue(&dev).is_none(), "a dev-command project serves itself");
+
+        // Non-PHP projects never delegate to a managed web server.
+        let mut node = php_project(WebServer::Nginx);
+        node.kind = ProjectType::Next;
+        node.start_command = None;
+        assert!(web_server_issue(&node).is_none(), "non-PHP never uses a managed web server");
     }
 
     /// Validate the *actual* generated config against the real binary when a

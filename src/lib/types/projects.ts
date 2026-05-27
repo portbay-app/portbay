@@ -165,6 +165,10 @@ export interface ProjectView {
   domain?: DomainConfig | null;
   status: PortbayStatus;
   runtime?: RuntimeInfo;
+  /** A reason this project's selected web server can't serve (e.g. nginx/apache
+      not installed), or undefined when fine. Derived state from the backend,
+      recomputed each list fetch. Rendered as an inline warning under the row. */
+  webServerWarning?: string;
 }
 
 /** Emitted on `portbay://status` for every project that transitions. */

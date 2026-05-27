@@ -15,4 +15,7 @@ pub mod error;
 pub mod lifecycle;
 
 pub use error::{Result, TunnelError};
-pub use lifecycle::{wait_for_url, Tunnel, TunnelManager, TunnelStatus, TUNNEL_URL_TIMEOUT};
+pub use lifecycle::{
+    read_state, state_file_path, sweep_stale_cloudflared, wait_for_url, write_state, Tunnel,
+    TunnelManager, TunnelStatus, TUNNEL_URL_TIMEOUT,
+};

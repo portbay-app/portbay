@@ -424,8 +424,14 @@ pub async fn stop_project(state: State<'_, AppState>, id: String) -> AppResult<(
     // the static-project early return so it covers Caddy-served projects too.
     {
         let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned");
-        let _ = tunnels.stop(&id);
+        if tunnels.stop(&id).is_ok() {
+            // Tunnel was actually sharing this project — flip its :80 route back
+            // out of normalize-all mode now, rather than waiting for the periodic
+            // reconcile tick (matches the stop_tunnel command).
+            state.reconciler.mark_dirty();
+        }
     }
+    state.persist_tunnel_state();
     // Drop it from the running session so it isn't reopened next launch.
     session_remove(&state, &id);
 
@@ -498,6 +504,22 @@ pub async fn preview_port_conflict(port: u16) -> AppResult<Option<String>> {
 /// frontend renders the table-of-outcomes to the user.
 #[tauri::command]
 pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
+    // Kill every tunnel first, independent of PC. A share pointed at a project
+    // we're about to stop would otherwise stay "running" while visitors get
+    // errors — and doing it before `pc_client()?` means a dead daemon never
+    // leaves a tunnel up. Covers static / Caddy-served shares too (no PC entry).
+    {
+        let stopped = state
+            .tunnels
+            .lock()
+            .expect("tunnels mutex poisoned")
+            .stop_all();
+        if stopped > 0 {
+            state.reconciler.mark_dirty();
+        }
+    }
+    state.persist_tunnel_state();
+
     let client = state.pc_client()?;
     let processes = client.processes().await?;
     let registry = load_registry(&state)?;

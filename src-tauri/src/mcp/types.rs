@@ -435,6 +435,18 @@ pub struct ExportResult {
 }
 
 // =============================================================================
+// Tunnel tool inputs
+// =============================================================================
+
+/// Look up one active tunnel by project id.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TunnelStatusArgs {
+    /// The project id (slug) whose tunnel you want. Must match the id used
+    /// when the share was started in the PortBay app.
+    pub id: String,
+}
+
+// =============================================================================
 // Group tool inputs
 // =============================================================================
 
@@ -520,4 +532,77 @@ pub struct WorkspaceScanResult {
     pub tool: String,
     /// Runnable apps found in the monorepo (those declaring a `dev` script).
     pub apps: Vec<WorkspaceAppSummary>,
+}
+
+// =============================================================================
+// Runtime tool inputs
+// =============================================================================
+
+/// Set or clear the default version for a language. Omit `version` (or pass
+/// `null`) to clear the default; provide a version label to set it.
+/// Rejected if the version is not currently surfaced by `portbay_list_runtimes`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SetDefaultRuntimeArgs {
+    /// Language id, e.g. `php`, `node`, `python`, `bun`, `go`, `ruby`,
+    /// `flutter`. See `portbay_list_runtimes` for valid ids.
+    pub lang: String,
+    /// Version label to set as the default (e.g. `"8.3"`, `"20"`). Omit or
+    /// pass `null` to clear the current default.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// Register an existing binary as a manual runtime install. The binary is
+/// probed for its version; it must report a recognisable version string.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct AddRuntimePathArgs {
+    /// Language id the binary belongs to (e.g. `php`, `node`).
+    pub lang: String,
+    /// Absolute path to the runtime binary (e.g. `/usr/local/bin/php`).
+    pub path: String,
+}
+
+/// Remove a manually-added runtime install by language + version label.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct RemoveRuntimePathArgs {
+    /// Language id (e.g. `php`, `node`).
+    pub lang: String,
+    /// Version label as returned by `portbay_list_runtimes` (e.g. `"8.3"`).
+    pub version: String,
+}
+
+// =============================================================================
+// Runtime tool outputs
+// =============================================================================
+
+/// One version of a runtime, as returned by `portbay_list_runtimes`.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct RuntimeVersionSummary {
+    /// Version label (e.g. `"8.3"`, `"22.11.0"`).
+    pub version: String,
+    /// Where the install came from (`homebrew`, `asdf`, `mise`, `nvm`,
+    /// `pyenv`, `system`, `manual`, …).
+    pub source: String,
+    /// Absolute path to the primary binary.
+    pub binary: String,
+    /// True when this version is the language's configured default.
+    pub is_default: bool,
+}
+
+/// One language and its detected installs, as returned by
+/// `portbay_list_runtimes`.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct RuntimeLanguageSummary {
+    /// Stable language id (e.g. `php`, `node`, `python`).
+    pub id: String,
+    /// Human-readable label (e.g. `"PHP"`, `"Node.js"`).
+    pub display_name: String,
+    /// The version label currently configured as this language's default,
+    /// or `null` when none is set.
+    pub default_version: Option<String>,
+    /// All detected + manually-added versions on this machine.
+    pub versions: Vec<RuntimeVersionSummary>,
+    /// Hint for installing via the system package manager when no versions
+    /// are detected (e.g. `"brew install php"`).
+    pub install_hint: String,
 }

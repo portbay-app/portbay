@@ -242,23 +242,69 @@ pub async fn open_main_window(app: AppHandle, path: Option<String>) -> AppResult
     Ok(())
 }
 
-/// `tail_logs(id, limit, offset)` — static log tail from PC's buffer.
+/// `tail_logs(id, limit, offset)` — snapshot of a project's recent log output.
 ///
-/// For live streaming, see card #10's Channel<T>-based follow mode — this
-/// command intentionally returns a snapshot.
+/// Reads the tail of the per-project log file PC writes at
+/// `<logs_dir>/<id>.log` — the same canonical file `subscribe_logs` streams.
+/// We deliberately do *not* hit PC's REST `/process/logs` endpoint: it returns
+/// HTTP 400 (`process <id> doesn't exist`) for any process not currently loaded
+/// in the daemon — i.e. every stopped project — and even for running ones only
+/// returns whatever is still in PC's in-memory ring, which is frequently empty.
+/// The on-disk file is the durable record, so reading it shows history for
+/// stopped projects and never errors.
+///
+/// For live streaming, see `subscribe_logs` (Channel<T> follow mode).
 #[tauri::command]
 pub async fn tail_logs(
     state: State<'_, AppState>,
     id: String,
     #[allow(non_snake_case)] limit: Option<u32>,
+    // Accepted for API compatibility. File-tail always returns the most recent
+    // lines, so an offset into PC's in-memory buffer no longer applies.
     #[allow(non_snake_case)] offset: Option<u64>,
 ) -> AppResult<Vec<String>> {
-    let client = state.pc_client()?;
-    let lines = client
-        .logs(&id, offset.unwrap_or(0), limit.unwrap_or(200))
-        .await
-        .map_err(AppError::Pc)?;
-    Ok(lines)
+    let _ = offset;
+    let limit = limit.unwrap_or(1000).max(1) as usize;
+    let path = state.logs_dir.join(format!("{id}.log"));
+    Ok(tail_file_lines(&path, limit))
+}
+
+/// Return the last `limit` lines of a log file, oldest-first.
+///
+/// Robust to the realities of live log files:
+/// - missing file (project never started) → empty vec, not an error;
+/// - invalid UTF-8 (stray bytes mid-stream) → decoded lossily so a single
+///   bad byte never blanks the viewer;
+/// - bounded memory: a ring buffer keeps at most `limit` lines regardless of
+///   how large the file has grown.
+fn tail_file_lines(path: &std::path::Path, limit: usize) -> Vec<String> {
+    use std::collections::VecDeque;
+    use std::io::{BufRead, BufReader};
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let mut reader = BufReader::new(file);
+    let mut ring: VecDeque<String> = VecDeque::with_capacity(limit.min(4096) + 1);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {
+                while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                    buf.pop();
+                }
+                if ring.len() == limit {
+                    ring.pop_front();
+                }
+                ring.push_back(String::from_utf8_lossy(&buf).into_owned());
+            }
+            Err(_) => break,
+        }
+    }
+    ring.into()
 }
 
 #[cfg(test)]

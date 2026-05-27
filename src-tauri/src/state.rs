@@ -427,6 +427,33 @@ impl AppState {
         // child — nothing PortBay spawned should outlive the app.
         *self.tunnels.lock().unwrap_or_else(|e| e.into_inner()) =
             crate::tunnel::TunnelManager::new();
+        // Empty the cross-process state mirror: with the app going down there
+        // are no live tunnels for the CLI / MCP server to report.
+        self.persist_tunnel_state();
+    }
+
+    /// Mirror the current tunnel list to the cross-process state file
+    /// (`<data_dir>/tunnels-state.json`) so the CLI / MCP server can list and
+    /// inspect tunnels without reaching into our in-memory `TunnelManager`.
+    /// Best-effort: a write failure is logged, never fatal. Call at every
+    /// tunnel mutation point (start / stop / stop-all / shutdown).
+    pub fn persist_tunnel_state(&self) {
+        let tunnels = self
+            .tunnels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list();
+        self.mirror_tunnels(&tunnels);
+    }
+
+    /// Write a specific tunnel list to the state mirror — used by `list_tunnels`
+    /// to persist the freshly origin-probed view (which the in-memory manager
+    /// doesn't carry), so the CLI / MCP read sees `origin_reachable` too.
+    pub fn mirror_tunnels(&self, tunnels: &[crate::tunnel::TunnelStatus]) {
+        let data_dir = self.logs_dir.parent().unwrap_or(&self.logs_dir);
+        if let Err(e) = crate::tunnel::write_state(data_dir, tunnels) {
+            tracing::warn!(error = %e, "failed to mirror tunnel state to disk");
+        }
     }
 }
 

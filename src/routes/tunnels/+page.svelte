@@ -85,7 +85,7 @@
     aria-label="Tunnel providers"
   >
     <header
-      class="sticky top-0 z-10 px-4 pt-4 pb-3 bg-surface/40 backdrop-blur-sm
+      class="sticky top-0 z-10 px-4 pt-4 pb-3 bg-surface/95
              border-b border-border/40"
     >
       <h2 class="text-[13px] font-semibold text-fg">Tunnels</h2>

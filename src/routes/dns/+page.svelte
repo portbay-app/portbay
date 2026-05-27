@@ -163,7 +163,7 @@
     aria-label="DNS"
   >
     <header
-      class="sticky top-0 z-10 px-4 pt-4 pb-3 bg-surface/40 backdrop-blur-sm border-b border-border/40"
+      class="sticky top-0 z-10 px-4 pt-4 pb-3 bg-surface/95 border-b border-border/40"
     >
       <h2 class="text-[13px] font-semibold text-fg mb-2.5">DNS</h2>
       <div class="relative">

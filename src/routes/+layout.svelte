@@ -31,6 +31,7 @@
   import { theme } from "$lib/stores/theme.svelte";
   import { onMount, untrack } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { tunnels } from "$lib/stores/tunnels.svelte";
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import { sidebar } from "$lib/stores/sidebar.svelte";
@@ -62,6 +63,23 @@
     // tunnels, listen for nav, or redirect to onboarding. Those side
     // effects belong to the main window's instance of this layout.
     if (isTrayPanel) return;
+
+    // Reveal the main window only once the webview has painted the themed UI.
+    // The window is created hidden (`visible: false` in tauri.conf.json); macOS
+    // would otherwise show the webview's white default backing for a frame
+    // before our dark surface + vibrancy composite — the classic Tauri launch
+    // flash. Two rAFs ensure the first paint has landed before we show.
+    if (!isSimulator) {
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          try {
+            void getCurrentWindow().show();
+          } catch {
+            /* not running inside a Tauri window — nothing to reveal */
+          }
+        }),
+      );
+    }
 
     installCrashReporter();
     tunnels.start();

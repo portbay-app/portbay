@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
@@ -24,8 +24,10 @@ use crate::tunnel::error::{Result, TunnelError};
 pub const TUNNEL_URL_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Public view of one running tunnel — what the GUI / list command
-/// renders. Cheap to clone.
-#[derive(Debug, Clone, Serialize)]
+/// renders. Cheap to clone. `Deserialize` too, so a separate process (the
+/// CLI / MCP server) can read the state file the app mirrors tunnels into
+/// (see [`write_state`] / [`read_state`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TunnelStatus {
     pub project_id: String,
@@ -195,6 +197,15 @@ impl TunnelManager {
         Ok(())
     }
 
+    /// Kill every running tunnel (Stop All / shutdown). Returns how many were
+    /// stopped. Clearing the map drops each `Tunnel`, whose `Drop` kills its
+    /// cloudflared child — so no share outlives a Stop All.
+    pub fn stop_all(&mut self) -> usize {
+        let n = self.tunnels.len();
+        self.tunnels.clear();
+        n
+    }
+
     /// Return the inner `Arc<Mutex<Option<String>>>` so callers can
     /// poll for the public URL *without* holding the `TunnelManager`
     /// lock across the await — which would deadlock since the
@@ -234,19 +245,111 @@ pub async fn wait_for_url(handle: Arc<Mutex<Option<String>>>) -> Result<String> 
 /// `~/.cloudflared/config.yml`. This preserves the isolation invariant
 /// established for quick tunnels: PortBay-spawned cloudflared processes never
 /// pick up the user's named-tunnel credentials or ingress rules.
-fn isolated_config_path() -> Result<PathBuf> {
-    let mut dir = dirs::data_dir()
-        .ok_or_else(|| TunnelError::SpawnFailed("no data dir".to_string()))?;
+/// Path to the isolated quick-tunnel config — pure computation, no I/O. Every
+/// PortBay-spawned cloudflared passes this via `--config`, so it doubles as the
+/// unique marker for spotting our leftovers in `ps` output ([`sweep_stale_cloudflared`]).
+/// `None` only when there's no platform data dir.
+fn quick_tunnel_config_path() -> Option<PathBuf> {
+    let mut dir = dirs::data_dir()?;
     dir.push("PortBay");
     dir.push("cloudflared");
-    std::fs::create_dir_all(&dir)
+    Some(dir.join("tunnel-quick.yml"))
+}
+
+fn isolated_config_path() -> Result<PathBuf> {
+    let path = quick_tunnel_config_path()
+        .ok_or_else(|| TunnelError::SpawnFailed("no data dir".to_string()))?;
+    let dir = path.parent().expect("config path always has a cloudflared parent dir");
+    std::fs::create_dir_all(dir)
         .map_err(|e| TunnelError::SpawnFailed(format!("mkdir cloudflared dir: {e}")))?;
-    let path = dir.join("tunnel-quick.yml");
     // PortBay quick tunnel: intentionally minimal so the user's ~/.cloudflared/config.yml
     // is not inherited.
     std::fs::write(&path, b"# PortBay quick tunnel: intentionally minimal so the user's ~/.cloudflared/config.yml is not inherited\n")
         .map_err(|e| TunnelError::SpawnFailed(format!("write cloudflared config: {e}")))?;
     Ok(path)
+}
+
+/// Grace period before a stale cloudflared gets SIGKILL during the boot sweep.
+const SWEEP_GRACE: Duration = Duration::from_millis(500);
+
+/// Reap any leftover PortBay-spawned `cloudflared` quick tunnels from a previous
+/// run. A normal quit tears tunnels down via [`TunnelManager`]'s `Drop`, but a
+/// crash / `SIGKILL` runs no destructor — cloudflared reparents to launchd and
+/// keeps tunneling a now-dead origin. Run this once at boot, before we spawn
+/// anything: at that point any cloudflared whose command line references our
+/// isolated `--config` path is, by definition, our orphan. Returns the count
+/// reaped. Mirrors `process_compose::lifecycle::sweep_stale`.
+pub fn sweep_stale_cloudflared() -> usize {
+    let Some(marker_path) = quick_tunnel_config_path() else {
+        return 0;
+    };
+    let marker = marker_path.to_string_lossy();
+    let out = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return 0,
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let targets = stale_cloudflared_pids(&text, &marker, std::process::id());
+    for pid in &targets {
+        let _ = crate::port_holder::kill_gracefully(*pid, SWEEP_GRACE);
+    }
+    targets.len()
+}
+
+/// Parse `ps -axo pid=,ppid=,command=` output and return the pids of every
+/// `cloudflared` line that references `marker` (our isolated config path) and
+/// isn't `me`. Pure string work, so it's unit-testable without spawning a thing.
+fn stale_cloudflared_pids(ps_output: &str, marker: &str, me: u32) -> Vec<u32> {
+    ps_output
+        .lines()
+        .filter_map(|line| {
+            let pid = line.split_whitespace().next()?.parse::<u32>().ok()?;
+            if pid == me {
+                return None;
+            }
+            (line.contains("cloudflared") && line.contains(marker)).then_some(pid)
+        })
+        .collect()
+}
+
+// --- Cross-process tunnel state mirror -------------------------------------
+//
+// Tunnels are managed in the app's in-memory `TunnelManager`, which a separate
+// process (the CLI / MCP server) can't reach. So the app mirrors the live
+// tunnel list to a JSON file on every change; out-of-process readers read that
+// file. Read-only for them — the app is the sole writer. The file is stale by
+// design when the app isn't running, so boot clears it and shutdown empties it.
+
+/// Filename (under the PortBay data dir) the app mirrors live tunnel state to.
+pub const STATE_FILE: &str = "tunnels-state.json";
+
+/// Absolute path to the tunnel state file under `data_dir`.
+pub fn state_file_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join(STATE_FILE)
+}
+
+/// Mirror the current tunnel list to the state file (write-then-rename so a
+/// reader never sees a half-written file). Best-effort; the caller logs on Err.
+pub fn write_state(data_dir: &std::path::Path, tunnels: &[TunnelStatus]) -> std::io::Result<()> {
+    let path = state_file_path(data_dir);
+    let json = serde_json::to_vec_pretty(tunnels)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// Read the mirrored tunnel state. Empty vec when the file is missing or
+/// unreadable/corrupt — an absent/just-booted app means "no tunnels", the
+/// honest read for an out-of-process caller.
+pub fn read_state(data_dir: &std::path::Path) -> Vec<TunnelStatus> {
+    let Ok(bytes) = std::fs::read(state_file_path(data_dir)) else {
+        return Vec::new();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
 /// Build the cloudflared command for a quick (ephemeral) tunnel.
@@ -363,5 +466,36 @@ mod tests {
         assert_eq!(m.count(), 0);
         assert!(!m.is_running("anything"));
         assert!(m.status("anything").is_none());
+    }
+
+    #[test]
+    fn stop_all_on_empty_manager_is_zero() {
+        let mut m = TunnelManager::new();
+        assert_eq!(m.stop_all(), 0);
+        assert_eq!(m.count(), 0);
+    }
+
+    #[test]
+    fn stale_sweep_matches_only_our_cloudflared() {
+        // ppid 1 = orphaned to launchd after a crash; that's the real-world
+        // leftover the boot sweep targets. The user's own cloudflared (a
+        // *different* --config) and unrelated processes are left untouched.
+        let marker = "/Users/n/Library/Application Support/PortBay/cloudflared/tunnel-quick.yml";
+        let ps = format!(
+            "  4242     1 /…/target/debug/cloudflared tunnel --config {marker} --url http://127.0.0.1:80 --http-host-header app.portbay.test\n\
+             54321     1 /opt/homebrew/bin/cloudflared tunnel --config /Users/n/.cloudflared/config.yml run my-named-tunnel\n\
+               321     1 /usr/sbin/cfprefsd agent"
+        );
+        let pids = stale_cloudflared_pids(&ps, marker, 999_999);
+        assert_eq!(pids, vec![4242], "only PortBay's quick tunnel matches");
+    }
+
+    #[test]
+    fn stale_sweep_never_targets_self() {
+        let marker = "/data/PortBay/cloudflared/tunnel-quick.yml";
+        let ps = format!("  777     1 cloudflared tunnel --config {marker} --url http://127.0.0.1:80");
+        // When the matching pid is us, it must be excluded (we'd never sweep the
+        // live process driving the sweep).
+        assert!(stale_cloudflared_pids(&ps, marker, 777).is_empty());
     }
 }

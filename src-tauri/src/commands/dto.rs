@@ -68,6 +68,13 @@ pub struct ProjectView {
 
     /// Live runtime details. `None` when PC has no record for this project.
     pub runtime: Option<RuntimeInfo>,
+
+    /// A user-facing reason this project's selected web server can't serve
+    /// (e.g. nginx/apache not installed), or `None` when fine. Derived state —
+    /// recomputed each fetch from current binary availability, so the dashboard
+    /// can explain a placeholder-only project instead of leaving the user to
+    /// guess. See [`crate::webservers::web_server_issue`].
+    pub web_server_warning: Option<String>,
 }
 
 impl ProjectView {
@@ -103,6 +110,7 @@ impl ProjectView {
                 .map(|p| p.portbay_status())
                 .unwrap_or(ProjectStatus::Stopped),
             runtime: proc.map(RuntimeInfo::from_process),
+            web_server_warning: crate::webservers::web_server_issue(project),
         }
     }
 }

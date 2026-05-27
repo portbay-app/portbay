@@ -19,7 +19,7 @@
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
-  import { parseLogLine, levelClass, type LogLine } from "./ansi";
+  import { parseLogLine, levelClass, type LogLevel, type LogLine } from "./ansi";
 
   /** Cap on rendered lines. Keeps DOM size bounded under chatty servers. */
   const MAX_LINES = 5_000;
@@ -44,6 +44,36 @@
   let scrollerEl: HTMLDivElement | undefined = $state();
   /** Active follow channel — null when not following. */
   let followChannel: Channel<string> | null = null;
+
+  // ----- level filter -----
+  // Mirrors the /logs page so the modal and the full page filter identically.
+  // "Info" folds in debug — there's no Debug tab and a line should never vanish
+  // into a level with no home. Error / Warn stay exact.
+  type LevelFilter = "all" | "error" | "warn" | "info";
+  const LEVEL_TABS: { value: LevelFilter; label: string }[] = [
+    { value: "all", label: "All" },
+    { value: "error", label: "Error" },
+    { value: "warn", label: "Warn" },
+    { value: "info", label: "Info" },
+  ];
+  let levelFilter = $state<LevelFilter>("all");
+
+  function matchesLevel(level: LogLevel): boolean {
+    switch (levelFilter) {
+      case "all":
+        return true;
+      case "error":
+        return level === "error";
+      case "warn":
+        return level === "warn";
+      case "info":
+        return level === "info" || level === "debug";
+    }
+  }
+
+  // The rendered set: level-filtered. Search highlights/jumps within it (it
+  // doesn't filter), so match indices below are indices into `visible`.
+  const visible = $derived(parsed.filter((pl) => matchesLevel(pl.level)));
 
   async function reload() {
     if (!project) return;
@@ -117,6 +147,7 @@
       parsed = [];
       searchQuery = "";
       matchIndex = 0;
+      levelFilter = "all";
       autoScroll = true;
       follow = false;
       void reload();
@@ -134,8 +165,8 @@
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [] as number[];
     const found: number[] = [];
-    for (let i = 0; i < parsed.length; i++) {
-      if (parsed[i].text.toLowerCase().includes(q)) found.push(i);
+    for (let i = 0; i < visible.length; i++) {
+      if (visible[i].text.toLowerCase().includes(q)) found.push(i);
     }
     return found;
   });
@@ -227,11 +258,46 @@
     >
       <!-- Header -->
       <header
-        class="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-border"
+        class="shrink-0 flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 border-b border-border"
       >
         <Icon name="terminal" size={16} class="text-fg-muted" />
         <h2 class="text-sm font-semibold text-fg">{project.name}</h2>
         <StatusPill status={project.status} />
+
+        <!-- Level tabs — same filter as the /logs page -->
+        <div
+          role="group"
+          aria-label="Filter by level"
+          class="flex items-center gap-1 bg-surface-2 border border-border rounded-lg p-1"
+        >
+          {#each LEVEL_TABS as tab (tab.value)}
+            {@const active = levelFilter === tab.value}
+            <button
+              type="button"
+              onclick={() => (levelFilter = tab.value)}
+              aria-pressed={active}
+              class="px-2.5 h-6 rounded-md text-[11px] font-medium transition-colors
+                     focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                     {active
+                ? tab.value === 'all'
+                  ? 'bg-accent text-on-accent'
+                  : tab.value === 'error'
+                    ? 'bg-status-crashed/15 text-status-crashed'
+                    : tab.value === 'warn'
+                      ? 'bg-status-unhealthy/15 text-status-unhealthy'
+                      : 'bg-accent/15 text-accent'
+                : tab.value === 'error'
+                  ? 'text-status-crashed/70 hover:text-status-crashed'
+                  : tab.value === 'warn'
+                    ? 'text-status-unhealthy/70 hover:text-status-unhealthy'
+                    : tab.value === 'info'
+                      ? 'text-accent/70 hover:text-accent'
+                      : 'text-fg-muted hover:text-fg'}"
+            >
+              {tab.label}
+            </button>
+          {/each}
+        </div>
 
         <!-- Follow toggle -->
         <label
@@ -328,12 +394,16 @@
         onscroll={onScroll}
         class="flex-1 min-h-0 overflow-y-auto bg-bg py-2 font-mono text-[12px] leading-[1.4] text-fg-muted"
       >
-        {#if parsed.length === 0}
+        {#if visible.length === 0}
           <p class="text-xs text-fg-subtle italic px-4 py-4">
-            {loading ? "Loading log…" : "No log output yet."}
+            {loading
+              ? "Loading log…"
+              : parsed.length === 0
+                ? "No log output yet."
+                : "No lines match the current filter."}
           </p>
         {:else}
-          {#each parsed as pl, i (i)}
+          {#each visible as pl, i (i)}
             <div
               data-line={i}
               class="px-4 whitespace-pre-wrap break-words {levelClass(pl.level)}
@@ -349,7 +419,10 @@
       <footer
         class="shrink-0 px-4 py-2 border-t border-border flex items-center gap-3 text-[11px] text-fg-subtle"
       >
-        <span>{parsed.length} lines</span>
+        <span>
+          {visible.length}{#if visible.length !== parsed.length} / {parsed.length}{/if}
+          line{visible.length === 1 ? "" : "s"}
+        </span>
         {#if follow}
           <span class="text-status-running">● following (live stream)</span>
         {/if}
