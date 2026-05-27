@@ -41,6 +41,15 @@ If a browser rejects a local certificate, verify the mkcert root is installed an
 4. Restart the affected project.
 5. If the route still fails, inspect the project’s registry record and generated Caddy autosave file.
 
+## Via MCP (agent-driven)
+
+When driving PortBay through an AI agent, two tools cover certificate tasks:
+
+- **`portbay_cert_info`** — read certificate metadata (paths, issued/expiry dates, SANs) for one or all projects. No daemon required; reads cert files directly.
+- **`portbay_reissue_cert`** — delete a project's cert so the running PortBay app mints a fresh one and reloads Caddy on its next reconcile (≤30s). Installing the mkcert CA into the system trust store is privileged and interactive — this is done from the app, not via MCP.
+
+See the [Tool Reference](../agents/tools.md) for the full argument and return-type details.
+
 ## Useful Signals
 
 | Symptom | Likely cause | Next action |

@@ -222,7 +222,7 @@ Two flags scope what an agent can do. Both have flag and environment-variable fo
 
 ### Read-only mode
 
-Removes every mutating tool (add / update / remove, start / stop / restart, import / export, scaffolding). The agent can inspect but never change anything.
+Removes every mutating tool (add / update / remove, start / stop / restart, import / export, scaffolding, group mutations, runtime mutations, database mutations, DNS suffix change, cert reissue, sandbox enable/disable, request log clear). The agent can inspect but never change anything.
 
 ```json
 {
@@ -241,14 +241,23 @@ In read-only mode the server appends a note to its system instructions telling t
 
 ### Toolsets
 
-Expose only the tool groups you want. Comma-separated list; valid values are `projects`, `lifecycle`, `diagnostics`, `scaffold`, and `all` (the default).
+Expose only the tool groups you want. Comma-separated list; valid values are `projects`, `lifecycle`, `diagnostics`, `scaffold`, `groups`, `tunnels`, `runtimes`, `databases`, `dns`, `sandbox`, `inspector`, `certs`, `migrate`, and `all` (the default).
 
 | Toolset | Tools included |
 | --- | --- |
-| `projects` | list\_projects, status, detect\_project, list\_recipes, add\_project, update\_project, remove\_project, export\_config, import\_config, setup, setup\_from\_recipe |
+| `projects` | list\_projects, status, detect\_project, detect\_workspace\_apps, list\_recipes, add\_project, update\_project, remove\_project, export\_config, import\_config, setup, setup\_from\_recipe |
 | `lifecycle` | start, stop, restart, stop\_all |
 | `diagnostics` | logs, doctor, sidecar\_status |
 | `scaffold` | setup\_from\_template (runs upstream scaffolders; requires network) |
+| `groups` | list\_groups, create\_group, update\_group, remove\_group, start\_group, stop\_group, restart\_group |
+| `tunnels` | list\_tunnels, tunnel\_status (read-only; start/stop tunnels from the app) |
+| `runtimes` | list\_runtimes, set\_default\_runtime, add\_runtime\_path, remove\_runtime\_path |
+| `databases` | list\_database\_engines, list\_databases, database\_connection, create\_database, remove\_database, start\_database, stop\_database, restart\_database, link\_database, unlink\_database, set\_database\_auto\_start |
+| `dns` | dns\_status, list\_dns\_records, set\_domain\_suffix |
+| `sandbox` | sandbox\_status, sandbox\_violations, enable\_sandbox, disable\_sandbox |
+| `inspector` | recent\_requests, clear\_requests |
+| `certs` | cert\_info, reissue\_cert |
+| `migrate` | detect\_import\_sources, preview\_import, import\_projects |
 
 ```json
 {
