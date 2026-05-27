@@ -55,6 +55,18 @@ pub struct Server {
     /// Populated by [`crate::caddy::with_access_log`]; `None` → omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logs: Option<serde_json::Value>,
+    /// TLS connection policies. `Some(vec![{}])` (one empty policy) makes Caddy
+    /// terminate TLS on this server, auto-selecting the matching cert (by SNI)
+    /// from the loaded `tls.certificates.load_files`. REQUIRED for the HTTPS
+    /// server: with `automatic_https.disable = true` Caddy won't auto-enable
+    /// TLS, so without an explicit policy the listener serves plain HTTP even
+    /// on :443 and every `https://` request fails the handshake. `None` for the
+    /// plain-HTTP `:80` server.
+    #[serde(
+        rename = "tls_connection_policies",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tls_connection_policies: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,6 +167,7 @@ mod tests {
             },
             errors: None,
             logs: None,
+            tls_connection_policies: None,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["automatic_https"]["disable_redirects"], true);

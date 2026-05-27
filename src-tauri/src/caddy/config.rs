@@ -164,6 +164,10 @@ pub fn bootstrap_config(admin_port: u16, https_port: u16) -> CaddyConfig {
             },
             errors: None,
             logs: None,
+            // Admin-only bootstrap: no certs are loaded yet, so we can't
+            // terminate TLS. The reconciler's first /load replaces this with the
+            // real config (certs + a TLS policy) within a tick or two.
+            tls_connection_policies: None,
         },
     );
 
@@ -308,6 +312,11 @@ where
             },
             errors: Some(server_errors("route_error_https")),
             logs: None,
+            // Terminate TLS here using the loaded mkcert certs (Caddy selects by
+            // SNI). REQUIRED: automatic_https.disable means Caddy won't enable
+            // TLS on its own, so without this the listener serves plain HTTP and
+            // every https:// request fails the handshake.
+            tls_connection_policies: Some(vec![json!({})]),
         },
     );
     servers.insert(
@@ -321,6 +330,7 @@ where
             },
             errors: Some(server_errors("route_error_http")),
             logs: None,
+            tls_connection_policies: None,
         },
     );
 
