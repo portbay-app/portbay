@@ -27,6 +27,8 @@
   import { preferences } from "$lib/stores/preferences.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { updater } from "$lib/stores/updater.svelte";
+  import { entitlements } from "$lib/stores/entitlements.svelte";
+  import { account } from "$lib/stores/account.svelte";
   import type {
     AccentColor,
     DefaultSort,
@@ -378,7 +380,13 @@
     }
   }
 
+  // Changing the default domain suffix is a Pro capability. The community tiers
+  // (anonymous / free) stay pinned to the configured suffix — important for the
+  // beta, where every tester shares the same `.portbay.test` routing.
+  const canEditDomainSuffix = $derived(entitlements.isPro);
+
   async function saveDomainSuffix() {
+    if (!canEditDomainSuffix) return;
     const next = domainDraft.trim().replace(/^\./, "");
     if (!next || next === domainSettings?.domainSuffix) return;
     domainBusy = true;
@@ -906,35 +914,62 @@
             suffix like <code class="font-mono">test</code> or
             <code class="font-mono">portbay.test</code> — public TLDs are rejected.
           </p>
+          {#if !canEditDomainSuffix}
+            <p class="mt-1.5 text-[11px] text-accent/90">
+              Changing the suffix is a <span class="font-medium">Pro</span> feature — community
+              projects stay on
+              <code class="font-mono">.{domainSettings?.domainSuffix ?? domainDraft}</code>.
+            </p>
+          {/if}
         </div>
-        <div class="flex items-center gap-2 shrink-0">
-          <div class="relative">
-            <span
-              class="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle text-[12px]"
-            >.</span>
-            <input
-              type="text"
-              value={domainDraft}
-              oninput={(e) =>
-                (domainDraft = (e.currentTarget as HTMLInputElement).value)}
-              onkeydown={(e) => {
-                if (e.key === "Enter") void saveDomainSuffix();
-              }}
-              placeholder="test"
-              class="h-8 w-44 rounded-md bg-bg border border-border pl-5 pr-2 text-[12px] text-fg font-mono focus:outline-none focus:border-accent/60"
-            />
+        {#if canEditDomainSuffix}
+          <div class="flex items-center gap-2 shrink-0">
+            <div class="relative">
+              <span
+                class="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle text-[12px]"
+              >.</span>
+              <input
+                type="text"
+                value={domainDraft}
+                oninput={(e) =>
+                  (domainDraft = (e.currentTarget as HTMLInputElement).value)}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") void saveDomainSuffix();
+                }}
+                placeholder="test"
+                class="h-8 w-44 rounded-md bg-bg border border-border pl-5 pr-2 text-[12px] text-fg font-mono focus:outline-none focus:border-accent/60"
+              />
+            </div>
+            <button
+              type="button"
+              onclick={saveDomainSuffix}
+              disabled={domainBusy || !domainDraft.trim() ||
+                domainDraft.trim().replace(/^\./, "") ===
+                  domainSettings?.domainSuffix}
+              class="h-8 px-3 rounded-md text-[12px] text-accent border border-accent/40 hover:bg-accent/10 transition-colors disabled:opacity-50"
+            >
+              {domainBusy ? "Saving…" : "Apply"}
+            </button>
           </div>
-          <button
-            type="button"
-            onclick={saveDomainSuffix}
-            disabled={domainBusy || !domainDraft.trim() ||
-              domainDraft.trim().replace(/^\./, "") ===
-                domainSettings?.domainSuffix}
-            class="h-8 px-3 rounded-md text-[12px] text-accent border border-accent/40 hover:bg-accent/10 transition-colors disabled:opacity-50"
-          >
-            {domainBusy ? "Saving…" : "Apply"}
-          </button>
-        </div>
+        {:else}
+          <!-- Community tiers can't change the suffix — show it read-only and
+               offer an upgrade. Mirrors the Sync (Pro) upsell. -->
+          <div class="flex items-center gap-2 shrink-0">
+            <span
+              class="inline-flex items-center h-8 px-2.5 rounded-md bg-bg border border-border text-[12px] text-fg-muted font-mono"
+              title="Changing the domain suffix is a Pro feature"
+            >
+              .{domainSettings?.domainSuffix ?? domainDraft}
+            </span>
+            <button
+              type="button"
+              onclick={() => account.open({ intent: "pro" })}
+              class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12px] font-medium text-accent border border-accent/40 hover:bg-accent/10 transition-colors"
+            >
+              <Icon name="lock" size={12} /> Pro
+            </button>
+          </div>
+        {/if}
       </div>
 
       <div class="flex items-center justify-between gap-3 py-2.5">
