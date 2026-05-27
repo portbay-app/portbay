@@ -111,13 +111,16 @@ impl TunnelManager {
         self.tunnels.get(project_id).map(|t| t.status())
     }
 
-    /// Spawn cloudflared for `project_id`, routing traffic through Caddy's
-    /// HTTPS listener so Origin/Host normalisation applies.
+    /// Spawn cloudflared for `project_id`, routing traffic through Caddy so the
+    /// per-project Origin/Host normalisation applies.
     ///
     /// `hostname` is the project's Caddy hostname (e.g. `myapp.test`); it is
     /// passed as `--http-host-header` so Caddy matches the correct route.
-    /// `caddy_https_port` is the port Caddy is listening on (stored in
-    /// `AppState::caddy_https_port` at boot time).
+    /// `upstream_url` is the local URL cloudflared points at — `start_tunnel`
+    /// passes Caddy's plain-HTTP `:80` listener (`http://127.0.0.1:80`), which
+    /// while a share is active serves that project with normalisation instead
+    /// of redirecting to https; reaching Caddy's TLS port by IP can't carry SNI,
+    /// so Caddy would have no cert to present and the handshake would 502.
     ///
     /// The returned status reflects the just-started state — `public_url`
     /// is initially `None`. Callers poll `status` until the URL is
@@ -248,17 +251,17 @@ fn isolated_config_path() -> Result<PathBuf> {
 
 /// Build the cloudflared command for a quick (ephemeral) tunnel.
 ///
-/// Traffic is routed through Caddy's local HTTPS listener
-/// (`https://127.0.0.1:<caddy_https_port>`) rather than directly to the dev
-/// server, so Caddy's Origin/Host normalisation applies for the duration of
-/// the share. `--http-host-header` tells cloudflared to send a `Host` header
-/// matching the project's Caddy hostname so Caddy routes the request to the
-/// correct project.
+/// Traffic is routed through Caddy (`upstream_url`, normally its plain-HTTP
+/// `:80` listener) rather than directly to the dev server, so Caddy's
+/// Origin/Host normalisation applies for the duration of the share.
+/// `--http-host-header` tells cloudflared to send a `Host` header matching the
+/// project's Caddy hostname so Caddy routes the request to the correct project.
 ///
 /// `--config` points at an isolated minimal YAML (a comment, not empty) so
 /// cloudflared never inherits the user's `~/.cloudflared/config.yml`.
-/// `--no-tls-verify` is required because Caddy is using a self-signed mkcert
-/// cert on localhost.
+/// `--no-tls-verify` is a harmless no-op for the plain-HTTP `:80` origin we use
+/// today; it is retained so an https origin (should we route to Caddy's TLS
+/// port in future) would accept the self-signed mkcert cert without a flag flip.
 fn resolve_command(
     app: &AppHandle,
     upstream_url: &str,

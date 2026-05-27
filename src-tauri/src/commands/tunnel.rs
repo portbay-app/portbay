@@ -51,14 +51,25 @@ pub async fn start_tunnel(
         mgr.url_handle(&id)?
     };
 
-    let _url = crate::tunnel::wait_for_url(url_handle)
-        .await
-        .map_err(AppError::Tunnel)?;
-
-    // Trigger a Caddy reconcile now that this project has an active tunnel,
-    // so the route flips to normalize_all = true (Origin/Host rewriting on
-    // plain requests) for the duration of the share.
+    // Flip the project's :80 route to normalize_all = true (Origin/Host rewriting
+    // on plain requests) NOW, while cloudflared is still negotiating the public
+    // URL. The tunnel record is already in the manager, so the reconcile counts
+    // it as active. Doing this before the URL wait closes the window where a
+    // freshly-announced tunnel URL would hit the still-in-place http→https
+    // redirect — a 308 to the unreachable `.test` host — for the first tick.
     state.reconciler.mark_dirty();
+
+    if let Err(e) = crate::tunnel::wait_for_url(url_handle).await {
+        // cloudflared never announced a URL: tear the tunnel down and revert the
+        // route so a dead share doesn't leave the normalised :80 route in place.
+        let _ = state
+            .tunnels
+            .lock()
+            .expect("tunnels mutex poisoned")
+            .stop(&id);
+        state.reconciler.mark_dirty();
+        return Err(AppError::Tunnel(e));
+    }
 
     state
         .tunnels
