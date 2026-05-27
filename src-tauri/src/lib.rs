@@ -26,6 +26,7 @@ pub mod reconciler;
 pub mod registry;
 pub mod runtimes;
 pub mod sandbox;
+pub mod sidecar_probe;
 pub mod smoke;
 pub mod state;
 pub mod sync;

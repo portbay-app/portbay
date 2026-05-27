@@ -20,6 +20,8 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::commands::certs::{read_cert_info, CertInfo};
+use crate::commands::http_inspector::{self, RequestEntry};
 use crate::commands::onboarding::ScaffoldKind;
 use crate::commands::projects::detect_kind;
 use crate::entitlements;
@@ -29,7 +31,7 @@ use crate::hosts_helper::HostsHelperClient;
 use crate::process_compose::{PcClient, Process, ProjectStatus, DEFAULT_PORT};
 use crate::registry::{
     store, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, Group, ManualRuntime, Project,
-    ProjectId, ProjectType, Readiness, Registry, WebServer, WorkspaceTool,
+    ProjectId, ProjectType, Readiness, Registry, SandboxNetworkPolicy, WebServer, WorkspaceTool,
 };
 use crate::util::slugify;
 use rmcp::schemars;
@@ -833,35 +835,32 @@ impl McpContext {
     }
 
     pub async fn sidecar_status(&self) -> AppResult<SidecarStatusResult> {
-        // Process Compose is the one sidecar we can probe directly (its HTTP
-        // API). The others are owned by the daemon and aren't reachable from
-        // outside it, so we report only their install presence — honestly
-        // labelled — and point the agent at `portbay_doctor` for more.
-        let pc_live = self.pc().live().await.unwrap_or(false);
-        let mut sidecars = vec![SidecarReport {
-            name: "process-compose".into(),
-            state: if pc_live { "running" } else { "stopped" }.into(),
-            detail: if pc_live {
-                format!("reachable on :{}", self.pc_port)
-            } else {
-                "daemon not reachable — open PortBay.app".into()
-            },
-        }];
-        for tool in ["caddy", "mkcert", "dnsmasq", "mailpit"] {
-            let detail = match which::which(tool) {
-                Ok(p) => format!("binary on PATH at {}", p.display()),
-                Err(_) => "not on PATH (bundled with PortBay.app; live state unknown from here)"
-                    .to_string(),
-            };
-            sidecars.push(SidecarReport {
-                name: tool.into(),
-                // We can't confirm live state from outside the daemon.
-                state: "unknown".into(),
-                detail,
-            });
-        }
+        // One shared probe powers this tool and the CLI `sidecar status`, so the
+        // two surfaces can't drift. It reports only what's honestly observable
+        // from outside the app: process-compose (HTTP), the dnsmasq resolver
+        // file, and managed /etc/hosts. Caddy/mkcert/Mailpit are app-owned →
+        // `unknown`. Restarting any sidecar is app-only (the app owns the
+        // processes); point the agent at `portbay_doctor` for more.
+        let suffix = self
+            .load_registry()
+            .map(|r| r.domain_suffix)
+            .unwrap_or_else(|_| DEFAULT_DOMAIN_SUFFIX.to_string());
+        let probes = crate::sidecar_probe::probe(self.pc_port, &suffix).await;
+        let daemon_reachable = probes
+            .iter()
+            .find(|p| p.name == "process-compose")
+            .map(|p| p.state == crate::sidecar_probe::ProbeState::Running)
+            .unwrap_or(false);
+        let sidecars = probes
+            .into_iter()
+            .map(|p| SidecarReport {
+                name: p.name.into(),
+                state: p.state.as_str().into(),
+                detail: p.detail,
+            })
+            .collect();
         Ok(SidecarStatusResult {
-            daemon_reachable: pc_live,
+            daemon_reachable,
             sidecars,
         })
     }
@@ -1319,6 +1318,247 @@ impl McpContext {
             new_suffix: migration.new_suffix,
             changed_projects: migration.changed_projects,
             cert_dirs_removed: migration.cert_dirs_removed,
+        })
+    }
+
+    // -------------------------------------------------------------------------
+    // Sandbox (macOS Seatbelt). Enabling/disabling the policy and reading
+    // violations are cross-process; the confined *launch* itself is app-only:
+    // the running app's reconcile loop re-wraps the command from the registry
+    // (≤30s), so an agent enables here then restarts via the lifecycle tools.
+    // -------------------------------------------------------------------------
+
+    /// Sandbox state for one project (`id`) or all projects (omit `id`):
+    /// per-project policy plus host capability (is `sandbox-exec` present?) and
+    /// the tier's community sandbox cap.
+    pub fn sandbox_status(&self, id: Option<&str>) -> AppResult<SandboxStatusResult> {
+        let reg = self.load_registry()?;
+        if let Some(id) = id {
+            self.require_project(&reg, id)?;
+        }
+        let enabled_count = reg
+            .projects
+            .iter()
+            .filter(|p| crate::sandbox::is_enabled(p))
+            .count();
+        let projects = reg
+            .projects
+            .iter()
+            .filter(|p| id.is_none_or(|want| p.id.as_str() == want))
+            .map(sandbox_project_status)
+            .collect();
+        Ok(SandboxStatusResult {
+            platform_supported: cfg!(target_os = "macos"),
+            sandbox_available: crate::sandbox::is_available(),
+            community_cap: entitlements::current().entitlements.max_sandbox_projects(),
+            enabled_count,
+            projects,
+        })
+    }
+
+    /// Enable Sandboxed Run on a project (macOS only). Sets the policy in the
+    /// registry and proves macOS accepts the generated profile (fail closed —
+    /// nothing is persisted if the profile is rejected). The running app
+    /// re-wraps the launch command on its next reconcile (≤30s); the caller
+    /// should then restart the project to run it confined.
+    pub fn enable_sandbox(
+        &self,
+        id: &str,
+        network: Option<&str>,
+        ephemeral: Option<bool>,
+    ) -> AppResult<SandboxOpResult> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (id, network, ephemeral);
+            Err(AppError::Unsupported {
+                feature: "Sandboxed Run",
+                reason: "Sandboxed Run is only available on macOS.",
+            })
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let policy = match network {
+                Some(s) => crate::sandbox::parse_network_policy(s).ok_or_else(|| {
+                    AppError::BadInput(format!(
+                        "unknown network policy `{s}` (loopback_only|outbound|full|blocked)"
+                    ))
+                })?,
+                None => SandboxNetworkPolicy::LoopbackOnly,
+            };
+            let ephemeral = ephemeral.unwrap_or(true);
+            let pid = ProjectId::new(id);
+            let mut reg = self.load_registry()?;
+
+            // Community sandbox cap (Pro unlimited): only a *newly* sandboxed
+            // project counts, measured against the others already sandboxed.
+            let already_on = reg
+                .get_project(&pid)
+                .map(crate::sandbox::is_enabled)
+                .unwrap_or(false);
+            if !already_on {
+                let others = reg
+                    .projects
+                    .iter()
+                    .filter(|p| p.id != pid && crate::sandbox::is_enabled(p))
+                    .count();
+                entitlements::check_can_sandbox(others)
+                    .map_err(|cap| AppError::SandboxCapReached { cap })?;
+            }
+
+            let data_dir = self.data_dir().to_path_buf();
+            let project = reg
+                .get_project_mut(&pid)
+                .ok_or_else(|| AppError::NotFound(id.to_string()))?;
+            if project.start_command.is_none() && project.workspace.is_none() {
+                return Err(AppError::BadInput(
+                    "Sandboxed Run requires a project command to supervise".into(),
+                ));
+            }
+            crate::sandbox::enable(project, policy, ephemeral);
+            // Fail closed: prove macOS accepts this profile before persisting.
+            crate::sandbox::preflight(&data_dir, project)
+                .map_err(|e| AppError::Internal(format!("sandbox could not be activated: {e}")))?;
+            crate::sandbox::reset_ephemeral_state(&data_dir, project)
+                .map_err(|e| AppError::Internal(format!("sandbox reset failed: {e}")))?;
+            let status = sandbox_project_status(project);
+            self.save_registry(&reg)?;
+            Ok(SandboxOpResult {
+                ok: true,
+                detail: format!(
+                    "Sandboxed Run enabled for {id} (network={}, ephemeral={ephemeral}). macOS \
+                     accepted the profile. The PortBay app re-wraps the launch command on its next \
+                     reconcile (≤30s); restart the project (portbay_restart) to run it confined.",
+                    crate::sandbox::network_policy_key(policy)
+                ),
+                project: status,
+            })
+        }
+    }
+
+    /// Disable Sandboxed Run on a project (the registry mutation behind
+    /// "promote to local"). Cross-platform so a synced/hand-edited registry
+    /// carrying `sandbox.enabled` can always be turned off. Restart the project
+    /// for the unconfined command to take effect.
+    pub fn disable_sandbox(&self, id: &str) -> AppResult<SandboxOpResult> {
+        let pid = ProjectId::new(id);
+        let mut reg = self.load_registry()?;
+        let project = reg
+            .get_project_mut(&pid)
+            .ok_or_else(|| AppError::NotFound(id.to_string()))?;
+        crate::sandbox::disable(project);
+        let status = sandbox_project_status(project);
+        self.save_registry(&reg)?;
+        Ok(SandboxOpResult {
+            ok: true,
+            detail: format!(
+                "Sandboxed Run disabled for {id}. Restart the project for the change to apply."
+            ),
+            project: status,
+        })
+    }
+
+    /// Recent sandbox-denial lines from a project's logs (`deny(...)` /
+    /// "operation not permitted"), surfaced so an agent can see what the profile
+    /// blocked. Requires the daemon (logs come from Process Compose).
+    pub async fn sandbox_violations(
+        &self,
+        id: &str,
+        limit: Option<u32>,
+    ) -> AppResult<SandboxViolationsResult> {
+        let reg = self.load_registry()?;
+        self.require_project(&reg, id)?;
+        self.ensure_daemon(false).await?;
+        let lines = self.pc().logs(id, 0, limit.unwrap_or(250)).await?;
+        let violations = crate::sandbox::violation_lines(&lines);
+        Ok(SandboxViolationsResult {
+            id: id.to_string(),
+            scanned_lines: lines.len(),
+            violations,
+        })
+    }
+
+    // -------------------------------------------------------------------------
+    // HTTP request inspector. The Caddy access log is read straight off disk
+    // (no daemon needed); the live `portbay://request` event stream is app-only.
+    // -------------------------------------------------------------------------
+
+    /// Recent HTTP requests Caddy handled (oldest→newest), optionally filtered
+    /// to one project. Reads the access-log file directly — empty when the app
+    /// hasn't served anything yet (or never created the log).
+    pub fn recent_requests(
+        &self,
+        limit: Option<u32>,
+        project: Option<&str>,
+    ) -> AppResult<Vec<RequestEntry>> {
+        let reg = self.load_registry()?;
+        if let Some(pid) = project {
+            self.require_project(&reg, pid)?;
+        }
+        let log = http_inspector::access_log_path(self.data_dir());
+        let mut entries = http_inspector::read_recent(&log, limit, &reg);
+        if let Some(pid) = project {
+            entries.retain(|e| e.project_id.as_deref() == Some(pid));
+        }
+        Ok(entries)
+    }
+
+    /// Truncate the access log so the inspector starts fresh.
+    pub fn clear_requests(&self) -> AppResult<OpResult> {
+        http_inspector::clear_access_log(&http_inspector::access_log_path(self.data_dir()))?;
+        Ok(OpResult {
+            ok: true,
+            project: None,
+            detail: "Cleared the HTTP request log.".into(),
+            warnings: vec![],
+        })
+    }
+
+    // -------------------------------------------------------------------------
+    // Certificates. cert_info reads the issued cert off disk; reissue removes it
+    // and lets the running app mint a fresh one on reconcile. Installing the
+    // mkcert CA into the system trust store is privileged + interactive — it's
+    // app-only and intentionally not exposed here.
+    // -------------------------------------------------------------------------
+
+    /// Local-HTTPS cert metadata (paths, issue/expiry, days-left, SANs) for one
+    /// project (`id`) or every project that has a cert (omit `id`). Reads the
+    /// cert files directly — no daemon needed. A project with no cert yet is
+    /// simply absent from the result.
+    pub fn cert_info(&self, id: Option<&str>) -> AppResult<Vec<CertInfo>> {
+        let reg = self.load_registry()?;
+        let root = certs_root()
+            .ok_or_else(|| AppError::Internal("could not resolve the certs directory".into()))?;
+        match id {
+            Some(id) => {
+                self.require_project(&reg, id)?;
+                Ok(read_cert_info(&root, id)?.into_iter().collect())
+            }
+            None => Ok(reg
+                .projects
+                .iter()
+                .filter_map(|p| read_cert_info(&root, p.id.as_str()).ok().flatten())
+                .collect()),
+        }
+    }
+
+    /// Reissue a project's cert: delete the existing one so the running app
+    /// mints a fresh cert and re-loads Caddy on its next reconcile (≤30s). The
+    /// mkcert CA must already be installed (done from the PortBay app).
+    pub fn reissue_cert(&self, id: &str) -> AppResult<OpResult> {
+        let reg = self.load_registry()?;
+        self.require_project(&reg, id)?;
+        let root = certs_root()
+            .ok_or_else(|| AppError::Internal("could not resolve the certs directory".into()))?;
+        crate::mkcert::remove_cert_dir(&root, id).map_err(AppError::Io)?;
+        Ok(OpResult {
+            ok: true,
+            project: None,
+            detail: format!(
+                "Removed {id}'s certificate; the PortBay app reissues it and reloads Caddy on its \
+                 next reconcile (≤30s)."
+            ),
+            warnings: vec![],
         })
     }
 
@@ -1873,6 +2113,68 @@ fn parse_resolver_port(contents: &str) -> Option<u16> {
             .strip_prefix("port ")
             .and_then(|n| n.trim().parse().ok())
     })
+}
+
+// =============================================================================
+// Sandbox result types + helper
+// =============================================================================
+
+/// One project's sandbox policy, as recorded in the registry.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct SandboxProjectStatus {
+    pub id: String,
+    pub name: String,
+    /// Whether the next supervised run is wrapped by the Seatbelt profile.
+    pub enabled: bool,
+    /// Network policy key: `loopback_only`, `outbound`, `full`, or `blocked`.
+    pub network: String,
+    /// Whether the per-run cache/temp scratch dir is wiped before each start.
+    pub ephemeral: bool,
+}
+
+/// Result of `portbay_sandbox_status`.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct SandboxStatusResult {
+    /// Whether this OS supports Sandboxed Run at all (macOS Seatbelt only).
+    pub platform_supported: bool,
+    /// Whether the `sandbox-exec` frontend is present on this machine. When
+    /// false on macOS, enabling will fail closed rather than run unconfined.
+    pub sandbox_available: bool,
+    /// How many projects may be sandboxed at once on the current tier; `null`
+    /// means unlimited (Pro).
+    pub community_cap: Option<u32>,
+    /// How many projects currently have Sandboxed Run enabled.
+    pub enabled_count: usize,
+    pub projects: Vec<SandboxProjectStatus>,
+}
+
+/// A sandbox mutation acknowledgement (enable / disable).
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct SandboxOpResult {
+    pub ok: bool,
+    pub detail: String,
+    pub project: SandboxProjectStatus,
+}
+
+/// Result of `portbay_sandbox_violations`.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct SandboxViolationsResult {
+    pub id: String,
+    /// How many recent log lines were scanned.
+    pub scanned_lines: usize,
+    /// The sandbox-denial lines found, in log order.
+    pub violations: Vec<String>,
+}
+
+fn sandbox_project_status(p: &Project) -> SandboxProjectStatus {
+    let cfg = crate::sandbox::config(p);
+    SandboxProjectStatus {
+        id: p.id.to_string(),
+        name: p.name.clone(),
+        enabled: crate::sandbox::is_enabled(p),
+        network: crate::sandbox::network_policy_key(cfg.network).into(),
+        ephemeral: cfg.ephemeral,
+    }
 }
 
 // =============================================================================

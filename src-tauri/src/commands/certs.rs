@@ -77,6 +77,24 @@ pub async fn install_mkcert_ca(state: State<'_, AppState>) -> AppResult<()> {
     }
 }
 
+/// Read + parse a project's on-disk cert under `certs_root` into [`CertInfo`].
+/// `Ok(None)` when no cert has been issued (files absent) — a normal empty
+/// state, not an error; `Err` only on a present-but-unreadable/corrupt cert.
+/// Shared by the `cert_info` command and the out-of-process CLI / MCP server,
+/// which read certs straight off disk without the bundled mkcert binary.
+pub fn read_cert_info(certs_root: &std::path::Path, project_id: &str) -> AppResult<Option<CertInfo>> {
+    let Some(paths) = crate::mkcert::cert_paths_in(certs_root, project_id) else {
+        return Ok(None);
+    };
+    let pem_bytes = fs::read(&paths.certificate).map_err(AppError::Io)?;
+    Ok(Some(parse_cert_pem(
+        project_id,
+        &paths.certificate,
+        &paths.key,
+        &pem_bytes,
+    )?))
+}
+
 /// `cert_info(id)` — returns issue/expiry/SANs for a project's cert.
 /// Reads the on-disk PEM via `x509-parser`. The cert file may not exist
 /// yet (project hasn't been reconciled, or HTTPS off) — caller treats a
@@ -88,13 +106,8 @@ pub async fn cert_info(state: State<'_, AppState>, id: String) -> AppResult<Cert
         .as_ref()
         .ok_or_else(|| AppError::BadInput("mkcert binary not bundled".into()))?;
 
-    let paths = mkcert
-        .cert_paths(&id)
-        .ok_or_else(|| AppError::NotFound(format!("no cert issued for project '{id}'")))?;
-
-    let pem_bytes = fs::read(&paths.certificate).map_err(AppError::Io)?;
-    let info = parse_cert_pem(&id, &paths.certificate, &paths.key, &pem_bytes)?;
-    Ok(info)
+    read_cert_info(mkcert.certs_root(), &id)?
+        .ok_or_else(|| AppError::NotFound(format!("no cert issued for project '{id}'")))
 }
 
 /// `reissue_cert(id)` — delete the existing cert dir, mark the

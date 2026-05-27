@@ -50,7 +50,7 @@ use portbay_lib::process_compose::{
 use portbay_lib::commands::projects::detect_kind;
 use portbay_lib::registry::{
     self, store, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, Group, Project, ProjectId,
-    ProjectType, Readiness, Registry, WorkspaceTool,
+    ProjectType, Readiness, Registry, SandboxNetworkPolicy, WorkspaceTool,
 };
 use portbay_lib::registry::workspace as workspace_detect;
 
@@ -185,6 +185,29 @@ enum Cmd {
     /// install are done from the PortBay app.
     #[command(subcommand)]
     Dns(DnsCmd),
+
+    /// Manage Sandboxed Run (macOS only): confine a project under a Seatbelt
+    /// profile, inspect policy, and read sandbox violations. The confined launch
+    /// itself is applied by the PortBay app on its next reconcile.
+    #[command(subcommand)]
+    Sandbox(SandboxCmd),
+
+    /// Inspect HTTP traffic Caddy handled: list recent requests (read from the
+    /// access log) or clear the log. The live stream is in the PortBay app.
+    #[command(subcommand)]
+    Requests(RequestsCmd),
+
+    /// Local-HTTPS certificates: show per-project cert metadata, or reissue a
+    /// cert. Installing the mkcert CA into the system trust store is done from
+    /// the PortBay app (privileged + interactive).
+    #[command(subcommand)]
+    Cert(CertCmd),
+
+    /// Sidecar status (process-compose, dnsmasq resolver, hosts, …). Read-only:
+    /// restarting a sidecar is done from the PortBay app, which owns the
+    /// processes. Caddy/mkcert/Mailpit live state isn't visible from outside it.
+    #[command(subcommand)]
+    Sidecar(SidecarStatusCmd),
 
     /// Inspect a folder and print detection results: detected framework,
     /// suggested id, hostname, port, and start command. With `--apps`, list
@@ -590,6 +613,117 @@ enum DnsCmd {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum SandboxCmd {
+    /// Show sandbox policy for one project (pass an id) or all projects, plus
+    /// host capability (sandbox-exec) and the tier's sandbox cap.
+    Status {
+        /// Project id to report on. Omit to list every project.
+        id: Option<String>,
+    },
+
+    /// Enable Sandboxed Run on a project (macOS only). Verifies the generated
+    /// profile, then the app re-wraps the command on its next reconcile (≤30s);
+    /// run `portbay restart <id>` to launch it confined.
+    Enable(SandboxEnableArgs),
+
+    /// Disable Sandboxed Run on a project. Restart the project to apply.
+    Disable {
+        /// Project id to unconfine.
+        id: String,
+    },
+
+    /// Print recent sandbox-denial lines from a project's logs (requires the
+    /// daemon).
+    Violations {
+        /// Project id whose logs to scan.
+        id: String,
+        /// How many recent log lines to scan (default 250).
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+}
+
+#[derive(Args, Debug)]
+struct SandboxEnableArgs {
+    /// Project id to sandbox.
+    id: String,
+
+    /// Network access granted inside the sandbox.
+    #[arg(long, value_enum, default_value_t = CliSandboxNetwork::LoopbackOnly)]
+    network: CliSandboxNetwork,
+
+    /// Keep the per-run cache/temp scratch dir between runs instead of wiping it
+    /// before each sandboxed start (ephemeral mode is on by default).
+    #[arg(long)]
+    no_ephemeral: bool,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CliSandboxNetwork {
+    /// Loopback bind/connect only — safest useful default for a local dev server.
+    LoopbackOnly,
+    /// Loopback plus outbound (package-manager fetches).
+    Outbound,
+    /// All networking.
+    Full,
+    /// No networking.
+    Blocked,
+}
+
+impl From<CliSandboxNetwork> for SandboxNetworkPolicy {
+    fn from(v: CliSandboxNetwork) -> Self {
+        match v {
+            CliSandboxNetwork::LoopbackOnly => SandboxNetworkPolicy::LoopbackOnly,
+            CliSandboxNetwork::Outbound => SandboxNetworkPolicy::Outbound,
+            CliSandboxNetwork::Full => SandboxNetworkPolicy::Full,
+            CliSandboxNetwork::Blocked => SandboxNetworkPolicy::Blocked,
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum RequestsCmd {
+    /// List recent HTTP requests Caddy handled (oldest→newest), read from the
+    /// access log. Works without the daemon; empty until the app serves traffic.
+    Recent {
+        /// How many recent requests to show (default 200, capped at 2000).
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Only show requests routed to this project id.
+        #[arg(long)]
+        project: Option<String>,
+    },
+
+    /// Truncate the access log so the inspector starts fresh.
+    Clear,
+}
+
+#[derive(Subcommand, Debug)]
+enum CertCmd {
+    /// Show certificate metadata (paths, issue/expiry, days left, SANs) for one
+    /// project, or all projects that have a cert when no id is given.
+    Info {
+        /// Project id to report on. Omit to list every project's cert.
+        id: Option<String>,
+    },
+
+    /// Reissue a project's cert: delete it so the app mints a fresh one and
+    /// reloads Caddy on its next reconcile (≤30s).
+    Reissue {
+        /// Project id whose cert to reissue.
+        id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SidecarStatusCmd {
+    /// Report each sidecar's state as seen from outside the app: process-compose
+    /// (live), the dnsmasq resolver file, and managed /etc/hosts. Caddy, mkcert,
+    /// and Mailpit are app-owned — their live state shows `unknown` here.
+    Status,
+}
+
 // =============================================================================
 // Entry
 // =============================================================================
@@ -654,6 +788,10 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Runtime(sub) => cmd_runtime(&ctx, sub).await,
         Cmd::Db(sub) => cmd_db(&ctx, sub).await,
         Cmd::Dns(sub) => cmd_dns(&ctx, sub).await,
+        Cmd::Sandbox(sub) => cmd_sandbox(&ctx, sub).await,
+        Cmd::Requests(sub) => cmd_requests(&ctx, sub).await,
+        Cmd::Cert(sub) => cmd_cert(&ctx, sub).await,
+        Cmd::Sidecar(sub) => cmd_sidecar(&ctx, sub).await,
         Cmd::Detect { path, apps } => cmd_detect(&ctx, &path, apps).await,
     }
 }
@@ -2216,7 +2354,7 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
                     .write_line(&format!(
                         "{} provisioned {} ({} on :{})",
                         style("✓").green(),
-                        instance.id.to_string(),
+                        instance.id,
                         eng.label(),
                         port
                     ))
@@ -2225,7 +2363,7 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
                     .write_line(&format!(
                         "  {} joins Process Compose after the app reconciles (≤30s); then `portbay db start {}`.",
                         style("·").dim(),
-                        instance.id.to_string()
+                        instance.id
                     ))
                     .ok();
             }
@@ -2257,7 +2395,7 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
                     .write_line(&format!(
                         "{} removed database {}",
                         style("✓").green(),
-                        removed.id.to_string()
+                        removed.id
                     ))
                     .ok();
                 for w in &warnings {
@@ -2569,6 +2707,234 @@ fn dns_resolver_port(contents: &str) -> Option<u16> {
             .strip_prefix("port ")
             .and_then(|n| n.trim().parse().ok())
     })
+}
+
+async fn cmd_sandbox(ctx: &CliContext, sub: SandboxCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::{entitlements, sandbox};
+
+    // The data dir is the parent of registry.json — same dir the app reads the
+    // generated `.sb` profile from, so the preflight below validates the real one.
+    let data_dir = ctx
+        .registry_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| ctx.registry_path.clone());
+
+    match sub {
+        SandboxCmd::Status { id } => {
+            let reg = ctx.load_registry()?;
+            if let Some(ref want) = id {
+                if reg.get_project(&ProjectId::new(want)).is_none() {
+                    return Err(CliError::ProjectNotFound(want.clone()));
+                }
+            }
+            let available = sandbox::is_available();
+            let cap = entitlements::current().entitlements.max_sandbox_projects();
+            let enabled_count = reg.projects.iter().filter(|p| sandbox::is_enabled(p)).count();
+            let rows: Vec<&Project> = reg
+                .projects
+                .iter()
+                .filter(|p| id.as_deref().is_none_or(|w| p.id.as_str() == w))
+                .collect();
+
+            if ctx.json {
+                let out: Vec<_> = rows
+                    .iter()
+                    .map(|p| {
+                        let cfg = sandbox::config(p);
+                        serde_json::json!({
+                            "id": p.id.as_str(),
+                            "name": p.name,
+                            "enabled": sandbox::is_enabled(p),
+                            "network": sandbox::network_policy_key(cfg.network),
+                            "ephemeral": cfg.ephemeral,
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "platform_supported": cfg!(target_os = "macos"),
+                        "sandbox_available": available,
+                        "community_cap": cap,
+                        "enabled_count": enabled_count,
+                        "projects": out,
+                    })
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            let cap_str = cap.map(|c| c.to_string()).unwrap_or_else(|| "unlimited".into());
+            ctx.term
+                .write_line(&format!(
+                    "  sandbox-exec: {}",
+                    if available { "available" } else { "unavailable" }
+                ))
+                .ok();
+            ctx.term
+                .write_line(&format!("  enabled:      {enabled_count} / {cap_str}"))
+                .ok();
+            for p in rows {
+                let on = sandbox::is_enabled(p);
+                let badge = if on { style("●").green() } else { style("○").dim() };
+                let detail = if on {
+                    let cfg = sandbox::config(p);
+                    style(format!(
+                        "network={} ephemeral={}",
+                        sandbox::network_policy_key(cfg.network),
+                        cfg.ephemeral
+                    ))
+                    .dim()
+                } else {
+                    style("off".to_string()).dim()
+                };
+                ctx.term
+                    .write_line(&format!("  {badge} {} {detail}", style(p.id.as_str()).bold()))
+                    .ok();
+            }
+        }
+
+        SandboxCmd::Enable(args) => {
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (&args, &data_dir);
+                return Err(CliError::Other(
+                    "Sandboxed Run is only available on macOS.".into(),
+                ));
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                let policy: SandboxNetworkPolicy = args.network.into();
+                let ephemeral = !args.no_ephemeral;
+                let pid = ProjectId::new(args.id.clone());
+                let mut reg = ctx.load_registry()?;
+
+                // Community sandbox cap (Pro unlimited): only a newly sandboxed
+                // project counts, measured against the others already sandboxed.
+                let already_on = reg
+                    .get_project(&pid)
+                    .map(sandbox::is_enabled)
+                    .unwrap_or(false);
+                if !already_on {
+                    let others = reg
+                        .projects
+                        .iter()
+                        .filter(|p| p.id != pid && sandbox::is_enabled(p))
+                        .count();
+                    if let Err(cap) = entitlements::check_can_sandbox(others) {
+                        return Err(CliError::BadInput(format!(
+                            "sandbox cap reached: this tier allows {cap} sandboxed project(s) at \
+                             once. Disable sandbox on another project, or sign in / upgrade for \
+                             unlimited."
+                        )));
+                    }
+                }
+
+                let project = reg
+                    .get_project_mut(&pid)
+                    .ok_or_else(|| CliError::ProjectNotFound(args.id.clone()))?;
+                if project.start_command.is_none() && project.workspace.is_none() {
+                    return Err(CliError::BadInput(
+                        "Sandboxed Run requires a project command to supervise".into(),
+                    ));
+                }
+                sandbox::enable(project, policy, ephemeral);
+                // Fail closed: prove macOS accepts this profile before persisting.
+                sandbox::preflight(&data_dir, project)
+                    .map_err(|e| CliError::Other(format!("sandbox could not be activated: {e}")))?;
+                sandbox::reset_ephemeral_state(&data_dir, project)
+                    .map_err(|e| CliError::Other(format!("sandbox reset failed: {e}")))?;
+                let net = sandbox::network_policy_key(policy);
+                ctx.save_registry(&reg)?;
+
+                if ctx.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "ok": true,
+                            "id": args.id,
+                            "enabled": true,
+                            "network": net,
+                            "ephemeral": ephemeral,
+                        })
+                    );
+                } else {
+                    cli_say(
+                        ctx,
+                        &format!("sandboxed {} (network={net}, ephemeral={ephemeral})", args.id),
+                    );
+                    ctx.term
+                        .write_line(&format!(
+                            "  {} macOS accepted the profile. The app re-wraps the command on its \
+                             next reconcile (≤30s); then `portbay restart {}` to run it confined.",
+                            style("·").dim(),
+                            args.id
+                        ))
+                        .ok();
+                }
+            }
+        }
+
+        SandboxCmd::Disable { id } => {
+            let pid = ProjectId::new(id.clone());
+            let mut reg = ctx.load_registry()?;
+            let project = reg
+                .get_project_mut(&pid)
+                .ok_or_else(|| CliError::ProjectNotFound(id.clone()))?;
+            sandbox::disable(project);
+            ctx.save_registry(&reg)?;
+            cli_say(
+                ctx,
+                &format!("disabled sandbox for {id} — restart the project to apply"),
+            );
+        }
+
+        SandboxCmd::Violations { id, limit } => {
+            {
+                let reg = ctx.load_registry()?;
+                if reg.get_project(&ProjectId::new(&id)).is_none() {
+                    return Err(CliError::ProjectNotFound(id));
+                }
+            }
+            let lines = ctx
+                .pc()
+                .logs(&id, 0, limit.unwrap_or(250))
+                .await
+                .map_err(CliError::Pc)?;
+            let violations = sandbox::violation_lines(&lines);
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": id,
+                        "scanned_lines": lines.len(),
+                        "violations": violations,
+                    })
+                );
+            } else if violations.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} no sandbox violations in the last {} log line(s) for {id}",
+                        style("·").dim(),
+                        lines.len()
+                    ))
+                    .ok();
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} {} sandbox violation(s) for {id}:",
+                        style("⚠").yellow(),
+                        violations.len()
+                    ))
+                    .ok();
+                for v in &violations {
+                    println!("  {v}");
+                }
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `portbay detect <path>` — single-project or monorepo app detection.
@@ -3117,6 +3483,210 @@ fn remove_host_best_effort(
     HostsManager::system().remove(hostname)
 }
 
+async fn cmd_requests(ctx: &CliContext, sub: RequestsCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::commands::http_inspector;
+
+    // The access log lives at <data_dir>/logs/caddy-access.log; data_dir is the
+    // registry's parent (same convention as tunnels/databases).
+    let data_dir = ctx
+        .registry_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| ctx.registry_path.clone());
+    let log = http_inspector::access_log_path(&data_dir);
+
+    match sub {
+        RequestsCmd::Recent { limit, project } => {
+            let reg = ctx.load_registry()?;
+            if let Some(ref pid) = project {
+                if reg.get_project(&ProjectId::new(pid)).is_none() {
+                    return Err(CliError::ProjectNotFound(pid.clone()));
+                }
+            }
+            let mut entries = http_inspector::read_recent(&log, limit, &reg);
+            if let Some(ref pid) = project {
+                entries.retain(|e| e.project_id.as_deref() == Some(pid.as_str()));
+            }
+
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            if entries.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} No requests recorded yet. Serve traffic through a project, then re-run.",
+                        style("·").dim()
+                    ))
+                    .ok();
+                return Ok(ExitCode::SUCCESS);
+            }
+            for e in &entries {
+                let status = match e.status {
+                    200..=299 => style(e.status).green(),
+                    300..=399 => style(e.status).cyan(),
+                    400..=499 => style(e.status).yellow(),
+                    _ => style(e.status).red(),
+                };
+                ctx.term
+                    .write_line(&format!(
+                        "  {status} {method:<6} {host}{uri}  {dur:.1}ms",
+                        method = e.method,
+                        host = style(&e.host).dim(),
+                        uri = e.uri,
+                        dur = e.duration_ms,
+                    ))
+                    .ok();
+            }
+        }
+
+        RequestsCmd::Clear => {
+            http_inspector::clear_access_log(&log)
+                .map_err(|e| CliError::Other(format!("clear access log: {e}")))?;
+            cli_say(ctx, "cleared the HTTP request log");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_cert(ctx: &CliContext, sub: CertCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::commands::certs::{read_cert_info, CertInfo};
+    use portbay_lib::mkcert;
+
+    let root = certs_root()
+        .ok_or_else(|| CliError::Other("could not resolve the certs directory".into()))?;
+
+    match sub {
+        CertCmd::Info { id } => {
+            let reg = ctx.load_registry()?;
+            let infos: Vec<CertInfo> = match &id {
+                Some(id) => {
+                    if reg.get_project(&ProjectId::new(id)).is_none() {
+                        return Err(CliError::ProjectNotFound(id.clone()));
+                    }
+                    read_cert_info(&root, id)
+                        .map_err(|e| CliError::Other(e.to_string()))?
+                        .into_iter()
+                        .collect()
+                }
+                None => reg
+                    .list_projects()
+                    .iter()
+                    .filter_map(|p| read_cert_info(&root, p.id.as_str()).ok().flatten())
+                    .collect(),
+            };
+
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&infos)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            if infos.is_empty() {
+                let scope = id.as_deref().map(|i| format!("for {i} ")).unwrap_or_default();
+                ctx.term
+                    .write_line(&format!(
+                        "{} No certificate {scope}issued yet. Start an HTTPS project so the app mints one.",
+                        style("·").dim()
+                    ))
+                    .ok();
+                return Ok(ExitCode::SUCCESS);
+            }
+            for c in &infos {
+                let expiry = match c.days_until_expiry {
+                    Some(d) if d < 0 => style(format!("expired {} day(s) ago", -d)).red(),
+                    Some(d) if d <= 14 => style(format!("expires in {d} day(s)")).yellow(),
+                    Some(d) => style(format!("expires in {d} day(s)")).green(),
+                    None => style("expiry unknown".to_string()).dim(),
+                };
+                ctx.term
+                    .write_line(&format!("  {} {}", style(&c.project_id).bold(), expiry))
+                    .ok();
+                if !c.sans.is_empty() {
+                    ctx.term
+                        .write_line(&format!("    {} {}", style("SANs:").dim(), c.sans.join(", ")))
+                        .ok();
+                }
+                ctx.term
+                    .write_line(&format!(
+                        "    {} {}",
+                        style("cert:").dim(),
+                        style(&c.certificate_path).dim()
+                    ))
+                    .ok();
+            }
+        }
+
+        CertCmd::Reissue { id } => {
+            let reg = ctx.load_registry()?;
+            if reg.get_project(&ProjectId::new(&id)).is_none() {
+                return Err(CliError::ProjectNotFound(id));
+            }
+            mkcert::remove_cert_dir(&root, &id)
+                .map_err(|e| CliError::Other(format!("remove cert: {e}")))?;
+            cli_say(
+                ctx,
+                &format!(
+                    "removed {id}'s certificate — the app reissues it + reloads Caddy on its next \
+                     reconcile (≤30s)"
+                ),
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_sidecar(ctx: &CliContext, sub: SidecarStatusCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::sidecar_probe::{self, ProbeState};
+
+    match sub {
+        SidecarStatusCmd::Status => {
+            let suffix = ctx
+                .load_registry()
+                .map(|r| r.domain_suffix)
+                .unwrap_or_else(|_| DEFAULT_DOMAIN_SUFFIX.to_string());
+            let probes = sidecar_probe::probe(ctx.pc_port, &suffix).await;
+
+            if ctx.json {
+                let out: Vec<_> = probes
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "name": p.name,
+                            "state": p.state.as_str(),
+                            "detail": p.detail,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            let name_w = probes.iter().map(|p| p.name.len()).max().unwrap_or(4);
+            for p in &probes {
+                let badge = match p.state {
+                    ProbeState::Running => style("●").green(),
+                    ProbeState::Stopped => style("○").red(),
+                    ProbeState::Unknown => style("·").dim(),
+                };
+                ctx.term
+                    .write_line(&format!(
+                        "  {badge} {name:<name_w$}  {detail}",
+                        name = style(p.name).bold(),
+                        detail = style(&p.detail).dim(),
+                        name_w = name_w,
+                    ))
+                    .ok();
+            }
+            ctx.term
+                .write_line(&format!(
+                    "  {} restarting a sidecar is done from the PortBay app (it owns the processes).",
+                    style("·").dim()
+                ))
+                .ok();
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cli_say(ctx: &CliContext, msg: &str) {
     if ctx.json {
         println!("{}", serde_json::json!({ "ok": true, "message": msg }));
@@ -3318,6 +3888,81 @@ mod tests {
             panic!("expected Add")
         };
         assert!(matches!(args.web_server, CliWebServer::Nginx));
+    }
+
+    #[test]
+    fn cli_parses_sandbox_enable_with_network_and_ephemeral_flags() {
+        let cli = Cli::try_parse_from([
+            "portbay",
+            "sandbox",
+            "enable",
+            "blog",
+            "--network",
+            "outbound",
+            "--no-ephemeral",
+        ])
+        .unwrap();
+        let Some(Cmd::Sandbox(SandboxCmd::Enable(args))) = cli.cmd else {
+            panic!("expected Sandbox Enable")
+        };
+        assert_eq!(args.id, "blog");
+        assert!(matches!(args.network, CliSandboxNetwork::Outbound));
+        assert!(args.no_ephemeral);
+        // Default network is loopback-only when the flag is omitted.
+        let cli = Cli::try_parse_from(["portbay", "sandbox", "enable", "blog"]).unwrap();
+        let Some(Cmd::Sandbox(SandboxCmd::Enable(args))) = cli.cmd else {
+            panic!("expected Sandbox Enable")
+        };
+        assert!(matches!(args.network, CliSandboxNetwork::LoopbackOnly));
+        assert!(!args.no_ephemeral);
+    }
+
+    #[test]
+    fn cli_parses_sandbox_status_optional_id() {
+        let cli = Cli::try_parse_from(["portbay", "sandbox", "status"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Sandbox(SandboxCmd::Status { id: None }))
+        ));
+    }
+
+    #[test]
+    fn cli_parses_requests_recent_with_filters_and_clear() {
+        let cli = Cli::try_parse_from([
+            "portbay", "requests", "recent", "--limit", "50", "--project", "blog",
+        ])
+        .unwrap();
+        let Some(Cmd::Requests(RequestsCmd::Recent { limit, project })) = cli.cmd else {
+            panic!("expected Requests Recent")
+        };
+        assert_eq!(limit, Some(50));
+        assert_eq!(project.as_deref(), Some("blog"));
+
+        let cli = Cli::try_parse_from(["portbay", "requests", "clear"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Requests(RequestsCmd::Clear))));
+    }
+
+    #[test]
+    fn cli_parses_cert_info_optional_id_and_reissue() {
+        let cli = Cli::try_parse_from(["portbay", "cert", "info"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Cert(CertCmd::Info { id: None }))
+        ));
+        let cli = Cli::try_parse_from(["portbay", "cert", "reissue", "blog"]).unwrap();
+        let Some(Cmd::Cert(CertCmd::Reissue { id })) = cli.cmd else {
+            panic!("expected Cert Reissue")
+        };
+        assert_eq!(id, "blog");
+    }
+
+    #[test]
+    fn cli_parses_sidecar_status() {
+        let cli = Cli::try_parse_from(["portbay", "sidecar", "status"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Sidecar(SidecarStatusCmd::Status))
+        ));
     }
 
     #[test]

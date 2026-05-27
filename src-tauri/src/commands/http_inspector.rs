@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -58,6 +58,32 @@ pub struct RequestEntry {
     pub req_headers: Option<BTreeMap<String, Vec<String>>>,
 }
 
+/// The Caddy access-log path under a PortBay data dir (the registry's parent).
+/// The CLI + MCP server have no `AppState`, so they resolve the log this way —
+/// one place that knows the `logs/` subdir convention.
+pub fn access_log_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("logs").join(ACCESS_LOG_FILE)
+}
+
+/// Backfill read shared by the `recent_requests` command and the CLI/MCP: the
+/// last `limit` parsed entries from `access_log`, oldest→newest, with each host
+/// mapped to its project via `reg`. Empty when no log exists yet. `limit`
+/// defaults to [`DEFAULT_LIMIT`] and is capped at [`MAX_LIMIT`].
+pub fn read_recent(access_log: &Path, limit: Option<u32>, reg: &Registry) -> Vec<RequestEntry> {
+    let limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
+    read_tail_entries(access_log, limit, &host_to_project(reg))
+}
+
+/// Truncate the access log so the inspector starts fresh — shared by the
+/// `clear_requests` command and the CLI/MCP. Safe cross-process: the app's
+/// tailer detects the shrink and reopens the file at the start.
+pub fn clear_access_log(access_log: &Path) -> std::io::Result<()> {
+    if access_log.exists() {
+        std::fs::write(access_log, b"")?;
+    }
+    Ok(())
+}
+
 /// `recent_requests(limit?)` — backfill the inspector from the tail of the
 /// access log. Returns oldest→newest. Empty when no log exists yet.
 #[tauri::command]
@@ -65,20 +91,14 @@ pub fn recent_requests(
     state: State<'_, AppState>,
     limit: Option<u32>,
 ) -> AppResult<Vec<RequestEntry>> {
-    let limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
-    let path = state.logs_dir.join(ACCESS_LOG_FILE);
     let reg = store::load_or_default(&state.registry_path, state.domain_suffix.clone())?;
-    let host_map = host_to_project(&reg);
-    Ok(read_tail_entries(&path, limit, &host_map))
+    Ok(read_recent(&state.logs_dir.join(ACCESS_LOG_FILE), limit, &reg))
 }
 
 /// `clear_requests()` — truncate the access log so the inspector starts fresh.
 #[tauri::command]
 pub fn clear_requests(state: State<'_, AppState>) -> AppResult<()> {
-    let path = state.logs_dir.join(ACCESS_LOG_FILE);
-    if path.exists() {
-        std::fs::write(&path, b"")?;
-    }
+    clear_access_log(&state.logs_dir.join(ACCESS_LOG_FILE))?;
     Ok(())
 }
 

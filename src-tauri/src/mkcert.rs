@@ -208,31 +208,45 @@ impl Mkcert {
     /// Look up existing cert paths for a project. Returns `None` if no
     /// cert has been issued. Pure (no `mkcert` invocation).
     pub fn cert_paths(&self, project_id: &str) -> Option<CertPaths> {
-        let dir = self.certs_root.join(project_id);
-        let cert = dir.join("cert.pem");
-        let key = dir.join("key.pem");
-        if cert.exists() && key.exists() {
-            Some(CertPaths {
-                certificate: cert,
-                key,
-            })
-        } else {
-            None
-        }
+        cert_paths_in(&self.certs_root, project_id)
     }
 
     /// Remove a project's cert directory. Idempotent — missing is fine.
     pub fn remove_cert(&self, project_id: &str) -> Result<()> {
         let dir = self.certs_root.join(project_id);
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(MkcertError::io(&dir, e)),
-        }
+        remove_cert_dir(&self.certs_root, project_id).map_err(|e| MkcertError::io(&dir, e))
     }
 
     fn command(&self) -> Command {
         Command::new(&self.binary)
+    }
+}
+
+/// Per-project cert/key paths under a certs root, or `None` unless both files
+/// are present. The on-disk layout (`<root>/<id>/{cert,key}.pem`) lives here so
+/// every surface — the [`Mkcert`] wrapper, the `cert_info` command, and the
+/// out-of-process CLI / MCP server (which have no bundled binary) — agrees on
+/// where certs live. Pure: no `mkcert` invocation, no binary needed.
+pub fn cert_paths_in(certs_root: &Path, project_id: &str) -> Option<CertPaths> {
+    let dir = certs_root.join(project_id);
+    let cert = dir.join("cert.pem");
+    let key = dir.join("key.pem");
+    (cert.exists() && key.exists()).then_some(CertPaths {
+        certificate: cert,
+        key,
+    })
+}
+
+/// Remove a project's cert directory under `certs_root`. Idempotent (a missing
+/// directory is success). Shared with [`Mkcert::remove_cert`]; the CLI / MCP
+/// reissue flow calls this directly, then the running app reissues on its next
+/// reconcile.
+pub fn remove_cert_dir(certs_root: &Path, project_id: &str) -> std::io::Result<()> {
+    let dir = certs_root.join(project_id);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 

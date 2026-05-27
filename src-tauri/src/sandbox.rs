@@ -48,6 +48,20 @@ pub fn network_policy_key(policy: SandboxNetworkPolicy) -> &'static str {
     }
 }
 
+/// Inverse of [`network_policy_key`]: parse a policy key (the snake_case wire
+/// value, plus a couple of friendly aliases) back into a policy. Shared by the
+/// CLI and the MCP server so both accept the same spellings. `None` for an
+/// unrecognised value.
+pub fn parse_network_policy(value: &str) -> Option<SandboxNetworkPolicy> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "loopback_only" | "loopback" => Some(SandboxNetworkPolicy::LoopbackOnly),
+        "outbound" => Some(SandboxNetworkPolicy::Outbound),
+        "full" => Some(SandboxNetworkPolicy::Full),
+        "blocked" | "none" => Some(SandboxNetworkPolicy::Blocked),
+        _ => None,
+    }
+}
+
 pub fn profile_path(data_dir: &Path, project: &Project) -> PathBuf {
     data_dir
         .join("sandbox")
@@ -496,6 +510,32 @@ mod tests {
         );
         assert_eq!(network_policy_key(SandboxNetworkPolicy::Full), "full");
         assert_eq!(network_policy_key(SandboxNetworkPolicy::Blocked), "blocked");
+    }
+
+    #[test]
+    fn parse_network_policy_round_trips_keys_and_aliases() {
+        for policy in [
+            SandboxNetworkPolicy::LoopbackOnly,
+            SandboxNetworkPolicy::Outbound,
+            SandboxNetworkPolicy::Full,
+            SandboxNetworkPolicy::Blocked,
+        ] {
+            assert_eq!(parse_network_policy(network_policy_key(policy)), Some(policy));
+        }
+        // CLI-friendly aliases + spelling tolerance.
+        assert_eq!(
+            parse_network_policy("loopback-only"),
+            Some(SandboxNetworkPolicy::LoopbackOnly)
+        );
+        assert_eq!(
+            parse_network_policy("LOOPBACK"),
+            Some(SandboxNetworkPolicy::LoopbackOnly)
+        );
+        assert_eq!(
+            parse_network_policy("none"),
+            Some(SandboxNetworkPolicy::Blocked)
+        );
+        assert_eq!(parse_network_policy("bogus"), None);
     }
 
     #[cfg(target_os = "macos")]

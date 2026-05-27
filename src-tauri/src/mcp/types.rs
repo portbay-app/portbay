@@ -677,3 +677,75 @@ pub struct SetDomainSuffixArgs {
     /// to this suffix and their HTTPS certs are dropped (the app reissues them).
     pub suffix: String,
 }
+
+// =============================================================================
+// Sandbox tool inputs
+// =============================================================================
+
+/// Enable Sandboxed Run on a project (macOS only). The project keeps running
+/// under Process Compose, but its launch command is wrapped by a generated
+/// Seatbelt profile that denies access to credential stores, browser data, and
+/// every `.env` outside the project.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct EnableSandboxArgs {
+    /// The project id (slug) to sandbox.
+    pub id: String,
+    /// Network access granted inside the sandbox: `loopback_only` (default —
+    /// local dev server only), `outbound` (also allow package-manager fetches),
+    /// `full` (all networking), or `blocked` (no networking).
+    #[serde(default)]
+    pub network: Option<String>,
+    /// Wipe the per-run cache/temp scratch dir before each sandboxed start and
+    /// steer `TMPDIR` + package-manager caches into it. Defaults to `true`.
+    #[serde(default)]
+    pub ephemeral: Option<bool>,
+}
+
+/// Report sandbox state for one project (set `id`) or all projects (omit `id`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SandboxStatusArgs {
+    /// Project id to report on. Omit to list every project's sandbox state.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// Read recent sandbox-denial lines from a project's logs.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SandboxViolationsArgs {
+    /// The project id (slug) whose logs to scan.
+    pub id: String,
+    /// How many recent log lines to scan for `deny(...)` / "operation not
+    /// permitted" entries. Defaults to 250.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+// =============================================================================
+// Certificate tool inputs
+// =============================================================================
+
+/// Report local-HTTPS cert metadata for one project (set `id`) or all projects
+/// that have a cert (omit `id`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct CertInfoArgs {
+    /// Project id to report on. Omit to list every project's cert.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+// =============================================================================
+// HTTP request inspector tool inputs
+// =============================================================================
+
+/// Read recent HTTP requests Caddy handled.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct RecentRequestsArgs {
+    /// How many recent requests to return (oldest→newest). Defaults to 200,
+    /// capped at 2000.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Only return requests routed to this project id (slug). Omit for all
+    /// projects' traffic.
+    #[serde(default)]
+    pub project: Option<String>,
+}

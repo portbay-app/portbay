@@ -47,6 +47,12 @@ pub enum ToolGroup {
     Databases,
     /// DNS / domains: resolver status, DNS records, domain-suffix change.
     Dns,
+    /// Sandboxed Run (macOS Seatbelt): status, enable, disable, violations.
+    Sandbox,
+    /// HTTP request inspector: recent Caddy requests, clear the log.
+    Inspector,
+    /// Local-HTTPS certificates: per-project cert info, reissue.
+    Certs,
 }
 
 impl ToolGroup {
@@ -61,6 +67,9 @@ impl ToolGroup {
             ToolGroup::Runtimes,
             ToolGroup::Databases,
             ToolGroup::Dns,
+            ToolGroup::Sandbox,
+            ToolGroup::Inspector,
+            ToolGroup::Certs,
         ]
     }
 
@@ -77,9 +86,12 @@ impl ToolGroup {
             "runtimes" => Ok(vec![ToolGroup::Runtimes]),
             "databases" => Ok(vec![ToolGroup::Databases]),
             "dns" => Ok(vec![ToolGroup::Dns]),
+            "sandbox" => Ok(vec![ToolGroup::Sandbox]),
+            "inspector" => Ok(vec![ToolGroup::Inspector]),
+            "certs" => Ok(vec![ToolGroup::Certs]),
             other => Err(format!(
                 "unknown toolset `{other}` (valid: projects, lifecycle, diagnostics, scaffold, \
-                 groups, tunnels, runtimes, databases, dns, all)"
+                 groups, tunnels, runtimes, databases, dns, sandbox, inspector, certs, all)"
             )),
         }
     }
@@ -172,6 +184,14 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_dns_status", ToolGroup::Dns, false),
     ("portbay_list_dns_records", ToolGroup::Dns, false),
     ("portbay_set_domain_suffix", ToolGroup::Dns, true),
+    ("portbay_sandbox_status", ToolGroup::Sandbox, false),
+    ("portbay_sandbox_violations", ToolGroup::Sandbox, false),
+    ("portbay_enable_sandbox", ToolGroup::Sandbox, true),
+    ("portbay_disable_sandbox", ToolGroup::Sandbox, true),
+    ("portbay_recent_requests", ToolGroup::Inspector, false),
+    ("portbay_clear_requests", ToolGroup::Inspector, true),
+    ("portbay_cert_info", ToolGroup::Certs, false),
+    ("portbay_reissue_cert", ToolGroup::Certs, true),
 ];
 
 /// The PortBay MCP server. Holds the operations context and the (possibly
@@ -1114,6 +1134,168 @@ impl PortbayMcp {
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.set_domain_suffix(&args.suffix))
     }
+
+    // ---- Sandbox ------------------------------------------------------------
+
+    #[tool(
+        name = "portbay_sandbox_status",
+        description = "Report Sandboxed Run state: per-project policy (enabled, network, ephemeral), \
+                       whether this OS supports it (macOS only) and whether `sandbox-exec` is present, \
+                       plus the tier's sandbox cap and how many projects are sandboxed. Set `id` for one \
+                       project, omit it for all.",
+        annotations(
+            title = "Sandbox status",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn sandbox_status(
+        &self,
+        Parameters(args): Parameters<SandboxStatusArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.sandbox_status(args.id.as_deref()))
+    }
+
+    #[tool(
+        name = "portbay_sandbox_violations",
+        description = "List recent sandbox-denial lines from a project's logs (`deny(...)` / \"operation \
+                       not permitted\"), so you can see what the profile blocked. Requires the PortBay \
+                       daemon (logs come from Process Compose). Defaults to scanning the last 250 lines.",
+        annotations(
+            title = "Sandbox violations",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn sandbox_violations(
+        &self,
+        Parameters(args): Parameters<SandboxViolationsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.sandbox_violations(&args.id, args.limit).await)
+    }
+
+    #[tool(
+        name = "portbay_enable_sandbox",
+        description = "Enable Sandboxed Run on a project (macOS only). Wraps the launch command in a \
+                       Seatbelt profile that denies credential stores, browser data, and every `.env` \
+                       outside the project. macOS must accept the profile or this fails closed (nothing \
+                       persists). The instance is NOT started/restarted here: the app re-wraps the \
+                       command on its next reconcile (≤30s), then call portbay_restart to run it \
+                       confined. Community tiers cap concurrent sandboxed projects (see \
+                       portbay_sandbox_status); Pro is unlimited.",
+        annotations(
+            title = "Enable Sandboxed Run",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn enable_sandbox(
+        &self,
+        Parameters(args): Parameters<EnableSandboxArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(
+            self.ctx
+                .enable_sandbox(&args.id, args.network.as_deref(), args.ephemeral),
+        )
+    }
+
+    #[tool(
+        name = "portbay_disable_sandbox",
+        description = "Disable Sandboxed Run on a project (the 'promote to local' action). The change \
+                       applies on the next restart. Works on any OS so a synced sandbox flag can always \
+                       be cleared.",
+        annotations(
+            title = "Disable Sandboxed Run",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn disable_sandbox(
+        &self,
+        Parameters(args): Parameters<IdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.disable_sandbox(&args.id))
+    }
+
+    // ---- HTTP request inspector --------------------------------------------
+
+    #[tool(
+        name = "portbay_recent_requests",
+        description = "List recent HTTP requests Caddy handled (method, host, URI, status, duration, \
+                       size, and the matched project), oldest→newest. Reads Caddy's access log off \
+                       disk, so it works without the daemon — it's empty until the app has served \
+                       traffic. Pass `project` to filter to one project's requests, `limit` to bound \
+                       the count (default 200, max 2000).",
+        annotations(
+            title = "Recent HTTP requests",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn recent_requests(
+        &self,
+        Parameters(args): Parameters<RecentRequestsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.recent_requests(args.limit, args.project.as_deref()))
+    }
+
+    #[tool(
+        name = "portbay_clear_requests",
+        description = "Truncate Caddy's access log so the request inspector starts fresh. Safe while \
+                       the app is running — the live stream just resumes from the next request.",
+        annotations(
+            title = "Clear HTTP request log",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn clear_requests(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.clear_requests())
+    }
+
+    // ---- Certificates -------------------------------------------------------
+
+    #[tool(
+        name = "portbay_cert_info",
+        description = "Report local-HTTPS certificate metadata — file paths, issued/expiry dates, days \
+                       until expiry, and DNS SANs — for one project (set `id`) or every project that \
+                       has a cert (omit `id`). Reads the cert files directly (no daemon needed); a \
+                       project with no cert yet is simply absent from the result.",
+        annotations(
+            title = "Certificate info",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn cert_info(
+        &self,
+        Parameters(args): Parameters<CertInfoArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.cert_info(args.id.as_deref()))
+    }
+
+    #[tool(
+        name = "portbay_reissue_cert",
+        description = "Reissue a project's local-HTTPS certificate: deletes the current cert so the \
+                       running PortBay app mints a fresh one and reloads Caddy on its next reconcile \
+                       (≤30s). The mkcert CA must already be trusted — installing it into the system \
+                       keychain is privileged + interactive, done from the PortBay app.",
+        annotations(
+            title = "Reissue certificate",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn reissue_cert(
+        &self,
+        Parameters(args): Parameters<IdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.reissue_cert(&args.id))
+    }
 }
 
 const INSTRUCTIONS: &str = "\
@@ -1152,7 +1334,22 @@ Key facts:
 - DNS: portbay_dns_status and portbay_list_dns_records show how names resolve (resolver file vs \
   /etc/hosts). portbay_set_domain_suffix changes the suffix for every project (destructive — it drops \
   certs, which the app reissues). Starting/restarting dnsmasq and first-run resolver install are done \
-  from the PortBay app.";
+  from the PortBay app.
+- Sandbox (macOS only): portbay_enable_sandbox confines an untrusted project under a Seatbelt profile \
+  that blocks credential/browser/.env reads; it fails closed if macOS rejects the profile. It does NOT \
+  launch the project — the app re-wraps the command on its next reconcile (≤30s), then portbay_restart \
+  runs it confined. portbay_sandbox_status shows policy + the tier cap; portbay_sandbox_violations \
+  lists what the profile blocked; portbay_disable_sandbox lifts it.
+- HTTP inspector: portbay_recent_requests reads Caddy's access log (method/host/uri/status/duration \
+  + matched project) straight off disk — works without the daemon, empty until traffic flows; filter \
+  with `project`. portbay_clear_requests truncates the log. The live request stream is in the app UI.
+- Certs: portbay_cert_info shows each project's local-HTTPS cert (paths, expiry, SANs), read off disk. \
+  portbay_reissue_cert deletes a cert so the app mints a fresh one on reconcile. Installing the mkcert \
+  CA into the system trust store is privileged + interactive — done from the PortBay app.
+- Sidecars: portbay_sidecar_status reports what's observable from outside the app — process-compose \
+  (live), the dnsmasq resolver file, and managed /etc/hosts; Caddy/mkcert/Mailpit are app-owned and \
+  read `unknown`. Restarting a sidecar (caddy/process-compose/dnsmasq) is done from the PortBay app, \
+  which owns those processes.";
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PortbayMcp {
