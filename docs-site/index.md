@@ -1,7 +1,7 @@
 ---
 layout: home
-title: PortBay — Local Dev Environment for macOS
-description: Run Node, PHP, and static sites locally with real HTTPS .test hostnames, Caddy reverse proxy, managed DNS, bundled databases, and zero /etc/hosts editing.
+title: PortBay — Open-Source Local Dev Environment for macOS
+description: Open-source, container-free local dev environment for macOS — a Laravel Herd alternative. Real HTTPS .test domains, managed DNS, reverse proxy, and bundled databases, with no /etc/hosts editing.
 
 hero:
   name: PortBay

@@ -5,10 +5,11 @@
   &nbsp;PortBay
 </h1>
 
-**A lightweight, open-source manager for your local development environment.**
+**The open-source, container-free local development environment manager for macOS.**
 
 One Play button per project. One Stop that always works. Real HTTPS hostnames,
-no container stack, no hand-rolled proxy and DNS config.
+managed DNS and a reverse proxy you never touch — and you can drive the whole
+stack from your editor, your terminal, or your AI agent.
 
 [Documentation](https://docs.portbay.app) ·
 [Architecture](./docs/ARCHITECTURE.md) ·
@@ -50,18 +51,22 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 
 ## What it does
 
-- **One-click Play / Stop per project** — Next.js, Vite, plain Node, PHP, Laravel.
+- **Point it at a folder — it already knows the project.** PortBay reads the framework (Next.js, Vite, plain Node, PHP, Laravel) and fills in the start command, port, hostname, and HTTPS. Nothing to configure by hand before the first run.
+- **One-click Play / Stop per project** — start and stop a project without hunting for the right terminal tab.
 - **A universal Stop-All** kill switch that always works, even after a crash.
 - **Real HTTPS hostnames** like `https://myproject.test`, issued and trusted locally.
 - **Wildcard `.test` routing** via a bundled DNS resolver — no per-project hosts edits.
 - **Reverse-proxy routing** managed for you through [Caddy](https://caddyserver.com)'s admin API.
-- **Bundled databases** — PortBay-supervised MySQL, MariaDB, Postgres, and Redis.
+- **Bundled databases** — PortBay-supervised MySQL, MariaDB, Postgres, Redis, MongoDB, and Memcached.
 - **Public sharing** — expose any project over a [Cloudflare](https://www.cloudflare.com/products/tunnel/) tunnel with one click.
+- **A sandboxed runner** — run an untrusted or freshly-cloned project inside a macOS sandbox, inspect it, then promote it to a normal local run.
+- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as agent tools.
 - **A declarative registry** — projects live in JSON; the daemon reconciles reality to match.
 - **Live logs, status, and metrics** per project, plus a macOS menu-bar mode.
+- **Already using Herd, ServBay, or MAMP?** Import your existing sites in one step — no re-entering paths, ports, and PHP versions.
 
-Everything is driven by a Rust core with full CLI parity, so the GUI is a client,
-not the source of truth.
+Everything is driven by a Rust core with full CLI parity, so the GUI — and your
+AI agent — are clients, not the source of truth.
 
 ## A look around
 
