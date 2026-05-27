@@ -27,7 +27,10 @@ use crate::error::{AppError, AppResult};
 use crate::hosts::{HostsError, HostsManager};
 use crate::hosts_helper::HostsHelperClient;
 use crate::process_compose::{PcClient, Process, ProjectStatus, DEFAULT_PORT};
-use crate::registry::{store, Group, ManualRuntime, Project, ProjectId, ProjectType, Readiness, Registry, WebServer, WorkspaceTool};
+use crate::registry::{
+    store, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, Group, ManualRuntime, Project,
+    ProjectId, ProjectType, Readiness, Registry, WebServer, WorkspaceTool,
+};
 use crate::util::slugify;
 use rmcp::schemars;
 
@@ -978,6 +981,348 @@ impl McpContext {
     }
 
     // -------------------------------------------------------------------------
+    // Databases (mirror commands/databases.rs; the databases module is path-
+    // based with no app-state deps. Provisioning happens here; the running
+    // app's reconcile loop adds the `db-<id>` Process Compose process.)
+    // -------------------------------------------------------------------------
+
+    /// Every supported engine with its install state on this machine. A pure
+    /// environment probe — no daemon or app required.
+    pub fn list_database_engines(&self) -> Vec<DatabaseEngineSummary> {
+        ALL_DB_ENGINES
+            .iter()
+            .map(|&e| {
+                let det = crate::databases::detect(e);
+                DatabaseEngineSummary {
+                    id: e.id().into(),
+                    label: e.label().into(),
+                    installed: det.installed,
+                    version: det.version,
+                    default_port: e.default_port(),
+                    client_available: det.client.is_some(),
+                    install_hint: db_install_hint(e).into(),
+                }
+            })
+            .collect()
+    }
+
+    /// Registry instances merged with live Process Compose state. Degrades to
+    /// `stopped` when the daemon is unreachable.
+    pub async fn list_databases(&self) -> AppResult<ListDatabasesResult> {
+        let reg = self.load_registry()?;
+        let pc_state = self.fetch_pc_state().await;
+        let app_data = self.data_dir();
+        let instances = reg
+            .list_databases()
+            .iter()
+            .map(|inst| {
+                let proc = pc_state.as_ref().and_then(|m| m.get(&inst.process_id()));
+                db_instance_summary(inst, db_status(proc), app_data)
+            })
+            .collect();
+        Ok(ListDatabasesResult {
+            daemon_reachable: pc_state.is_some(),
+            instances,
+        })
+    }
+
+    /// Connection URL + framework env (DATABASE_URL, DB_*) for one instance.
+    pub fn database_connection(&self, id: &str) -> AppResult<DatabaseConnectionResult> {
+        let reg = self.load_registry()?;
+        let inst = reg
+            .get_database(&DatabaseInstanceId::new(id))
+            .ok_or_else(|| AppError::NotFound(format!("database:{id}")))?;
+        Ok(DatabaseConnectionResult {
+            id: inst.id.to_string(),
+            engine: inst.engine.id().into(),
+            connection_url: inst.connection_url(),
+            account: inst.default_account().into(),
+            env: inst.connection_env().into_iter().collect(),
+        })
+    }
+
+    /// Provision + register a new instance. The daemon binary must already be
+    /// installed (engine installation via brew is app-only). The `db-<id>`
+    /// process appears in Process Compose after the app's next reconcile.
+    pub fn create_database(&self, args: CreateDatabaseArgs) -> AppResult<DatabaseOpResult> {
+        let eng = DatabaseEngine::from_id(&args.engine)
+            .ok_or_else(|| AppError::BadInput(format!("unknown engine: {}", args.engine)))?;
+        let name = args.name.trim();
+        if name.is_empty() {
+            return Err(AppError::BadInput("a database name is required".into()));
+        }
+        let daemon = crate::databases::daemon_binary(eng).ok_or_else(|| {
+            AppError::BadInput(format!(
+                "{} isn't installed ({}). Install the engine binary from the PortBay app, then retry.",
+                eng.label(),
+                db_install_hint(eng)
+            ))
+        })?;
+
+        let mut reg = self.load_registry()?;
+        let id = db_unique_instance_id(&reg, name);
+        let app_data = self.data_dir().to_path_buf();
+
+        let port = match args.port {
+            Some(p) => {
+                if reg.database_port_in_use(p, None) {
+                    return Err(AppError::BadInput(format!(
+                        "port {p} is already used by another database instance"
+                    )));
+                }
+                p
+            }
+            None => db_allocate_port(&reg, eng),
+        };
+
+        let detection = crate::databases::detect(eng);
+        crate::databases::provision(eng, &daemon, &app_data, &id, port).map_err(AppError::Internal)?;
+
+        let instance = DatabaseInstance {
+            id: DatabaseInstanceId::new(id.clone()),
+            name: name.to_string(),
+            engine: eng,
+            version: detection.version,
+            port,
+            data_dir: crate::databases::data_dir(&app_data, &id),
+            config_path: crate::databases::config_path(eng, &app_data, &id),
+            socket_path: crate::databases::socket_path(eng, &app_data, &id),
+            auto_start: args.auto_start.unwrap_or(false),
+            linked_projects: vec![],
+        };
+        reg.add_database(instance.clone())?;
+        self.save_registry(&reg)?;
+
+        let summary = db_instance_summary(&instance, "stopped".into(), &app_data);
+        Ok(DatabaseOpResult {
+            ok: true,
+            detail: format!(
+                "Provisioned {} ({} on :{}). It joins Process Compose after the PortBay app \
+                 reconciles (≤30s); then start it with `portbay db start {}`.",
+                instance.id,
+                eng.label(),
+                port,
+                instance.id
+            ),
+            instance: Some(summary),
+            warnings: vec![],
+        })
+    }
+
+    /// Stop (best-effort) + deregister an instance; optionally delete its data.
+    pub async fn remove_database(&self, id: &str, delete_data: bool) -> AppResult<DatabaseOpResult> {
+        let did = DatabaseInstanceId::new(id);
+        let app_data = self.data_dir().to_path_buf();
+        // Best-effort stop so we don't orphan a running daemon.
+        let _ = self.pc().stop(&format!("db-{id}")).await;
+
+        let mut reg = self.load_registry()?;
+        let removed = reg.remove_database(&did)?;
+        self.save_registry(&reg)?;
+
+        let mut warnings: Vec<String> = Vec::new();
+        if delete_data {
+            let dir = crate::databases::instance_dir(&app_data, removed.id.as_str());
+            if dir.starts_with(crate::databases::instances_root(&app_data)) && dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&dir) {
+                    warnings.push(format!("could not delete data dir {}: {e}", dir.display()));
+                }
+            }
+        }
+        Ok(DatabaseOpResult {
+            ok: true,
+            detail: format!("Removed database {}.", removed.id),
+            instance: None,
+            warnings,
+        })
+    }
+
+    pub async fn start_database(&self, id: &str) -> AppResult<DatabaseOpResult> {
+        self.db_require(id)?;
+        self.ensure_daemon(false).await?;
+        self.pc().start(&format!("db-{id}")).await?;
+        Ok(self.db_ack(id, "Started").await)
+    }
+
+    pub async fn stop_database(&self, id: &str) -> AppResult<DatabaseOpResult> {
+        self.db_require(id)?;
+        self.ensure_daemon(false).await?;
+        self.pc().stop(&format!("db-{id}")).await?;
+        Ok(self.db_ack(id, "Stopped").await)
+    }
+
+    pub async fn restart_database(&self, id: &str) -> AppResult<DatabaseOpResult> {
+        self.db_require(id)?;
+        self.ensure_daemon(false).await?;
+        self.pc().restart(&format!("db-{id}")).await?;
+        Ok(self.db_ack(id, "Restarted").await)
+    }
+
+    pub fn link_database(&self, id: &str, project_id: &str) -> AppResult<DatabaseOpResult> {
+        let did = DatabaseInstanceId::new(id);
+        let pid = ProjectId::new(project_id);
+        let mut reg = self.load_registry()?;
+        if reg.get_project(&pid).is_none() {
+            return Err(AppError::NotFound(project_id.to_string()));
+        }
+        let inst = reg
+            .get_database_mut(&did)
+            .ok_or_else(|| AppError::NotFound(format!("database:{id}")))?;
+        if !inst.linked_projects.contains(&pid) {
+            inst.linked_projects.push(pid);
+        }
+        self.save_registry(&reg)?;
+        Ok(self.db_summary_ack(id, format!("Linked {id} to project {project_id}.")))
+    }
+
+    pub fn unlink_database(&self, id: &str, project_id: &str) -> AppResult<DatabaseOpResult> {
+        let did = DatabaseInstanceId::new(id);
+        let pid = ProjectId::new(project_id);
+        let mut reg = self.load_registry()?;
+        let inst = reg
+            .get_database_mut(&did)
+            .ok_or_else(|| AppError::NotFound(format!("database:{id}")))?;
+        inst.linked_projects.retain(|p| p != &pid);
+        self.save_registry(&reg)?;
+        Ok(self.db_summary_ack(id, format!("Unlinked project {project_id} from {id}.")))
+    }
+
+    pub fn set_database_auto_start(&self, id: &str, auto_start: bool) -> AppResult<DatabaseOpResult> {
+        let did = DatabaseInstanceId::new(id);
+        let mut reg = self.load_registry()?;
+        let inst = reg
+            .get_database_mut(&did)
+            .ok_or_else(|| AppError::NotFound(format!("database:{id}")))?;
+        inst.auto_start = auto_start;
+        self.save_registry(&reg)?;
+        Ok(self.db_summary_ack(id, format!("Set auto-start={auto_start} for {id}.")))
+    }
+
+    fn db_require(&self, id: &str) -> AppResult<()> {
+        let reg = self.load_registry()?;
+        if reg.get_database(&DatabaseInstanceId::new(id)).is_none() {
+            return Err(AppError::NotFound(format!("database:{id}")));
+        }
+        Ok(())
+    }
+
+    async fn db_ack(&self, id: &str, verb: &str) -> DatabaseOpResult {
+        DatabaseOpResult {
+            ok: true,
+            detail: format!("{verb} database {id}."),
+            instance: self.db_instance_now(id).await,
+            warnings: vec![],
+        }
+    }
+
+    /// Registry-only ack (no live status — the caller may have no daemon).
+    fn db_summary_ack(&self, id: &str, detail: String) -> DatabaseOpResult {
+        let instance = self.load_registry().ok().and_then(|reg| {
+            reg.get_database(&DatabaseInstanceId::new(id))
+                .map(|i| db_instance_summary(i, "unknown".into(), self.data_dir()))
+        });
+        DatabaseOpResult {
+            ok: true,
+            detail,
+            instance,
+            warnings: vec![],
+        }
+    }
+
+    async fn db_instance_now(&self, id: &str) -> Option<DatabaseInstanceSummary> {
+        let reg = self.load_registry().ok()?;
+        let inst = reg.get_database(&DatabaseInstanceId::new(id))?;
+        let pc_state = self.fetch_pc_state().await;
+        let proc = pc_state.as_ref().and_then(|m| m.get(&inst.process_id()));
+        Some(db_instance_summary(inst, db_status(proc), self.data_dir()))
+    }
+
+    // -------------------------------------------------------------------------
+    // DNS / domains (the resolver file is read cross-process; the live dnsmasq
+    // port + sidecar lifecycle are app-only and intentionally not exposed.)
+    // -------------------------------------------------------------------------
+
+    /// Domain suffix, resolver-file state (parsed from `/etc/resolver/<suffix>`,
+    /// since the live sidecar port isn't reachable cross-process), helper
+    /// availability, and the persisted dnsmasq tuning.
+    pub fn dns_status(&self) -> AppResult<DnsStatusResult> {
+        let reg = self.load_registry()?;
+        let suffix = reg.domain_suffix.clone();
+        let path = crate::dnsmasq::resolver::resolver_file_path(&suffix);
+        let contents = crate::dnsmasq::resolver::read_installed(&suffix);
+        let resolver_installed = contents
+            .as_deref()
+            .is_some_and(|c| c.contains("nameserver 127.0.0.1"));
+        let resolver_port = contents.as_deref().and_then(parse_resolver_port);
+        Ok(DnsStatusResult {
+            suffix,
+            resolver_installed,
+            resolver_path: path.to_string_lossy().into_owned(),
+            resolver_port,
+            resolver_contents: contents,
+            helper_available: HostsHelperClient::system().is_available(),
+            dnsmasq: DnsmasqSettingsView {
+                cache_size: reg.dnsmasq.cache_size,
+                local_ttl: reg.dnsmasq.local_ttl,
+                disable_negative_cache: reg.dnsmasq.disable_negative_cache,
+            },
+        })
+    }
+
+    /// The wildcard record plus one row per project hostname, each tagged with
+    /// how it's routed (`dnsmasq` when the resolver file is installed and the
+    /// hostname is under the suffix, else `hosts`).
+    pub fn list_dns_records(&self) -> AppResult<Vec<DnsRecordSummary>> {
+        let reg = self.load_registry()?;
+        let suffix = reg.domain_suffix.clone();
+        let dns_routing = crate::dnsmasq::resolver::read_installed(&suffix)
+            .as_deref()
+            .is_some_and(|c| c.contains("nameserver 127.0.0.1"));
+        let suffix_tail = format!(".{suffix}");
+        let mut records = Vec::with_capacity(reg.projects.len() + 1);
+        records.push(DnsRecordSummary {
+            hostname: format!("*.{suffix}"),
+            target: "127.0.0.1".into(),
+            kind: "wildcard".into(),
+            project_id: None,
+            project_name: None,
+            routed_via: "dnsmasq".into(),
+        });
+        for p in reg.list_projects() {
+            let in_suffix = p.hostname.ends_with(&suffix_tail);
+            records.push(DnsRecordSummary {
+                hostname: p.hostname.clone(),
+                target: "127.0.0.1".into(),
+                kind: "project".into(),
+                project_id: Some(p.id.to_string()),
+                project_name: Some(p.name.clone()),
+                routed_via: if dns_routing && in_suffix {
+                    "dnsmasq".into()
+                } else {
+                    "hosts".into()
+                },
+            });
+        }
+        Ok(records)
+    }
+
+    /// Change the domain suffix: rewrite every project hostname and drop the
+    /// affected HTTPS cert directories. The running app reconciles `/etc/hosts`
+    /// and reissues certs. Rejects reserved TLDs (.com, etc.).
+    pub fn set_domain_suffix(&self, suffix: &str) -> AppResult<SetDomainSuffixResult> {
+        let mut reg = self.load_registry()?;
+        let migration = crate::domain::migrate_registry_suffix(&mut reg, suffix, certs_root())
+            .map_err(|e| AppError::BadInput(e.to_string()))?;
+        self.save_registry(&reg)?;
+        Ok(SetDomainSuffixResult {
+            old_suffix: migration.old_suffix,
+            new_suffix: migration.new_suffix,
+            changed_projects: migration.changed_projects,
+            cert_dirs_removed: migration.cert_dirs_removed,
+        })
+    }
+
+    // -------------------------------------------------------------------------
     // Group CRUD + lifecycle (mirrors commands/groups.rs, no app-state deps)
     // -------------------------------------------------------------------------
 
@@ -1276,6 +1621,258 @@ fn language_summary(lv: crate::runtimes::LanguageView) -> RuntimeLanguageSummary
         versions,
         install_hint: lv.install_hint,
     }
+}
+
+// =============================================================================
+// Database result types + helpers (mirror commands/databases.rs DTOs)
+// =============================================================================
+
+/// One supported engine and its install state on this machine.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct DatabaseEngineSummary {
+    /// Stable engine id (`mysql`, `postgres`, `mariadb`, `redis`, `mongo`, `memcached`).
+    pub id: String,
+    pub label: String,
+    /// Whether the daemon binary resolves on this machine.
+    pub installed: bool,
+    /// Detected daemon version (empty when not installed).
+    pub version: String,
+    pub default_port: u16,
+    /// Whether the CLI client (psql/mysql/…) is available.
+    pub client_available: bool,
+    /// Homebrew install command — engine installation is done from the app.
+    pub install_hint: String,
+}
+
+/// One owned database instance plus its live status (when the daemon is up).
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct DatabaseInstanceSummary {
+    /// Stable slug id — pass to start/stop/remove/link tools.
+    pub id: String,
+    pub name: String,
+    pub engine: String,
+    pub engine_label: String,
+    pub version: String,
+    pub port: u16,
+    /// `running`, `starting`, `errored`, `stopped`, or `unknown`.
+    pub status: String,
+    pub auto_start: bool,
+    pub data_dir: String,
+    pub config_path: Option<String>,
+    pub socket_path: Option<String>,
+    /// Connection URL frameworks can use (e.g. `mysql://root@127.0.0.1:3306/`).
+    pub connection_url: String,
+    /// Default account the instance is provisioned with (`root`, `postgres`, …).
+    pub account: String,
+    /// Project ids this instance is linked to (its connection env is injected).
+    pub linked_projects: Vec<String>,
+    pub binary_available: bool,
+    pub provisioned: bool,
+}
+
+/// Result of `portbay_list_databases`.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct ListDatabasesResult {
+    /// Whether the daemon answered. When false, `status` reflects the registry only.
+    pub daemon_reachable: bool,
+    pub instances: Vec<DatabaseInstanceSummary>,
+}
+
+/// Connection details for one instance — URL + framework env vars.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct DatabaseConnectionResult {
+    pub id: String,
+    pub engine: String,
+    pub connection_url: String,
+    pub account: String,
+    /// Env vars (DATABASE_URL, DB_CONNECTION, DB_HOST, DB_PORT, …) PortBay
+    /// injects into linked projects.
+    pub env: BTreeMap<String, String>,
+}
+
+/// A database mutation acknowledgement (create / remove / lifecycle / link).
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct DatabaseOpResult {
+    pub ok: bool,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<DatabaseInstanceSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Engines PortBay can manage. Mirrors `commands::databases::ALL_ENGINES`.
+const ALL_DB_ENGINES: &[DatabaseEngine] = &[
+    DatabaseEngine::Mysql,
+    DatabaseEngine::Postgres,
+    DatabaseEngine::Mariadb,
+    DatabaseEngine::Redis,
+    DatabaseEngine::Mongo,
+    DatabaseEngine::Memcached,
+];
+
+fn db_install_hint(e: DatabaseEngine) -> &'static str {
+    match e {
+        DatabaseEngine::Mysql => "brew install mysql",
+        DatabaseEngine::Postgres => "brew install postgresql@16",
+        DatabaseEngine::Mariadb => "brew install mariadb",
+        DatabaseEngine::Redis => "brew install redis",
+        DatabaseEngine::Mongo => "brew install mongodb-community",
+        DatabaseEngine::Memcached => "brew install memcached",
+    }
+}
+
+/// Slugify the name, then ensure uniqueness by appending `-2`, `-3`, …
+fn db_unique_instance_id(reg: &Registry, name: &str) -> String {
+    let base = {
+        let s = slugify(name);
+        if s.is_empty() {
+            "db".to_string()
+        } else {
+            s
+        }
+    };
+    let mut candidate = base.clone();
+    let mut n = 2;
+    while reg
+        .get_database(&DatabaseInstanceId::new(candidate.clone()))
+        .is_some()
+    {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    candidate
+}
+
+/// Walk up from the engine's default port until one is free in the registry
+/// and on the host.
+fn db_allocate_port(reg: &Registry, eng: DatabaseEngine) -> u16 {
+    let mut port = eng.default_port();
+    for _ in 0..500 {
+        if !reg.database_port_in_use(port, None) && crate::port_holder::find(port).is_none() {
+            return port;
+        }
+        port = port.saturating_add(1);
+        if port == u16::MAX {
+            break;
+        }
+    }
+    eng.default_port()
+}
+
+/// Map a Process Compose process snapshot to an instance status string,
+/// mirroring `commands::databases::list_database_instances`.
+fn db_status(proc: Option<&Process>) -> String {
+    match proc {
+        None => "stopped".into(),
+        Some(p) => {
+            let s = p.status.to_lowercase();
+            if p.is_running && (s.contains("running") || s.contains("ready")) {
+                "running".into()
+            } else if s.contains("launching") || s.contains("starting") {
+                "starting".into()
+            } else if s.contains("error") || s.contains("failed") {
+                "errored".into()
+            } else {
+                "stopped".into()
+            }
+        }
+    }
+}
+
+fn db_instance_summary(
+    inst: &DatabaseInstance,
+    status: String,
+    app_data: &std::path::Path,
+) -> DatabaseInstanceSummary {
+    let data = crate::databases::data_dir(app_data, inst.id.as_str());
+    DatabaseInstanceSummary {
+        id: inst.id.to_string(),
+        name: inst.name.clone(),
+        engine: inst.engine.id().into(),
+        engine_label: inst.engine.label().into(),
+        version: inst.version.clone(),
+        port: inst.port,
+        status,
+        auto_start: inst.auto_start,
+        data_dir: data.to_string_lossy().into_owned(),
+        config_path: crate::databases::config_path(inst.engine, app_data, inst.id.as_str())
+            .map(|p| p.to_string_lossy().into_owned()),
+        socket_path: inst
+            .socket_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        connection_url: inst.connection_url(),
+        account: inst.default_account().into(),
+        linked_projects: inst.linked_projects.iter().map(|p| p.to_string()).collect(),
+        binary_available: crate::databases::daemon_binary(inst.engine).is_some(),
+        provisioned: crate::databases::is_initialized(inst.engine, &data),
+    }
+}
+
+// =============================================================================
+// DNS / domain result types
+// =============================================================================
+
+/// User-tunable dnsmasq settings (mirror of the registry's `DnsmasqSettings`).
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct DnsmasqSettingsView {
+    pub cache_size: u16,
+    pub local_ttl: u32,
+    pub disable_negative_cache: bool,
+}
+
+/// Result of `portbay_dns_status`.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct DnsStatusResult {
+    /// The active domain suffix (e.g. `portbay.test`).
+    pub suffix: String,
+    /// Whether `/etc/resolver/<suffix>` points wildcard `*.suffix` at PortBay's
+    /// dnsmasq. When false, projects resolve via `/etc/hosts` instead.
+    pub resolver_installed: bool,
+    pub resolver_path: String,
+    /// Port the resolver file targets (parsed from the file; the live sidecar
+    /// port isn't reachable from outside the app).
+    pub resolver_port: Option<u16>,
+    /// Raw resolver-file contents, for diagnostics (null when not installed).
+    pub resolver_contents: Option<String>,
+    /// Whether PortBay's privileged hosts/resolver helper is installed.
+    pub helper_available: bool,
+    pub dnsmasq: DnsmasqSettingsView,
+}
+
+/// One resolvable name PortBay knows about (wildcard or a project hostname).
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct DnsRecordSummary {
+    pub hostname: String,
+    /// Always loopback for PortBay-managed names.
+    pub target: String,
+    /// `wildcard` or `project`.
+    pub kind: String,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    /// `dnsmasq` when the resolver file routes this name, else `hosts`.
+    pub routed_via: String,
+}
+
+/// Result of `portbay_set_domain_suffix`.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct SetDomainSuffixResult {
+    pub old_suffix: String,
+    pub new_suffix: String,
+    /// Number of project hostnames rewritten to the new suffix.
+    pub changed_projects: usize,
+    /// Number of HTTPS cert directories removed (reissued by the app on reconcile).
+    pub cert_dirs_removed: usize,
+}
+
+/// Parse the `port <n>` line out of an `/etc/resolver/<suffix>` file body.
+fn parse_resolver_port(contents: &str) -> Option<u16> {
+    contents.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("port ")
+            .and_then(|n| n.trim().parse().ok())
+    })
 }
 
 // =============================================================================
@@ -2089,5 +2686,237 @@ mod tests {
                 .all(|v| v.binary != fake_bin.to_string_lossy()),
             "manual entry should be gone after remove"
         );
+    }
+
+    // =========================================================================
+    // Database tests — registry-only ops run fully offline (pc_port 1 = down).
+    // =========================================================================
+
+    /// Seed the registry with one Redis instance for the mutation tests.
+    fn seed_db(ctx: &McpContext, id: &str) {
+        let mut reg = ctx.load_registry().unwrap();
+        reg.add_database(DatabaseInstance {
+            id: DatabaseInstanceId::new(id),
+            name: id.to_string(),
+            engine: DatabaseEngine::Redis,
+            version: "7".into(),
+            port: 6390,
+            data_dir: crate::databases::data_dir(ctx.data_dir(), id),
+            config_path: None,
+            socket_path: None,
+            auto_start: false,
+            linked_projects: vec![],
+        })
+        .unwrap();
+        ctx.save_registry(&reg).unwrap();
+    }
+
+    #[test]
+    fn list_database_engines_covers_all_six() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let engines = ctx.list_database_engines();
+        assert_eq!(engines.len(), 6);
+        let ids: Vec<&str> = engines.iter().map(|e| e.id.as_str()).collect();
+        for want in ["mysql", "postgres", "mariadb", "redis", "mongo", "memcached"] {
+            assert!(ids.contains(&want), "missing engine {want}");
+        }
+        for e in &engines {
+            assert!(e.install_hint.starts_with("brew install "));
+            assert!(e.default_port > 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn list_databases_empty_without_instances() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let res = ctx.list_databases().await.unwrap();
+        assert!(!res.daemon_reachable, "no daemon on port 1");
+        assert!(res.instances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn database_mutations_roundtrip_offline() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        seed_db(&ctx, "cache");
+
+        let list = ctx.list_databases().await.unwrap();
+        assert_eq!(list.instances.len(), 1);
+        assert_eq!(list.instances[0].id, "cache");
+        assert_eq!(list.instances[0].status, "stopped");
+        assert_eq!(list.instances[0].engine, "redis");
+
+        // Connection details reflect the instance.
+        let conn = ctx.database_connection("cache").unwrap();
+        assert_eq!(conn.engine, "redis");
+        assert!(conn.connection_url.contains("6390"), "url: {}", conn.connection_url);
+
+        // Auto-start toggle persists.
+        ctx.set_database_auto_start("cache", true).unwrap();
+        assert!(ctx.list_databases().await.unwrap().instances[0].auto_start);
+
+        // Unknown id is a clean NotFound, not a panic.
+        let err = ctx.set_database_auto_start("ghost", true).unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn link_database_requires_existing_project() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        seed_db(&ctx, "cache");
+        let err = ctx.link_database("cache", "ghost").unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn link_then_unlink_a_real_project() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        seed_db(&ctx, "cache");
+
+        let pid = ctx
+            .add_project(AddProjectArgs {
+                path: proj.path().to_string_lossy().to_string(),
+                name: Some("API".into()),
+                hostname: Some("api.test".into()),
+                kind: Some(McpProjectKind::Node),
+                port: Some(4100),
+                start_command: Some("node index.js".into()),
+                https: Some(false),
+                auto_start: Some(false),
+                php_version: None,
+                document_root: None,
+            })
+            .await
+            .unwrap()
+            .project
+            .unwrap()
+            .id;
+
+        ctx.link_database("cache", &pid).unwrap();
+        assert_eq!(
+            ctx.list_databases().await.unwrap().instances[0].linked_projects,
+            vec![pid.clone()]
+        );
+
+        ctx.unlink_database("cache", &pid).unwrap();
+        assert!(ctx.list_databases().await.unwrap().instances[0]
+            .linked_projects
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_database_deletes_data_dir_when_asked() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        seed_db(&ctx, "cache");
+
+        // Create the instance dir under instances_root so the safety guard passes.
+        let inst_dir = crate::databases::instance_dir(ctx.data_dir(), "cache");
+        std::fs::create_dir_all(inst_dir.join("data")).unwrap();
+        assert!(inst_dir.exists());
+
+        ctx.remove_database("cache", true).await.unwrap();
+        assert!(!inst_dir.exists(), "data dir should be gone");
+        assert!(ctx.list_databases().await.unwrap().instances.is_empty());
+
+        // Removing again is a clean error, not a panic.
+        let err = ctx.remove_database("cache", false).await.unwrap_err();
+        assert!(matches!(err, AppError::Registry(_) | AppError::NotFound(_)));
+    }
+
+    // =========================================================================
+    // DNS / domain tests — registry + resolver-file reads, fully offline. A
+    // deliberately unique suffix guarantees no system /etc/resolver file matches.
+    // =========================================================================
+
+    #[test]
+    fn dns_status_reads_suffix_and_absent_resolver() {
+        let home = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let mut reg = ctx.load_registry().unwrap();
+        reg.domain_suffix = "pbtest-unique-7c3.test".into();
+        ctx.save_registry(&reg).unwrap();
+
+        let st = ctx.dns_status().unwrap();
+        assert_eq!(st.suffix, "pbtest-unique-7c3.test");
+        assert!(!st.resolver_installed, "no resolver file for a unique suffix");
+        assert!(st.resolver_port.is_none());
+        assert!(st.resolver_path.contains("pbtest-unique-7c3.test"));
+    }
+
+    #[tokio::test]
+    async fn list_dns_records_wildcard_first_then_routed_via_hosts() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let mut reg = ctx.load_registry().unwrap();
+        reg.domain_suffix = "pbtest-uniq-9a.test".into();
+        ctx.save_registry(&reg).unwrap();
+
+        ctx.add_project(AddProjectArgs {
+            path: proj.path().to_string_lossy().to_string(),
+            name: Some("Web".into()),
+            hostname: Some("web.pbtest-uniq-9a.test".into()),
+            kind: Some(McpProjectKind::Static),
+            port: None,
+            start_command: None,
+            https: Some(false),
+            auto_start: Some(false),
+            php_version: None,
+            document_root: None,
+        })
+        .await
+        .unwrap();
+
+        let records = ctx.list_dns_records().unwrap();
+        assert_eq!(records[0].kind, "wildcard");
+        assert_eq!(records[0].hostname, "*.pbtest-uniq-9a.test");
+        let web = records
+            .iter()
+            .find(|r| r.hostname == "web.pbtest-uniq-9a.test")
+            .expect("project record present");
+        assert_eq!(web.kind, "project");
+        // No resolver file for this unique suffix → routed via hosts.
+        assert_eq!(web.routed_via, "hosts");
+    }
+
+    #[tokio::test]
+    async fn set_domain_suffix_rewrites_project_hostnames() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+
+        // Non-HTTPS project so set_domain_suffix's cert-removal branch is
+        // skipped (no real cert dirs touched).
+        ctx.add_project(AddProjectArgs {
+            path: proj.path().to_string_lossy().to_string(),
+            name: Some("Web".into()),
+            hostname: Some("web.portbay.test".into()),
+            kind: Some(McpProjectKind::Static),
+            port: None,
+            start_command: None,
+            https: Some(false),
+            auto_start: Some(false),
+            php_version: None,
+            document_root: None,
+        })
+        .await
+        .unwrap();
+
+        let res = ctx.set_domain_suffix("dev.test").unwrap();
+        assert_eq!(res.old_suffix, "portbay.test");
+        assert_eq!(res.new_suffix, "dev.test");
+        assert_eq!(res.changed_projects, 1);
+        assert_eq!(res.cert_dirs_removed, 0);
+
+        // The change persisted and the hostname was rewritten.
+        let reg = ctx.load_registry().unwrap();
+        assert_eq!(reg.domain_suffix, "dev.test");
+        assert_eq!(reg.list_projects()[0].hostname, "web.dev.test");
     }
 }

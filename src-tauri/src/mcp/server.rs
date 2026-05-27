@@ -43,6 +43,10 @@ pub enum ToolGroup {
     Tunnels,
     /// Runtime management: list detected versions, set defaults, add/remove manual paths.
     Runtimes,
+    /// Database engines + owned instances: list, create, lifecycle, link, auto-start.
+    Databases,
+    /// DNS / domains: resolver status, DNS records, domain-suffix change.
+    Dns,
 }
 
 impl ToolGroup {
@@ -55,6 +59,8 @@ impl ToolGroup {
             ToolGroup::Groups,
             ToolGroup::Tunnels,
             ToolGroup::Runtimes,
+            ToolGroup::Databases,
+            ToolGroup::Dns,
         ]
     }
 
@@ -69,9 +75,11 @@ impl ToolGroup {
             "groups" => Ok(vec![ToolGroup::Groups]),
             "tunnels" => Ok(vec![ToolGroup::Tunnels]),
             "runtimes" => Ok(vec![ToolGroup::Runtimes]),
+            "databases" => Ok(vec![ToolGroup::Databases]),
+            "dns" => Ok(vec![ToolGroup::Dns]),
             other => Err(format!(
-                "unknown toolset `{other}` \
-                 (valid: projects, lifecycle, diagnostics, scaffold, groups, tunnels, runtimes, all)"
+                "unknown toolset `{other}` (valid: projects, lifecycle, diagnostics, scaffold, \
+                 groups, tunnels, runtimes, databases, dns, all)"
             )),
         }
     }
@@ -150,6 +158,20 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_set_default_runtime", ToolGroup::Runtimes, true),
     ("portbay_add_runtime_path", ToolGroup::Runtimes, true),
     ("portbay_remove_runtime_path", ToolGroup::Runtimes, true),
+    ("portbay_list_database_engines", ToolGroup::Databases, false),
+    ("portbay_list_databases", ToolGroup::Databases, false),
+    ("portbay_database_connection", ToolGroup::Databases, false),
+    ("portbay_create_database", ToolGroup::Databases, true),
+    ("portbay_remove_database", ToolGroup::Databases, true),
+    ("portbay_start_database", ToolGroup::Databases, true),
+    ("portbay_stop_database", ToolGroup::Databases, true),
+    ("portbay_restart_database", ToolGroup::Databases, true),
+    ("portbay_link_database", ToolGroup::Databases, true),
+    ("portbay_unlink_database", ToolGroup::Databases, true),
+    ("portbay_set_database_auto_start", ToolGroup::Databases, true),
+    ("portbay_dns_status", ToolGroup::Dns, false),
+    ("portbay_list_dns_records", ToolGroup::Dns, false),
+    ("portbay_set_domain_suffix", ToolGroup::Dns, true),
 ];
 
 /// The PortBay MCP server. Holds the operations context and the (possibly
@@ -834,6 +856,264 @@ impl PortbayMcp {
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.remove_runtime_path(args.lang, args.version))
     }
+
+    // ---- Databases ----------------------------------------------------------
+
+    #[tool(
+        name = "portbay_list_database_engines",
+        description = "List every database engine PortBay can manage (MySQL, PostgreSQL, MariaDB, \
+                       Redis, MongoDB, Memcached), each with whether it's installed on this machine, \
+                       its detected version, default port, and CLI-client availability. Check here \
+                       before portbay_create_database — installing an engine binary (Homebrew) is \
+                       done from the PortBay app; this tool reports the install state and the brew hint.",
+        annotations(
+            title = "List database engines",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_database_engines(&self) -> Result<CallToolResult, McpError> {
+        finish(Ok(self.ctx.list_database_engines()))
+    }
+
+    #[tool(
+        name = "portbay_list_databases",
+        description = "List the database instances PortBay manages, each with engine, port, \
+                       connection URL, linked projects, and — when the daemon is running — live \
+                       status (running/starting/stopped/errored). `daemon_reachable: false` means \
+                       status reflects the registry only.",
+        annotations(
+            title = "List databases",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_databases(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.list_databases().await)
+    }
+
+    #[tool(
+        name = "portbay_database_connection",
+        description = "Get connection details for one database instance: the connection URL plus the \
+                       framework env vars (DATABASE_URL, DB_CONNECTION, DB_HOST, DB_PORT, …) PortBay \
+                       injects into linked projects. Use this to wire an app up to a database.",
+        annotations(
+            title = "Database connection details",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn database_connection(
+        &self,
+        Parameters(args): Parameters<DatabaseIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.database_connection(&args.id))
+    }
+
+    #[tool(
+        name = "portbay_create_database",
+        description = "Provision and register a new database instance: PortBay initializes an \
+                       isolated data dir, writes a config, and tracks it. The engine binary must \
+                       already be installed (see portbay_list_database_engines). The instance joins \
+                       Process Compose after the app's next reconcile (≤30s); start it with \
+                       portbay_start_database. Does NOT start it immediately.",
+        annotations(
+            title = "Create database",
+            read_only_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_database(
+        &self,
+        Parameters(args): Parameters<CreateDatabaseArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.create_database(args))
+    }
+
+    #[tool(
+        name = "portbay_remove_database",
+        description = "Stop (best-effort) and unregister a database instance. By default the on-disk \
+                       data is kept; pass `delete_data: true` to also delete the data directory \
+                       (irreversible). Confirm with the user before deleting data.",
+        annotations(
+            title = "Remove database",
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn remove_database(
+        &self,
+        Parameters(args): Parameters<RemoveDatabaseArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(
+            self.ctx
+                .remove_database(&args.id, args.delete_data.unwrap_or(false))
+                .await,
+        )
+    }
+
+    #[tool(
+        name = "portbay_start_database",
+        description = "Start a database instance's daemon via Process Compose. Requires the PortBay \
+                       daemon to be running, and the instance to already exist in its config (true \
+                       once the app has reconciled a newly-created instance).",
+        annotations(
+            title = "Start database",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn start_database(
+        &self,
+        Parameters(args): Parameters<DatabaseIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.start_database(&args.id).await)
+    }
+
+    #[tool(
+        name = "portbay_stop_database",
+        description = "Stop a running database instance. Requires the PortBay daemon to be running.",
+        annotations(
+            title = "Stop database",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn stop_database(
+        &self,
+        Parameters(args): Parameters<DatabaseIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.stop_database(&args.id).await)
+    }
+
+    #[tool(
+        name = "portbay_restart_database",
+        description = "Restart a database instance (stop then start). Requires the daemon to be running.",
+        annotations(
+            title = "Restart database",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn restart_database(
+        &self,
+        Parameters(args): Parameters<DatabaseIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.restart_database(&args.id).await)
+    }
+
+    #[tool(
+        name = "portbay_link_database",
+        description = "Link a database instance to a project. PortBay injects the instance's \
+                       connection env vars (DATABASE_URL, DB_*) into the linked project's process on \
+                       the next reconcile, so the app can reach the database with zero config.",
+        annotations(
+            title = "Link database to project",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn link_database(
+        &self,
+        Parameters(args): Parameters<LinkDatabaseArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.link_database(&args.id, &args.project_id))
+    }
+
+    #[tool(
+        name = "portbay_unlink_database",
+        description = "Unlink a database instance from a project, stopping its connection env vars \
+                       from being injected into that project.",
+        annotations(
+            title = "Unlink database from project",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn unlink_database(
+        &self,
+        Parameters(args): Parameters<LinkDatabaseArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.unlink_database(&args.id, &args.project_id))
+    }
+
+    #[tool(
+        name = "portbay_set_database_auto_start",
+        description = "Set whether a database instance starts automatically when the PortBay daemon \
+                       boots.",
+        annotations(
+            title = "Set database auto-start",
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_database_auto_start(
+        &self,
+        Parameters(args): Parameters<SetDatabaseAutoStartArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(
+            self.ctx
+                .set_database_auto_start(&args.id, args.auto_start),
+        )
+    }
+
+    // ---- DNS / domains ------------------------------------------------------
+
+    #[tool(
+        name = "portbay_dns_status",
+        description = "Report local DNS state: the active domain suffix, whether the \
+                       /etc/resolver/<suffix> file routes wildcard `*.suffix` to PortBay's dnsmasq \
+                       (and on which port), whether the privileged helper is installed, and the \
+                       persisted dnsmasq tuning. Read-only — starting/restarting dnsmasq and \
+                       first-run resolver install are done from the PortBay app.",
+        annotations(title = "DNS status", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn dns_status(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.dns_status())
+    }
+
+    #[tool(
+        name = "portbay_list_dns_records",
+        description = "List the names PortBay resolves: the wildcard `*.<suffix>` plus one row per \
+                       project hostname, each tagged with how it's currently routed (`dnsmasq` via \
+                       the resolver file, or `hosts` via /etc/hosts).",
+        annotations(
+            title = "List DNS records",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_dns_records(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.list_dns_records())
+    }
+
+    #[tool(
+        name = "portbay_set_domain_suffix",
+        description = "Change the local domain suffix (e.g. `test` → `localhost`). Rewrites EVERY \
+                       project hostname to the new suffix and drops their HTTPS cert directories \
+                       (the app reissues certs and updates /etc/hosts on the next reconcile). \
+                       Reserved public TLDs (.com, etc.) are rejected. High blast radius — confirm \
+                       with the user first.",
+        annotations(
+            title = "Set domain suffix",
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_domain_suffix(
+        &self,
+        Parameters(args): Parameters<SetDomainSuffixArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.set_domain_suffix(&args.suffix))
+    }
 }
 
 const INSTRUCTIONS: &str = "\
@@ -863,7 +1143,16 @@ Key facts:
 - Runtimes: `portbay_list_runtimes` shows every detected language version and the configured \
   default. Use `portbay_set_default_runtime` to change which version new projects inherit. Use \
   `portbay_add_runtime_path` / `portbay_remove_runtime_path` to manage manually-added binaries. \
-  Installing a new language version and editing PHP FPM/ini config are done from the PortBay app.";
+  Installing a new language version and editing PHP FPM/ini config are done from the PortBay app.
+- Databases: PortBay owns isolated database instances. portbay_list_database_engines shows which \
+  engines are installed; portbay_create_database provisions one (the engine binary must already be \
+  installed — brew installs are done from the app). A new instance joins Process Compose after the \
+  app's next reconcile, then portbay_start_database runs it. portbay_link_database wires a project to \
+  a database (its connection env is injected); portbay_database_connection returns the URL + env vars.
+- DNS: portbay_dns_status and portbay_list_dns_records show how names resolve (resolver file vs \
+  /etc/hosts). portbay_set_domain_suffix changes the suffix for every project (destructive — it drops \
+  certs, which the app reissues). Starting/restarting dnsmasq and first-run resolver install are done \
+  from the PortBay app.";
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PortbayMcp {

@@ -48,7 +48,10 @@ use portbay_lib::process_compose::{
     PcClient, Process, ProjectStatus, DEFAULT_PORT as PC_DEFAULT_PORT,
 };
 use portbay_lib::commands::projects::detect_kind;
-use portbay_lib::registry::{self, store, Group, Project, ProjectId, ProjectType, Readiness, Registry, WorkspaceTool};
+use portbay_lib::registry::{
+    self, store, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, Group, Project, ProjectId,
+    ProjectType, Readiness, Registry, WorkspaceTool,
+};
 use portbay_lib::registry::workspace as workspace_detect;
 
 /// Domain suffix used when no registry exists yet. Kept in sync with the
@@ -170,6 +173,18 @@ enum Cmd {
     /// from the PortBay app.
     #[command(subcommand)]
     Runtime(RuntimeCmd),
+
+    /// Manage database engines + owned instances (list, create, lifecycle,
+    /// link to projects). Installing an engine binary (Homebrew) and opening a
+    /// DB shell are done from the PortBay app.
+    #[command(subcommand)]
+    Db(DbCmd),
+
+    /// Inspect and manage local DNS: resolver status, DNS records, and the
+    /// domain suffix. Starting/restarting dnsmasq and first-run resolver
+    /// install are done from the PortBay app.
+    #[command(subcommand)]
+    Dns(DnsCmd),
 
     /// Inspect a folder and print detection results: detected framework,
     /// suggested id, hostname, port, and start command. With `--apps`, list
@@ -462,6 +477,119 @@ enum RuntimeCmd {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum DbCmd {
+    /// List supported database engines and their install state.
+    Engines,
+
+    /// List managed database instances (with live status if the daemon is up).
+    List,
+
+    /// Show connection details (URL + framework env) for an instance.
+    Info {
+        /// Database instance id (slug).
+        id: String,
+    },
+
+    /// Provision + register a new instance. The engine binary must already be
+    /// installed (see `portbay db engines`).
+    Create(DbCreateArgs),
+
+    /// Stop + unregister an instance (optionally delete its data dir).
+    Remove(DbRemoveArgs),
+
+    /// Start an instance (requires running daemon; instance must already be in
+    /// the daemon's config — true once the app has reconciled a new instance).
+    Start {
+        /// Database instance id (slug).
+        id: String,
+    },
+
+    /// Stop an instance (requires running daemon).
+    Stop {
+        /// Database instance id (slug).
+        id: String,
+    },
+
+    /// Restart an instance (requires running daemon).
+    Restart {
+        /// Database instance id (slug).
+        id: String,
+    },
+
+    /// Link an instance to a project (its connection env is injected on the
+    /// next reconcile).
+    Link {
+        /// Database instance id (slug).
+        id: String,
+        /// Project id (slug) to link.
+        project_id: String,
+    },
+
+    /// Unlink an instance from a project.
+    Unlink {
+        /// Database instance id (slug).
+        id: String,
+        /// Project id (slug) to unlink.
+        project_id: String,
+    },
+
+    /// Set whether an instance auto-starts when the daemon boots.
+    AutoStart {
+        /// Database instance id (slug).
+        id: String,
+        /// `true` to auto-start, `false` to disable.
+        #[arg(action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+struct DbCreateArgs {
+    /// Engine id: mysql, postgres, mariadb, redis, mongo, memcached.
+    engine: String,
+
+    /// Human-readable name (slugified into the instance id).
+    name: String,
+
+    /// Port to bind. Omit to auto-allocate from the engine default upward.
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// Start the instance when the daemon boots.
+    #[arg(long)]
+    auto_start: bool,
+}
+
+#[derive(Args, Debug)]
+struct DbRemoveArgs {
+    /// Database instance id (slug).
+    id: String,
+
+    /// Also delete the on-disk data directory (irreversible).
+    #[arg(long)]
+    delete_data: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum DnsCmd {
+    /// Show the domain suffix, resolver-file state + port, helper availability,
+    /// and dnsmasq tuning.
+    Status,
+
+    /// List resolvable names (wildcard + per-project), tagged by how each is
+    /// routed (dnsmasq vs hosts).
+    Records,
+
+    /// Change the domain suffix. Rewrites every project hostname and drops
+    /// their HTTPS certs (the app reissues them on the next reconcile).
+    Suffix {
+        /// New suffix (e.g. test, localhost, portbay.test). Reserved public
+        /// TLDs like .com are rejected.
+        suffix: String,
+    },
+}
+
 // =============================================================================
 // Entry
 // =============================================================================
@@ -524,6 +652,8 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Group(sub) => cmd_group(&ctx, sub).await,
         Cmd::Tunnel(sub) => cmd_tunnel(&ctx, sub).await,
         Cmd::Runtime(sub) => cmd_runtime(&ctx, sub).await,
+        Cmd::Db(sub) => cmd_db(&ctx, sub).await,
+        Cmd::Dns(sub) => cmd_dns(&ctx, sub).await,
         Cmd::Detect { path, apps } => cmd_detect(&ctx, &path, apps).await,
     }
 }
@@ -1879,6 +2009,566 @@ async fn cmd_runtime(ctx: &CliContext, sub: RuntimeCmd) -> Result<ExitCode, CliE
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `portbay db <...>` — database engine catalogue + owned-instance lifecycle.
+/// Mirrors `commands/databases.rs` over the registry + Process Compose; the
+/// running app's reconcile loop adds the `db-<id>` process after a create.
+/// Installing an engine binary (brew) and opening a DB shell are app-only.
+async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::databases as engine;
+
+    let app_data = ctx
+        .registry_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| ctx.registry_path.clone());
+
+    match sub {
+        DbCmd::Engines => {
+            let rows: Vec<serde_json::Value> = DB_ENGINES
+                .iter()
+                .map(|&e| {
+                    let det = engine::detect(e);
+                    serde_json::json!({
+                        "id": e.id(),
+                        "label": e.label(),
+                        "installed": det.installed,
+                        "version": det.version,
+                        "default_port": e.default_port(),
+                        "client_available": det.client.is_some(),
+                        "install_hint": db_install_hint(e),
+                    })
+                })
+                .collect();
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            for r in &rows {
+                let badge = if r["installed"].as_bool().unwrap_or(false) {
+                    style("●").green()
+                } else {
+                    style("○").dim()
+                };
+                ctx.term
+                    .write_line(&format!(
+                        "  {badge} {id:<10} {ver:<10} {hint}",
+                        id = style(r["id"].as_str().unwrap_or("")).bold(),
+                        ver = style(r["version"].as_str().unwrap_or("")).dim(),
+                        hint = style(r["install_hint"].as_str().unwrap_or("")).dim(),
+                    ))
+                    .ok();
+            }
+        }
+
+        DbCmd::List => {
+            let reg = ctx.load_registry()?;
+            let pc = fetch_pc_state(ctx).await;
+            let instances = reg.list_databases();
+            if ctx.json {
+                let out: Vec<_> = instances
+                    .iter()
+                    .map(|inst| {
+                        let proc = pc.as_ref().and_then(|m| m.get(&format!("db-{}", inst.id)));
+                        serde_json::json!({
+                            "id": inst.id.to_string(),
+                            "name": inst.name,
+                            "engine": inst.engine.id(),
+                            "version": inst.version,
+                            "port": inst.port,
+                            "status": db_status_str(proc),
+                            "auto_start": inst.auto_start,
+                            "connection_url": inst.connection_url(),
+                            "linked_projects": inst.linked_projects.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            if instances.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} No database instances. Create one: `portbay db create <engine> <name>`.",
+                        style("·").dim()
+                    ))
+                    .ok();
+                return Ok(ExitCode::SUCCESS);
+            }
+            if pc.is_none() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} Daemon not reachable; status reflects the registry only.",
+                        style("!").yellow()
+                    ))
+                    .ok();
+            }
+            for inst in instances {
+                let proc = pc.as_ref().and_then(|m| m.get(&format!("db-{}", inst.id)));
+                let status = db_status_str(proc);
+                let badge = if status == "running" {
+                    style("●").green()
+                } else {
+                    style("○").dim()
+                };
+                ctx.term
+                    .write_line(&format!(
+                        "  {badge} {id:<16} {eng:<10} :{port:<6} {status}",
+                        id = style(inst.id.to_string()).bold(),
+                        eng = style(inst.engine.id()).dim(),
+                        port = inst.port,
+                        status = style(&status).dim(),
+                    ))
+                    .ok();
+            }
+        }
+
+        DbCmd::Info { id } => {
+            let reg = ctx.load_registry()?;
+            let inst = reg
+                .get_database(&DatabaseInstanceId::new(id.clone()))
+                .ok_or_else(|| CliError::BadInput(format!("database `{id}` not found")))?;
+            let env = inst.connection_env();
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": inst.id.to_string(),
+                        "engine": inst.engine.id(),
+                        "connection_url": inst.connection_url(),
+                        "account": inst.default_account(),
+                        "env": env,
+                    })
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            ctx.term
+                .write_line(&format!(
+                    "  {} {}",
+                    style(inst.id.to_string()).bold(),
+                    style(inst.connection_url()).dim()
+                ))
+                .ok();
+            for (k, v) in &env {
+                ctx.term
+                    .write_line(&format!("      {}={}", style(k).dim(), v))
+                    .ok();
+            }
+        }
+
+        DbCmd::Create(args) => {
+            let eng = DatabaseEngine::from_id(&args.engine)
+                .ok_or_else(|| CliError::BadInput(format!("unknown engine: {}", args.engine)))?;
+            let name = args.name.trim();
+            if name.is_empty() {
+                return Err(CliError::BadInput("a database name is required".into()));
+            }
+            let daemon = engine::daemon_binary(eng).ok_or_else(|| {
+                CliError::BadInput(format!(
+                    "{} isn't installed ({}). Install the engine binary from the PortBay app, then retry.",
+                    eng.label(),
+                    db_install_hint(eng)
+                ))
+            })?;
+            let mut reg = ctx.load_registry()?;
+            let id = db_unique_id(&reg, name);
+            let port = match args.port {
+                Some(p) => {
+                    if reg.database_port_in_use(p, None) {
+                        return Err(CliError::BadInput(format!(
+                            "port {p} is already used by another database instance"
+                        )));
+                    }
+                    p
+                }
+                None => db_alloc_port(&reg, eng),
+            };
+            let detection = engine::detect(eng);
+            engine::provision(eng, &daemon, &app_data, &id, port)
+                .map_err(|e| CliError::Other(format!("provision: {e}")))?;
+            let instance = DatabaseInstance {
+                id: DatabaseInstanceId::new(id.clone()),
+                name: name.to_string(),
+                engine: eng,
+                version: detection.version,
+                port,
+                data_dir: engine::data_dir(&app_data, &id),
+                config_path: engine::config_path(eng, &app_data, &id),
+                socket_path: engine::socket_path(eng, &app_data, &id),
+                auto_start: args.auto_start,
+                linked_projects: vec![],
+            };
+            reg.add_database(instance.clone()).map_err(CliError::Registry)?;
+            ctx.save_registry(&reg)?;
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": instance.id.to_string(),
+                        "engine": eng.id(),
+                        "port": port,
+                        "connection_url": instance.connection_url(),
+                    })
+                );
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} provisioned {} ({} on :{})",
+                        style("✓").green(),
+                        instance.id.to_string(),
+                        eng.label(),
+                        port
+                    ))
+                    .ok();
+                ctx.term
+                    .write_line(&format!(
+                        "  {} joins Process Compose after the app reconciles (≤30s); then `portbay db start {}`.",
+                        style("·").dim(),
+                        instance.id.to_string()
+                    ))
+                    .ok();
+            }
+        }
+
+        DbCmd::Remove(args) => {
+            let did = DatabaseInstanceId::new(args.id.clone());
+            // Best-effort stop so we don't orphan a running daemon.
+            let _ = ctx.pc().stop(&format!("db-{}", args.id)).await;
+            let mut reg = ctx.load_registry()?;
+            let removed = reg.remove_database(&did).map_err(CliError::Registry)?;
+            ctx.save_registry(&reg)?;
+            let mut warnings: Vec<String> = Vec::new();
+            if args.delete_data {
+                let dir = engine::instance_dir(&app_data, removed.id.as_str());
+                if dir.starts_with(engine::instances_root(&app_data)) && dir.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&dir) {
+                        warnings.push(format!("could not delete data dir {}: {e}", dir.display()));
+                    }
+                }
+            }
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "removed": removed.id.to_string(), "warnings": warnings })
+                );
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} removed database {}",
+                        style("✓").green(),
+                        removed.id.to_string()
+                    ))
+                    .ok();
+                for w in &warnings {
+                    ctx.term
+                        .write_line(&format!("  {} {w}", style("!").yellow()))
+                        .ok();
+                }
+            }
+        }
+
+        DbCmd::Start { id } => return db_lifecycle(ctx, &id, ProcOp::Start).await,
+        DbCmd::Stop { id } => return db_lifecycle(ctx, &id, ProcOp::Stop).await,
+        DbCmd::Restart { id } => return db_lifecycle(ctx, &id, ProcOp::Restart).await,
+
+        DbCmd::Link { id, project_id } => {
+            let mut reg = ctx.load_registry()?;
+            if reg.get_project(&ProjectId::new(project_id.clone())).is_none() {
+                return Err(CliError::ProjectNotFound(project_id));
+            }
+            let pid = ProjectId::new(project_id.clone());
+            let inst = reg
+                .get_database_mut(&DatabaseInstanceId::new(id.clone()))
+                .ok_or_else(|| CliError::BadInput(format!("database `{id}` not found")))?;
+            if !inst.linked_projects.contains(&pid) {
+                inst.linked_projects.push(pid);
+            }
+            ctx.save_registry(&reg)?;
+            cli_say(ctx, &format!("linked {id} to {project_id}"));
+        }
+
+        DbCmd::Unlink { id, project_id } => {
+            let mut reg = ctx.load_registry()?;
+            let pid = ProjectId::new(project_id.clone());
+            let inst = reg
+                .get_database_mut(&DatabaseInstanceId::new(id.clone()))
+                .ok_or_else(|| CliError::BadInput(format!("database `{id}` not found")))?;
+            inst.linked_projects.retain(|p| p != &pid);
+            ctx.save_registry(&reg)?;
+            cli_say(ctx, &format!("unlinked {project_id} from {id}"));
+        }
+
+        DbCmd::AutoStart { id, enabled } => {
+            let mut reg = ctx.load_registry()?;
+            let inst = reg
+                .get_database_mut(&DatabaseInstanceId::new(id.clone()))
+                .ok_or_else(|| CliError::BadInput(format!("database `{id}` not found")))?;
+            inst.auto_start = enabled;
+            ctx.save_registry(&reg)?;
+            cli_say(ctx, &format!("set auto-start={enabled} for {id}"));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Shared start/stop/restart for a DB instance: confirm it exists, then drive
+/// Process Compose on its `db-<id>` process.
+async fn db_lifecycle(ctx: &CliContext, id: &str, op: ProcOp) -> Result<ExitCode, CliError> {
+    {
+        let reg = ctx.load_registry()?;
+        if reg.get_database(&DatabaseInstanceId::new(id)).is_none() {
+            return Err(CliError::BadInput(format!("database `{id}` not found")));
+        }
+    }
+    cmd_proc_op(ctx, &format!("db-{id}"), op).await
+}
+
+/// Engines PortBay can manage (mirrors `commands::databases::ALL_ENGINES`).
+const DB_ENGINES: &[DatabaseEngine] = &[
+    DatabaseEngine::Mysql,
+    DatabaseEngine::Postgres,
+    DatabaseEngine::Mariadb,
+    DatabaseEngine::Redis,
+    DatabaseEngine::Mongo,
+    DatabaseEngine::Memcached,
+];
+
+fn db_install_hint(e: DatabaseEngine) -> &'static str {
+    match e {
+        DatabaseEngine::Mysql => "brew install mysql",
+        DatabaseEngine::Postgres => "brew install postgresql@16",
+        DatabaseEngine::Mariadb => "brew install mariadb",
+        DatabaseEngine::Redis => "brew install redis",
+        DatabaseEngine::Mongo => "brew install mongodb-community",
+        DatabaseEngine::Memcached => "brew install memcached",
+    }
+}
+
+fn db_unique_id(reg: &Registry, name: &str) -> String {
+    let base = {
+        let s = slugify(name);
+        if s.is_empty() {
+            "db".to_string()
+        } else {
+            s
+        }
+    };
+    let mut candidate = base.clone();
+    let mut n = 2;
+    while reg
+        .get_database(&DatabaseInstanceId::new(candidate.clone()))
+        .is_some()
+    {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    candidate
+}
+
+fn db_alloc_port(reg: &Registry, eng: DatabaseEngine) -> u16 {
+    let mut port = eng.default_port();
+    for _ in 0..500 {
+        if !reg.database_port_in_use(port, None) && portbay_lib::port_holder::find(port).is_none() {
+            return port;
+        }
+        port = port.saturating_add(1);
+        if port == u16::MAX {
+            break;
+        }
+    }
+    eng.default_port()
+}
+
+fn db_status_str(proc: Option<&Process>) -> String {
+    match proc {
+        None => "stopped".into(),
+        Some(p) => {
+            let s = p.status.to_lowercase();
+            if p.is_running && (s.contains("running") || s.contains("ready")) {
+                "running".into()
+            } else if s.contains("launching") || s.contains("starting") {
+                "starting".into()
+            } else if s.contains("error") || s.contains("failed") {
+                "errored".into()
+            } else {
+                "stopped".into()
+            }
+        }
+    }
+}
+
+/// `portbay dns <...>` — local DNS inspection + domain-suffix change. The
+/// resolver file is read cross-process; starting/restarting dnsmasq and
+/// first-run resolver install are done from the PortBay app.
+async fn cmd_dns(ctx: &CliContext, sub: DnsCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::dnsmasq::resolver;
+
+    match sub {
+        DnsCmd::Status => {
+            let reg = ctx.load_registry()?;
+            let suffix = reg.domain_suffix.clone();
+            let path = resolver::resolver_file_path(&suffix);
+            let contents = resolver::read_installed(&suffix);
+            let installed = contents
+                .as_deref()
+                .is_some_and(|c| c.contains("nameserver 127.0.0.1"));
+            let port = contents.as_deref().and_then(dns_resolver_port);
+            let helper = HostsHelperClient::system().is_available();
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "suffix": suffix,
+                        "resolver_installed": installed,
+                        "resolver_path": path.to_string_lossy(),
+                        "resolver_port": port,
+                        "helper_available": helper,
+                        "dnsmasq": {
+                            "cache_size": reg.dnsmasq.cache_size,
+                            "local_ttl": reg.dnsmasq.local_ttl,
+                            "disable_negative_cache": reg.dnsmasq.disable_negative_cache,
+                        },
+                    })
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            ctx.term
+                .write_line(&format!("  suffix:   {}", style(&suffix).bold()))
+                .ok();
+            let badge = if installed {
+                style("●").green()
+            } else {
+                style("○").dim()
+            };
+            let port_str = port.map(|p| format!(" (port {p})")).unwrap_or_default();
+            ctx.term
+                .write_line(&format!(
+                    "  {badge} resolver: {}{}",
+                    if installed {
+                        "installed"
+                    } else {
+                        "not installed (names resolve via /etc/hosts)"
+                    },
+                    port_str
+                ))
+                .ok();
+            ctx.term
+                .write_line(&format!("      {}", style(path.to_string_lossy()).dim()))
+                .ok();
+            ctx.term
+                .write_line(&format!(
+                    "  helper:   {}",
+                    if helper { "available" } else { "not installed" }
+                ))
+                .ok();
+            ctx.term
+                .write_line(&format!(
+                    "  dnsmasq:  cache={} ttl={} no-negcache={}",
+                    reg.dnsmasq.cache_size, reg.dnsmasq.local_ttl, reg.dnsmasq.disable_negative_cache
+                ))
+                .ok();
+        }
+
+        DnsCmd::Records => {
+            let reg = ctx.load_registry()?;
+            let suffix = reg.domain_suffix.clone();
+            let dns_routing = resolver::read_installed(&suffix)
+                .as_deref()
+                .is_some_and(|c| c.contains("nameserver 127.0.0.1"));
+            let suffix_tail = format!(".{suffix}");
+            if ctx.json {
+                let mut out = vec![serde_json::json!({
+                    "hostname": format!("*.{suffix}"),
+                    "target": "127.0.0.1",
+                    "kind": "wildcard",
+                    "routed_via": "dnsmasq",
+                })];
+                for p in reg.list_projects() {
+                    let in_suffix = p.hostname.ends_with(&suffix_tail);
+                    out.push(serde_json::json!({
+                        "hostname": p.hostname,
+                        "target": "127.0.0.1",
+                        "kind": "project",
+                        "project_id": p.id.as_str(),
+                        "project_name": p.name,
+                        "routed_via": if dns_routing && in_suffix { "dnsmasq" } else { "hosts" },
+                    }));
+                }
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            ctx.term
+                .write_line(&format!(
+                    "  {} {}",
+                    style(format!("*.{suffix}")).bold(),
+                    style("dnsmasq").dim()
+                ))
+                .ok();
+            for p in reg.list_projects() {
+                let in_suffix = p.hostname.ends_with(&suffix_tail);
+                let via = if dns_routing && in_suffix {
+                    "dnsmasq"
+                } else {
+                    "hosts"
+                };
+                ctx.term
+                    .write_line(&format!(
+                        "  {} {}",
+                        style(&p.hostname).bold(),
+                        style(via).dim()
+                    ))
+                    .ok();
+            }
+        }
+
+        DnsCmd::Suffix { suffix } => {
+            let mut reg = ctx.load_registry()?;
+            let migration =
+                portbay_lib::domain::migrate_registry_suffix(&mut reg, &suffix, certs_root())
+                    .map_err(|e| CliError::BadInput(e.to_string()))?;
+            ctx.save_registry(&reg)?;
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "old_suffix": migration.old_suffix,
+                        "new_suffix": migration.new_suffix,
+                        "changed_projects": migration.changed_projects,
+                        "cert_dirs_removed": migration.cert_dirs_removed,
+                    })
+                );
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} suffix {} → {}",
+                        style("✓").green(),
+                        style(&migration.old_suffix).dim(),
+                        style(&migration.new_suffix).bold()
+                    ))
+                    .ok();
+                ctx.term
+                    .write_line(&format!(
+                        "  {} {} hostname(s) rewritten, {} cert dir(s) removed; the app reissues \
+                         certs + updates /etc/hosts on the next reconcile.",
+                        style("·").dim(),
+                        migration.changed_projects,
+                        migration.cert_dirs_removed
+                    ))
+                    .ok();
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Parse the `port <n>` line out of an `/etc/resolver/<suffix>` file body.
+fn dns_resolver_port(contents: &str) -> Option<u16> {
+    contents.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("port ")
+            .and_then(|n| n.trim().parse().ok())
+    })
 }
 
 /// `portbay detect <path>` — single-project or monorepo app detection.

@@ -606,3 +606,74 @@ pub struct RuntimeLanguageSummary {
     /// are detected (e.g. `"brew install php"`).
     pub install_hint: String,
 }
+
+// =============================================================================
+// Database tool inputs
+// =============================================================================
+
+/// Reference a single database instance by id.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseIdArgs {
+    /// The database instance id (slug), as returned by `portbay_list_databases`.
+    pub id: String,
+}
+
+/// Provision and register a new database instance. The engine binary must
+/// already be installed (check with `portbay_list_database_engines`; installing
+/// an engine via Homebrew is done from the PortBay app).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct CreateDatabaseArgs {
+    /// Engine id: `mysql`, `postgres`, `mariadb`, `redis`, `mongo`, or `memcached`.
+    pub engine: String,
+    /// Human-readable name. The instance id is slugified from this.
+    pub name: String,
+    /// Port to bind. Omit to auto-allocate from the engine's default upward.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Start the instance on daemon boot. Defaults to `false`.
+    #[serde(default)]
+    pub auto_start: Option<bool>,
+}
+
+/// Remove a database instance.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct RemoveDatabaseArgs {
+    /// The database instance id (slug) to remove.
+    pub id: String,
+    /// Also delete the instance's on-disk data directory. Defaults to `false`
+    /// (the registration is removed but the data is kept).
+    #[serde(default)]
+    pub delete_data: Option<bool>,
+}
+
+/// Link or unlink a database instance and a project.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct LinkDatabaseArgs {
+    /// The database instance id (slug).
+    pub id: String,
+    /// The project id (slug) to link/unlink. PortBay injects the instance's
+    /// connection env vars into a linked project's process.
+    pub project_id: String,
+}
+
+/// Toggle a database instance's auto-start.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SetDatabaseAutoStartArgs {
+    /// The database instance id (slug).
+    pub id: String,
+    /// Whether the instance should start when the PortBay daemon boots.
+    pub auto_start: bool,
+}
+
+// =============================================================================
+// DNS / domain tool inputs
+// =============================================================================
+
+/// Change the local domain suffix.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SetDomainSuffixArgs {
+    /// The new suffix (e.g. `test`, `localhost`, `portbay.test`). Reserved
+    /// public TLDs like `.com` are rejected. Every project hostname is rewritten
+    /// to this suffix and their HTTPS certs are dropped (the app reissues them).
+    pub suffix: String,
+}
