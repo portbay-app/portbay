@@ -303,12 +303,19 @@ impl Project {
     }
 
     /// Process Compose id that represents this project at runtime, when one
-    /// exists. Normal command-backed projects use the project id directly.
-    /// PHP projects served by generated Nginx/Apache configs use a derived
-    /// backend process id. Pure Caddy/PHP-FPM and static file-server projects
-    /// have no project-specific Process Compose process.
+    /// exists. Used by Start/Stop/status to find the process to act on.
+    ///
+    /// MUST stay in lockstep with `process_compose::config::project_to_pc_process`,
+    /// which emits a PC entry keyed by the project id for any project with an
+    /// explicit `start_command` **or** a monorepo `workspace` binding (it derives
+    /// the dev command from the workspace, e.g. `pnpm --filter @app/web dev`). If
+    /// the two disagree, Start/Stop silently no-op on the projects this misses:
+    /// that's exactly how workspace-backed projects (no explicit command) used to
+    /// have a running process the UI couldn't start or stop. PHP projects served
+    /// by generated Nginx/Apache configs use a derived backend process id instead.
+    /// Pure Caddy/PHP-FPM and static file-server projects have no PC process.
     pub fn process_compose_id(&self) -> Option<String> {
-        if self.start_command.is_some() {
+        if self.start_command.is_some() || self.workspace.is_some() {
             return Some(self.id.as_str().to_string());
         }
         if self.kind == ProjectType::Php {
@@ -1130,6 +1137,30 @@ mod tests {
 
         p.start_command = Some("php artisan serve".into());
         assert_eq!(p.process_compose_id().as_deref(), Some("legacy-php"));
+    }
+
+    #[test]
+    fn process_compose_id_covers_workspace_projects_without_a_start_command() {
+        // A monorepo app pinned by workspace filter, no explicit start_command —
+        // the real bookslash case. `project_to_pc_process` emits a PC entry keyed
+        // by the project id for it, so `process_compose_id` MUST return that id;
+        // otherwise Start/Stop silently no-op on the project (it has a running
+        // process the UI can neither start nor stop). Regression guard for that.
+        let mut p = bare_php_project();
+        p.id = ProjectId::new("bookslash");
+        p.kind = ProjectType::Node;
+        p.start_command = None;
+        p.web_server = None;
+        p.workspace = Some(Workspace {
+            package: "@bookslash/web".into(),
+            rel_dir: "apps/web".into(),
+            tool: WorkspaceTool::Turbo,
+        });
+        assert_eq!(
+            p.process_compose_id().as_deref(),
+            Some("bookslash"),
+            "workspace projects must resolve to their id-named PC process"
+        );
     }
 
     #[test]
