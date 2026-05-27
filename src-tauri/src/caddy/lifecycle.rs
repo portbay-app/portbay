@@ -129,12 +129,19 @@ pub fn find_free_port(start: u16, range: u16, avoid: &[u16]) -> Option<u16> {
     None
 }
 
-/// Pre-flight check for the public HTTPS port. Prefers `prefer` if it's free
-/// and not in `avoid`; otherwise falls back to a scan from `fallback`.
+/// Pre-flight check for the public HTTPS port. Prefers `prefer` (normally 443)
+/// if it's free and not in `avoid`; otherwise falls back to a scan from
+/// `fallback`.
+///
+/// The bind test uses the **wildcard** address, not `127.0.0.1`, on purpose:
+/// macOS denies a non-root process a privileged-port (<1024) bind on the
+/// loopback-specific address (`127.0.0.1:443` → EACCES) but *allows* it on the
+/// wildcard (`0.0.0.0:443`) — and Caddy binds the wildcard (`:443`). Testing
+/// `127.0.0.1:443` therefore wrongly fails and forces a fallback to 8443, so a
+/// browser hitting `https://<host>` (port 443) finds nothing. Matching Caddy's
+/// bind makes the pre-flight honest.
 pub fn find_free_https_port(prefer: u16, fallback: u16, avoid: &[u16]) -> u16 {
-    if !avoid.contains(&prefer)
-        && std::net::TcpListener::bind(("127.0.0.1", prefer)).is_ok()
-    {
+    if !avoid.contains(&prefer) && std::net::TcpListener::bind(("0.0.0.0", prefer)).is_ok() {
         return prefer;
     }
     find_free_port(fallback, 32, avoid).unwrap_or(fallback)
