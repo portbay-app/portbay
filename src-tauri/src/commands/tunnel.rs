@@ -3,12 +3,17 @@
 //! Three surfaces:
 //!
 //! - `start_tunnel(id)` — spawn cloudflared against the project's
-//!   URL, block until the public `trycloudflare.com` URL is
-//!   announced, and return the full status.
-//! - `stop_tunnel(id)` — kill the per-project cloudflared child.
+//!   Caddy HTTPS route (so Origin/Host normalisation applies), block
+//!   until the public `trycloudflare.com` URL is announced, trigger
+//!   a Caddy reconcile so the route flips to `normalize_all = true`,
+//!   and return the full status.
+//! - `stop_tunnel(id)` — kill the per-project cloudflared child, then
+//!   trigger a Caddy reconcile to flip the route back to no-normalise.
 //! - `list_tunnels()` — every active tunnel + its public URL.
 //! - `tunnel_status(id)` — single-project lookup (used by polling
 //!   modals while the URL is still being assigned).
+
+use std::sync::atomic::Ordering;
 
 use tauri::{AppHandle, State};
 
@@ -24,40 +29,36 @@ pub async fn start_tunnel(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<TunnelStatus> {
-    // Resolve the project's URL from the registry so the GUI doesn't
-    // have to know the scheme/hostname mapping.
+    // Resolve the project's hostname from the registry. cloudflared routes
+    // through Caddy's HTTPS listener so Origin/Host normalisation applies;
+    // it needs the project hostname as the `Host` header so Caddy matches
+    // the correct route.
     let registry = load_registry(&state)?;
     let project = registry
         .get_project(&ProjectId::new(&id))
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
-    // Choose the most robust origin for cloudflared:
-    // - A project with a dev-server port → point straight at `127.0.0.1:<port>`.
-    //   This drops the dependency on local DNS (/etc/hosts + dnsmasq) and Caddy
-    //   being up, and avoids any Host-header/cert mismatch — the shared link
-    //   keeps working for visitors as long as the dev server runs.
-    // - A port-less project (PHP / static served by Caddy) must go through Caddy
-    //   by hostname; cloudflared resolves it locally and `--no-tls-verify`
-    //   accepts the mkcert cert.
-    let upstream = match project.port {
-        Some(port) => format!("http://127.0.0.1:{port}"),
-        None => {
-            let scheme = if project.https { "https" } else { "http" };
-            format!("{scheme}://{}", project.hostname)
-        }
-    };
+    let hostname = project.hostname.clone();
+
+    // Read the Caddy HTTPS port that was stored when Caddy booted.
+    let caddy_https_port = state.caddy_https_port.load(Ordering::Relaxed);
 
     // Spawn + pull out the URL handle under one brief lock — we then
     // drop the lock before awaiting, because `MutexGuard` isn't `Send`
     // and Tauri requires the command future to be `Send`.
     let url_handle = {
         let mut mgr = state.tunnels.lock().expect("tunnels mutex poisoned");
-        mgr.start(&app, &id, &upstream)?;
+        mgr.start(&app, &id, &hostname, caddy_https_port)?;
         mgr.url_handle(&id)?
     };
 
     let _url = crate::tunnel::wait_for_url(url_handle)
         .await
         .map_err(AppError::Tunnel)?;
+
+    // Trigger a Caddy reconcile now that this project has an active tunnel,
+    // so the route flips to normalize_all = true (Origin/Host rewriting on
+    // plain requests) for the duration of the share.
+    state.reconciler.mark_dirty();
 
     state
         .tunnels
@@ -74,6 +75,12 @@ pub async fn stop_tunnel(state: State<'_, AppState>, id: String) -> AppResult<()
         .lock()
         .expect("tunnels mutex poisoned")
         .stop(&id)?;
+
+    // Trigger a Caddy reconcile now that this project's tunnel is gone,
+    // so the route flips back to normalize_all = false (CSRF intact,
+    // plain requests untouched for local .test access).
+    state.reconciler.mark_dirty();
+
     Ok(())
 }
 

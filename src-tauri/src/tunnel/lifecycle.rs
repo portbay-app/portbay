@@ -7,6 +7,7 @@
 //! return it immediately.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -110,21 +111,30 @@ impl TunnelManager {
         self.tunnels.get(project_id).map(|t| t.status())
     }
 
-    /// Spawn cloudflared for `project_id` against `upstream_url`. The
-    /// returned status reflects the just-started state — `public_url`
+    /// Spawn cloudflared for `project_id`, routing traffic through Caddy's
+    /// HTTPS listener so Origin/Host normalisation applies.
+    ///
+    /// `hostname` is the project's Caddy hostname (e.g. `myapp.test`); it is
+    /// passed as `--http-host-header` so Caddy matches the correct route.
+    /// `caddy_https_port` is the port Caddy is listening on (stored in
+    /// `AppState::caddy_https_port` at boot time).
+    ///
+    /// The returned status reflects the just-started state — `public_url`
     /// is initially `None`. Callers poll `status` until the URL is
     /// populated (the stdout-tail task fills it in).
     pub fn start(
         &mut self,
         app: &AppHandle,
         project_id: &str,
-        upstream_url: &str,
+        hostname: &str,
+        caddy_https_port: u16,
     ) -> Result<TunnelStatus> {
         if self.tunnels.contains_key(project_id) {
             return Err(TunnelError::AlreadyRunning(project_id.to_string()));
         }
 
-        let cmd = resolve_command(app, upstream_url)?;
+        let upstream_url = format!("https://127.0.0.1:{caddy_https_port}");
+        let cmd = resolve_command(app, &upstream_url, hostname)?;
         let (mut rx, child) = cmd
             .spawn()
             .map_err(|e| TunnelError::SpawnFailed(e.to_string()))?;
@@ -161,7 +171,7 @@ impl TunnelManager {
 
         let tunnel = Tunnel {
             project_id: project_id.to_string(),
-            upstream_url: upstream_url.to_string(),
+            upstream_url,
             public_url,
             started_at_ms,
             child: Some(child),
@@ -216,28 +226,59 @@ pub async fn wait_for_url(handle: Arc<Mutex<Option<String>>>) -> Result<String> 
     }
 }
 
+/// Write a minimal cloudflared config file that intentionally contains only
+/// a comment, so cloudflared's own config loading is satisfied (it won't
+/// complain about an empty file) while inheriting nothing from the user's
+/// `~/.cloudflared/config.yml`. This preserves the isolation invariant
+/// established for quick tunnels: PortBay-spawned cloudflared processes never
+/// pick up the user's named-tunnel credentials or ingress rules.
+fn isolated_config_path() -> Result<PathBuf> {
+    let mut dir = dirs::data_dir()
+        .ok_or_else(|| TunnelError::SpawnFailed("no data dir".to_string()))?;
+    dir.push("PortBay");
+    dir.push("cloudflared");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| TunnelError::SpawnFailed(format!("mkdir cloudflared dir: {e}")))?;
+    let path = dir.join("tunnel-quick.yml");
+    // PortBay quick tunnel: intentionally minimal so the user's ~/.cloudflared/config.yml
+    // is not inherited.
+    std::fs::write(&path, b"# PortBay quick tunnel: intentionally minimal so the user's ~/.cloudflared/config.yml is not inherited\n")
+        .map_err(|e| TunnelError::SpawnFailed(format!("write cloudflared config: {e}")))?;
+    Ok(path)
+}
+
+/// Build the cloudflared command for a quick (ephemeral) tunnel.
+///
+/// Traffic is routed through Caddy's local HTTPS listener
+/// (`https://127.0.0.1:<caddy_https_port>`) rather than directly to the dev
+/// server, so Caddy's Origin/Host normalisation applies for the duration of
+/// the share. `--http-host-header` tells cloudflared to send a `Host` header
+/// matching the project's Caddy hostname so Caddy routes the request to the
+/// correct project.
+///
+/// `--config` points at an isolated minimal YAML (a comment, not empty) so
+/// cloudflared never inherits the user's `~/.cloudflared/config.yml`.
+/// `--no-tls-verify` is required because Caddy is using a self-signed mkcert
+/// cert on localhost.
 fn resolve_command(
     app: &AppHandle,
     upstream_url: &str,
+    hostname: &str,
 ) -> Result<tauri_plugin_shell::process::Command> {
-    // `--config` is a global flag (before the subcommand) that isolates our
-    // quick tunnel from the user's own ~/.cloudflared/config.yml. A developer
-    // who runs a *named* tunnel has a config.yml whose ingress rules — typically
-    // ending in a catch-all `service: http_status:404` — would otherwise be
-    // applied to our quick tunnel and 404 every request, even though the origin
-    // is healthy. Pointing at an empty PortBay-owned file gives cloudflared a
-    // clean slate. Best-effort: if the file can't be created we fall back to
-    // cloudflared's default discovery rather than failing to start a tunnel.
-    let mut args: Vec<String> = Vec::with_capacity(7);
-    if let Some(cfg) = isolated_config_path() {
-        args.push("--config".into());
-        args.push(cfg.to_string_lossy().into_owned());
-    }
-    args.push("tunnel".into());
-    args.push("--url".into());
-    args.push(upstream_url.into());
-    args.push("--no-autoupdate".into());
-    args.push("--no-tls-verify".into());
+    let config_path = isolated_config_path()?;
+    let config_str = config_path.to_string_lossy().into_owned();
+
+    let args = [
+        "tunnel",
+        "--config",
+        &config_str,
+        "--url",
+        upstream_url,
+        "--http-host-header",
+        hostname,
+        "--no-autoupdate",
+        "--no-tls-verify",
+    ];
 
     if let Ok(sidecar) = app.shell().sidecar("cloudflared") {
         return Ok(sidecar.args(args));
@@ -247,22 +288,6 @@ fn resolve_command(
         .shell()
         .command(path.to_string_lossy().into_owned())
         .args(args))
-}
-
-/// Path to an empty, PortBay-owned cloudflared config, created idempotently in
-/// the app-data dir. An empty file is a valid no-op config; passing it via
-/// `--config` stops cloudflared from loading the user's ~/.cloudflared/config.yml
-/// (and its ingress rules) into our quick tunnels. Returns `None` if the data
-/// dir or file can't be created.
-fn isolated_config_path() -> Option<std::path::PathBuf> {
-    let mut dir = dirs::data_dir()?;
-    dir.push("PortBay");
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join("cloudflared-empty.yml");
-    if !path.exists() {
-        std::fs::write(&path, b"").ok()?;
-    }
-    Some(path)
 }
 
 /// Parse the public `trycloudflare.com` URL from a cloudflared log

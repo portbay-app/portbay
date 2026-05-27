@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -115,6 +115,14 @@ pub struct AppState {
     /// considered stale and ignored.
     pub stop_intents: Mutex<HashMap<String, Instant>>,
 
+    /// The HTTPS port Caddy is currently listening on. Set in [`boot_caddy`]
+    /// alongside the bootstrap config write, then re-read by tunnel commands
+    /// so cloudflared can route through Caddy's HTTPS listener instead of
+    /// directly to the dev server (enabling Origin/Host normalisation).
+    /// Defaults to `DEFAULT_HTTPS_PORT`; Caddy may fall back to an alternate
+    /// port when 443 is held by another process.
+    pub caddy_https_port: AtomicU16,
+
     /// Set once [`AppState::shutdown_all`] has run, so the teardown is
     /// idempotent across the multiple quit signals Tauri can deliver (the
     /// window `Destroyed` event AND the app-level `RunEvent::Exit`).
@@ -157,6 +165,7 @@ impl AppState {
             preferences: Mutex::new(Preferences::load()),
             tray: Mutex::new(Default::default()),
             stop_intents: Mutex::new(HashMap::new()),
+            caddy_https_port: AtomicU16::new(DEFAULT_HTTPS_PORT),
             shutdown_done: AtomicBool::new(false),
             pending_login: Mutex::new(None),
         }
@@ -274,6 +283,9 @@ impl AppState {
                 },
             )?;
         let https_port = find_free_https_port(443, DEFAULT_HTTPS_PORT, &avoid);
+        // Persist the chosen HTTPS port so tunnel commands can route cloudflared
+        // through Caddy's HTTPS listener (enabling Origin/Host normalisation).
+        self.caddy_https_port.store(https_port, Ordering::Relaxed);
         let config_path = write_caddy_bootstrap_config(admin_port, https_port)?;
 
         let client = self.caddy.lock().unwrap_or_else(|e| e.into_inner()).start(

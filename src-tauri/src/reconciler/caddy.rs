@@ -62,6 +62,19 @@ pub(super) async fn reconcile(
     // Drop the routes of `expose_when_running` projects that aren't currently
     // up. The common case (nobody opted in) skips the PC round-trip.
     let suppressed = suppressed_routes(reg, state).await;
+
+    // Collect project ids with an active tunnel. We take a snapshot under the
+    // lock and immediately release it so we don't hold the mutex across the
+    // subsequent async Caddy load.
+    let shared_project_ids: HashSet<String> = {
+        let mgr = state.tunnels.lock().expect("tunnels mutex poisoned");
+        mgr.list()
+            .into_iter()
+            .filter(|t| t.running)
+            .map(|t| t.project_id)
+            .collect()
+    };
+
     let cfg = match build_config_filtered(
         reg,
         admin_port,
@@ -69,6 +82,7 @@ pub(super) async fn reconcile(
         https_port,
         &php_socket_dir,
         &suppressed,
+        &shared_project_ids,
         |id| cert_lookup.get(id).cloned(),
     ) {
         Ok(c) => c,

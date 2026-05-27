@@ -192,6 +192,10 @@ pub fn bootstrap_config(admin_port: u16, https_port: u16) -> CaddyConfig {
 ///
 /// `cert_lookup(project_id) -> Option<CertPaths>` lets the caller plug in
 /// the mkcert wrapper without us depending on it.
+///
+/// No projects are considered actively shared — equivalent to calling
+/// [`build_config_filtered`] with an empty `shared_project_ids` and empty
+/// `suppressed` set.
 pub fn build_config<F>(
     reg: &Registry,
     admin_port: u16,
@@ -210,14 +214,27 @@ where
         https_port,
         php_socket_dir,
         &HashSet::new(),
+        &HashSet::new(),
         cert_lookup,
     )
 }
 
 /// Like [`build_config`] but omits the routes of any project id in
-/// `suppressed`. The reconciler uses this to drop `expose_when_running`
-/// projects that aren't currently up, so their hostname stops claiming the
-/// edge until the process is back. `build_config` suppresses nothing.
+/// `suppressed`, and enables full Origin/Host header normalisation for any
+/// project id in `shared_project_ids` (those with an active Cloudflare
+/// tunnel).
+///
+/// The reconciler uses `suppressed` to drop `expose_when_running` projects
+/// that aren't currently up, so their hostname stops claiming the edge until
+/// the process is back.
+///
+/// `shared_project_ids` is the set of project ids that currently have an
+/// active tunnel. For those projects `normalize_all = true` is passed to
+/// `project_to_route`, which adds Origin/Host/X-Forwarded-Host rewrites on
+/// plain (non-WebSocket) requests so Next.js `allowedDevOrigins` and Vite
+/// `allowedHosts` accept traffic arriving via the public tunnel URL. For all
+/// other projects the output is **byte-for-byte identical** to the no-tunnel
+/// path.
 pub fn build_config_filtered<F>(
     reg: &Registry,
     admin_port: u16,
@@ -225,6 +242,7 @@ pub fn build_config_filtered<F>(
     https_port: u16,
     php_socket_dir: &std::path::Path,
     suppressed: &HashSet<String>,
+    shared_project_ids: &HashSet<String>,
     cert_lookup: F,
 ) -> Result<CaddyConfig>
 where
@@ -246,8 +264,11 @@ where
         if suppressed.contains(p.id.as_str()) {
             continue;
         }
+        // Enable full header normalisation only for projects with an active
+        // tunnel. The no-tunnel path is byte-for-byte identical to before.
+        let normalize_all = shared_project_ids.contains(p.id.as_str());
         if p.https {
-            https_routes.push(project_to_route(p, php_socket_dir, reg));
+            https_routes.push(project_to_route(p, php_socket_dir, reg, normalize_all));
             http_routes.push(https_redirect_route(p));
             if let Some(paths) = cert_lookup(p.id.as_str()) {
                 cert_files.push(TlsCertFile {
@@ -257,7 +278,7 @@ where
                 });
             }
         } else {
-            http_routes.push(project_to_route(p, php_socket_dir, reg));
+            http_routes.push(project_to_route(p, php_socket_dir, reg, normalize_all));
         }
     }
 
@@ -352,9 +373,22 @@ pub fn with_access_log(mut cfg: CaddyConfig, log_path: &std::path::Path) -> Cadd
 /// `php_socket_dir` is the parent directory under which PortBay
 /// expects per-version FPM sockets at `<dir>/<version>/php-fpm.sock`
 /// (matching [`crate::php::lifecycle::fpm_socket_path`]).
-pub fn project_to_route(p: &Project, php_socket_dir: &std::path::Path, reg: &Registry) -> Route {
+///
+/// `normalize_all` — when `true` the plain (non-WebSocket) reverse-proxy
+/// route also rewrites `Origin`, `Host`, and `X-Forwarded-Host` to the
+/// loopback dev origin. Set to `true` only for projects with an active
+/// Cloudflare tunnel so that Next.js/Vite `allowedDevOrigins`/
+/// `allowedHosts` checks are satisfied for the duration of a share.
+/// When `false` the output is byte-for-byte identical to the pre-tunnel
+/// path (CSRF intact, plain requests untouched).
+pub fn project_to_route(
+    p: &Project,
+    php_socket_dir: &std::path::Path,
+    reg: &Registry,
+    normalize_all: bool,
+) -> Route {
     let id = format!("route_{}", p.id);
-    let handler = build_handler(p, php_socket_dir, reg);
+    let handler = build_handler(p, php_socket_dir, reg, normalize_all);
     // Pro: wrap in a CORS subroute when the project has an active policy. The
     // basic listen port is never gated; only this custom cross-origin policy
     // is (see `Project::cors`). Inactive/absent → the handler is untouched, so
@@ -467,6 +501,7 @@ fn build_handler(
     p: &Project,
     php_socket_dir: &std::path::Path,
     reg: &Registry,
+    normalize_all: bool,
 ) -> serde_json::Value {
     match p.kind {
         // PHP can run in two modes:
@@ -481,14 +516,14 @@ fn build_handler(
                 ))
                 && p.port.is_some() =>
         {
-            reverse_proxy_handler(p)
+            reverse_proxy_handler(p, normalize_all)
         }
         ProjectType::Php => php_handler(p, php_socket_dir, reg),
         // Static sites have no dev server — serve their files straight off
         // disk. Routing them through reverse_proxy (the old `_` arm) dialed
         // 127.0.0.1:80, i.e. Caddy itself, and never served anything.
         ProjectType::Static => static_handler(p),
-        _ => reverse_proxy_handler(p),
+        _ => reverse_proxy_handler(p, normalize_all),
     }
 }
 
@@ -508,9 +543,28 @@ fn static_handler(p: &Project) -> serde_json::Value {
     })
 }
 
-fn reverse_proxy_handler(p: &Project) -> serde_json::Value {
+/// Build the `reverse_proxy` subroute handler for a dev-server project.
+///
+/// `normalize_all` controls whether plain (non-WebSocket) requests also
+/// have their `Origin`, `Host`, and `X-Forwarded-Host` rewritten to the
+/// loopback dev origin.
+///
+/// **`normalize_all = false` (default, no active tunnel):**
+/// - WebSocket upgrades get `Origin` rewritten (HMR fix, unchanged).
+/// - Plain requests are forwarded as-is (CSRF intact).
+/// Output is byte-for-byte identical to the pre-tunnel implementation.
+///
+/// **`normalize_all = true` (project has an active Cloudflare tunnel):**
+/// - WebSocket upgrades: same as above.
+/// - Plain requests: also rewrite `Origin`, `Host`, `X-Forwarded-Host` →
+///   loopback, so Next.js `allowedDevOrigins` and Vite `allowedHosts`
+///   accept tunnel traffic. Scoped to the active-share window only.
+fn reverse_proxy_handler(p: &Project, normalize_all: bool) -> serde_json::Value {
     let port = p.port.unwrap_or(80);
     let dial = format!("127.0.0.1:{port}");
+    let loopback_origin = format!("http://localhost:{port}");
+    let loopback_host = format!("localhost:{port}");
+
     // Dev-server HMR / live-reload WebSockets: Next.js (via `allowedDevOrigins`),
     // Vite, and webpack-dev-server all reject upgrade requests whose `Origin`
     // isn't a loopback dev origin. Behind PortBay's pretty hostname the browser
@@ -518,8 +572,31 @@ fn reverse_proxy_handler(p: &Project) -> serde_json::Value {
     // HMR dies — the page loads, but live-reload spins forever. Rewrite `Origin`
     // to the loopback dev origin for WebSocket upgrades ONLY (matched on the
     // `Upgrade: websocket` header), so HMR works with zero per-project config.
-    // Plain (non-upgrade) requests keep their real `Origin`, so app-level
-    // CSRF/CORS is left untouched.
+    // Plain (non-upgrade) requests keep their real `Origin` when normalize_all
+    // is false, so app-level CSRF/CORS is left untouched. When normalize_all
+    // is true (active tunnel), we also rewrite Origin/Host/X-Forwarded-Host on
+    // plain requests so the dev server's cross-origin checks accept tunnel traffic.
+    let plain_proxy = if normalize_all {
+        json!({
+            "handle": [{
+                "handler": "reverse_proxy",
+                "headers": { "request": { "set": {
+                    "Origin": [loopback_origin],
+                    "Host": [loopback_host.clone()],
+                    "X-Forwarded-Host": [loopback_host]
+                }}},
+                "upstreams": [{ "dial": &dial }]
+            }]
+        })
+    } else {
+        json!({
+            "handle": [{
+                "handler": "reverse_proxy",
+                "upstreams": [{ "dial": &dial }]
+            }]
+        })
+    };
+
     json!({
         "handler": "subroute",
         "routes": [
@@ -528,15 +605,10 @@ fn reverse_proxy_handler(p: &Project) -> serde_json::Value {
                 "handle": [{
                     "handler": "reverse_proxy",
                     "headers": { "request": { "set": { "Origin": [format!("http://localhost:{port}")] } } },
-                    "upstreams": [{ "dial": dial }]
+                    "upstreams": [{ "dial": &dial }]
                 }]
             },
-            {
-                "handle": [{
-                    "handler": "reverse_proxy",
-                    "upstreams": [{ "dial": dial }]
-                }]
-            }
+            plain_proxy
         ]
     })
 }
@@ -713,7 +785,7 @@ mod tests {
         let p = next_project("plain", 3010, true);
         let mut r = Registry::new("test");
         r.add_project(p.clone()).unwrap();
-        let route = project_to_route(&p, Path::new("/tmp/portbay-php"), &r);
+        let route = project_to_route(&p, Path::new("/tmp/portbay-php"), &r, false);
         let json = serde_json::to_string(&route).unwrap();
         assert!(!json.contains("Access-Control-Allow-Origin"));
     }
@@ -727,7 +799,7 @@ mod tests {
         });
         let mut r = Registry::new("test");
         r.add_project(p.clone()).unwrap();
-        let route = project_to_route(&p, Path::new("/tmp/portbay-php"), &r);
+        let route = project_to_route(&p, Path::new("/tmp/portbay-php"), &r, false);
         let v = serde_json::to_value(&route).unwrap();
         let sub = &v["handle"][0];
         assert_eq!(sub["handler"], "subroute");
@@ -1023,7 +1095,7 @@ mod tests {
         let p = next_project("abc", 3000, true);
         let mut reg = Registry::new("test");
         reg.add_project(p.clone()).unwrap();
-        let route = project_to_route(&p, Path::new("/tmp/portbay-php"), &reg);
+        let route = project_to_route(&p, Path::new("/tmp/portbay-php"), &reg, false);
         assert_eq!(route.id, "route_abc");
         assert!(route.terminal);
     }
@@ -1050,6 +1122,106 @@ mod tests {
         assert_eq!(
             v["apps"]["http"]["servers"]["portbay"]["routes"],
             serde_json::json!([])
+        );
+    }
+
+    /// Hard constraint: when no project has an active tunnel, `build_config_filtered`
+    /// with an empty `shared_project_ids` MUST produce byte-for-byte identical
+    /// output to `build_config` (which always passes an empty shared set).
+    #[test]
+    fn no_tunnel_output_is_identical_to_build_config() {
+        let mut r = Registry::new("test");
+        r.add_project(next_project("site", 3010, true)).unwrap();
+
+        let cfg_base = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs)
+            .unwrap();
+        let cfg_filtered = build_config_filtered(
+            &r,
+            2019,
+            80,
+            8443,
+            Path::new("/tmp/portbay-php"),
+            &HashSet::new(), // suppressed
+            &HashSet::new(), // shared_project_ids (empty — no tunnels)
+            no_certs,
+        )
+        .unwrap();
+
+        let base_json = serde_json::to_vec(&cfg_base).unwrap();
+        let filtered_json = serde_json::to_vec(&cfg_filtered).unwrap();
+        assert_eq!(
+            base_json,
+            filtered_json,
+            "no-tunnel output must be byte-for-byte identical"
+        );
+    }
+
+    /// When a project id is in `shared_project_ids`, the plain (non-WebSocket)
+    /// reverse-proxy route must include Origin, Host, and X-Forwarded-Host
+    /// header rewrites pointing at the loopback dev origin.
+    #[test]
+    fn active_tunnel_adds_origin_host_normalization_on_plain_route() {
+        let p = next_project("shared", 3010, false);
+        let mut r = Registry::new("test");
+        r.add_project(p.clone()).unwrap();
+
+        let mut shared = HashSet::new();
+        shared.insert("shared".to_string());
+
+        let cfg = build_config_filtered(
+            &r,
+            2019,
+            80,
+            8443,
+            Path::new("/tmp/portbay-php"),
+            &HashSet::new(),
+            &shared,
+            no_certs,
+        )
+        .unwrap();
+
+        let http = cfg.apps.http.servers.get("portbay_http").unwrap();
+        let sub = &http.routes[0].handle[0];
+        assert_eq!(sub["handler"], "subroute");
+
+        // WebSocket branch (route 0): unchanged — still rewrites only Origin.
+        let ws = &sub["routes"][0];
+        assert_eq!(ws["match"][0]["header"]["Upgrade"][0], "websocket");
+        assert_eq!(
+            ws["handle"][0]["headers"]["request"]["set"]["Origin"][0],
+            "http://localhost:3010"
+        );
+
+        // Plain branch (route 1): now also rewrites Origin, Host, X-Forwarded-Host.
+        let plain = &sub["routes"][1];
+        let set = &plain["handle"][0]["headers"]["request"]["set"];
+        assert_eq!(set["Origin"][0], "http://localhost:3010");
+        assert_eq!(set["Host"][0], "localhost:3010");
+        assert_eq!(set["X-Forwarded-Host"][0], "localhost:3010");
+        assert_eq!(
+            plain["handle"][0]["upstreams"][0]["dial"],
+            "127.0.0.1:3010"
+        );
+    }
+
+    /// Without a tunnel the plain route must have NO header rewrite block.
+    #[test]
+    fn no_tunnel_plain_route_has_no_header_rewrite() {
+        let p = next_project("local", 3010, false);
+        let mut r = Registry::new("test");
+        r.add_project(p.clone()).unwrap();
+
+        let cfg = build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs)
+            .unwrap();
+
+        let http = cfg.apps.http.servers.get("portbay_http").unwrap();
+        let sub = &http.routes[0].handle[0];
+        let plain = &sub["routes"][1];
+        // No "headers" key at all on the plain route's handler.
+        assert!(plain["handle"][0]["headers"].is_null());
+        assert_eq!(
+            plain["handle"][0]["upstreams"][0]["dial"],
+            "127.0.0.1:3010"
         );
     }
 }
