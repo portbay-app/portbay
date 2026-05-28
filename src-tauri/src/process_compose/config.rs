@@ -917,11 +917,12 @@ mod tests {
         };
         let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[spec], &[], &[], true).unwrap();
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        let cmd = doc["processes"]["php-fpm-8-4"]["command"]
-            .as_str()
-            .unwrap();
-        assert!(cmd.contains("'/Users/me/Library/Application Support/PortBay/runtimes/php/8.4/sbin/php-fpm'"));
-        assert!(cmd.contains(" -y '/Users/me/Library/Application Support/PortBay/php/8.4/php-fpm.conf'"));
+        let cmd = doc["processes"]["php-fpm-8-4"]["command"].as_str().unwrap();
+        assert!(cmd.contains(
+            "'/Users/me/Library/Application Support/PortBay/runtimes/php/8.4/sbin/php-fpm'"
+        ));
+        assert!(cmd
+            .contains(" -y '/Users/me/Library/Application Support/PortBay/php/8.4/php-fpm.conf'"));
     }
 
     #[test]

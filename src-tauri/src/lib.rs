@@ -411,8 +411,9 @@ pub fn run() {
             // Regular, so we only act when the preference is off.
             #[cfg(target_os = "macos")]
             if !prefs.show_dock_icon {
-                if let Err(e) =
-                    app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory)
+                if let Err(e) = app
+                    .handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory)
                 {
                     tracing::warn!(error = %e, "failed to set accessory activation policy");
                 }

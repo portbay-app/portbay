@@ -180,7 +180,11 @@ async fn suppressed_routes(reg: &Registry, state: &AppState) -> HashSet<String> 
             if let Ok(v) = client.processes().await {
                 let procs: HashMap<String, Process> =
                     v.into_iter().map(|p| (p.name.clone(), p)).collect();
-                for p in reg.list_projects().iter().filter(|p| p.expose_when_running()) {
+                for p in reg
+                    .list_projects()
+                    .iter()
+                    .filter(|p| p.expose_when_running())
+                {
                     let down = match p.process_compose_id() {
                         None => false,
                         Some(pid) => !matches!(

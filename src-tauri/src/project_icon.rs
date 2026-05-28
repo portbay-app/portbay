@@ -81,15 +81,30 @@ fn detect_in_dirs(
 ) -> Option<IconData> {
     let same = app_dir == repo_root;
     match kind {
-        ProjectType::Xcode => detect_apple_icon(app_dir)
-            .or_else(|| if same { None } else { detect_apple_icon(repo_root) }),
-        ProjectType::Android => detect_android_icon(app_dir)
-            .or_else(|| if same { None } else { detect_android_icon(repo_root) }),
+        ProjectType::Xcode => detect_apple_icon(app_dir).or_else(|| {
+            if same {
+                None
+            } else {
+                detect_apple_icon(repo_root)
+            }
+        }),
+        ProjectType::Android => detect_android_icon(app_dir).or_else(|| {
+            if same {
+                None
+            } else {
+                detect_android_icon(repo_root)
+            }
+        }),
         // Flutter carries both an iOS asset catalogue and an Android res tree.
         ProjectType::Flutter => detect_apple_icon(app_dir).or_else(|| detect_android_icon(app_dir)),
         // Everything web-ish shares the same favicon search.
-        _ => detect_web_icon(app_dir, if same { document_root } else { None })
-            .or_else(|| if same { None } else { detect_web_icon(repo_root, document_root) }),
+        _ => detect_web_icon(app_dir, if same { document_root } else { None }).or_else(|| {
+            if same {
+                None
+            } else {
+                detect_web_icon(repo_root, document_root)
+            }
+        }),
     }
 }
 
@@ -599,9 +614,7 @@ mod tests {
     #[test]
     fn xcode_appiconset_uses_contents_json() {
         let dir = tempfile::tempdir().unwrap();
-        let set = dir
-            .path()
-            .join("MyApp/Assets.xcassets/AppIcon.appiconset");
+        let set = dir.path().join("MyApp/Assets.xcassets/AppIcon.appiconset");
         write(&set.join("icon-60@2x.png"), PNG_1X1);
         write(&set.join("icon-1024.png"), PNG_1X1);
         write(

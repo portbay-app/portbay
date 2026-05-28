@@ -612,7 +612,11 @@ pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
     // started); re-reconcile so Caddy drops their routes now instead of at the
     // next periodic tick. The status poller flips their badges to Stopped within
     // a tick off the same cleared session.
-    if registry.list_projects().iter().any(|p| p.is_static_served()) {
+    if registry
+        .list_projects()
+        .iter()
+        .any(|p| p.is_static_served())
+    {
         state.reconciler.mark_dirty();
     }
 

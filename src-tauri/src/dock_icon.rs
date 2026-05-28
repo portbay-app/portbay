@@ -30,7 +30,7 @@ pub fn apply() {
     {
         use objc2::{AnyThread, MainThreadMarker};
         use objc2_app_kit::{
-            NSApplication, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSImage,
+            NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSImage,
         };
         use objc2_foundation::{NSArray, NSData, NSProcessInfo};
 
@@ -41,7 +41,11 @@ pub fn apply() {
         // with `setApplicationIconImage` here would clobber it, so the runtime
         // swap is scoped to macOS 11–15, which has no Liquid Glass and shows
         // the static bundle icon. See icons/macos-liquid-glass/README.md.
-        if NSProcessInfo::processInfo().operatingSystemVersion().majorVersion >= 26 {
+        if NSProcessInfo::processInfo()
+            .operatingSystemVersion()
+            .majorVersion
+            >= 26
+        {
             return;
         }
 

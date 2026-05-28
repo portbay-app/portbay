@@ -42,17 +42,17 @@ use console::{style, Term};
 use std::net::Ipv4Addr;
 
 use portbay_lib::caddy::CertPaths;
+use portbay_lib::commands::projects::detect_kind;
 use portbay_lib::hosts::{HostsError, HostsManager};
 use portbay_lib::hosts_helper::HostsHelperClient;
 use portbay_lib::process_compose::{
     PcClient, Process, ProjectStatus, DEFAULT_PORT as PC_DEFAULT_PORT,
 };
-use portbay_lib::commands::projects::detect_kind;
+use portbay_lib::registry::workspace as workspace_detect;
 use portbay_lib::registry::{
     self, store, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, Group, Project, ProjectId,
     ProjectType, Readiness, Registry, SandboxNetworkPolicy, WorkspaceTool,
 };
-use portbay_lib::registry::workspace as workspace_detect;
 
 /// Domain suffix used when no registry exists yet. Kept in sync with the
 /// GUI's `lib.rs::DEFAULT_DOMAIN_SUFFIX` so the CLI and app agree.
@@ -1851,10 +1851,7 @@ async fn cmd_tunnel(ctx: &CliContext, sub: TunnelCmd) -> Result<ExitCode, CliErr
                     Some(false) => style("origin unreachable").yellow(),
                     None => style("origin unknown").dim(),
                 };
-                let public = t
-                    .public_url
-                    .as_deref()
-                    .unwrap_or("(assigning…)");
+                let public = t.public_url.as_deref().unwrap_or("(assigning…)");
                 ctx.term
                     .write_line(&format!(
                         "  {running_badge} {id:<id_w$}  {pub_url}  {origin}",
@@ -1887,10 +1884,7 @@ async fn cmd_tunnel(ctx: &CliContext, sub: TunnelCmd) -> Result<ExitCode, CliErr
                     } else {
                         style("○").dim()
                     };
-                    let public = t
-                        .public_url
-                        .as_deref()
-                        .unwrap_or("(assigning…)");
+                    let public = t.public_url.as_deref().unwrap_or("(assigning…)");
                     ctx.term
                         .write_line(&format!(
                             "  {running_badge} {}  {}",
@@ -2017,7 +2011,11 @@ async fn cmd_runtime(ctx: &CliContext, sub: RuntimeCmd) -> Result<ExitCode, CliE
             }
         }
 
-        RuntimeCmd::SetDefault { lang, version, clear } => {
+        RuntimeCmd::SetDefault {
+            lang,
+            version,
+            clear,
+        } => {
             // If --clear is set or no version provided, remove the default.
             let effective_version: Option<String> = if clear {
                 None
@@ -2035,9 +2033,8 @@ async fn cmd_runtime(ctx: &CliContext, sub: RuntimeCmd) -> Result<ExitCode, CliE
                 // Validate the version is currently detected.
                 let views = runtimes::list_all(&reg.runtimes);
                 let lang_view = views.iter().find(|lv| lv.id == lang);
-                let version_known = lang_view.is_some_and(|lv| {
-                    lv.versions.iter().any(|vv| vv.install.version == *v)
-                });
+                let version_known = lang_view
+                    .is_some_and(|lv| lv.versions.iter().any(|vv| vv.install.version == *v));
                 if !version_known {
                     return Err(CliError::BadInput(format!(
                         "version `{v}` is not currently detected for `{lang}` \
@@ -2061,17 +2058,23 @@ async fn cmd_runtime(ctx: &CliContext, sub: RuntimeCmd) -> Result<ExitCode, CliE
                 );
             } else {
                 match effective_version {
-                    Some(v) => ctx.term.write_line(&format!(
-                        "{} default for {} set to {}",
-                        style("\u{2713}").green(),
-                        style(&lang).bold(),
-                        style(&v).bold(),
-                    )).ok(),
-                    None => ctx.term.write_line(&format!(
-                        "{} default for {} cleared",
-                        style("\u{2713}").green(),
-                        style(&lang).bold(),
-                    )).ok(),
+                    Some(v) => ctx
+                        .term
+                        .write_line(&format!(
+                            "{} default for {} set to {}",
+                            style("\u{2713}").green(),
+                            style(&lang).bold(),
+                            style(&v).bold(),
+                        ))
+                        .ok(),
+                    None => ctx
+                        .term
+                        .write_line(&format!(
+                            "{} default for {} cleared",
+                            style("\u{2713}").green(),
+                            style(&lang).bold(),
+                        ))
+                        .ok(),
                 };
             }
         }
@@ -2113,16 +2116,18 @@ async fn cmd_runtime(ctx: &CliContext, sub: RuntimeCmd) -> Result<ExitCode, CliE
                 let lang_view = views.iter().find(|lv| lv.id == lang);
                 let out: Vec<serde_json::Value> = lang_view
                     .into_iter()
-                    .map(|lv| serde_json::json!({
-                        "id": lv.id,
-                        "display_name": lv.display_name,
-                        "default_version": lv.default_version,
-                        "versions": lv.versions.iter().map(|vv| serde_json::json!({
-                            "version": vv.install.version,
-                            "source": runtimes::source_label(vv.install.source),
-                            "binary": vv.install.binary.to_string_lossy(),
-                        })).collect::<Vec<_>>(),
-                    }))
+                    .map(|lv| {
+                        serde_json::json!({
+                            "id": lv.id,
+                            "display_name": lv.display_name,
+                            "default_version": lv.default_version,
+                            "versions": lv.versions.iter().map(|vv| serde_json::json!({
+                                "version": vv.install.version,
+                                "source": runtimes::source_label(vv.install.source),
+                                "binary": vv.install.binary.to_string_lossy(),
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
@@ -2371,7 +2376,8 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
                 auto_start: args.auto_start,
                 linked_projects: vec![],
             };
-            reg.add_database(instance.clone()).map_err(CliError::Registry)?;
+            reg.add_database(instance.clone())
+                .map_err(CliError::Registry)?;
             ctx.save_registry(&reg)?;
             if ctx.json {
                 println!(
@@ -2446,7 +2452,10 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
 
         DbCmd::Link { id, project_id } => {
             let mut reg = ctx.load_registry()?;
-            if reg.get_project(&ProjectId::new(project_id.clone())).is_none() {
+            if reg
+                .get_project(&ProjectId::new(project_id.clone()))
+                .is_none()
+            {
                 return Err(CliError::ProjectNotFound(project_id));
             }
             let pid = ProjectId::new(project_id.clone());
@@ -2637,7 +2646,9 @@ async fn cmd_dns(ctx: &CliContext, sub: DnsCmd) -> Result<ExitCode, CliError> {
             ctx.term
                 .write_line(&format!(
                     "  dnsmasq:  cache={} ttl={} no-negcache={}",
-                    reg.dnsmasq.cache_size, reg.dnsmasq.local_ttl, reg.dnsmasq.disable_negative_cache
+                    reg.dnsmasq.cache_size,
+                    reg.dnsmasq.local_ttl,
+                    reg.dnsmasq.disable_negative_cache
                 ))
                 .ok();
         }
@@ -2764,7 +2775,11 @@ async fn cmd_sandbox(ctx: &CliContext, sub: SandboxCmd) -> Result<ExitCode, CliE
             }
             let available = sandbox::is_available();
             let cap = entitlements::current().entitlements.max_sandbox_projects();
-            let enabled_count = reg.projects.iter().filter(|p| sandbox::is_enabled(p)).count();
+            let enabled_count = reg
+                .projects
+                .iter()
+                .filter(|p| sandbox::is_enabled(p))
+                .count();
             let rows: Vec<&Project> = reg
                 .projects
                 .iter()
@@ -2798,11 +2813,17 @@ async fn cmd_sandbox(ctx: &CliContext, sub: SandboxCmd) -> Result<ExitCode, CliE
                 return Ok(ExitCode::SUCCESS);
             }
 
-            let cap_str = cap.map(|c| c.to_string()).unwrap_or_else(|| "unlimited".into());
+            let cap_str = cap
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unlimited".into());
             ctx.term
                 .write_line(&format!(
                     "  sandbox-exec: {}",
-                    if available { "available" } else { "unavailable" }
+                    if available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    }
                 ))
                 .ok();
             ctx.term
@@ -2810,7 +2831,11 @@ async fn cmd_sandbox(ctx: &CliContext, sub: SandboxCmd) -> Result<ExitCode, CliE
                 .ok();
             for p in rows {
                 let on = sandbox::is_enabled(p);
-                let badge = if on { style("●").green() } else { style("○").dim() };
+                let badge = if on {
+                    style("●").green()
+                } else {
+                    style("○").dim()
+                };
                 let detail = if on {
                     let cfg = sandbox::config(p);
                     style(format!(
@@ -2823,7 +2848,10 @@ async fn cmd_sandbox(ctx: &CliContext, sub: SandboxCmd) -> Result<ExitCode, CliE
                     style("off".to_string()).dim()
                 };
                 ctx.term
-                    .write_line(&format!("  {badge} {} {detail}", style(p.id.as_str()).bold()))
+                    .write_line(&format!(
+                        "  {badge} {} {detail}",
+                        style(p.id.as_str()).bold()
+                    ))
                     .ok();
             }
         }
@@ -2896,7 +2924,10 @@ async fn cmd_sandbox(ctx: &CliContext, sub: SandboxCmd) -> Result<ExitCode, CliE
                 } else {
                     cli_say(
                         ctx,
-                        &format!("sandboxed {} (network={net}, ephemeral={ephemeral})", args.id),
+                        &format!(
+                            "sandboxed {} (network={net}, ephemeral={ephemeral})",
+                            args.id
+                        ),
                     );
                     ctx.term
                         .write_line(&format!(
@@ -3060,10 +3091,10 @@ async fn cmd_detect(ctx: &CliContext, path: &str, apps: bool) -> Result<ExitCode
                 ctx.term
                     .write_line(&format!(
                         "  {id}  {host}  {kind}{cmd}",
-                        id   = style(app["suggested_id"].as_str().unwrap_or("")).bold(),
+                        id = style(app["suggested_id"].as_str().unwrap_or("")).bold(),
                         host = style(app["suggested_hostname"].as_str().unwrap_or("")).dim(),
                         kind = style(app["kind"].as_str().unwrap_or("")).dim(),
-                        cmd  = app["suggested_start_command"]
+                        cmd = app["suggested_start_command"]
                             .as_str()
                             .map(|c| format!("  ({})", style(c).dim()))
                             .unwrap_or_default(),
@@ -3107,10 +3138,7 @@ async fn cmd_detect(ctx: &CliContext, path: &str, apps: bool) -> Result<ExitCode
                 ))
                 .ok();
             ctx.term
-                .write_line(&format!(
-                    "  hostname:  {}",
-                    style(&hostname).dim()
-                ))
+                .write_line(&format!("  hostname:  {}", style(&hostname).dim()))
                 .ok();
             if let Some(port) = detected.port {
                 ctx.term
@@ -3152,8 +3180,7 @@ async fn cmd_group(ctx: &CliContext, sub: GroupCmd) -> Result<ExitCode, CliError
                 .list_groups()
                 .iter()
                 .map(|g| {
-                    let project_ids: Vec<&str> =
-                        g.projects.iter().map(|id| id.as_str()).collect();
+                    let project_ids: Vec<&str> = g.projects.iter().map(|id| id.as_str()).collect();
                     let known_ids: Vec<&str> = project_ids
                         .iter()
                         .filter(|id| known.contains(*id))
@@ -3219,8 +3246,7 @@ async fn cmd_group(ctx: &CliContext, sub: GroupCmd) -> Result<ExitCode, CliError
             if ctx.json {
                 let known: std::collections::HashSet<&str> =
                     reg.list_projects().iter().map(|p| p.id.as_str()).collect();
-                let project_ids: Vec<&str> =
-                    group.projects.iter().map(|id| id.as_str()).collect();
+                let project_ids: Vec<&str> = group.projects.iter().map(|id| id.as_str()).collect();
                 let known_ids: Vec<&str> = project_ids
                     .iter()
                     .filter(|id| known.contains(*id))
@@ -3267,15 +3293,13 @@ async fn cmd_group(ctx: &CliContext, sub: GroupCmd) -> Result<ExitCode, CliError
                     args.projects.into_iter().map(ProjectId::new).collect()
                 },
             };
-            reg.update_group(next.clone())
-                .map_err(CliError::Registry)?;
+            reg.update_group(next.clone()).map_err(CliError::Registry)?;
             ctx.save_registry(&reg)?;
 
             if ctx.json {
                 let known: std::collections::HashSet<&str> =
                     reg.list_projects().iter().map(|p| p.id.as_str()).collect();
-                let project_ids: Vec<&str> =
-                    next.projects.iter().map(|id| id.as_str()).collect();
+                let project_ids: Vec<&str> = next.projects.iter().map(|id| id.as_str()).collect();
                 let known_ids: Vec<&str> = project_ids
                     .iter()
                     .filter(|id| known.contains(*id))
@@ -3615,7 +3639,10 @@ async fn cmd_cert(ctx: &CliContext, sub: CertCmd) -> Result<ExitCode, CliError> 
                 return Ok(ExitCode::SUCCESS);
             }
             if infos.is_empty() {
-                let scope = id.as_deref().map(|i| format!("for {i} ")).unwrap_or_default();
+                let scope = id
+                    .as_deref()
+                    .map(|i| format!("for {i} "))
+                    .unwrap_or_default();
                 ctx.term
                     .write_line(&format!(
                         "{} No certificate {scope}issued yet. Start an HTTPS project so the app mints one.",
@@ -3636,7 +3663,11 @@ async fn cmd_cert(ctx: &CliContext, sub: CertCmd) -> Result<ExitCode, CliError> 
                     .ok();
                 if !c.sans.is_empty() {
                     ctx.term
-                        .write_line(&format!("    {} {}", style("SANs:").dim(), c.sans.join(", ")))
+                        .write_line(&format!(
+                            "    {} {}",
+                            style("SANs:").dim(),
+                            c.sans.join(", ")
+                        ))
                         .ok();
                 }
                 ctx.term
@@ -3810,8 +3841,8 @@ async fn cmd_import(ctx: &CliContext, sub: ImportCmd) -> Result<ExitCode, CliErr
             } else {
                 ids
             };
-            let result =
-                import::import_selected(src, &ids, &mut reg).map_err(|e| CliError::Other(e.to_string()))?;
+            let result = import::import_selected(src, &ids, &mut reg)
+                .map_err(|e| CliError::Other(e.to_string()))?;
             if !result.imported.is_empty() {
                 ctx.save_registry(&reg)?;
             }
@@ -4092,7 +4123,13 @@ mod tests {
     #[test]
     fn cli_parses_requests_recent_with_filters_and_clear() {
         let cli = Cli::try_parse_from([
-            "portbay", "requests", "recent", "--limit", "50", "--project", "blog",
+            "portbay",
+            "requests",
+            "recent",
+            "--limit",
+            "50",
+            "--project",
+            "blog",
         ])
         .unwrap();
         let Some(Cmd::Requests(RequestsCmd::Recent { limit, project })) = cli.cmd else {
@@ -4185,9 +4222,8 @@ mod tests {
 
     #[test]
     fn cli_parses_group_create_with_explicit_id() {
-        let cli =
-            Cli::try_parse_from(["portbay", "group", "create", "Dev", "--id", "dev-group"])
-                .unwrap();
+        let cli = Cli::try_parse_from(["portbay", "group", "create", "Dev", "--id", "dev-group"])
+            .unwrap();
         let Some(Cmd::Group(GroupCmd::Create(args))) = cli.cmd else {
             panic!("expected Group::Create")
         };
@@ -4217,8 +4253,7 @@ mod tests {
 
     #[test]
     fn cli_parses_group_remove() {
-        let cli =
-            Cli::try_parse_from(["portbay", "group", "remove", "old-group"]).unwrap();
+        let cli = Cli::try_parse_from(["portbay", "group", "remove", "old-group"]).unwrap();
         let Some(Cmd::Group(GroupCmd::Remove { id })) = cli.cmd else {
             panic!("expected Group::Remove")
         };
@@ -4228,8 +4263,7 @@ mod tests {
     #[test]
     fn cli_parses_group_start_stop_restart() {
         for verb in ["start", "stop", "restart"] {
-            let cli =
-                Cli::try_parse_from(["portbay", "group", verb, "g1"]).unwrap();
+            let cli = Cli::try_parse_from(["portbay", "group", verb, "g1"]).unwrap();
             assert!(matches!(
                 cli.cmd,
                 Some(Cmd::Group(
@@ -4257,13 +4291,15 @@ mod tests {
     #[test]
     fn cli_parses_runtime_list() {
         let cli = Cli::try_parse_from(["portbay", "runtime", "list"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Runtime(RuntimeCmd::List { lang: None }))));
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Runtime(RuntimeCmd::List { lang: None }))
+        ));
     }
 
     #[test]
     fn cli_parses_runtime_list_with_lang_filter() {
-        let cli =
-            Cli::try_parse_from(["portbay", "runtime", "list", "--lang", "php"]).unwrap();
+        let cli = Cli::try_parse_from(["portbay", "runtime", "list", "--lang", "php"]).unwrap();
         let Some(Cmd::Runtime(RuntimeCmd::List { lang })) = cli.cmd else {
             panic!("expected Runtime::List")
         };
@@ -4272,11 +4308,13 @@ mod tests {
 
     #[test]
     fn cli_parses_runtime_set_default() {
-        let cli = Cli::try_parse_from([
-            "portbay", "runtime", "set-default", "node", "20",
-        ])
-        .unwrap();
-        let Some(Cmd::Runtime(RuntimeCmd::SetDefault { lang, version, clear })) = cli.cmd else {
+        let cli = Cli::try_parse_from(["portbay", "runtime", "set-default", "node", "20"]).unwrap();
+        let Some(Cmd::Runtime(RuntimeCmd::SetDefault {
+            lang,
+            version,
+            clear,
+        })) = cli.cmd
+        else {
             panic!("expected Runtime::SetDefault")
         };
         assert_eq!(lang, "node");
@@ -4286,10 +4324,8 @@ mod tests {
 
     #[test]
     fn cli_parses_runtime_set_default_clear_flag() {
-        let cli = Cli::try_parse_from([
-            "portbay", "runtime", "set-default", "php", "--clear",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["portbay", "runtime", "set-default", "php", "--clear"]).unwrap();
         let Some(Cmd::Runtime(RuntimeCmd::SetDefault { lang, clear, .. })) = cli.cmd else {
             panic!("expected Runtime::SetDefault")
         };
@@ -4300,7 +4336,11 @@ mod tests {
     #[test]
     fn cli_parses_runtime_add_path() {
         let cli = Cli::try_parse_from([
-            "portbay", "runtime", "add-path", "node", "/usr/local/bin/node",
+            "portbay",
+            "runtime",
+            "add-path",
+            "node",
+            "/usr/local/bin/node",
         ])
         .unwrap();
         let Some(Cmd::Runtime(RuntimeCmd::AddPath { lang, path })) = cli.cmd else {
@@ -4312,10 +4352,7 @@ mod tests {
 
     #[test]
     fn cli_parses_runtime_remove_path() {
-        let cli = Cli::try_parse_from([
-            "portbay", "runtime", "remove-path", "php", "8.3",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["portbay", "runtime", "remove-path", "php", "8.3"]).unwrap();
         let Some(Cmd::Runtime(RuntimeCmd::RemovePath { lang, version })) = cli.cmd else {
             panic!("expected Runtime::RemovePath")
         };
