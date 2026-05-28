@@ -728,6 +728,19 @@
         />
       </div>
       <div class="flex items-center justify-between gap-3 py-2.5">
+        <div class="min-w-0">
+          <span class="text-[13px] text-fg">Show icon in the Dock</span>
+          <p class="text-[12px] text-fg-subtle mt-0.5">
+            When off, PortBay stays in the menu bar only — no Dock icon.
+          </p>
+        </div>
+        <Toggle
+          checked={preferences.value.showDockIcon}
+          label="Show icon in the Dock"
+          onchange={(v) => preferences.update({ showDockIcon: v })}
+        />
+      </div>
+      <div class="flex items-center justify-between gap-3 py-2.5">
         <span class="text-[13px] text-fg">Reopen previous projects on launch</span>
         <Toggle
           checked={preferences.value.reopenPreviousProjects}

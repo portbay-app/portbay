@@ -81,6 +81,40 @@ pub async fn set_preferences(
         }
     }
 
+    // Dock-icon visibility toggle. Regular = icon in the Dock; Accessory =
+    // no Dock tile, menu-bar tray only.
+    //
+    // AppKit's `setActivationPolicy:` / `setApplicationIconImage:` must run on
+    // the main thread, but Tauri command handlers run on a worker thread —
+    // calling them here directly was unreliable (the flip only "took" after the
+    // main loop next pumped) and left the icon unset (our main-thread guard
+    // bailed). So marshal the policy change onto the main thread, and re-skin
+    // the icon on the main thread *after a short beat*: the new Dock tile
+    // doesn't exist the instant the policy flips, so an immediate
+    // `applicationIconImage` set is dropped and the tile shows the default icon.
+    #[cfg(target_os = "macos")]
+    if previous.show_dock_icon != prefs.show_dock_icon {
+        let show = prefs.show_dock_icon;
+        let app_policy = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let policy = if show {
+                tauri::ActivationPolicy::Regular
+            } else {
+                tauri::ActivationPolicy::Accessory
+            };
+            if let Err(e) = app_policy.set_activation_policy(policy) {
+                tracing::warn!(error = %e, "failed to update Dock activation policy");
+            }
+        });
+        if show {
+            let app_icon = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                let _ = app_icon.run_on_main_thread(crate::dock_icon::apply);
+            });
+        }
+    }
+
     // Previously a dead toggle. Now installs/removes a per-user LaunchAgent so
     // PortBay actually opens at login.
     if previous.launch_at_login != prefs.launch_at_login {

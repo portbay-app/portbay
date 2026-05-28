@@ -95,6 +95,15 @@ rmcp = { version = "1.7", features = [
     "schemars",
 ], optional = true }
 
+# Appearance-aware Dock icon (`crate::dock_icon`): swap NSApplication's
+# applicationIconImage to a light/dark variant on theme change. These crates
+# are already in the dependency tree transitively (via Tauri); pinned here so
+# the AppKit call site is explicit. macOS-only.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSArray", "NSString", "NSProcessInfo"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSAppearance"] }
+
 [dev-dependencies]
 tempfile = "3"
 

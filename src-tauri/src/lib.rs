@@ -5,6 +5,7 @@ pub mod caddy;
 pub mod commands;
 pub mod databases;
 pub mod dnsmasq;
+pub mod dock_icon;
 pub mod domain;
 pub mod entitlements;
 pub mod error;
@@ -369,6 +370,21 @@ pub fn run() {
             // (Windows Mica placeholder, Linux unchanged). See `crate::vibrancy`.
             if let Some(main_win) = app.get_webview_window("main") {
                 crate::vibrancy::apply_main(&main_win);
+                // Reveal the window from Rust, *after* vibrancy is in place. It's
+                // created hidden (`visible: false`) so the blur material is set
+                // before it appears; doing the reveal here — rather than relying
+                // on the frontend calling `.show()` — guarantees the window opens
+                // on launch even if the webview is slow or errors. Previously a
+                // failed frontend reveal left the window openable only via the
+                // tray.
+                let _ = main_win.show();
+                let _ = main_win.set_focus();
+
+                // Appearance-aware Dock icon: match the current Light/Dark
+                // appearance now (read from NSApplication.effectiveAppearance),
+                // and keep it in sync on the ThemeChanged window event below.
+                // See `crate::dock_icon`.
+                crate::dock_icon::apply();
             }
             if let Some(tray_panel) = app.get_webview_window("tray-panel") {
                 crate::vibrancy::apply_tray_panel(&tray_panel);
@@ -385,6 +401,19 @@ pub fn run() {
             if prefs.show_tray_icon {
                 if let Err(e) = crate::tray::install(app.handle()) {
                     tracing::warn!(error = %e, "menu-bar tray failed to initialise");
+                }
+            }
+
+            // Dock-icon visibility: default Regular (icon in the Dock). If the
+            // user turned it off, run as an Accessory — no Dock tile, present
+            // only in the menu-bar tray. The default `tauri.conf.json` policy is
+            // Regular, so we only act when the preference is off.
+            #[cfg(target_os = "macos")]
+            if !prefs.show_dock_icon {
+                if let Err(e) =
+                    app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory)
+                {
+                    tracing::warn!(error = %e, "failed to set accessory activation policy");
                 }
             }
             Ok(())
@@ -433,6 +462,11 @@ pub fn run() {
                     // other is a no-op.
                     let state: tauri::State<AppState> = window.state();
                     state.shutdown_all();
+                }
+                tauri::WindowEvent::ThemeChanged(_) => {
+                    // System appearance flipped — re-skin the Dock icon to the
+                    // matching light/dark variant. See `crate::dock_icon`.
+                    crate::dock_icon::apply();
                 }
                 _ => {}
             }
@@ -577,6 +611,27 @@ pub fn run() {
             // `shutdown_all` is idempotent, so firing from both is safe.
             if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
                 app_handle.state::<AppState>().shutdown_all();
+            }
+
+            // Re-assert the appearance-aware Dock icon once the app has fully
+            // launched. Tauri sets the bundle icon during startup (after our
+            // `setup` hook), so applying here — after Ready — is what actually
+            // sticks on the live Dock tile. See `crate::dock_icon`.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Ready = event {
+                crate::dock_icon::apply();
+            }
+
+            // Dock-icon click (macOS) → reveal + focus the main window. Without
+            // this, "close to menu bar" (or any hidden state) left clicking the
+            // Dock icon doing nothing — the user could only reopen via the tray.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(win) = app_handle.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
             }
         });
 }

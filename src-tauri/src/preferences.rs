@@ -36,6 +36,13 @@ pub struct Preferences {
     #[serde(default = "default_true")]
     pub show_tray_icon: bool,
 
+    /// When true, PortBay shows its icon in the macOS Dock (the regular
+    /// activation policy). When false, the app runs as an accessory — no
+    /// Dock tile, present only in the menu-bar tray. On by default; toggled
+    /// at runtime via `NSApplication`'s activation policy. macOS-only.
+    #[serde(default = "default_true")]
+    pub show_dock_icon: bool,
+
     /// When true, clicking the window's close button hides the window
     /// instead of exiting the app. The tray-menu's "Quit PortBay" item
     /// (and ⌘Q in the app menu) remain the only ways to actually exit.
@@ -197,6 +204,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             show_tray_icon: true,
+            show_dock_icon: true,
             close_to_menu_bar: true,
             close_to_menu_bar_toast_seen: false,
             telemetry_enabled: false,
@@ -304,6 +312,7 @@ mod tests {
     fn round_trip_camel_case() {
         let p = Preferences {
             show_tray_icon: false,
+            show_dock_icon: true,
             close_to_menu_bar: true,
             close_to_menu_bar_toast_seen: true,
             telemetry_enabled: true,
@@ -329,6 +338,7 @@ mod tests {
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"showTrayIcon\":false"));
+        assert!(json.contains("\"showDockIcon\":true"));
         assert!(json.contains("\"earlyAccessOptIn\":true"));
         assert!(json.contains("\"closeToMenuBar\":true"));
         assert!(json.contains("\"launchAtLogin\":true"));

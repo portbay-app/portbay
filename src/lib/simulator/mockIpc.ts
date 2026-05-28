@@ -52,6 +52,7 @@ export function installSimulatorIpcBrowser(payload: {
   // page's "Set as default" and Settings toggles reflect within the session.
   const prefs: Record<string, unknown> = {
     showTrayIcon: true,
+    showDockIcon: true,
     closeToMenuBar: true,
     closeToMenuBarToastSeen: true,
     telemetryEnabled: false,

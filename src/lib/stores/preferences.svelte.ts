@@ -28,6 +28,9 @@ export type AutoCleanSchedule = "off" | "weekly" | "monthly";
 export interface Preferences {
   /** Install the menu-bar tray icon at launch. */
   showTrayIcon: boolean;
+  /** Show PortBay's icon in the Dock. When false, the app runs as a
+   * menu-bar-only accessory (no Dock tile). macOS-only. */
+  showDockIcon: boolean;
   /** When true, closing the window hides instead of quits the app. */
   closeToMenuBar: boolean;
   /** Internal: the one-time "still running" toast has been shown. */
@@ -74,6 +77,7 @@ export interface Preferences {
 
 const DEFAULTS: Preferences = {
   showTrayIcon: true,
+  showDockIcon: true,
   closeToMenuBar: true,
   closeToMenuBarToastSeen: false,
   telemetryEnabled: false,
