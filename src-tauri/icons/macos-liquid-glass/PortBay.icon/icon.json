@@ -1,0 +1,38 @@
+{
+  "fill" : {
+    "solid" : "display-p3:0.87192,0.90958,0.96783,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "portbay-logo.png",
+          "name" : "portbay-logo",
+          "position" : {
+            "scale" : 1.9,
+            "translation-in-points" : [
+              -0.4453125,
+              -9.5234375
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

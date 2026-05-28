@@ -101,6 +101,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/private_keys"
           printf '%s' "${{ secrets.APPLE_API_KEY_P8 }}" > "$RUNNER_TEMP/private_keys/AuthKey.p8"
 
+      # Bake the macOS 26 Liquid Glass icon (Icon Composer) into the bundle
+      # BEFORE Tauri signs/notarises. Non-fatal: if no compiled Assets.car is
+      # committed and this runner lacks Xcode 26, it logs a warning and the
+      # build ships the icon.icns fallback. See
+      # src-tauri/icons/macos-liquid-glass/README.md.
+      - name: Bake macOS 26 Liquid Glass icon (pre-build)
+        run: bash scripts/prepare-macos-liquid-glass-icon.sh
+
       - name: Build signed app
         env:
           # Developer ID Application cert (base64-encoded .p12), unwrapped
