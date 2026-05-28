@@ -7,6 +7,7 @@
 //! known upstream constraint, called out in the kanban Outcome.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tauri::AppHandle;
 
@@ -14,6 +15,14 @@ use crate::process_compose;
 use crate::reconciler::report::StepOutcome;
 use crate::registry::Registry;
 use crate::state::AppState;
+
+/// How long to wait for a freshly-rebooted process-compose to report live
+/// before giving up and letting the tick continue. PC parses its YAML in a
+/// few hundred ms; 5 s is generous headroom on a busy machine. Mirrors
+/// `CADDY_READINESS_TIMEOUT`.
+const PC_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Poll cadence while waiting for the rebooted daemon's `/live` to answer 200.
+const PC_READINESS_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Default)]
 pub(super) struct PcCache {
@@ -69,6 +78,31 @@ pub(super) async fn reconcile(
     state.shutdown_pc();
     if let Err(e) = state.boot_pc(app, yaml_path) {
         return StepOutcome::failed(format!("boot pc: {e}"));
+    }
+
+    // `boot_pc` returns the moment the child is spawned, but process-compose
+    // needs a beat to parse the YAML and register its processes before the REST
+    // API will accept `/process/start/{name}` — until then it answers those with
+    // `400 no such process`. Every start path (`start_project`,
+    // `start_project_sandboxed`, `restart_project`, `force_start_project`) awaits
+    // this tick *before* issuing the start, so blocking here until the daemon is
+    // live makes "PC is serving the new YAML" the tick's postcondition and closes
+    // the reboot→start race. Mirrors the readiness poll `boot_caddy` already does
+    // for the identical reason. On timeout we proceed anyway: a genuinely failed
+    // PC will surface a precise error on the subsequent start call rather than
+    // wedging the whole reconcile (which also drives Caddy, hosts, and dnsmasq).
+    if let Ok(client) = state.pc_client() {
+        let deadline = std::time::Instant::now() + PC_READINESS_TIMEOUT;
+        while !client.live().await.unwrap_or(false) {
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    target: "reconciler",
+                    "process-compose did not report live within {PC_READINESS_TIMEOUT:?} after reboot"
+                );
+                break;
+            }
+            tokio::time::sleep(PC_READINESS_POLL).await;
+        }
     }
 
     cache.last_applied = Some(hash);
