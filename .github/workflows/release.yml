@@ -125,6 +125,34 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --target aarch64-apple-darwin
 
+      # Tauri notarizes + staples the .app, then wraps it in a DMG it signs but
+      # does NOT notarize. A quarantined DMG download then trips Gatekeeper at
+      # mount ("unnotarized Developer ID"). Notarize + staple the DMG itself so
+      # the downloaded artifact clears Gatekeeper. Must run before the artifact
+      # upload below so the stapled DMG is what ships and what the Homebrew
+      # cask SHA-256 is computed from. Reuses the .p8 materialised above.
+      - name: Notarize and staple the DMG
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/private_keys/AuthKey.p8
+        run: |
+          set -euo pipefail
+          dmg="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' | head -n 1)"
+          if [ -z "$dmg" ]; then
+            echo "::error::No .dmg produced by the build; cannot notarize."
+            exit 1
+          fi
+          echo "Notarizing $dmg"
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl -a -t open --context context:primary-signature -vv "$dmg"
+
       # Guards the "<100 MB installer" positioning claim (docs/ARCHITECTURE.md
       # bundle-size budget; baseline ~77 MB). A regression — a stray dependency,
       # an un-stripped binary, an extra bundled sidecar — fails the release here
