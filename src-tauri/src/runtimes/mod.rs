@@ -551,6 +551,32 @@ pub fn resolve_binary(
         .map(|install| install.binary)
 }
 
+/// Resolve the newest PortBay-managed Node binary from the registry. Returns
+/// `None` when no managed Node is installed; callers fall back to neutral
+/// detected installs in that case.
+pub fn resolve_default_node(settings: &crate::registry::RuntimeSettings) -> Option<PathBuf> {
+    let mut candidates: Vec<_> = settings
+        .managed
+        .iter()
+        .filter(|m| m.lang == "node")
+        .collect();
+    // Sort descending by version string (good enough for semver-ish labels).
+    candidates.sort_by(|a, b| b.version.cmp(&a.version));
+    candidates.into_iter().next().map(|m| m.binary.clone())
+}
+
+/// Return the `corepack` sibling binary next to a resolved Node binary, or
+/// `None` when it doesn't exist (neutral install that ships without corepack).
+pub fn corepack_sibling(node_bin: &std::path::Path) -> Option<PathBuf> {
+    let bin_dir = node_bin.parent()?;
+    let corepack = bin_dir.join("corepack");
+    if corepack.is_file() || corepack.exists() {
+        Some(corepack)
+    } else {
+        None
+    }
+}
+
 pub fn version_matches(installed: &str, requested: &str) -> bool {
     installed == requested
         || installed.starts_with(&format!("{requested}."))
@@ -819,5 +845,68 @@ mod tests {
         assert!(out.contains("GOFLAGS=-mod=vendor")); // value with '=' survives
         assert!(out.contains("GOPROXY=https://proxy/"));
         assert!(!out.contains("GOPATH=")); // removed (both occurrences)
+    }
+
+    #[test]
+    fn resolve_default_node_returns_newest_managed_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_22 = tmp.path().join("node-22/bin/node");
+        let bin_20 = tmp.path().join("node-20/bin/node");
+        std::fs::create_dir_all(bin_22.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(bin_20.parent().unwrap()).unwrap();
+        std::fs::write(&bin_22, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&bin_20, b"#!/bin/sh\n").unwrap();
+        let settings = crate::registry::RuntimeSettings {
+            managed: vec![
+                crate::registry::ManagedRuntime {
+                    lang: "node".into(),
+                    version: "20.0.0".into(),
+                    binary: bin_20.clone(),
+                    arch: download::manifest::current_arch().into(),
+                },
+                crate::registry::ManagedRuntime {
+                    lang: "node".into(),
+                    version: "22.14.0".into(),
+                    binary: bin_22.clone(),
+                    arch: download::manifest::current_arch().into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let resolved = resolve_default_node(&settings);
+        assert_eq!(
+            resolved.as_deref(),
+            Some(bin_22.as_path()),
+            "newest managed node version must be selected"
+        );
+    }
+
+    #[test]
+    fn resolve_default_node_returns_none_when_no_managed_node() {
+        let settings = crate::registry::RuntimeSettings::default();
+        assert!(
+            resolve_default_node(&settings).is_none(),
+            "should return None when no managed Node is installed"
+        );
+    }
+
+    #[test]
+    fn corepack_sibling_returns_some_when_file_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = tmp.path().join("bin/node");
+        let corepack = tmp.path().join("bin/corepack");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(&node, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&corepack, b"#!/bin/sh\n").unwrap();
+        assert_eq!(corepack_sibling(&node).as_deref(), Some(corepack.as_path()));
+    }
+
+    #[test]
+    fn corepack_sibling_returns_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = tmp.path().join("bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(&node, b"#!/bin/sh\n").unwrap();
+        assert!(corepack_sibling(&node).is_none());
     }
 }

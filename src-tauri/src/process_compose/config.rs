@@ -412,8 +412,8 @@ fn project_to_pc_process(
         Some(cmd) => cmd.clone(),
         None => p.workspace.as_ref().map(|ws| ws.derive_dev_command())?,
     };
+    let data_dir = logs_dir.parent().unwrap_or(logs_dir);
     if crate::sandbox::is_enabled(p) {
-        let data_dir = logs_dir.parent().unwrap_or(logs_dir);
         command = crate::sandbox::wrap_command(data_dir, p, &command);
     }
 
@@ -448,7 +448,7 @@ fn project_to_pc_process(
     for (k, v) in &p.env {
         environment.insert(k.clone(), v.clone());
     }
-    inject_runtime_path(p, runtimes, &mut environment);
+    inject_runtime_path(p, data_dir, runtimes, &mut environment);
     if crate::sandbox::is_enabled(p) {
         environment.insert("PORTBAY_SANDBOX".into(), "1".into());
         environment.insert(
@@ -478,11 +478,87 @@ fn project_to_pc_process(
     })
 }
 
+/// Returns true when the project's kind maps to the "node" language family
+/// (Next.js, Vite, plain Node). Used to decide whether to apply the
+/// sandboxed-node minimal-PATH branch.
+fn is_node_type(p: &Project) -> bool {
+    use crate::registry::ProjectType;
+    matches!(
+        p.kind,
+        ProjectType::Next | ProjectType::Vite | ProjectType::Node
+    )
+}
+
 fn inject_runtime_path(
     p: &Project,
+    data_dir: &Path,
     runtimes: &RuntimeSettings,
     environment: &mut BTreeMap<String, String>,
 ) {
+    // Sandboxed node-type projects get a minimal, fixed PATH so the RUN phase
+    // never inherits the login-shell PATH or a competitor's binaries. The
+    // managed Node binary (or a fallback to the pinned runtime) is placed
+    // first; `/usr/bin:/bin` covers system utilities; `node_modules/.bin` makes
+    // locally-installed CLI tools (like the project's own devDependencies)
+    // available without a global install.
+    if crate::sandbox::is_enabled(p) && is_node_type(p) {
+        // Resolve the node binary: prefer the pinned runtime, else the newest
+        // PortBay-managed Node, else nothing (fall through to non-sandboxed
+        // behaviour — neutral installs on the inherited PATH).
+        let node_binary = p
+            .runtime
+            .as_ref()
+            .and_then(|rt| crate::runtimes::resolve_binary(rt, runtimes))
+            .or_else(|| crate::runtimes::resolve_default_node(runtimes));
+
+        if let Some(binary) = node_binary {
+            if let Some(bin_dir) = binary.parent() {
+                let node_modules_bin = format!("{}/node_modules/.bin", p.path.to_string_lossy());
+                environment.insert(
+                    "PATH".into(),
+                    format!(
+                        "{}:{}:/usr/bin:/bin",
+                        bin_dir.to_string_lossy(),
+                        node_modules_bin,
+                    ),
+                );
+
+                // Stable per-project corepack home: survives across install →
+                // run cycles and is not the ephemeral scratch (which is wiped
+                // on each sandboxed start). Written by the install phase,
+                // read offline by the run phase.
+                let corepack_home = data_dir
+                    .join("sandbox")
+                    .join(p.id.as_str())
+                    .join("corepack");
+                environment.insert(
+                    "COREPACK_HOME".into(),
+                    corepack_home.to_string_lossy().into_owned(),
+                );
+                // Hard-disable network in the RUN phase; the install phase
+                // already materialized the pinned PM into COREPACK_HOME.
+                environment.insert("COREPACK_ENABLE_NETWORK".into(), "0".into());
+
+                // Keep the runtime metadata exports.
+                let (lang, version) = p
+                    .runtime
+                    .as_ref()
+                    .map(|rt| (rt.lang.clone(), rt.version.clone()))
+                    .unwrap_or_else(|| ("node".into(), String::new()));
+                environment.insert("PORTBAY_RUNTIME_LANG".into(), lang);
+                if !version.is_empty() {
+                    environment.insert("PORTBAY_RUNTIME_VERSION".into(), version);
+                }
+            }
+            return;
+        }
+        // No managed Node found — fall through to the non-sandboxed branch so
+        // neutral installs on PATH still work (no regression). The user will
+        // see a "install PortBay Node" prompt from the UI layer.
+    }
+
+    // Non-sandboxed path (or sandboxed non-node, or sandboxed node with no
+    // managed binary): prepend the runtime bin dir onto the inherited PATH.
     let Some(runtime) = &p.runtime else {
         return;
     };
@@ -975,5 +1051,106 @@ mod tests {
             Some("/")
         );
         assert_eq!(proc["disabled"].as_bool(), Some(false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandboxed_node_project_with_managed_runtime_gets_minimal_path_and_corepack_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("node-22").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let node = bin_dir.join("node");
+        std::fs::write(&node, "#!/bin/sh\necho v22.14.0\n").unwrap();
+
+        let mut p = next_project("node-sandboxed", 3020);
+        // No explicit runtime pin — default-node resolution path.
+        p.runtime = None;
+        p.sandbox = Some(SandboxConfig::enabled(SandboxNetworkPolicy::Blocked, false));
+
+        let mut r = Registry::new("test");
+        // Register a PortBay-managed node binary.
+        r.runtimes.managed.push(crate::registry::ManagedRuntime {
+            lang: "node".into(),
+            version: "22.14.0".into(),
+            binary: node.clone(),
+            arch: crate::runtimes::download::manifest::current_arch().into(),
+        });
+        r.add_project(p).unwrap();
+
+        // logs_dir parent is the data_dir used to compute COREPACK_HOME.
+        let logs_dir = Path::new("/tmp/portbay/logs");
+        let yaml = to_yaml(&r, logs_dir, None, &[], &[], &[], true).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let env = env_kv_map(&doc["processes"]["node-sandboxed"]["environment"]);
+
+        let path = env
+            .get("PATH")
+            .expect("PATH must be set for sandboxed node project");
+        // Must start with the managed node bin dir.
+        assert!(
+            path.starts_with(&bin_dir.to_string_lossy().to_string()),
+            "managed bin dir must be first in PATH, got: {path}"
+        );
+        // Must include node_modules/.bin.
+        assert!(
+            path.contains("node_modules/.bin"),
+            "node_modules/.bin must be in PATH, got: {path}"
+        );
+        // Must end with /usr/bin:/bin — no inherited PATH leakage.
+        assert!(
+            path.ends_with("/usr/bin:/bin"),
+            "PATH must end with /usr/bin:/bin (minimal, no login-shell PATH), got: {path}"
+        );
+        // COREPACK_HOME must be set.
+        let corepack_home = env.get("COREPACK_HOME").expect("COREPACK_HOME must be set");
+        assert!(
+            corepack_home.contains("sandbox/node-sandboxed/corepack"),
+            "COREPACK_HOME must point to per-project corepack dir, got: {corepack_home}"
+        );
+        // COREPACK_ENABLE_NETWORK must be 0.
+        assert_eq!(
+            env.get("COREPACK_ENABLE_NETWORK").map(String::as_str),
+            Some("0"),
+            "COREPACK_ENABLE_NETWORK must be 0 in sandboxed run"
+        );
+    }
+
+    #[test]
+    fn non_sandboxed_node_project_still_prepends_runtime_bin_to_path() {
+        // The non-sandboxed branch must keep its existing prepend-onto-inherited
+        // PATH behavior (regression guard for the existing test).
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("node-22").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let node = bin_dir.join("node");
+        std::fs::write(&node, "#!/bin/sh\necho v22.1.0\n").unwrap();
+
+        let mut p = next_project("runtime-path-non-sandboxed", 3021);
+        p.runtime = Some(Runtime {
+            lang: "node".into(),
+            version: "22.1.0".into(),
+        });
+        // No sandbox config — this is a plain (non-sandboxed) run.
+        let mut r = Registry::new("test");
+        r.runtimes.manual.push(ManualRuntime {
+            lang: "node".into(),
+            version: "22.1.0".into(),
+            binary: node,
+        });
+        r.add_project(p).unwrap();
+
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let env = env_kv_map(&doc["processes"]["runtime-path-non-sandboxed"]["environment"]);
+        let path = env.get("PATH").expect("PATH entry");
+        assert!(
+            path.starts_with(&bin_dir.to_string_lossy().to_string()),
+            "expected runtime bin dir first in PATH, got {path}"
+        );
+        // Non-sandboxed: no COREPACK_HOME injection.
+        assert!(
+            !env.contains_key("COREPACK_HOME"),
+            "non-sandboxed project must not have COREPACK_HOME injected"
+        );
     }
 }

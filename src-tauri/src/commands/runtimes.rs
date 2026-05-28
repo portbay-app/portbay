@@ -322,6 +322,7 @@ fn is_installable_runtime(lang: &str) -> bool {
 fn expected_binary_rel(lang: &str) -> AppResult<&'static Path> {
     match lang {
         "php" => Ok(Path::new("bin/php")),
+        "node" => Ok(Path::new("bin/node")),
         "nginx" => Ok(Path::new("sbin/nginx")),
         "apache" => Ok(Path::new("bin/httpd")),
         _ => Err(AppError::BadInput(format!(
@@ -332,6 +333,17 @@ fn expected_binary_rel(lang: &str) -> AppResult<&'static Path> {
 
 fn probe_runtime(lang: &str, version: &str, bin: &Path) -> bool {
     match lang {
+        "node" => Command::new(bin)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| {
+                let text = String::from_utf8_lossy(&out.stdout);
+                // `node --version` prints `v22.14.0`; check the major.minor prefix.
+                text.contains(&major_minor(version))
+            })
+            .unwrap_or(false),
         "php" => {
             let Some(install_dir) = bin.parent().and_then(Path::parent) else {
                 return false;
@@ -437,4 +449,59 @@ pub async fn update_runtime_config(
     }
 
     Ok(runtimes::list_all(&reg.runtimes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_binary_rel_node_is_bin_node() {
+        let rel = expected_binary_rel("node").unwrap();
+        assert_eq!(rel, Path::new("bin/node"));
+    }
+
+    #[test]
+    fn expected_binary_rel_php_is_bin_php() {
+        let rel = expected_binary_rel("php").unwrap();
+        assert_eq!(rel, Path::new("bin/php"));
+    }
+
+    #[test]
+    fn expected_binary_rel_unknown_is_error() {
+        assert!(expected_binary_rel("ruby").is_err());
+    }
+
+    #[test]
+    fn probe_runtime_node_accepts_valid_version_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("node");
+        // Write a shell script that mimics `node --version` → `v22.14.0`.
+        std::fs::write(&bin, b"#!/bin/sh\necho v22.14.0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            probe_runtime("node", "22.14.0", &bin),
+            "probe should accept a binary echoing the right version"
+        );
+    }
+
+    #[test]
+    fn probe_runtime_node_rejects_wrong_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("node");
+        std::fs::write(&bin, b"#!/bin/sh\necho v18.20.0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            !probe_runtime("node", "22.14.0", &bin),
+            "probe must reject a binary reporting the wrong major.minor"
+        );
+    }
 }
