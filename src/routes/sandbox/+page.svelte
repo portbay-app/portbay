@@ -1,11 +1,14 @@
 <!--
   /sandbox — the projects PortBay is running in isolation.
 
-  PortBay's sandbox is NOT a "run any GitHub repo in the cloud" box. It's a
-  local guarantee: a project flagged `sandboxed` runs under an OS-level wrapper
-  with a network policy you pick, so untrusted or experimental code can't read
-  your files, reach your other PortBay services, or call home unless you allow
-  it. The toggle + policy live on each project's detail panel (Pro); this page
+  PortBay's sandbox is NOT a "run any GitHub repo in the cloud" box, and it is
+  NOT a VM. It's a local OS-level (macOS Seatbelt) wrapper: a project flagged
+  `sandboxed` runs with a network policy you pick and a filesystem profile that
+  blocks reads of your credentials / keychains / browser data / other projects'
+  `.env`, while confining writes to the project. It contains careless and
+  opportunistic code (e.g. a malicious postinstall script exfiltrating secrets);
+  it shares the host kernel, sets no CPU/memory limits, and is not a boundary
+  against a determined attacker. The toggle + policy live on each project's detail panel (Pro); this page
   is the roll-up — every sandboxed project, what its policy actually permits,
   and what the sandbox has *blocked* (the one thing competitors never show).
 
@@ -242,7 +245,8 @@
         <p class="mt-1.5 text-[12.5px] text-fg-subtle leading-relaxed max-w-[60ch]">
           Projects you run in isolation. Each one gets its own process and a
           network policy you choose — so untrusted or experimental code can't
-          read your files or reach your other services unless you let it.
+          read your credentials or other projects' secrets, or reach your other
+          services, unless you let it.
         </p>
       </div>
 
@@ -257,6 +261,28 @@
         Add project
       </button>
     </header>
+
+    <!-- Honest boundary: say plainly what the OS sandbox does and does NOT do,
+         so nobody mistakes it for VM-grade isolation and runs genuinely hostile
+         code under it. Seatbelt confines file + network access, not CPU/memory,
+         and shares the host kernel. -->
+    <div
+      class="flex items-start gap-2.5 rounded-lg border border-border bg-surface-2 px-3.5 py-2.5"
+    >
+      <Icon name="shield" size={14} class="mt-0.5 shrink-0 text-fg-subtle" />
+      <p class="text-[11.5px] text-fg-subtle leading-relaxed">
+        <span class="text-fg-muted font-medium">What this protects:</span>
+        file writes are confined to the project, and reads of your credentials,
+        keychains, browser data, and other projects' <span class="font-mono">.env</span>
+        files are blocked. Network is restricted to the policy you pick.
+        <span class="text-fg-muted font-medium">What it doesn't:</span>
+        it's macOS Seatbelt, not a virtual machine — it shares the host kernel,
+        sets no CPU/memory limits (it won't stop a fork bomb or a miner), and
+        isn't a barrier against a determined attacker exploiting the kernel. It
+        contains careless and opportunistic code; for software you truly distrust,
+        use a disposable VM.
+      </p>
+    </div>
 
     {#if sandboxed.length === 0}
       <!-- Empty state — explain the concept and the real way to enter it. -->

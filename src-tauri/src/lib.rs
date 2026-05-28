@@ -13,6 +13,7 @@ pub mod flags;
 pub mod hosts;
 pub mod hosts_helper;
 pub mod import;
+pub mod install_proxy;
 pub mod mailpit;
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -491,6 +492,7 @@ pub fn run() {
             commands::lifecycle::restart_project,
             commands::lifecycle::promote_project_to_local,
             commands::lifecycle::sandbox_violations,
+            commands::lifecycle::install_project_sandboxed,
             commands::lifecycle::stop_all,
             commands::lifecycle::open_project,
             commands::lifecycle::preview_port_conflict,

@@ -23,6 +23,7 @@
   import { parseLogLine, levelClass } from "$lib/components/logs/ansi";
   import { projects } from "$lib/stores/projects.svelte";
   import { dns } from "$lib/stores/dns.svelte";
+  import { confirmDialog } from "$lib/stores/confirm.svelte";
   import HostnameField from "$lib/components/domains/HostnameField.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { createCertInfo } from "$lib/stores/certInfo.svelte";
@@ -97,6 +98,17 @@
   let sandboxEphemeral = $state<boolean>(true);
   let sandboxViolations = $state<string[]>([]);
   let loadingSandboxViolations = $state<boolean>(false);
+
+  type SandboxInstallReport = {
+    command: string;
+    ok: boolean;
+    exitCode: number | null;
+    output: string;
+    violations: string[];
+    blockedHosts: string[];
+  };
+  let sandboxInstalling = $state<boolean>(false);
+  let sandboxInstallReport = $state<SandboxInstallReport | null>(null);
 
   let removeArmed = $state<boolean>(false);
   let removeArmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -328,6 +340,27 @@
   async function runSandboxed() {
     if (!project) return;
     const id = project.id;
+    const name = project.name;
+    // Enabling sandbox rewrites this project's launch command, so Process
+    // Compose reloads its config and briefly restarts every *other* running
+    // project. (Re-running an already-sandboxed project doesn't change the
+    // config, so this only fires on the first enable.) Warn before disrupting
+    // running work.
+    if (!project.sandboxed) {
+      const others = projects.value.filter(
+        (p) => p.id !== id && p.status === "running",
+      ).length;
+      if (others > 0) {
+        const ok = await confirmDialog.open({
+          title: "Start in sandbox?",
+          message: `Sandboxing ${name} reloads Process Compose, which briefly restarts your ${others} other running project${others === 1 ? "" : "s"}. They'll come back on their own.`,
+          actions: [
+            { label: "Start in sandbox", value: "go", tone: "primary", icon: "shield" },
+          ],
+        });
+        if (ok !== "go") return;
+      }
+    }
     projects.beginTransition(id, "start");
     try {
       await dns.ensureReady();
@@ -360,6 +393,22 @@
       });
     } catch {
       /* toast already pushed */
+    }
+  }
+
+  async function installSandboxed() {
+    if (!project || sandboxInstalling) return;
+    sandboxInstalling = true;
+    sandboxInstallReport = null;
+    try {
+      sandboxInstallReport = await safeInvoke<SandboxInstallReport>(
+        "install_project_sandboxed",
+        { id: project.id },
+      );
+    } catch {
+      /* toast already pushed */
+    } finally {
+      sandboxInstalling = false;
     }
   }
 
@@ -584,6 +633,13 @@
           {/if}
         {/snippet}
         <div class="space-y-3 text-xs">
+          <p class="text-[11px] text-fg-subtle leading-relaxed">
+            Runs this project's command under macOS Seatbelt: blocks reads of your
+            credentials, keychains, browser data, and other projects'
+            <span class="font-mono">.env</span>; confines writes to the project.
+            Not a VM — shares the host kernel and sets no CPU/memory limits, so
+            use it for careless or untrusted code, not genuinely hostile code.
+          </p>
           <div class="grid grid-cols-[120px,1fr] gap-x-4 gap-y-3 items-center">
             <label for="sandbox-network" class="text-fg-muted">Network</label>
             <select
@@ -627,6 +683,22 @@
               <Icon name={project.sandboxed ? "check" : "shield"} size={12} />
               {project.sandboxed ? "Promote to local" : "Run in Sandbox"}
             </button>
+            <button
+              type="button"
+              onclick={installSandboxed}
+              disabled={sandboxInstalling}
+              title="Run this project's dependency install (npm/pnpm/yarn/bun/composer) sandboxed: network pinned to package registries only, your secrets still blocked"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md
+                     border border-border text-fg-muted hover:text-fg hover:bg-surface-2
+                     disabled:opacity-50"
+            >
+              <Icon
+                name={sandboxInstalling ? "refresh-cw" : "package"}
+                size={12}
+                class={sandboxInstalling ? "animate-spin" : ""}
+              />
+              {sandboxInstalling ? "Installing…" : "Install (sandboxed)"}
+            </button>
             {#if project.sandboxed}
               <button
                 type="button"
@@ -658,6 +730,61 @@
             <p class="text-fg-subtle">
               No sandbox violations loaded for this run.
             </p>
+          {/if}
+
+          {#if sandboxInstallReport}
+            {@const r = sandboxInstallReport}
+            <div class="space-y-1.5">
+              <div
+                class="flex items-center gap-1.5 text-[11px] {r.ok
+                  ? 'text-status-running'
+                  : 'text-status-unhealthy'}"
+              >
+                <Icon name={r.ok ? "check" : "circle-alert"} size={12} />
+                <span class="font-mono">{r.command}</span>
+                <span class="text-fg-subtle">
+                  {r.ok
+                    ? "completed"
+                    : `failed${r.exitCode != null ? ` (exit ${r.exitCode})` : ""}`}
+                </span>
+              </div>
+              {#if r.blockedHosts.length > 0}
+                <p class="text-[11px] text-status-unhealthy">
+                  Blocked {r.blockedHosts.length} non-registry host{r.blockedHosts
+                    .length === 1
+                    ? ""
+                    : "s"} — the install tried to reach these, but only package registries are allowed:
+                </p>
+                <div
+                  class="max-h-24 overflow-auto rounded-md border border-border bg-bg
+                         p-2 font-mono text-[11px] text-status-unhealthy space-y-1"
+                >
+                  {#each r.blockedHosts as host}
+                    <div>{host}</div>
+                  {/each}
+                </div>
+              {/if}
+              {#if r.violations.length > 0}
+                <p class="text-[11px] text-status-unhealthy">
+                  {r.violations.length} sandbox denial{r.violations.length === 1
+                    ? ""
+                    : "s"} during install — the profile blocked these:
+                </p>
+                <div
+                  class="max-h-24 overflow-auto rounded-md border border-border bg-bg
+                         p-2 font-mono text-[11px] text-status-unhealthy space-y-1"
+                >
+                  {#each r.violations as line}
+                    <div>{line}</div>
+                  {/each}
+                </div>
+              {/if}
+              {#if r.output.trim()}
+                <pre
+                  class="max-h-40 overflow-auto rounded-md border border-border bg-bg
+                         p-2 font-mono text-[11px] text-fg-muted whitespace-pre-wrap break-all">{r.output}</pre>
+              {/if}
+            </div>
           {/if}
         </div>
       </DashboardCard>
