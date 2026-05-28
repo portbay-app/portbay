@@ -697,7 +697,6 @@ pub struct ProjectDbProvision {
 /// is generated client-side (Web Crypto) and must be alphanumeric.
 #[tauri::command]
 pub async fn provision_project_database(
-    app: AppHandle,
     state: State<'_, AppState>,
     project_id: String,
     instance_id: String,
@@ -712,13 +711,14 @@ pub async fn provision_project_database(
     }
 
     let pid = ProjectId::new(project_id.clone());
-    let mut registry = load_registry(&state)?;
+    let registry = load_registry(&state)?;
     let project = registry
         .get_project(&pid)
         .ok_or_else(|| AppError::NotFound(project_id.clone()))?;
     let base = engine::sanitize_identifier(project.id.as_str());
     let database = format!("{base}_dev");
     let username = base;
+    let env_path = project.path.join(".env");
 
     // Provision off the async runtime (it shells out to the engine client).
     let inst_for_blocking = inst.clone();
@@ -733,30 +733,71 @@ pub async fn provision_project_database(
 
     let connection_url = engine::app_connection_url(&inst, &username, &password, &database);
 
-    // Inject the connection env into the project (authoritative — project env
-    // overrides any linked-instance defaults in the reconciler).
-    let project = registry
-        .get_project_mut(&pid)
-        .ok_or_else(|| AppError::NotFound(project_id.clone()))?;
-    project
-        .env
-        .insert("DB_CONNECTION".into(), inst.engine.id().into());
-    project.env.insert("DB_HOST".into(), "127.0.0.1".into());
-    project.env.insert("DB_PORT".into(), inst.port.to_string());
-    project.env.insert("DB_DATABASE".into(), database.clone());
-    project.env.insert("DB_USERNAME".into(), username.clone());
-    project.env.insert("DB_PASSWORD".into(), password.clone());
-    project
-        .env
-        .insert("DATABASE_URL".into(), connection_url.clone());
-    save_registry(&state, &registry)?;
-    let _ = state.reconciler.tick(&app).await;
+    // Write the connection into the project's on-disk .env so the framework
+    // picks it up however it's launched, and it surfaces in the Database panel.
+    // Only the DB_* / DATABASE_URL keys are touched; everything else is left as-is.
+    let pairs: Vec<(&str, String)> = vec![
+        ("DB_CONNECTION", inst.engine.id().to_string()),
+        ("DB_HOST", "127.0.0.1".to_string()),
+        ("DB_PORT", inst.port.to_string()),
+        ("DB_DATABASE", database.clone()),
+        ("DB_USERNAME", username.clone()),
+        ("DB_PASSWORD", password.clone()),
+        ("DATABASE_URL", connection_url.clone()),
+    ];
+    upsert_dotenv(&env_path, &pairs)
+        .map_err(|e| AppError::Internal(format!("write {}: {e}", env_path.display())))?;
 
     Ok(ProjectDbProvision {
         database,
         username,
         connection_url,
     })
+}
+
+/// Upsert `KEY=value` pairs into a `.env` file: existing keys are rewritten in
+/// place (comments and unrelated lines preserved), missing keys are appended
+/// under a PortBay header. Creates the file (and parent dir) if absent. Values
+/// here are alphanumeric / URL-safe, so no quoting is needed.
+fn upsert_dotenv(path: &Path, pairs: &[(&str, String)]) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let mut applied = vec![false; pairs.len()];
+
+    for line in lines.iter_mut() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else { continue };
+        let key = line[..eq].trim();
+        if let Some(i) = pairs.iter().position(|(k, _)| *k == key) {
+            *line = format!("{}={}", pairs[i].0, pairs[i].1);
+            applied[i] = true;
+        }
+    }
+
+    let missing: Vec<&(&str, String)> = pairs
+        .iter()
+        .zip(applied.iter())
+        .filter(|(_, done)| !**done)
+        .map(|(p, _)| p)
+        .collect();
+    if !missing.is_empty() {
+        if lines.last().map(|l| !l.is_empty()).unwrap_or(false) {
+            lines.push(String::new());
+        }
+        lines.push("# PortBay-provisioned database".to_string());
+        for (k, v) in missing {
+            lines.push(format!("{k}={v}"));
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    std::fs::write(path, out)
 }
 
 async fn open_in_terminal(app: &AppHandle, command: &str) -> AppResult<()> {
@@ -893,6 +934,38 @@ mod tests {
         reg.add_database(inst).unwrap();
         assert_eq!(unique_instance_id(&reg, "MyApp"), "myapp-2");
         assert_eq!(unique_instance_id(&reg, "Other DB"), "other-db");
+    }
+
+    #[test]
+    fn upsert_dotenv_updates_existing_and_appends_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = tmp.path().join(".env");
+        std::fs::write(
+            &env,
+            "APP_ENV=local\n# comment\nDB_HOST=oldhost\nDB_PASSWORD=stale\n",
+        )
+        .unwrap();
+
+        let pairs: Vec<(&str, String)> = vec![
+            ("DB_HOST", "127.0.0.1".to_string()),
+            ("DB_PASSWORD", "newpw".to_string()),
+            ("DB_DATABASE", "myapp_dev".to_string()), // missing → appended
+        ];
+        upsert_dotenv(&env, &pairs).unwrap();
+        let out = std::fs::read_to_string(&env).unwrap();
+
+        // Unrelated lines preserved; existing keys rewritten in place; new appended.
+        assert!(out.contains("APP_ENV=local"));
+        assert!(out.contains("# comment"));
+        assert!(out.contains("DB_HOST=127.0.0.1"));
+        assert!(!out.contains("oldhost"));
+        assert!(out.contains("DB_PASSWORD=newpw"));
+        assert!(!out.contains("stale"));
+        assert!(out.contains("DB_DATABASE=myapp_dev"));
+        // Idempotent: a second run doesn't duplicate keys.
+        upsert_dotenv(&env, &pairs).unwrap();
+        let out2 = std::fs::read_to_string(&env).unwrap();
+        assert_eq!(out2.matches("DB_DATABASE=").count(), 1);
     }
 
     #[test]

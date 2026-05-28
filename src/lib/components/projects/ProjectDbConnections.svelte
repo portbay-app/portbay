@@ -16,7 +16,12 @@
 
   import { DashboardCard, Icon } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
-  import type { ProjectDbConnection } from "$lib/types/databases";
+  import { databases } from "$lib/stores/databases.svelte";
+  import { errorBus } from "$lib/stores/errors.svelte";
+  import type {
+    ProjectDbConnection,
+    ProjectDbProvision,
+  } from "$lib/types/databases";
   import type { ProjectView } from "$lib/types/projects";
 
   interface Props {
@@ -27,6 +32,62 @@
   let connections = $state<ProjectDbConnection[]>([]);
   /** Connection names whose password is currently revealed. */
   let revealed = $state<Set<string>>(new Set());
+
+  // ── Provisioning ──────────────────────────────────────────────────────────
+  // A dedicated database can be provisioned on any *running* SQL instance.
+  const SQL_ENGINES = ["mysql", "mariadb", "postgres"];
+  let provisioning = $state<boolean>(false);
+  let pickerOpen = $state<boolean>(false);
+
+  const provisionable = $derived(
+    databases.value.filter(
+      (i) => i.status === "running" && SQL_ENGINES.includes(i.engine),
+    ),
+  );
+
+  /** Strong, alphanumeric password (Web Crypto) — alnum so it needs no SQL/URL
+      escaping, matching the backend's validation. */
+  function genPassword(len = 24): string {
+    const alphabet =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const arr = new Uint32Array(len);
+    crypto.getRandomValues(arr);
+    return Array.from(arr, (n) => alphabet[n % alphabet.length]).join("");
+  }
+
+  async function provision(instanceId: string) {
+    if (provisioning) return;
+    provisioning = true;
+    pickerOpen = false;
+    try {
+      const res = await safeInvoke<ProjectDbProvision>(
+        "provision_project_database",
+        { projectId: project.id, instanceId, password: genPassword() },
+      );
+      errorBus.push({
+        code: "DB_PROVISIONED",
+        whatHappened: `Database "${res.database}" provisioned for ${project.name}.`,
+        whyItMatters:
+          "DB_* and DATABASE_URL were written to this project's .env. Restart the project to pick them up.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
+      await load();
+    } catch {
+      /* safeInvoke toasted the failure */
+    } finally {
+      provisioning = false;
+    }
+  }
+
+  function onProvisionClick() {
+    if (provisionable.length === 1) {
+      void provision(provisionable[0].id);
+    } else {
+      pickerOpen = !pickerOpen;
+    }
+  }
 
   async function load() {
     revealed = new Set();
@@ -85,11 +146,68 @@
   ];
 </script>
 
-{#if connections.length > 0}
+<svelte:window onclick={() => (pickerOpen = false)} />
+
+{#if connections.length > 0 || provisionable.length > 0}
   <DashboardCard title="Database" flush>
-    <p class="text-[11px] text-fg-subtle mb-2">
-      Parsed from this project's <span class="font-mono">.env</span>. Read-only.
-    </p>
+    <div class="relative flex items-start justify-between gap-2 mb-2">
+      <p class="text-[11px] text-fg-subtle">
+        {#if connections.length > 0}
+          Parsed from this project's <span class="font-mono">.env</span>. Read-only.
+        {:else}
+          No database connection yet.
+        {/if}
+      </p>
+      {#if provisionable.length > 0}
+        <button
+          type="button"
+          onclick={(e) => {
+            e.stopPropagation();
+            onProvisionClick();
+          }}
+          disabled={provisioning}
+          title="Create a dedicated database for this project on a running instance"
+          class="shrink-0 inline-flex items-center gap-1 px-2 h-7 rounded-md
+                 border border-accent/40 text-accent text-[11px]
+                 hover:bg-accent/10 disabled:opacity-50 transition-colors"
+        >
+          {#if provisioning}
+            <Icon name="refresh-cw" size={10} class="animate-spin" />
+            Provisioning…
+          {:else}
+            <Icon name="plus" size={11} />
+            Provision
+          {/if}
+        </button>
+        {#if pickerOpen}
+          <div
+            role="presentation"
+            onclick={(e) => e.stopPropagation()}
+            class="absolute right-0 top-8 z-30 w-56 max-h-64 overflow-y-auto
+                   rounded-lg border border-border bg-surface shadow-2xl py-1"
+          >
+            {#each provisionable as inst (inst.id)}
+              <button
+                type="button"
+                onclick={() => provision(inst.id)}
+                class="w-full text-left px-3 py-1.5 text-[12px] text-fg-muted
+                       hover:bg-surface-2 hover:text-fg transition-colors truncate"
+              >
+                {inst.name} · {inst.engineLabel}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+    </div>
+
+    {#if connections.length === 0}
+      <p class="text-[12px] text-fg-subtle">
+        Provision a dedicated database on a running instance — PortBay creates
+        it, adds a login user, and writes the <span class="font-mono">DB_*</span>
+        vars into this project's <span class="font-mono">.env</span>.
+      </p>
+    {:else}
     <div class="space-y-3">
       {#each connections as conn (conn.name)}
         <div class="rounded-md border border-border overflow-hidden">
@@ -168,5 +286,6 @@
         </div>
       {/each}
     </div>
+    {/if}
   </DashboardCard>
 {/if}

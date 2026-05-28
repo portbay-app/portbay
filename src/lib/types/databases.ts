@@ -26,6 +26,13 @@ export interface DatabaseEngineView {
   managedVersion: string;
 }
 
+/** Result of `provision_project_database`. */
+export interface ProjectDbProvision {
+  database: string;
+  username: string;
+  connectionUrl: string;
+}
+
 /** Progress events streamed from `install_database_engine` (mirrors runtimes). */
 export type EngineInstallEvent =
   | { kind: "log"; line: string }
