@@ -11,7 +11,7 @@
 //! registry-drift events land in a separate follow-up card once the
 //! reconcile loop is fleshed out.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -113,6 +113,15 @@ pub fn spawn_status_poller(app: AppHandle) {
                 .unwrap_or_default();
             let mut expose_changed = false;
 
+            // Static sites have no PC process, so they never appear in
+            // `processes` below — their Running/Stopped is the session set
+            // (Play adds, Stop removes). Snapshot it so we can emit their
+            // transitions alongside the process-backed ones.
+            let started_static: HashSet<String> =
+                crate::commands::lifecycle::load_session(state.inner())
+                    .into_iter()
+                    .collect();
+
             // Emit on transition; track for the next pass.
             let mut next: HashMap<String, ObservedState> = HashMap::with_capacity(processes.len());
             for p in &processes {
@@ -172,6 +181,39 @@ pub fn spawn_status_poller(app: AppHandle) {
                     }
                 }
                 next.insert(p.name.clone(), observed);
+            }
+
+            // Static sites: no process, so derive Running/Stopped from the
+            // session set and emit on transition, mirroring the PC path. Keyed
+            // by project id (never collides with a PC process name), so the
+            // "disappeared" sweep below leaves them alone.
+            if let Some(reg) = registry.as_ref() {
+                for p in reg.list_projects().iter().filter(|p| p.is_static_served()) {
+                    let id = p.id.as_str().to_string();
+                    let status = if started_static.contains(&id) {
+                        ProjectStatus::Running
+                    } else {
+                        ProjectStatus::Stopped
+                    };
+                    let observed = ObservedState {
+                        event_id: id.clone(),
+                        status,
+                        pid: 0,
+                        restarts: 0,
+                    };
+                    let changed = last.get(&id) != Some(&observed);
+                    if changed {
+                        let event = ProjectStatusEvent {
+                            id: id.clone(),
+                            status,
+                            runtime: None,
+                            last_error: None,
+                            ts: now,
+                        };
+                        let _ = app.emit(STATUS_CHANNEL, event);
+                    }
+                    next.insert(id, observed);
+                }
             }
 
             // Projects that disappeared from PC since last tick → emit stopped.

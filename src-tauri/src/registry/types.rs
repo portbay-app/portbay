@@ -327,6 +327,17 @@ impl Project {
         }
         None
     }
+
+    /// A static site served straight off disk by Caddy's `file_server`, with no
+    /// supervised process to start or stop. Because there's no process, its
+    /// "running" state can't come from Process Compose — it's an explicit serve
+    /// toggle (Play/Stop) tracked in the session set: started ⇒ Caddy publishes
+    /// its route and the UI shows Running; stopped ⇒ the route is suppressed and
+    /// the site stops serving. See `reconciler::caddy::suppressed_routes`,
+    /// `commands::lifecycle::{start,stop}_project`, and the status poller.
+    pub fn is_static_served(&self) -> bool {
+        self.kind == ProjectType::Static && self.process_compose_id().is_none()
+    }
 }
 
 /// Per-project CORS policy applied at the Caddy edge. The basic listen port
@@ -1140,6 +1151,28 @@ mod tests {
 
         // Nothing set at all.
         assert_eq!(bare_php_project().php_version_effective(), None);
+    }
+
+    #[test]
+    fn is_static_served_only_for_processless_static_sites() {
+        // A static site with no command: served straight off disk by Caddy,
+        // its Running/Stopped is the session set — this is the play/pause case.
+        let mut p = bare_php_project();
+        p.kind = ProjectType::Static;
+        p.start_command = None;
+        p.web_server = None;
+        assert!(p.is_static_served());
+
+        // A static site that DOES run a process (e.g. a build watcher) has a PC
+        // process, so its status comes from there — not session-toggled.
+        let mut with_cmd = p.clone();
+        with_cmd.start_command = Some("npm run watch".into());
+        assert!(!with_cmd.is_static_served());
+
+        // Non-static kinds are never static-served, command or not.
+        let mut node = p.clone();
+        node.kind = ProjectType::Node;
+        assert!(!node.is_static_served());
     }
 
     #[test]

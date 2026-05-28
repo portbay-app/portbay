@@ -1,9 +1,13 @@
 //! First-run "PortBay smoke" canary project.
 //!
-//! A tiny Static site PortBay seeds on first launch so a brand-new user can
-//! press Play once and confirm their whole local stack works end to end —
-//! privileged helper → `/etc/hosts` (or dnsmasq) resolution → Caddy on :80 →
-//! file serving — without having to wire up a real project first.
+//! A self-contained Static site PortBay seeds on first launch so a brand-new
+//! user can press Play once and confirm their whole local stack works end to
+//! end — privileged helper → `/etc/hosts` (or dnsmasq) resolution → Caddy on
+//! :80 → file serving — without having to wire up a real project first.
+//!
+//! It doubles as a real PortBay landing page (hero, features, open-source
+//! pitch, pricing, FAQ, download) so the canary the user inevitably opens also
+//! introduces the product. The page is authored in `smoke_site/index.html`.
 //!
 //! It is intentionally **HTTP, not HTTPS**: serving over TLS would also
 //! require the mkcert CA to be installed (a second privileged step), which
@@ -102,59 +106,16 @@ fn scaffold(dir: &std::path::Path, suffix: &str) -> std::io::Result<()> {
     std::fs::write(dir.join("index.html"), canary_html(&hostname))
 }
 
+/// The canary page is a full, self-contained PortBay landing page that doubles
+/// as the first-run smoke test: a single static `index.html` (inline CSS, inline
+/// SVG, one base64 logo — no external assets, no build step) served by the
+/// bundled Caddy. Authored in `smoke_site/index.html` and embedded at compile
+/// time; the only runtime substitution is the live `.test` hostname in the
+/// "your setup works" banner.
+const CANARY_TEMPLATE: &str = include_str!("smoke_site/index.html");
+
 fn canary_html(hostname: &str) -> String {
-    format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PortBay is working</title>
-<style>
-  :root {{ color-scheme: dark; }}
-  * {{ box-sizing: border-box; }}
-  html, body {{ height: 100%; margin: 0; }}
-  body {{
-    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    color: #e7ecf3;
-    background: radial-gradient(1200px 600px at 50% -10%, #16263b 0%, #0b1118 55%, #070b10 100%);
-    display: grid; place-items: center; text-align: center; padding: 24px;
-  }}
-  .card {{ max-width: 520px; }}
-  .mark {{ display: inline-flex; align-items: center; gap: 10px; margin-bottom: 22px; }}
-  .mark svg {{ width: 34px; height: 34px; }}
-  .mark span {{ font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }}
-  h1 {{ font-size: 24px; font-weight: 650; letter-spacing: -0.02em; margin: 0 0 12px; }}
-  p {{ margin: 0 0 10px; color: #9fb0c3; }}
-  code {{ background: #ffffff12; padding: 2px 7px; border-radius: 6px; font-size: 13px; color: #cdd9e8; }}
-  ul {{ list-style: none; padding: 0; margin: 22px auto 0; max-width: 360px; text-align: left; }}
-  li {{ display: flex; align-items: center; gap: 10px; padding: 7px 0; color: #cdd9e8; font-size: 13.5px; }}
-  li svg {{ width: 16px; height: 16px; flex: none; }}
-  .foot {{ margin-top: 30px; font-size: 12px; color: #5a6b80; letter-spacing: .02em; }}
-</style>
-</head>
-<body>
-  <div class="card">
-    <div class="mark">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#36d399" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 2.5 9.5 9h5L12 2.5Z"/><path d="M9.7 9h4.6l1.2 11.5H8.5L9.7 9Z"/><path d="M7 20.5h10"/><path d="M14.8 6.2l3 1.2M9.2 6.2l-3 1.2"/>
-      </svg>
-      <span>PortBay</span>
-    </div>
-    <h1>Your setup works.</h1>
-    <p>You're seeing this because <code>{hostname}</code> resolved to this Mac
-       and PortBay's bundled Caddy served it.</p>
-    <ul>
-      <li><svg viewBox="0 0 24 24" fill="none" stroke="#36d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> Local DNS routed <code>.test</code> to 127.0.0.1</li>
-      <li><svg viewBox="0 0 24 24" fill="none" stroke="#36d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> Caddy answered on port 80</li>
-      <li><svg viewBox="0 0 24 24" fill="none" stroke="#36d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> Static files served from disk</li>
-    </ul>
-    <div class="foot">Delete this project any time — it's just a check.</div>
-  </div>
-</body>
-</html>
-"##
-    )
+    CANARY_TEMPLATE.replace("{{HOSTNAME}}", hostname)
 }
 
 #[cfg(test)]

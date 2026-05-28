@@ -59,6 +59,12 @@ pub async fn start_project(
         // Remember this project in the running session so
         // `reopen_previous_projects` can restart it next launch.
         session_add(&state, &id);
+    } else if project_is_static_served(&state, &id)? {
+        // A static site has no process — Caddy serves its files directly. Mark
+        // it "started" in the session; the reconcile tick below then publishes
+        // its route (it's no longer suppressed) and the status poller reports
+        // Running. This is the Play half of static play/pause.
+        session_add(&state, &id);
     }
 
     // After the process is up (or immediately, for static sites), force a
@@ -273,6 +279,17 @@ fn pc_process_id_for_project(project: &Project) -> Option<String> {
     project.process_compose_id()
 }
 
+/// Whether `project_id` is a static site served directly by Caddy (no process),
+/// whose started/paused state is the session set. Used by Start/Stop to toggle
+/// serving. A missing project reads as `false`.
+fn project_is_static_served(state: &State<'_, AppState>, project_id: &str) -> AppResult<bool> {
+    let registry = load_registry(state)?;
+    Ok(registry
+        .get_project(&ProjectId::new(project_id))
+        .map(|p| p.is_static_served())
+        .unwrap_or(false))
+}
+
 /// Walk the registry for the given project, look up any port it pins
 /// (primary `port` + `extra_ports`), and check whether anything is
 /// already listening. PortBay-owned orphans get killed in place;
@@ -435,10 +452,15 @@ pub async fn stop_project(state: State<'_, AppState>, id: String) -> AppResult<(
     // Drop it from the running session so it isn't reopened next launch.
     session_remove(&state, &id);
 
-    // Static / pure-Caddy projects have no PC process to stop. Caddy keeps
-    // serving their files for as long as they're in the registry, so Stop is
-    // a no-op rather than a 400 against a non-existent PC process.
+    // No PC process to stop. For a static site, the `session_remove` above just
+    // flipped it to paused — nudge the reconciler so Caddy drops its route now
+    // and it actually stops serving (the Stop half of static play/pause). Other
+    // pure-Caddy projects (e.g. PHP-FPM) keep serving for as long as they're in
+    // the registry, so Stop stays a no-op for them.
     let Some(process_id) = project_pc_process_id(&state, &id)? else {
+        if project_is_static_served(&state, &id)? {
+            state.reconciler.mark_dirty();
+        }
         return Ok(());
     };
     state.mark_stop_requested(&id);
@@ -585,6 +607,14 @@ pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
 
     // Nothing is running now → clear the reopen-on-launch session.
     session_clear(&state);
+
+    // Clearing the session just paused every static site (they serve only while
+    // started); re-reconcile so Caddy drops their routes now instead of at the
+    // next periodic tick. The status poller flips their badges to Stopped within
+    // a tick off the same cleared session.
+    if registry.list_projects().iter().any(|p| p.is_static_served()) {
+        state.reconciler.mark_dirty();
+    }
 
     Ok(report)
 }

@@ -143,38 +143,60 @@ fn hash_bytes(b: &[u8]) -> u64 {
     crate::util::stable_hash(b)
 }
 
-/// Project ids whose route should be omitted this tick: those that opted into
-/// `expose_when_running` and whose supervised process isn't currently up.
+/// Project ids whose route should be omitted this tick. Two sources:
 ///
-/// Fail-open: if no project opts in we skip the Process Compose round-trip
-/// entirely, and if PC can't be read we suppress nothing (better to keep a
-/// route up briefly than to hide it on a transient PC hiccup — the next tick,
-/// nudged by the status poller, corrects it). Projects with no supervised
-/// process (pure-Caddy / static / PHP-FPM) can't be "down", so they're never
-/// suppressed.
+/// 1. **Static sites that aren't "started".** A static site has no supervised
+///    process, so Play/Stop is an explicit serve toggle held in the session set
+///    (see [`Project::is_static_served`]). A static site that isn't in the
+///    session is paused — drop its route so Stop genuinely stops serving it,
+///    rather than Caddy keeping the files up 24/7. Reads the session file only;
+///    no Process Compose round-trip.
+/// 2. **`expose_when_running` projects whose process isn't up.** Their route is
+///    published only while their supervised process is Running/Unhealthy.
+///
+/// Fail-open for (2): if no project opts in we skip the Process Compose
+/// round-trip, and if PC can't be read we suppress nothing on that account
+/// (better to keep a route up briefly than to hide it on a transient PC hiccup
+/// — the next tick, nudged by the status poller, corrects it).
 async fn suppressed_routes(reg: &Registry, state: &AppState) -> HashSet<String> {
-    if !reg.list_projects().iter().any(|p| p.expose_when_running()) {
-        return HashSet::new();
+    let mut suppressed = HashSet::new();
+
+    // (1) Paused static sites — those not currently in the session set.
+    let has_static = reg.list_projects().iter().any(|p| p.is_static_served());
+    if has_static {
+        let started: HashSet<String> = crate::commands::lifecycle::load_session(state)
+            .into_iter()
+            .collect();
+        for p in reg.list_projects().iter().filter(|p| p.is_static_served()) {
+            if !started.contains(p.id.as_str()) {
+                suppressed.insert(p.id.to_string());
+            }
+        }
     }
-    let procs: HashMap<String, Process> = match state.pc_client() {
-        Ok(client) => match client.processes().await {
-            Ok(v) => v.into_iter().map(|p| (p.name.clone(), p)).collect(),
-            Err(_) => return HashSet::new(),
-        },
-        Err(_) => return HashSet::new(),
-    };
-    reg.list_projects()
-        .iter()
-        .filter(|p| p.expose_when_running())
-        .filter(|p| match p.process_compose_id() {
-            None => false,
-            Some(pid) => !matches!(
-                procs.get(&pid).map(Process::portbay_status),
-                Some(ProjectStatus::Running) | Some(ProjectStatus::Unhealthy)
-            ),
-        })
-        .map(|p| p.id.to_string())
-        .collect()
+
+    // (2) expose_when_running projects whose process isn't up.
+    if reg.list_projects().iter().any(|p| p.expose_when_running()) {
+        if let Ok(client) = state.pc_client() {
+            if let Ok(v) = client.processes().await {
+                let procs: HashMap<String, Process> =
+                    v.into_iter().map(|p| (p.name.clone(), p)).collect();
+                for p in reg.list_projects().iter().filter(|p| p.expose_when_running()) {
+                    let down = match p.process_compose_id() {
+                        None => false,
+                        Some(pid) => !matches!(
+                            procs.get(&pid).map(Process::portbay_status),
+                            Some(ProjectStatus::Running) | Some(ProjectStatus::Unhealthy)
+                        ),
+                    };
+                    if down {
+                        suppressed.insert(p.id.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    suppressed
 }
 
 #[cfg(test)]

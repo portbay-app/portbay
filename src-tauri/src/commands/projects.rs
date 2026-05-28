@@ -5,7 +5,7 @@
 //! write goes through these commands so we can layer in side effects
 //! (Caddy reconcile, hosts file write, cert issuance) in one place later.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,7 +18,7 @@ use crate::commands::dto::{
     WorkspaceScan,
 };
 use crate::error::{AppError, AppResult};
-use crate::process_compose::Process;
+use crate::process_compose::{Process, ProjectStatus};
 use crate::registry::{
     store, MobileRunConfig, Project, ProjectId, ProjectType, Readiness, Registry, Runtime,
     SandboxConfig, SandboxNetworkPolicy, WebServer,
@@ -34,6 +34,9 @@ use crate::state::AppState;
 pub async fn list_projects(state: State<'_, AppState>) -> AppResult<Vec<ProjectView>> {
     let registry = load_registry(&state)?;
     let pc_state = fetch_pc_state(&state).await;
+    // "Started" static sites — their Running/Stopped is the session set, not a
+    // process (see `Project::is_static_served`).
+    let started = started_static_ids(&state);
 
     let views = registry
         .list_projects()
@@ -42,10 +45,34 @@ pub async fn list_projects(state: State<'_, AppState>) -> AppResult<Vec<ProjectV
             let proc = pc_state
                 .as_ref()
                 .and_then(|m| p.process_compose_id().and_then(|key| m.get(key.as_str())));
-            ProjectView::from_project(p, proc)
+            let mut view = ProjectView::from_project(p, proc);
+            if p.is_static_served() {
+                view.status = static_status(p, &started);
+            }
+            view
         })
         .collect();
     Ok(views)
+}
+
+/// Project ids the session marks as currently "started", filtered to those
+/// that are static-served. The session file is the source of truth for whether
+/// a process-less static site is serving.
+fn started_static_ids(state: &State<'_, AppState>) -> HashSet<String> {
+    crate::commands::lifecycle::load_session(state.inner())
+        .into_iter()
+        .collect()
+}
+
+/// Running when the static site is in the started set, Stopped otherwise. This
+/// is the single place the static play/pause state maps onto the UI taxonomy;
+/// the reconciler keys the Caddy route off the same session set.
+fn static_status(project: &Project, started: &HashSet<String>) -> ProjectStatus {
+    if started.contains(project.id.as_str()) {
+        ProjectStatus::Running
+    } else {
+        ProjectStatus::Stopped
+    }
 }
 
 /// `get_project(id)` — single project with merged live state.
@@ -61,7 +88,11 @@ pub async fn get_project(state: State<'_, AppState>, id: String) -> AppResult<Pr
             .process_compose_id()
             .and_then(|key| m.get(key.as_str()))
     });
-    Ok(ProjectView::from_project(project, proc))
+    let mut view = ProjectView::from_project(project, proc);
+    if project.is_static_served() {
+        view.status = static_status(project, &started_static_ids(&state));
+    }
+    Ok(view)
 }
 
 /// `add_project(input)` — register a new project from a folder path.
