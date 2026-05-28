@@ -107,6 +107,10 @@
     // deep-linking to a page that doesn't start the poll leaves the store on its
     // "loading…" placeholder, which falsely reads as "mkcert CA needs setup".
     sidecars.start();
+    // Populate the databases store once at boot so the sidebar "Databases"
+    // nav badge shows the running-instance count app-wide (the /databases page
+    // refreshes it live when open).
+    void databases.refresh();
     void preferences.load();
     // Load the cached entitlement immediately (no network), then re-verify a
     // stored session in the background (rotates tokens, refetches the license).

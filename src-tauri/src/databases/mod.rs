@@ -632,6 +632,145 @@ pub fn client_invocation(instance: &DatabaseInstance, client: &Path) -> String {
 }
 
 // ===========================================================================
+// Per-database (schema) management
+// ===========================================================================
+//
+// Lists and creates/drops the *databases* (schemas) inside a running instance,
+// by running one-shot queries through the engine's CLI client. Only the SQL
+// engines expose a meaningful schema namespace — Redis (numbered DBs),
+// Memcached (no schemas), and Mongo (created on first write) are excluded.
+
+/// Whether per-database create/drop/list applies to this engine.
+pub fn supports_schema_management(engine: DatabaseEngine) -> bool {
+    matches!(
+        engine,
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb | DatabaseEngine::Postgres
+    )
+}
+
+/// A safe SQL identifier: a name we can interpolate into `CREATE DATABASE` /
+/// `DROP DATABASE` without injection risk. Conservative on purpose — letters,
+/// digits, underscores; must start with a letter or underscore; ≤ 64 chars.
+fn validate_identifier(name: &str) -> Result<(), String> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false)
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid database name `{name}` — use letters, digits, and underscores (starting with a letter or underscore)."
+        ))
+    }
+}
+
+/// System schemas hidden from the per-instance database list.
+fn is_system_schema(engine: DatabaseEngine, name: &str) -> bool {
+    match engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => matches!(
+            name,
+            "information_schema" | "mysql" | "performance_schema" | "sys"
+        ),
+        DatabaseEngine::Postgres => matches!(name, "template0" | "template1"),
+        _ => false,
+    }
+}
+
+/// List the user databases/schemas in a running instance.
+pub fn list_schemas(instance: &DatabaseInstance, client: &Path) -> Result<Vec<String>, String> {
+    let port = instance.port.to_string();
+    let args: Vec<&str> = match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => vec![
+            "-N",
+            "-B",
+            "-h",
+            "127.0.0.1",
+            "-P",
+            &port,
+            "-u",
+            "root",
+            "-e",
+            "SHOW DATABASES",
+        ],
+        DatabaseEngine::Postgres => vec![
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port,
+            "-U",
+            "postgres",
+            "-tAc",
+            "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
+        ],
+        _ => {
+            return Err(format!(
+                "listing databases isn't supported for {}.",
+                instance.engine.label()
+            ))
+        }
+    };
+    let out = run_capture(&client.to_path_buf(), &args, Duration::from_secs(10))?;
+    Ok(out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !is_system_schema(instance.engine, l))
+        .collect())
+}
+
+/// Create a database/schema in a running instance.
+pub fn create_schema(instance: &DatabaseInstance, client: &Path, name: &str) -> Result<(), String> {
+    validate_identifier(name)?;
+    let port = instance.port.to_string();
+    let sql;
+    let args: Vec<&str> = match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => {
+            sql = format!("CREATE DATABASE `{name}`");
+            vec!["-h", "127.0.0.1", "-P", &port, "-u", "root", "-e", &sql]
+        }
+        DatabaseEngine::Postgres => {
+            sql = format!("CREATE DATABASE \"{name}\"");
+            vec!["-h", "127.0.0.1", "-p", &port, "-U", "postgres", "-c", &sql]
+        }
+        _ => {
+            return Err(format!(
+                "creating databases isn't supported for {}.",
+                instance.engine.label()
+            ))
+        }
+    };
+    run_capture(&client.to_path_buf(), &args, Duration::from_secs(15)).map(|_| ())
+}
+
+/// Drop a database/schema from a running instance.
+pub fn drop_schema(instance: &DatabaseInstance, client: &Path, name: &str) -> Result<(), String> {
+    validate_identifier(name)?;
+    let port = instance.port.to_string();
+    let sql;
+    let args: Vec<&str> = match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => {
+            sql = format!("DROP DATABASE `{name}`");
+            vec!["-h", "127.0.0.1", "-P", &port, "-u", "root", "-e", &sql]
+        }
+        DatabaseEngine::Postgres => {
+            sql = format!("DROP DATABASE \"{name}\"");
+            vec!["-h", "127.0.0.1", "-p", &port, "-U", "postgres", "-c", &sql]
+        }
+        _ => {
+            return Err(format!(
+                "dropping databases isn't supported for {}.",
+                instance.engine.label()
+            ))
+        }
+    };
+    run_capture(&client.to_path_buf(), &args, Duration::from_secs(15)).map(|_| ())
+}
+
+// ===========================================================================
 // Subprocess helper
 // ===========================================================================
 
@@ -906,6 +1045,33 @@ mod tests {
         std::fs::write(&mysqld, b"#!/bin/sh\n").unwrap();
         let resolved = daemon_binary_resolved(DatabaseEngine::Mysql, Some(&bin));
         assert_eq!(resolved.as_deref(), Some(mysqld.as_path()));
+    }
+
+    #[test]
+    fn validate_identifier_rejects_injection_and_bad_names() {
+        // Valid
+        assert!(validate_identifier("myapp").is_ok());
+        assert!(validate_identifier("my_app_dev").is_ok());
+        assert!(validate_identifier("_internal").is_ok());
+        // Invalid — injection / shell / SQL metacharacters and edge cases
+        assert!(validate_identifier("").is_err());
+        assert!(validate_identifier("1abc").is_err()); // leading digit
+        assert!(validate_identifier("a; DROP DATABASE x").is_err());
+        assert!(validate_identifier("a`b").is_err());
+        assert!(validate_identifier("a\"b").is_err());
+        assert!(validate_identifier("a-b").is_err());
+        assert!(validate_identifier("a b").is_err());
+        assert!(validate_identifier(&"x".repeat(65)).is_err()); // too long
+    }
+
+    #[test]
+    fn schema_management_only_for_sql_engines() {
+        assert!(supports_schema_management(DatabaseEngine::Mysql));
+        assert!(supports_schema_management(DatabaseEngine::Mariadb));
+        assert!(supports_schema_management(DatabaseEngine::Postgres));
+        assert!(!supports_schema_management(DatabaseEngine::Redis));
+        assert!(!supports_schema_management(DatabaseEngine::Mongo));
+        assert!(!supports_schema_management(DatabaseEngine::Memcached));
     }
 
     #[test]

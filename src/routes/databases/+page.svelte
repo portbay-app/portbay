@@ -114,6 +114,84 @@
     }
   }
 
+  // ── Per-database (schema) management ──────────────────────────────────────
+  // Only the SQL engines expose a schema namespace, and the instance must be
+  // running to query it. The list loads when the selected instance changes.
+  const SQL_ENGINES = ["mysql", "mariadb", "postgres"];
+  let schemas = $state<string[]>([]);
+  let schemasLoading = $state<boolean>(false);
+  let schemaError = $state<string | null>(null);
+  let newSchema = $state<string>("");
+  let schemaBusy = $state<boolean>(false);
+
+  const canManageSchemas = $derived(
+    !!selected && SQL_ENGINES.includes(selected.engine),
+  );
+
+  async function loadSchemas() {
+    if (!selected || !canManageSchemas || selected.status !== "running") {
+      schemas = [];
+      return;
+    }
+    schemasLoading = true;
+    schemaError = null;
+    try {
+      schemas = await safeInvoke<string[]>("list_instance_databases", {
+        id: selected.id,
+      });
+    } catch {
+      // Connection refused etc. — keep the section usable, surface inline.
+      schemas = [];
+      schemaError = "Couldn't list databases. Is the instance running?";
+    } finally {
+      schemasLoading = false;
+    }
+  }
+
+  // Reload whenever the selected instance or its run state changes.
+  $effect(() => {
+    // Touch the deps so the effect re-runs on change.
+    void selected?.id;
+    void selected?.status;
+    void loadSchemas();
+  });
+
+  async function addSchema() {
+    const name = newSchema.trim();
+    if (!selected || !name) return;
+    schemaBusy = true;
+    try {
+      await safeInvoke("create_instance_database", { id: selected.id, name });
+      newSchema = "";
+      await loadSchemas();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      schemaBusy = false;
+    }
+  }
+
+  async function dropSchema(name: string) {
+    if (!selected) return;
+    const choice = await confirmDialog.open({
+      title: `Drop database "${name}"?`,
+      message:
+        "This permanently deletes the database and all its tables/data. This cannot be undone.",
+      destructive: true,
+      actions: [{ label: "Drop database", value: "drop", tone: "destructive" }],
+    });
+    if (choice !== "drop") return;
+    schemaBusy = true;
+    try {
+      await safeInvoke("drop_instance_database", { id: selected.id, name });
+      await loadSchemas();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      schemaBusy = false;
+    }
+  }
+
   async function removeInstance() {
     if (!selected) return;
     const choice = await confirmDialog.open({
@@ -546,6 +624,94 @@
             </div>
           </div>
         </article>
+
+        <!-- Databases (schemas) — SQL engines only -->
+        {#if canManageSchemas}
+          <article class="bg-surface border border-border/70 rounded-2xl px-5 py-4">
+            <header class="flex items-center justify-between gap-2 mb-3.5">
+              <div class="flex items-center gap-2">
+                <Icon name="database" size={13} class="text-fg-muted" />
+                <h3 class="text-[13px] font-semibold text-fg">Databases</h3>
+              </div>
+              {#if schemasLoading}
+                <Icon
+                  name="refresh-cw"
+                  size={12}
+                  class="text-fg-subtle animate-spin"
+                />
+              {/if}
+            </header>
+
+            {#if selected.status !== "running"}
+              <p class="text-[12px] text-fg-subtle">
+                Start the instance to view and manage its databases.
+              </p>
+            {:else}
+              <!-- Create -->
+              <form
+                class="flex items-stretch gap-1.5 mb-3"
+                onsubmit={(e) => {
+                  e.preventDefault();
+                  void addSchema();
+                }}
+              >
+                <input
+                  type="text"
+                  bind:value={newSchema}
+                  placeholder="new_database_name"
+                  aria-label="New database name"
+                  class="flex-1 min-w-0 px-3 h-9 rounded-md bg-bg border border-border
+                         text-[12px] font-mono text-fg placeholder:text-fg-subtle
+                         focus:outline-none focus:ring-1 focus:ring-accent/50
+                         focus:border-accent/40 transition-colors"
+                />
+                <button
+                  type="submit"
+                  disabled={schemaBusy || !newSchema.trim()}
+                  class="shrink-0 inline-flex items-center gap-1.5 h-9 px-3 rounded-md
+                         bg-accent text-on-accent text-[12px] font-medium
+                         hover:brightness-110 active:brightness-95
+                         disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
+                >
+                  <Icon name="plus" size={12} />
+                  Create
+                </button>
+              </form>
+
+              {#if schemaError}
+                <p class="text-[11.5px] text-status-crashed mb-2">{schemaError}</p>
+              {/if}
+
+              {#if schemas.length === 0 && !schemasLoading}
+                <p class="text-[12px] text-fg-subtle">
+                  No user databases yet. Create one above.
+                </p>
+              {:else}
+                <ul class="space-y-1.5">
+                  {#each schemas as s (s)}
+                    <li
+                      class="flex items-center justify-between gap-2 px-3 py-2
+                             rounded-md bg-surface-2/50 border border-border/50"
+                    >
+                      <span class="text-[12.5px] font-mono text-fg truncate">{s}</span>
+                      <button
+                        type="button"
+                        onclick={() => dropSchema(s)}
+                        disabled={schemaBusy}
+                        title="Drop database"
+                        aria-label="Drop database {s}"
+                        class="shrink-0 p-1 rounded text-fg-subtle hover:text-status-crashed
+                               hover:bg-status-crashed/10 transition-colors disabled:opacity-50"
+                      >
+                        <Icon name="x" size={13} />
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            {/if}
+          </article>
+        {/if}
 
         <!-- Paths / Storage -->
         <article class="bg-surface border border-border/70 rounded-2xl px-5 py-4">

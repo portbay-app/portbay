@@ -31,6 +31,7 @@
   import { groups } from "$lib/stores/groups.svelte";
   import { groupEditor } from "$lib/stores/groupEditor.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { databases } from "$lib/stores/databases.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { SIDECAR_ORDER } from "$lib/types/sidecars";
   import type { SidecarState } from "$lib/types/sidecars";
@@ -43,6 +44,13 @@
   /** Hide the resize handle in compact density — the layout forces a
    *  fixed sidebar width there, so a drag handle wouldn't do anything. */
   const showHandle = $derived(density.value !== "compact");
+
+  /** Running database instances — surfaced as a badge on the Databases nav
+   *  item (N running). Reflects the databases store, refreshed app-wide on
+   *  boot and whenever the Databases page or its actions run. */
+  const runningDbCount = $derived(
+    databases.value.filter((d) => d.status === "running").length,
+  );
 
   /** Compact density renders the rail as an icon-only strip. Driven by the
    *  same density preference the Settings page toggles, so "compact" means
@@ -333,6 +341,7 @@
         icon="database"
         label="Databases"
         matchPrefix
+        badge={runningDbCount}
         {collapsed}
       />
       <SidebarItem href="/tunnels" icon="cloud" label="Tunnels" matchPrefix {collapsed} />

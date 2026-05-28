@@ -23,9 +23,20 @@
     matchPrefix?: boolean;
     /** Icon-only rendering for the collapsed (compact-density) sidebar. */
     collapsed?: boolean;
+    /** Optional count shown as a small pill (or a dot when collapsed). Hidden
+        when null/0 so an idle section stays quiet. */
+    badge?: number | null;
   }
-  let { href, icon, label, matchPrefix = false, collapsed = false }: Props =
-    $props();
+  let {
+    href,
+    icon,
+    label,
+    matchPrefix = false,
+    collapsed = false,
+    badge = null,
+  }: Props = $props();
+
+  const showBadge = $derived(typeof badge === "number" && badge > 0);
 
   const active = $derived.by(() => {
     const path = page.url.pathname;
@@ -54,5 +65,21 @@
   <Icon name={icon} size={16} />
   {#if !collapsed}
     <span class="truncate">{label}</span>
+    {#if showBadge}
+      <span
+        class="ml-auto shrink-0 inline-flex items-center justify-center min-w-[18px] h-[18px]
+               px-1 rounded-full bg-status-running/15 text-status-running
+               text-[10px] font-semibold tabular-nums"
+        aria-label="{badge} running"
+      >
+        {badge}
+      </span>
+    {/if}
+  {:else if showBadge}
+    <!-- Collapsed: a small running dot in the corner. -->
+    <span
+      aria-hidden="true"
+      class="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-status-running"
+    ></span>
   {/if}
 </a>

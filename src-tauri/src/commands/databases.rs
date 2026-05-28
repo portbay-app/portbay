@@ -614,6 +614,71 @@ pub async fn open_database_client(
     open_in_terminal(&app, &command).await
 }
 
+// ===========================================================================
+// Per-database (schema) management
+// ===========================================================================
+
+/// Resolve a running-instance + its CLI client (managed-aware) for schema ops.
+fn instance_and_client(
+    state: &State<'_, AppState>,
+    id: &str,
+) -> AppResult<(DatabaseInstance, PathBuf)> {
+    let registry = load_registry(state)?;
+    let inst = registry
+        .get_database(&DatabaseInstanceId::new(id))
+        .ok_or_else(|| AppError::BadInput(format!("database `{id}` not found")))?;
+    let mb = managed_bin(&registry, inst.engine);
+    let client = engine::client_binary_resolved(inst.engine, mb.as_deref()).ok_or_else(|| {
+        AppError::BadInput(format!("no CLI client for {} found.", inst.engine.label()))
+    })?;
+    Ok((inst.clone(), client))
+}
+
+/// `list_instance_databases(id)` — the databases/schemas inside the instance.
+/// Empty for engines without a schema namespace (Redis/Mongo/Memcached).
+#[tauri::command]
+pub async fn list_instance_databases(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<Vec<String>> {
+    let (inst, client) = instance_and_client(&state, &id)?;
+    if !engine::supports_schema_management(inst.engine) {
+        return Ok(vec![]);
+    }
+    tokio::task::spawn_blocking(move || engine::list_schemas(&inst, &client))
+        .await
+        .map_err(|e| AppError::Internal(format!("schema list join: {e}")))?
+        .map_err(AppError::Internal)
+}
+
+/// `create_instance_database(id, name)` — create a schema in a running instance.
+#[tauri::command]
+pub async fn create_instance_database(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> AppResult<()> {
+    let (inst, client) = instance_and_client(&state, &id)?;
+    tokio::task::spawn_blocking(move || engine::create_schema(&inst, &client, &name))
+        .await
+        .map_err(|e| AppError::Internal(format!("schema create join: {e}")))?
+        .map_err(AppError::Internal)
+}
+
+/// `drop_instance_database(id, name)` — drop a schema from a running instance.
+#[tauri::command]
+pub async fn drop_instance_database(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> AppResult<()> {
+    let (inst, client) = instance_and_client(&state, &id)?;
+    tokio::task::spawn_blocking(move || engine::drop_schema(&inst, &client, &name))
+        .await
+        .map_err(|e| AppError::Internal(format!("schema drop join: {e}")))?
+        .map_err(AppError::Internal)
+}
+
 async fn open_in_terminal(app: &AppHandle, command: &str) -> AppResult<()> {
     let safe = command.replace('"', "\\\"");
     let script =
