@@ -771,6 +771,145 @@ pub fn drop_schema(instance: &DatabaseInstance, client: &Path, name: &str) -> Re
 }
 
 // ===========================================================================
+// Per-project provisioning (dedicated database + user)
+// ===========================================================================
+//
+// Creates a project-owned database and a login user with a caller-supplied
+// (random, generated client-side with Web Crypto) password, then the command
+// layer injects DB_* into the project's env. SQL engines only.
+
+/// Turn an arbitrary project id/slug into a safe SQL identifier base: lowercase,
+/// non-alphanumerics collapsed to `_`, guaranteed to start with a letter, capped.
+pub fn sanitize_identifier(raw: &str) -> String {
+    let mut s: String = raw
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    s.truncate(50);
+    let needs_prefix = s
+        .chars()
+        .next()
+        .map(|c| !(c.is_ascii_alphabetic() || c == '_'))
+        .unwrap_or(true);
+    if needs_prefix {
+        s = format!("db_{s}");
+    }
+    s
+}
+
+/// A safe provisioning password: alphanumeric, 8–128 chars. The frontend
+/// generates a strong random one; the alphanumeric constraint also means it
+/// needs no quoting/escaping inside SQL string literals or connection URLs.
+fn validate_password(pw: &str) -> Result<(), String> {
+    if (8..=128).contains(&pw.len()) && pw.chars().all(|c| c.is_ascii_alphanumeric()) {
+        Ok(())
+    } else {
+        Err("database password must be 8–128 alphanumeric characters.".to_string())
+    }
+}
+
+/// Provision (idempotently) a dedicated database + login user on a running
+/// instance. MySQL/MariaDB/PostgreSQL only.
+pub fn provision_app_database(
+    instance: &DatabaseInstance,
+    client: &Path,
+    database: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    validate_identifier(database)?;
+    validate_identifier(username)?;
+    validate_password(password)?;
+    let port = instance.port.to_string();
+    match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => {
+            // One round-trip; identifiers are validated, password is alphanumeric.
+            let sql = [
+                format!("CREATE DATABASE IF NOT EXISTS `{database}`"),
+                format!("CREATE USER IF NOT EXISTS '{username}'@'%' IDENTIFIED BY '{password}'"),
+                format!("ALTER USER '{username}'@'%' IDENTIFIED BY '{password}'"),
+                format!("GRANT ALL PRIVILEGES ON `{database}`.* TO '{username}'@'%'"),
+                "FLUSH PRIVILEGES".to_string(),
+            ]
+            .join("; ");
+            let args = vec!["-h", "127.0.0.1", "-P", &port, "-u", "root", "-e", &sql];
+            run_capture(&client.to_path_buf(), &args, Duration::from_secs(20)).map(|_| ())
+        }
+        DatabaseEngine::Postgres => {
+            // Role: create-or-update its password idempotently.
+            let role = format!(
+                "DO $$ BEGIN \
+                   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{username}') THEN \
+                     CREATE ROLE \"{username}\" LOGIN PASSWORD '{password}'; \
+                   ELSE \
+                     ALTER ROLE \"{username}\" LOGIN PASSWORD '{password}'; \
+                   END IF; \
+                 END $$;"
+            );
+            run_pg(client, &port, &role)?;
+            // CREATE DATABASE can't run in a DO block; tolerate "already exists".
+            let _ = run_pg(
+                client,
+                &port,
+                &format!("CREATE DATABASE \"{database}\" OWNER \"{username}\""),
+            );
+            run_pg(
+                client,
+                &port,
+                &format!("GRANT ALL PRIVILEGES ON DATABASE \"{database}\" TO \"{username}\""),
+            )
+            .map(|_| ())
+        }
+        _ => Err(format!(
+            "per-project provisioning isn't supported for {}.",
+            instance.engine.label()
+        )),
+    }
+}
+
+fn run_pg(client: &Path, port: &str, sql: &str) -> Result<String, String> {
+    let args = vec![
+        "-h",
+        "127.0.0.1",
+        "-p",
+        port,
+        "-U",
+        "postgres",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        sql,
+    ];
+    run_capture(&client.to_path_buf(), &args, Duration::from_secs(20))
+}
+
+/// A `DATABASE_URL` for a provisioned project database (credentials inline).
+pub fn app_connection_url(
+    instance: &DatabaseInstance,
+    username: &str,
+    password: &str,
+    database: &str,
+) -> String {
+    let port = instance.port;
+    match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => {
+            format!("mysql://{username}:{password}@127.0.0.1:{port}/{database}")
+        }
+        DatabaseEngine::Postgres => {
+            format!("postgresql://{username}:{password}@127.0.0.1:{port}/{database}")
+        }
+        _ => String::new(),
+    }
+}
+
+// ===========================================================================
 // Subprocess helper
 // ===========================================================================
 
@@ -1072,6 +1211,41 @@ mod tests {
         assert!(!supports_schema_management(DatabaseEngine::Redis));
         assert!(!supports_schema_management(DatabaseEngine::Mongo));
         assert!(!supports_schema_management(DatabaseEngine::Memcached));
+    }
+
+    #[test]
+    fn sanitize_identifier_produces_safe_sql_names() {
+        assert_eq!(sanitize_identifier("my-app"), "my_app");
+        assert_eq!(sanitize_identifier("My App 2"), "my_app_2");
+        assert_eq!(sanitize_identifier("123start"), "db_123start"); // leading digit
+        assert_eq!(sanitize_identifier(""), "db_"); // empty → prefixed
+                                                    // Every result is a valid identifier.
+        for raw in ["my-app", "My App 2", "123start", "weird!!name", ""] {
+            assert!(validate_identifier(&sanitize_identifier(raw)).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_password_requires_alnum_and_length() {
+        assert!(validate_password("abc12345").is_ok());
+        assert!(validate_password("short7").is_err()); // < 8
+        assert!(validate_password("has space12").is_err());
+        assert!(validate_password("has'quote12").is_err());
+        assert!(validate_password(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn app_connection_url_embeds_credentials_per_engine() {
+        let mysql = instance(DatabaseEngine::Mysql, 3307);
+        assert_eq!(
+            app_connection_url(&mysql, "u", "pw", "u_dev"),
+            "mysql://u:pw@127.0.0.1:3307/u_dev"
+        );
+        let pg = instance(DatabaseEngine::Postgres, 5433);
+        assert_eq!(
+            app_connection_url(&pg, "u", "pw", "u_dev"),
+            "postgresql://u:pw@127.0.0.1:5433/u_dev"
+        );
     }
 
     #[test]

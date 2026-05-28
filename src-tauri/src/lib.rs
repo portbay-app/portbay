@@ -601,6 +601,7 @@ pub fn run() {
             commands::databases::list_instance_databases,
             commands::databases::create_instance_database,
             commands::databases::drop_instance_database,
+            commands::databases::provision_project_database,
             commands::telemetry::telemetry_settings,
             commands::telemetry::list_crash_reports,
             commands::telemetry::read_crash_report,

@@ -679,6 +679,86 @@ pub async fn drop_instance_database(
         .map_err(AppError::Internal)
 }
 
+// ===========================================================================
+// Per-project provisioning
+// ===========================================================================
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDbProvision {
+    pub database: String,
+    pub username: String,
+    pub connection_url: String,
+}
+
+/// `provision_project_database(projectId, instanceId, password)` — create a
+/// dedicated database + login user (named after the project) on a running SQL
+/// instance and inject DB_* / DATABASE_URL into the project's env. The password
+/// is generated client-side (Web Crypto) and must be alphanumeric.
+#[tauri::command]
+pub async fn provision_project_database(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+    instance_id: String,
+    password: String,
+) -> AppResult<ProjectDbProvision> {
+    let (inst, client) = instance_and_client(&state, &instance_id)?;
+    if !engine::supports_schema_management(inst.engine) {
+        return Err(AppError::BadInput(format!(
+            "{} can't host a per-project database.",
+            inst.engine.label()
+        )));
+    }
+
+    let pid = ProjectId::new(project_id.clone());
+    let mut registry = load_registry(&state)?;
+    let project = registry
+        .get_project(&pid)
+        .ok_or_else(|| AppError::NotFound(project_id.clone()))?;
+    let base = engine::sanitize_identifier(project.id.as_str());
+    let database = format!("{base}_dev");
+    let username = base;
+
+    // Provision off the async runtime (it shells out to the engine client).
+    let inst_for_blocking = inst.clone();
+    let client_for_blocking = client.clone();
+    let (db, user, pw) = (database.clone(), username.clone(), password.clone());
+    tokio::task::spawn_blocking(move || {
+        engine::provision_app_database(&inst_for_blocking, &client_for_blocking, &db, &user, &pw)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("provision join: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    let connection_url = engine::app_connection_url(&inst, &username, &password, &database);
+
+    // Inject the connection env into the project (authoritative — project env
+    // overrides any linked-instance defaults in the reconciler).
+    let project = registry
+        .get_project_mut(&pid)
+        .ok_or_else(|| AppError::NotFound(project_id.clone()))?;
+    project
+        .env
+        .insert("DB_CONNECTION".into(), inst.engine.id().into());
+    project.env.insert("DB_HOST".into(), "127.0.0.1".into());
+    project.env.insert("DB_PORT".into(), inst.port.to_string());
+    project.env.insert("DB_DATABASE".into(), database.clone());
+    project.env.insert("DB_USERNAME".into(), username.clone());
+    project.env.insert("DB_PASSWORD".into(), password.clone());
+    project
+        .env
+        .insert("DATABASE_URL".into(), connection_url.clone());
+    save_registry(&state, &registry)?;
+    let _ = state.reconciler.tick(&app).await;
+
+    Ok(ProjectDbProvision {
+        database,
+        username,
+        connection_url,
+    })
+}
+
 async fn open_in_terminal(app: &AppHandle, command: &str) -> AppResult<()> {
     let safe = command.replace('"', "\\\"");
     let script =
