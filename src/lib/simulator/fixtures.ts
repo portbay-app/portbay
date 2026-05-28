@@ -765,6 +765,8 @@ const DATABASE_ENGINES: DatabaseEngineView[] = [
     defaultPort: 3306,
     clientAvailable: true,
     installHint: "",
+    managed: false,
+    managedVersion: "",
   },
   {
     id: "mariadb",
@@ -774,6 +776,8 @@ const DATABASE_ENGINES: DatabaseEngineView[] = [
     defaultPort: 3306,
     clientAvailable: true,
     installHint: "",
+    managed: false,
+    managedVersion: "",
   },
   {
     id: "postgres",
@@ -783,6 +787,8 @@ const DATABASE_ENGINES: DatabaseEngineView[] = [
     defaultPort: 5432,
     clientAvailable: true,
     installHint: "",
+    managed: false,
+    managedVersion: "",
   },
   {
     id: "redis",
@@ -792,6 +798,8 @@ const DATABASE_ENGINES: DatabaseEngineView[] = [
     defaultPort: 6379,
     clientAvailable: true,
     installHint: "",
+    managed: false,
+    managedVersion: "",
   },
   {
     id: "mongo",
@@ -801,6 +809,8 @@ const DATABASE_ENGINES: DatabaseEngineView[] = [
     defaultPort: 27017,
     clientAvailable: true,
     installHint: "",
+    managed: false,
+    managedVersion: "",
   },
   {
     id: "memcached",
@@ -810,6 +820,8 @@ const DATABASE_ENGINES: DatabaseEngineView[] = [
     defaultPort: 11211,
     clientAvailable: false,
     installHint: "",
+    managed: false,
+    managedVersion: "",
   },
 ];
 

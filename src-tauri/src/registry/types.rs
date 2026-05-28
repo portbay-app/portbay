@@ -751,6 +751,26 @@ impl DatabaseInstance {
     }
 }
 
+/// A PortBay-managed database engine — our own signed build of an engine
+/// (MySQL/PostgreSQL/Redis/…) fetched on demand into
+/// `Application Support/PortBay/database-engines/<engine>/<version>/`, mirroring
+/// the managed-runtime ([`ManagedRuntime`]) model. When present, it is preferred
+/// over any Homebrew/system install when resolving the engine's binaries, so an
+/// engine installed through PortBay lives entirely inside the PortBay environment
+/// without bundling it into the app installer.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedDatabaseEngine {
+    pub engine: DatabaseEngine,
+    /// Full version installed (e.g. "8.4.0").
+    pub version: String,
+    /// The install root: `<app-data>/database-engines/<engine>/<version>/`.
+    /// Binaries live under `<dir>/bin/`.
+    pub dir: PathBuf,
+    /// "aarch64" or "x86_64".
+    pub arch: String,
+}
+
 /// Largest `cache-size` we'll write. dnsmasq itself warns past ~10k, and a
 /// local dev resolver never needs more.
 pub const MAX_DNS_CACHE_SIZE: u16 = 10_000;

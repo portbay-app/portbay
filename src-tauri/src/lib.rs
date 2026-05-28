@@ -587,6 +587,7 @@ pub fn run() {
             commands::runtimes::install_runtime,
             commands::databases::list_database_engines,
             commands::databases::install_database_engine,
+            commands::databases::remove_managed_engine,
             commands::databases::list_database_instances,
             commands::databases::create_database_instance,
             commands::databases::remove_database_instance,

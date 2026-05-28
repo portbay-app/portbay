@@ -20,7 +20,17 @@ export interface DatabaseEngineView {
   defaultPort: number;
   clientAvailable: boolean;
   installHint: string;
+  /** True when a PortBay-managed build of this engine is installed. */
+  managed: boolean;
+  /** Version of the managed build, when `managed` is true. */
+  managedVersion: string;
 }
+
+/** Progress events streamed from `install_database_engine` (mirrors runtimes). */
+export type EngineInstallEvent =
+  | { kind: "log"; line: string }
+  | { kind: "progress"; downloaded: number; total: number | null }
+  | { kind: "done"; success: boolean };
 
 export type InstanceStatus = "running" | "stopped" | "starting" | "errored";
 

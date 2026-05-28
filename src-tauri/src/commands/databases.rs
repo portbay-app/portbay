@@ -15,18 +15,27 @@
 //!   - `link_database_to_project` / `unlink_database_from_project`
 //!   - `open_database_client`         — launch the CLI in Terminal
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_shell::ShellExt;
 
 use crate::commands::projects::{load_registry, save_registry, slugify};
+use crate::commands::runtimes::{fetch_signed_manifest, newest_entry, InstallEvent};
 use crate::databases as engine;
 use crate::error::{AppError, AppResult};
-use crate::registry::{DatabaseEngine, DatabaseInstance, DatabaseInstanceId, ProjectId, Registry};
+use crate::registry::{
+    DatabaseEngine, DatabaseInstance, DatabaseInstanceId, ManagedDatabaseEngine, ProjectId,
+    Registry,
+};
 use crate::state::AppState;
+
+/// App-event channel mirroring the per-call `Channel<InstallEvent>` for the
+/// managed database-engine install (parallels `portbay://runtime-install`).
+const DB_ENGINE_INSTALL_CHANNEL: &str = "portbay://db-engine-install";
 
 // ===========================================================================
 // Wire types
@@ -42,6 +51,10 @@ pub struct DatabaseEngineView {
     pub default_port: u16,
     pub client_available: bool,
     pub install_hint: String,
+    /// True when a PortBay-managed build of this engine is installed.
+    pub managed: bool,
+    /// Version of the managed build, when `managed` is true.
+    pub managed_version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,6 +115,8 @@ const ALL_ENGINES: &[DatabaseEngine] = &[
     DatabaseEngine::Memcached,
 ];
 
+/// Fallback hint shown when an engine isn't installed and no managed build is
+/// published yet — the managed install button is the primary path.
 fn install_hint(e: DatabaseEngine) -> &'static str {
     match e {
         DatabaseEngine::Mysql => "brew install mysql",
@@ -113,24 +128,26 @@ fn install_hint(e: DatabaseEngine) -> &'static str {
     }
 }
 
-fn install_formula(e: DatabaseEngine) -> &'static str {
-    match e {
-        DatabaseEngine::Mysql => "mysql",
-        DatabaseEngine::Postgres => "postgresql@16",
-        DatabaseEngine::Mariadb => "mariadb",
-        DatabaseEngine::Redis => "redis",
-        DatabaseEngine::Mongo => "mongodb-community",
-        DatabaseEngine::Memcached => "memcached",
-    }
+/// The `bin` dir of a PortBay-managed engine install, when one exists.
+fn managed_bin(registry: &Registry, engine: DatabaseEngine) -> Option<PathBuf> {
+    registry
+        .managed_engine(engine)
+        .map(|m| engine::managed_bin_dir(&m.dir))
 }
 
 /// `list_database_engines()` — every supported engine, with install state.
+/// Reports a PortBay-managed install ahead of any Homebrew/system copy.
 #[tauri::command]
-pub async fn list_database_engines() -> AppResult<Vec<DatabaseEngineView>> {
+pub async fn list_database_engines(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<DatabaseEngineView>> {
+    let registry = load_registry(&state)?;
     Ok(ALL_ENGINES
         .iter()
         .map(|&e| {
-            let det = engine::detect(e);
+            let managed = registry.managed_engine(e);
+            let mb = managed.map(|m| engine::managed_bin_dir(&m.dir));
+            let det = engine::detect_resolved(e, mb.as_deref());
             DatabaseEngineView {
                 id: e.id().into(),
                 label: e.label().into(),
@@ -139,30 +156,114 @@ pub async fn list_database_engines() -> AppResult<Vec<DatabaseEngineView>> {
                 default_port: e.default_port(),
                 client_available: det.client.is_some(),
                 install_hint: install_hint(e).into(),
+                managed: managed.is_some(),
+                managed_version: managed.map(|m| m.version.clone()).unwrap_or_default(),
             }
         })
         .collect())
 }
 
-/// `install_database_engine(engine)` — install the engine binary via brew.
+/// `install_database_engine(engine, onEvent)` — download a signed, PortBay-managed
+/// build of the engine into `<app-data>/database-engines/<engine>/<version>/` and
+/// register it. Reuses the runtime download/verify/install pipeline (same signed
+/// manifest); the engine id is the manifest `lang`. Progress streams over the
+/// channel, mirroring `install_runtime`.
 #[tauri::command]
-pub async fn install_database_engine(engine: String) -> AppResult<()> {
+pub async fn install_database_engine(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    engine: String,
+    on_event: Channel<InstallEvent>,
+) -> AppResult<()> {
     let eng = parse_engine(&engine)?;
-    let brew = require_brew()?;
-    let formula = install_formula(eng);
-    // `brew install` can run for minutes — never on the async runtime.
-    tokio::task::spawn_blocking(move || {
-        engine::run_capture(&brew, &["install", formula], Duration::from_secs(8 * 60))
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("install join: {e}")))?
-    .map(|_| ())
-    .map_err(|e| {
-        AppError::Internal(format!(
-            "brew install {formula} failed: {}",
-            truncate(&e, 600)
+
+    let _ = on_event.send(InstallEvent::Log {
+        line: "Fetching signed PortBay manifest…".into(),
+    });
+    let manifest = fetch_signed_manifest().await?;
+    let arch = crate::runtimes::download::manifest::current_arch();
+    let entry = newest_entry(&manifest, eng.id(), arch).ok_or_else(|| {
+        AppError::BadInput(format!(
+            "no PortBay-managed {} build is published for {arch} yet",
+            eng.label()
         ))
-    })
+    })?;
+
+    let app_data = app_data_dir(&state)?;
+    let dest_root = engine::engines_root(&app_data);
+    let expected = engine::expected_daemon_rel(eng);
+    let version = entry.version.clone();
+    let install_arch = entry.arch.clone();
+    let app_for_progress = app.clone();
+    let channel = on_event.clone();
+    let _ = on_event.send(InstallEvent::Log {
+        line: format!("Installing {} {} ({install_arch})…", eng.label(), version),
+    });
+    let binary = crate::runtimes::download::install::fetch_and_install(
+        &entry,
+        &dest_root,
+        &expected,
+        move |downloaded, total| {
+            let ev = InstallEvent::Progress { downloaded, total };
+            let _ = channel.send(ev.clone());
+            let _ = app_for_progress.emit(DB_ENGINE_INSTALL_CHANNEL, ev);
+        },
+        |bin| probe_engine(bin),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("engine install failed: {e}")))?;
+
+    // binary = <dest_root>/<engine>/<version>/bin/<daemon>; the install root
+    // (what we record + resolve `bin/` under) is two parents up.
+    let install_dir = binary
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| AppError::Internal("installed engine path is malformed".into()))?
+        .to_path_buf();
+
+    let mut reg = load_registry(&state)?;
+    reg.upsert_managed_engine(ManagedDatabaseEngine {
+        engine: eng,
+        version,
+        dir: install_dir,
+        arch: install_arch,
+    });
+    save_registry(&state, &reg)?;
+
+    let done = InstallEvent::Done { success: true };
+    let _ = app.emit(DB_ENGINE_INSTALL_CHANNEL, done.clone());
+    let _ = on_event.send(done);
+    Ok(())
+}
+
+/// `remove_managed_engine(engine)` — drop a PortBay-managed engine install and
+/// delete its binaries. Instances fall back to any Homebrew/system copy.
+#[tauri::command]
+pub async fn remove_managed_engine(state: State<'_, AppState>, engine: String) -> AppResult<()> {
+    let eng = parse_engine(&engine)?;
+    let app_data = app_data_dir(&state)?;
+    let mut reg = load_registry(&state)?;
+    let removed = reg.remove_managed_engine(eng);
+    save_registry(&state, &reg)?;
+    if let Some(m) = removed {
+        // Only ever delete inside our own engines root.
+        if m.dir.starts_with(engine::engines_root(&app_data)) && m.dir.exists() {
+            std::fs::remove_dir_all(&m.dir).map_err(|e| {
+                AppError::Internal(format!("delete engine dir {}: {e}", m.dir.display()))
+            })?;
+        }
+    }
+    state.reconciler.mark_dirty();
+    Ok(())
+}
+
+/// Validate a freshly-extracted engine daemon: it runs and reports a version.
+fn probe_engine(bin: &Path) -> bool {
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+        .unwrap_or(false)
 }
 
 // ===========================================================================
@@ -200,7 +301,8 @@ pub async fn list_database_instances(
                     }
                 }
             };
-            instance_view(inst, status, &app_data)
+            let mb = managed_bin(&registry, inst.engine);
+            instance_view(inst, status, &app_data, mb.as_deref())
         })
         .collect();
     Ok(views)
@@ -209,7 +311,8 @@ pub async fn list_database_instances(
 fn instance_view(
     inst: &DatabaseInstance,
     status: InstanceStatus,
-    app_data: &std::path::Path,
+    app_data: &Path,
+    managed_bin: Option<&Path>,
 ) -> DatabaseInstanceView {
     let data = engine::data_dir(app_data, inst.id.as_str());
     DatabaseInstanceView {
@@ -231,7 +334,7 @@ fn instance_view(
         connection_url: inst.connection_url(),
         account: inst.default_account().into(),
         linked_projects: inst.linked_projects.iter().map(|p| p.to_string()).collect(),
-        binary_available: engine::daemon_binary(inst.engine).is_some(),
+        binary_available: engine::daemon_binary_resolved(inst.engine, managed_bin).is_some(),
         provisioned: engine::is_initialized(inst.engine, &data),
     }
 }
@@ -255,18 +358,19 @@ pub async fn create_database_instance(
         return Err(AppError::BadInput("a name is required".into()));
     }
 
-    // Daemon must be installed before we can provision.
-    let daemon = engine::daemon_binary(eng).ok_or_else(|| {
-        AppError::BadInput(format!(
-            "{} isn't installed. Install it first ({}).",
-            eng.label(),
-            install_hint(eng)
-        ))
-    })?;
-
     let mut registry = load_registry(&state)?;
     let id = unique_instance_id(&registry, name);
     let app_data = app_data_dir(&state)?;
+
+    // Daemon must be installed before we can provision — prefer a PortBay-managed
+    // build, falling back to a Homebrew/system copy.
+    let mb = managed_bin(&registry, eng);
+    let daemon = engine::daemon_binary_resolved(eng, mb.as_deref()).ok_or_else(|| {
+        AppError::BadInput(format!(
+            "{} isn't installed. Install it from the Databases page first.",
+            eng.label()
+        ))
+    })?;
 
     let port = match input.port {
         Some(p) => {
@@ -284,11 +388,19 @@ pub async fn create_database_instance(
     // `mysqld --initialize-insecure` / `initdb`, which can take 30–120s.
     // Run it off the async runtime so status, metrics, and log-stream IPC
     // stay responsive while the GUI shows its spinner.
-    let detection = engine::detect(eng);
+    let detection = engine::detect_resolved(eng, mb.as_deref());
     let provision_data = app_data.clone();
     let provision_id = id.clone();
+    let provision_managed = mb.clone();
     tokio::task::spawn_blocking(move || {
-        engine::provision(eng, &daemon, &provision_data, &provision_id, port)
+        engine::provision(
+            eng,
+            &daemon,
+            &provision_data,
+            &provision_id,
+            port,
+            provision_managed.as_deref(),
+        )
     })
     .await
     .map_err(|e| AppError::Internal(format!("provision join: {e}")))?
@@ -314,7 +426,12 @@ pub async fn create_database_instance(
     // process exists (and auto-starts if requested) before we return.
     let _ = state.reconciler.tick(&app).await;
 
-    Ok(instance_view(&instance, InstanceStatus::Stopped, &app_data))
+    Ok(instance_view(
+        &instance,
+        InstanceStatus::Stopped,
+        &app_data,
+        mb.as_deref(),
+    ))
 }
 
 /// `remove_database_instance(id, deleteData)` — stop the daemon, drop it
@@ -489,7 +606,8 @@ pub async fn open_database_client(
     let inst = registry
         .get_database(&DatabaseInstanceId::new(id.clone()))
         .ok_or_else(|| AppError::BadInput(format!("database `{id}` not found")))?;
-    let client = engine::client_binary(inst.engine).ok_or_else(|| {
+    let mb = managed_bin(&registry, inst.engine);
+    let client = engine::client_binary_resolved(inst.engine, mb.as_deref()).ok_or_else(|| {
         AppError::BadInput(format!("no CLI client for {} found.", inst.engine.label()))
     })?;
     let command = engine::client_invocation(inst, &client);
@@ -525,14 +643,6 @@ fn require_instance(state: &State<'_, AppState>, id: &str) -> AppResult<()> {
         return Err(AppError::BadInput(format!("database `{id}` not found")));
     }
     Ok(())
-}
-
-fn require_brew() -> AppResult<PathBuf> {
-    which::which("brew").map_err(|_| {
-        AppError::BadInput(
-            "Homebrew isn't installed. Install from https://brew.sh, then restart PortBay.".into(),
-        )
-    })
 }
 
 /// PortBay app-data dir — the parent of `logs_dir` (e.g.
@@ -584,14 +694,6 @@ fn allocate_port(registry: &Registry, eng: DatabaseEngine) -> u16 {
     eng.default_port()
 }
 
-fn truncate(s: &str, limit: usize) -> &str {
-    if s.len() <= limit {
-        s
-    } else {
-        &s[..limit]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,7 +727,6 @@ mod tests {
             assert!(!engine.label().is_empty());
             assert!(engine.default_port() > 0);
             assert!(install_hint(*engine).starts_with("brew install "));
-            assert!(!install_formula(*engine).is_empty());
         }
     }
 

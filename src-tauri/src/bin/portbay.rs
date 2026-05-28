@@ -2341,14 +2341,18 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
             if name.is_empty() {
                 return Err(CliError::BadInput("a database name is required".into()));
             }
-            let daemon = engine::daemon_binary(eng).ok_or_else(|| {
+            let mut reg = ctx.load_registry()?;
+            // Prefer a PortBay-managed engine install, falling back to Homebrew/system.
+            let managed_bin = reg
+                .managed_engine(eng)
+                .map(|m| engine::managed_bin_dir(&m.dir));
+            let daemon = engine::daemon_binary_resolved(eng, managed_bin.as_deref()).ok_or_else(|| {
                 CliError::BadInput(format!(
                     "{} isn't installed ({}). Install the engine binary from the PortBay app, then retry.",
                     eng.label(),
                     db_install_hint(eng)
                 ))
             })?;
-            let mut reg = ctx.load_registry()?;
             let id = db_unique_id(&reg, name);
             let port = match args.port {
                 Some(p) => {
@@ -2361,8 +2365,8 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
                 }
                 None => db_alloc_port(&reg, eng),
             };
-            let detection = engine::detect(eng);
-            engine::provision(eng, &daemon, &app_data, &id, port)
+            let detection = engine::detect_resolved(eng, managed_bin.as_deref());
+            engine::provision(eng, &daemon, &app_data, &id, port, managed_bin.as_deref())
                 .map_err(|e| CliError::Other(format!("provision: {e}")))?;
             let instance = DatabaseInstance {
                 id: DatabaseInstanceId::new(id.clone()),

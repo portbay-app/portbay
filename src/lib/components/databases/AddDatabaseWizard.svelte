@@ -5,12 +5,15 @@
 
   Flow:
     1. Pick an engine (cards). Engines that aren't installed show an
-       Install button that runs `brew install` inline.
+       Install button that downloads a signed, PortBay-managed build into the
+       PortBay environment (no Homebrew, nothing bundled into the installer).
     2. Name the instance + optional explicit port (auto-allocated if blank).
     3. Create → PortBay provisions the data dir + config and registers the
        instance, then it appears in the list.
 -->
 <script lang="ts">
+  import { Channel } from "@tauri-apps/api/core";
+
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import DatabaseMark from "./DatabaseMark.svelte";
@@ -24,6 +27,7 @@
   import type {
     DatabaseEngineId,
     DatabaseEngineView,
+    EngineInstallEvent,
   } from "$lib/types/databases";
 
   let selectedEngine = $state<DatabaseEngineId | null>(null);
@@ -32,6 +36,8 @@
   let autoStart = $state<boolean>(true);
   let submitting = $state<boolean>(false);
   let installingEngine = $state<DatabaseEngineId | null>(null);
+  /** Live progress line for the engine currently installing. */
+  let installLine = $state<string>("");
   let formError = $state<CommandError | null>(null);
 
   const engine = $derived<DatabaseEngineView | null>(
@@ -49,21 +55,27 @@
   async function installEngine(e: DatabaseEngineView) {
     if (installingEngine) return;
     installingEngine = e.id;
-    errorBus.push({
-      code: "DB_ENGINE_INSTALL",
-      whatHappened: `Installing ${e.label} via Homebrew…`,
-      whyItMatters: "First install can take a minute or two.",
-      whoCausedIt: "system",
-      severity: "info",
-      actions: [],
-    });
+    installLine = "Starting…";
+    const channel = new Channel<EngineInstallEvent>();
+    channel.onmessage = (ev) => {
+      if (ev.kind === "log") {
+        installLine = ev.line;
+      } else if (ev.kind === "progress") {
+        installLine = ev.total
+          ? `${Math.round((ev.downloaded / ev.total) * 100)}% downloaded`
+          : `${(ev.downloaded / 1_000_000).toFixed(1)} MB downloaded`;
+      }
+    };
     try {
-      await safeInvoke("install_database_engine", { engine: e.id });
+      await safeInvoke("install_database_engine", {
+        engine: e.id,
+        onEvent: channel,
+      });
       await databases.refreshEngines();
       errorBus.push({
         code: "DB_ENGINE_INSTALL_OK",
         whatHappened: `${e.label} installed.`,
-        whyItMatters: "You can create an instance now.",
+        whyItMatters: "It now lives inside PortBay — you can create an instance.",
         whoCausedIt: "system",
         severity: "success",
         actions: [],
@@ -72,6 +84,7 @@
       /* toast already pushed */
     } finally {
       installingEngine = null;
+      installLine = "";
     }
   }
 
@@ -210,10 +223,24 @@
                       {e.version ? `v${e.version}` : "installed"}
                     </span>
                   {/if}
+                  {#if e.managed}
+                    <span
+                      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded
+                             bg-accent/10 text-accent text-[10px] font-medium"
+                      title="Installed and managed by PortBay"
+                    >
+                      <Icon name="shield" size={9} />
+                      PortBay
+                    </span>
+                  {/if}
                 </div>
-                <p class="text-[11px] text-fg-subtle">
-                  Default port {e.defaultPort}
-                </p>
+                {#if installingEngine === e.id && installLine}
+                  <p class="text-[11px] text-accent truncate">{installLine}</p>
+                {:else}
+                  <p class="text-[11px] text-fg-subtle">
+                    Default port {e.defaultPort}
+                  </p>
+                {/if}
               </div>
               {#if e.installed}
                 {#if isSel}
@@ -227,6 +254,7 @@
                     void installEngine(e);
                   }}
                   disabled={installingEngine !== null}
+                  title="Download a signed, PortBay-managed build into the PortBay environment"
                   class="shrink-0 inline-flex items-center gap-1 px-2 h-7 rounded-md
                          border border-accent/40 text-accent text-[11px]
                          hover:bg-accent/10 disabled:opacity-50 transition-colors"

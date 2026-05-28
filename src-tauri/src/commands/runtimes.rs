@@ -181,37 +181,10 @@ pub async fn install_runtime(
         )));
     }
 
-    let manifest_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_URL")
-        .unwrap_or_else(|_| RUNTIME_MANIFEST_URL.to_string());
-    let signature_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_SIGNATURE_URL")
-        .unwrap_or_else(|_| RUNTIME_MANIFEST_SIGNATURE_URL.to_string());
-
     let _ = on_event.send(InstallEvent::Log {
         line: "Fetching signed PortBay runtime manifest…".into(),
     });
-    let manifest_bytes = reqwest::get(&manifest_url)
-        .await
-        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
-        .error_for_status()
-        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("runtime manifest read failed: {e}")))?;
-    let signature = reqwest::get(&signature_url)
-        .await
-        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
-        .error_for_status()
-        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
-        .text()
-        .await
-        .map_err(|e| AppError::Internal(format!("runtime manifest signature read failed: {e}")))?;
-
-    let manifest = crate::runtimes::download::manifest::verify_and_parse(
-        &manifest_bytes,
-        &signature,
-        UPDATER_PUBKEY,
-    )
-    .map_err(|e| AppError::Internal(format!("runtime manifest verification failed: {e}")))?;
+    let manifest = fetch_signed_manifest().await?;
     let arch = crate::runtimes::download::manifest::current_arch();
     let requested = version.as_deref().unwrap_or("");
     let entry = if requested.is_empty() {
@@ -286,7 +259,42 @@ pub async fn install_runtime(
     Ok(())
 }
 
-fn newest_entry(
+/// Fetch the signed PortBay runtimes manifest and verify it. Shared by the
+/// runtime and database-engine installers — both pull builds from the same
+/// signed manifest published by the portbay-runtimes repo.
+pub(crate) async fn fetch_signed_manifest(
+) -> AppResult<crate::runtimes::download::manifest::RuntimeManifest> {
+    let manifest_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_URL")
+        .unwrap_or_else(|_| RUNTIME_MANIFEST_URL.to_string());
+    let signature_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_SIGNATURE_URL")
+        .unwrap_or_else(|_| RUNTIME_MANIFEST_SIGNATURE_URL.to_string());
+    let manifest_bytes = reqwest::get(&manifest_url)
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
+        .error_for_status()
+        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest read failed: {e}")))?;
+    let signature = reqwest::get(&signature_url)
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
+        .error_for_status()
+        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
+        .text()
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest signature read failed: {e}")))?;
+    crate::runtimes::download::manifest::verify_and_parse(
+        &manifest_bytes,
+        &signature,
+        UPDATER_PUBKEY,
+    )
+    .map_err(|e| AppError::Internal(format!("runtime manifest verification failed: {e}")))
+}
+
+/// Newest manifest entry for a `lang`/`arch`, by descending version. Shared
+/// with the database-engine installer (engine id is used as the `lang`).
+pub(crate) fn newest_entry(
     manifest: &crate::runtimes::download::manifest::RuntimeManifest,
     lang: &str,
     arch: &str,

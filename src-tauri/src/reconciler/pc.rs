@@ -294,7 +294,13 @@ fn db_daemon_specs_for(
 ) -> Vec<process_compose::config::DatabaseDaemonSpec> {
     let mut specs = Vec::new();
     for inst in reg.list_databases() {
-        let Some(daemon) = crate::databases::daemon_binary(inst.engine) else {
+        // Prefer a PortBay-managed engine install, falling back to Homebrew/system.
+        let managed_bin = reg
+            .managed_engine(inst.engine)
+            .map(|m| crate::databases::managed_bin_dir(&m.dir));
+        let Some(daemon) =
+            crate::databases::daemon_binary_resolved(inst.engine, managed_bin.as_deref())
+        else {
             tracing::warn!(
                 target: "reconciler",
                 "database `{}` ({}) skipped — daemon binary not found. Install the engine via the Databases panel.",

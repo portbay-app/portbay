@@ -17,9 +17,10 @@ pub mod workspace;
 pub use error::{RegistryError, Result};
 pub use types::{
     CorsConfig, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings,
-    DomainConfig, FpmTuning, Group, ManagedRuntime, ManualRuntime, MobileRunConfig,
-    PhpVersionConfig, Project, ProjectId, ProjectType, Readiness, ResolverMode, Runtime,
-    RuntimeSettings, SandboxConfig, SandboxNetworkPolicy, WebServer, Workspace, WorkspaceTool,
+    DomainConfig, FpmTuning, Group, ManagedDatabaseEngine, ManagedRuntime, ManualRuntime,
+    MobileRunConfig, PhpVersionConfig, Project, ProjectId, ProjectType, Readiness, ResolverMode,
+    Runtime, RuntimeSettings, SandboxConfig, SandboxNetworkPolicy, WebServer, Workspace,
+    WorkspaceTool,
 };
 
 /// The registry-file schema version this build reads and writes.
@@ -120,6 +121,13 @@ pub struct Registry {
     #[serde(default)]
     pub databases: Vec<DatabaseInstance>,
 
+    /// PortBay-managed database engines fetched on demand (the on-demand
+    /// counterpart to bundling). Preferred over Homebrew/system installs when
+    /// resolving an engine's binaries. `#[serde(default)]` keeps older registry
+    /// files loading.
+    #[serde(default)]
+    pub managed_database_engines: Vec<ManagedDatabaseEngine>,
+
     /// Tunable dnsmasq daemon settings. `#[serde(default)]` keeps
     /// pre-DNS-settings registry files loading with sane defaults.
     #[serde(default)]
@@ -140,6 +148,7 @@ impl Registry {
             projects: Vec::new(),
             groups: Vec::new(),
             databases: Vec::new(),
+            managed_database_engines: Vec::new(),
             dnsmasq: DnsmasqSettings::default(),
             runtimes: RuntimeSettings::default(),
         }
@@ -309,6 +318,35 @@ impl Registry {
         self.databases
             .iter()
             .any(|d| d.port == port && except != Some(&d.id))
+    }
+
+    // ---- Managed database engines -----------------------------------------
+
+    /// The PortBay-managed install for `engine`, if one has been downloaded.
+    pub fn managed_engine(&self, engine: DatabaseEngine) -> Option<&ManagedDatabaseEngine> {
+        self.managed_database_engines
+            .iter()
+            .find(|m| m.engine == engine)
+    }
+
+    /// Record (or replace) a managed engine install. One managed install per
+    /// engine — installing a new version supersedes the prior one.
+    pub fn upsert_managed_engine(&mut self, managed: ManagedDatabaseEngine) {
+        self.managed_database_engines
+            .retain(|m| m.engine != managed.engine);
+        self.managed_database_engines.push(managed);
+    }
+
+    /// Drop the managed install for `engine`, returning it if present.
+    pub fn remove_managed_engine(
+        &mut self,
+        engine: DatabaseEngine,
+    ) -> Option<ManagedDatabaseEngine> {
+        let idx = self
+            .managed_database_engines
+            .iter()
+            .position(|m| m.engine == engine)?;
+        Some(self.managed_database_engines.remove(idx))
     }
 }
 
@@ -544,5 +582,39 @@ mod tests {
         doc["version"] = serde_json::json!(SUPPORTED_VERSION);
         let out = migrate(doc.clone(), SUPPORTED_VERSION).unwrap();
         assert_eq!(out, doc);
+    }
+
+    #[test]
+    fn managed_engine_upsert_replaces_and_remove_works() {
+        let mut reg = Registry::new("test");
+        assert!(reg.managed_engine(DatabaseEngine::Redis).is_none());
+
+        reg.upsert_managed_engine(ManagedDatabaseEngine {
+            engine: DatabaseEngine::Redis,
+            version: "7.2.0".into(),
+            dir: PathBuf::from("/x/redis/7.2.0"),
+            arch: "aarch64".into(),
+        });
+        assert_eq!(
+            reg.managed_engine(DatabaseEngine::Redis).unwrap().version,
+            "7.2.0"
+        );
+
+        // Upsert supersedes the prior version — one managed install per engine.
+        reg.upsert_managed_engine(ManagedDatabaseEngine {
+            engine: DatabaseEngine::Redis,
+            version: "7.4.0".into(),
+            dir: PathBuf::from("/x/redis/7.4.0"),
+            arch: "aarch64".into(),
+        });
+        assert_eq!(reg.managed_database_engines.len(), 1);
+        assert_eq!(
+            reg.managed_engine(DatabaseEngine::Redis).unwrap().version,
+            "7.4.0"
+        );
+
+        let removed = reg.remove_managed_engine(DatabaseEngine::Redis);
+        assert_eq!(removed.unwrap().version, "7.4.0");
+        assert!(reg.managed_engine(DatabaseEngine::Redis).is_none());
     }
 }

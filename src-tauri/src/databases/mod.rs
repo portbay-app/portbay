@@ -173,12 +173,49 @@ pub fn client_binary(engine: DatabaseEngine) -> Option<PathBuf> {
     resolve_in(engine, spec(engine).clients, prefix.as_deref())
 }
 
-fn init_binary(engine: DatabaseEngine, prefix: Option<&Path>) -> Option<PathBuf> {
-    let spec = spec(engine);
-    if spec.init_bins.is_empty() {
-        return None;
+// ===========================================================================
+// Managed-engine resolution (PortBay-managed install wins over Homebrew)
+// ===========================================================================
+//
+// A PortBay-managed engine is installed under
+// `<app-data>/database-engines/<engine>/<version>/`, with every binary
+// (daemon, client, init helper) under `<dir>/bin/`. When such an install
+// exists, its `bin` dir is searched before the Homebrew opt dirs / PATH, so
+// an engine installed through PortBay is used in preference to any system copy
+// — the engine lives inside the PortBay environment without being bundled.
+
+/// Search `managed_bin` (when set) for the first matching name, then fall back
+/// to the Homebrew/system resolution.
+fn resolve_preferring_managed(
+    engine: DatabaseEngine,
+    names: &[&str],
+    managed_bin: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(dir) = managed_bin {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
     }
-    resolve_in(engine, spec.init_bins, prefix)
+    resolve_in(engine, names, brew_prefix().as_deref())
+}
+
+/// Daemon binary, preferring a PortBay-managed install at `managed_bin`.
+pub fn daemon_binary_resolved(
+    engine: DatabaseEngine,
+    managed_bin: Option<&Path>,
+) -> Option<PathBuf> {
+    resolve_preferring_managed(engine, spec(engine).daemons, managed_bin)
+}
+
+/// CLI client binary, preferring a PortBay-managed install at `managed_bin`.
+pub fn client_binary_resolved(
+    engine: DatabaseEngine,
+    managed_bin: Option<&Path>,
+) -> Option<PathBuf> {
+    resolve_preferring_managed(engine, spec(engine).clients, managed_bin)
 }
 
 // ===========================================================================
@@ -195,9 +232,16 @@ pub struct EngineDetection {
 }
 
 /// Probe an engine: is its daemon binary present, and what version?
+/// Considers Homebrew/system installs only.
 pub fn detect(engine: DatabaseEngine) -> EngineDetection {
-    let daemon = daemon_binary(engine);
-    let client = client_binary(engine);
+    detect_resolved(engine, None)
+}
+
+/// Like [`detect`], but searches a PortBay-managed install at `managed_bin`
+/// first. A managed engine reports as installed even when no system copy exists.
+pub fn detect_resolved(engine: DatabaseEngine, managed_bin: Option<&Path>) -> EngineDetection {
+    let daemon = daemon_binary_resolved(engine, managed_bin);
+    let client = client_binary_resolved(engine, managed_bin);
 
     // Probe the daemon's raw `--version` once — needed both to extract the
     // numeric version and to disambiguate the MySQL/MariaDB pair, which share
@@ -290,6 +334,30 @@ pub fn instances_root(app_data: &Path) -> PathBuf {
     app_data.join("databases")
 }
 
+/// Root directory PortBay owns for managed engine *binaries* (distinct from
+/// instance data): `<app-data>/database-engines/`.
+pub fn engines_root(app_data: &Path) -> PathBuf {
+    app_data.join("database-engines")
+}
+
+/// Install dir for a managed engine build:
+/// `<app-data>/database-engines/<engine>/<version>/`.
+pub fn managed_engine_dir(app_data: &Path, engine: DatabaseEngine, version: &str) -> PathBuf {
+    engines_root(app_data).join(engine.id()).join(version)
+}
+
+/// The `bin` dir inside a managed engine install root.
+pub fn managed_bin_dir(install_dir: &Path) -> PathBuf {
+    install_dir.join("bin")
+}
+
+/// Relative path of the daemon binary inside a managed engine archive — the
+/// layout the portbay-runtimes build must produce (every binary under `bin/`).
+/// Used as the `expected_binary_rel` the installer validates after extraction.
+pub fn expected_daemon_rel(engine: DatabaseEngine) -> PathBuf {
+    PathBuf::from("bin").join(spec(engine).daemons[0])
+}
+
 /// The instance's own directory: `<app-data>/databases/<id>/`.
 pub fn instance_dir(app_data: &Path, id: &str) -> PathBuf {
     instances_root(app_data).join(id)
@@ -352,18 +420,17 @@ pub fn provision(
     app_data: &Path,
     id: &str,
     port: u16,
+    managed_bin: Option<&Path>,
 ) -> Result<(), String> {
     let data = data_dir(app_data, id);
     std::fs::create_dir_all(&data)
         .map_err(|e| format!("create data dir {}: {e}", data.display()))?;
 
-    let prefix = brew_prefix();
-
     if !is_initialized(engine, &data) {
         match engine {
             DatabaseEngine::Mysql => init_mysql(daemon, &data)?,
-            DatabaseEngine::Mariadb => init_mariadb(engine, &data, prefix.as_deref())?,
-            DatabaseEngine::Postgres => init_postgres(engine, &data, prefix.as_deref())?,
+            DatabaseEngine::Mariadb => init_mariadb(engine, &data, managed_bin)?,
+            DatabaseEngine::Postgres => init_postgres(engine, &data, managed_bin)?,
             DatabaseEngine::Redis | DatabaseEngine::Mongo | DatabaseEngine::Memcached => {
                 /* dir is enough */
             }
@@ -396,10 +463,13 @@ fn init_mysql(daemon: &Path, data: &Path) -> Result<(), String> {
         .map_err(|e| format!("mysqld --initialize-insecure failed: {}", truncate(&e, 800)))
 }
 
-fn init_mariadb(engine: DatabaseEngine, data: &Path, prefix: Option<&Path>) -> Result<(), String> {
-    let init = init_binary(engine, prefix).ok_or_else(|| {
-        "mariadb-install-db not found — reinstall MariaDB via Homebrew.".to_string()
-    })?;
+fn init_mariadb(
+    engine: DatabaseEngine,
+    data: &Path,
+    managed_bin: Option<&Path>,
+) -> Result<(), String> {
+    let init = resolve_preferring_managed(engine, spec(engine).init_bins, managed_bin)
+        .ok_or_else(|| "mariadb-install-db not found — install MariaDB first.".to_string())?;
     let datadir_arg = format!("--datadir={}", data.display());
     let args = vec![
         datadir_arg.as_str(),
@@ -411,9 +481,13 @@ fn init_mariadb(engine: DatabaseEngine, data: &Path, prefix: Option<&Path>) -> R
         .map_err(|e| format!("mariadb-install-db failed: {}", truncate(&e, 800)))
 }
 
-fn init_postgres(engine: DatabaseEngine, data: &Path, prefix: Option<&Path>) -> Result<(), String> {
-    let initdb = init_binary(engine, prefix)
-        .ok_or_else(|| "initdb not found — reinstall PostgreSQL via Homebrew.".to_string())?;
+fn init_postgres(
+    engine: DatabaseEngine,
+    data: &Path,
+    managed_bin: Option<&Path>,
+) -> Result<(), String> {
+    let initdb = resolve_preferring_managed(engine, spec(engine).init_bins, managed_bin)
+        .ok_or_else(|| "initdb not found — install PostgreSQL first.".to_string())?;
     let pgdata = format!("--pgdata={}", data.display());
     let args = vec![
         pgdata.as_str(),
@@ -791,6 +865,47 @@ mod tests {
     fn shell_quote_wraps_paths_with_spaces() {
         assert_eq!(shell_quote("/tmp/pb/data"), "/tmp/pb/data");
         assert_eq!(shell_quote("/My Drive/db"), "'/My Drive/db'");
+    }
+
+    #[test]
+    fn expected_daemon_rel_lives_under_bin() {
+        assert_eq!(
+            expected_daemon_rel(DatabaseEngine::Mysql),
+            PathBuf::from("bin/mysqld")
+        );
+        assert_eq!(
+            expected_daemon_rel(DatabaseEngine::Postgres),
+            PathBuf::from("bin/postgres")
+        );
+        assert_eq!(
+            expected_daemon_rel(DatabaseEngine::Redis),
+            PathBuf::from("bin/redis-server")
+        );
+    }
+
+    #[test]
+    fn managed_engine_dir_is_namespaced_by_engine_and_version() {
+        let app = Path::new("/tmp/pb");
+        assert_eq!(
+            managed_engine_dir(app, DatabaseEngine::Postgres, "16.2"),
+            PathBuf::from("/tmp/pb/database-engines/postgres/16.2")
+        );
+        assert_eq!(
+            managed_bin_dir(&managed_engine_dir(app, DatabaseEngine::Redis, "7.4.0")),
+            PathBuf::from("/tmp/pb/database-engines/redis/7.4.0/bin")
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_managed_install_over_system() {
+        // A binary in the managed bin dir wins, without consulting Homebrew/PATH.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let mysqld = bin.join("mysqld");
+        std::fs::write(&mysqld, b"#!/bin/sh\n").unwrap();
+        let resolved = daemon_binary_resolved(DatabaseEngine::Mysql, Some(&bin));
+        assert_eq!(resolved.as_deref(), Some(mysqld.as_path()));
     }
 
     #[test]
