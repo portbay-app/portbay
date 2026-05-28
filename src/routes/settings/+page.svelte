@@ -39,6 +39,7 @@
   import { openUrl } from "$lib/security/openUrl";
   // Canonical wire shapes — imported so they can't drift from the Rust side.
   import type { ResolverStatus, DomainMigration } from "$lib/types/dns";
+  import type { CrashReportSummary, TelemetrySettings } from "$lib/types/telemetry";
 
   // ---- AI Integrations ----
   const MCP_FALLBACK_PATH = "/Applications/PortBay.app/Contents/MacOS/portbay-mcp";
@@ -276,23 +277,12 @@
   let domainDraft = $state<string>("test");
   let domainBusy = $state<boolean>(false);
 
-  interface CrashSummary {
-    id: string;
-    kind: "rust_panic" | "js_error" | "js_unhandled_rejection";
-    message: string;
-    createdAt: number;
-  }
-  interface TelemetrySettings {
-    enabled: boolean;
-    crashReportCount: number;
-    endpointConfigured: boolean;
-  }
   let telemetryInfo = $state<TelemetrySettings>({
     enabled: false,
     crashReportCount: 0,
     endpointConfigured: false,
   });
-  let crashReports = $state<CrashSummary[]>([]);
+  let crashReports = $state<CrashReportSummary[]>([]);
   let telemetryBusy = $state<boolean>(false);
 
   let appVersion = $state<string>("…");
@@ -333,7 +323,7 @@
   async function refreshTelemetry() {
     try {
       telemetryInfo = await safeInvoke<TelemetrySettings>("telemetry_settings");
-      crashReports = await safeInvoke<CrashSummary[]>("list_crash_reports");
+      crashReports = await safeInvoke<CrashReportSummary[]>("list_crash_reports");
     } catch {
       crashReports = [];
     }
@@ -1549,8 +1539,7 @@
                     <button
                       type="button"
                       onclick={() => sendCrash(r.id)}
-                      disabled={telemetryBusy ||
-                        !preferences.value.telemetryEnabled}
+                      disabled={telemetryBusy}
                       class="h-7 px-2 text-[11px] rounded border border-accent/40 text-accent disabled:opacity-50"
                     >
                       Send

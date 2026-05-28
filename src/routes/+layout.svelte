@@ -27,6 +27,7 @@
   import { ConfirmDialog } from "$lib/components/atoms";
   import { SignInSheet, AboutLicenseDialog } from "$lib/components/account";
   import FeedbackPrompt from "$lib/components/lifecycle/FeedbackPrompt.svelte";
+  import CrashReportCard from "$lib/components/lifecycle/CrashReportCard.svelte";
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
   import { onMount, untrack } from "svelte";
@@ -47,6 +48,7 @@
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { installCrashReporter } from "$lib/stores/crashReporter.svelte";
+  import { crashSurface } from "$lib/stores/crashSurface.svelte";
   import { updater } from "$lib/stores/updater.svelte";
 
   /** Compact byte label for the auto-clean "freed N" toast. */
@@ -86,6 +88,10 @@
     }
 
     installCrashReporter();
+    // Surface any crash left over from a previous session (e.g. a panic that
+    // took the app down) as a one-click "send report" card — but only after the
+    // launch has settled, so it never fights the window reveal / onboarding.
+    const crashTimer = setTimeout(() => void crashSurface.presentLatestPending(), 2500);
     tunnels.start();
     // The projects store has page-spanning lifetime — it's read by
     // /domains, /services, /logs, /languages, the right rail, the
@@ -176,6 +182,7 @@
       }
     })();
     return () => {
+      clearTimeout(crashTimer);
       tunnels.stop();
       unlistenNav?.();
       unlistenToast?.();
@@ -417,5 +424,6 @@
   <SignInSheet />
   <AboutLicenseDialog />
   <FeedbackPrompt />
+  <CrashReportCard />
   <ToastHost />
 {/if}

@@ -187,10 +187,12 @@ pub fn discard_crash_report(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn send_crash_report(id: &str, prefs: &Preferences) -> Result<()> {
-    if !prefs.telemetry_enabled {
-        return Err(TelemetryError::Disabled);
-    }
+pub async fn send_crash_report(id: &str) -> Result<()> {
+    // No opt-in gate here: a crash report is only ever uploaded in response to
+    // an explicit user click ("Send report" on the crash card, or "Send" in
+    // Settings). That click is the per-incident consent — it lets someone who
+    // keeps automatic diagnostics off still hand us a single crash. Background
+    // usage telemetry (`send_telemetry_event`) stays gated on `telemetryEnabled`.
     let url = endpoint().ok_or(TelemetryError::EndpointMissing)?;
     let report = read_crash_report(id)?;
     post_json(&format!("{url}/crash"), &report).await?;

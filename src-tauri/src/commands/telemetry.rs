@@ -31,9 +31,10 @@ pub async fn discard_crash_report(id: String) -> AppResult<Noop> {
 }
 
 #[tauri::command]
-pub async fn send_crash_report(state: State<'_, AppState>, id: String) -> AppResult<Noop> {
-    let prefs = state.preferences_snapshot();
-    telemetry::send_crash_report(&id, &prefs)
+pub async fn send_crash_report(id: String) -> AppResult<Noop> {
+    // User-initiated upload — the click is consent, so no telemetry opt-in gate
+    // (see `telemetry::send_crash_report`).
+    telemetry::send_crash_report(&id)
         .await
         .map_err(to_app_error)?;
     Ok(Noop {})
