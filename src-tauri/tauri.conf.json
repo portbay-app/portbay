@@ -28,7 +28,7 @@
         "label": "tray-panel",
         "url": "/tray-panel",
         "width": 360,
-        "height": 480,
+        "height": 560,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

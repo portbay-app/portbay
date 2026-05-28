@@ -9,7 +9,8 @@
     1. Header        — Portbay wordmark + aggregate status + settings cog
     2. Nav grid      — Dashboard · Domains · Databases · Logs launchers
     3. Stat cards    — system CPU (sparkline) · Memory (ring) · Disk (ring)
-    4. Running Now   — live list of up projects; click a host to open it
+    4. Projects running — up projects only (hidden when none); URL opens it,
+                          with per-row open · restart · stop controls
     5. Quick Controls— Start all · Stop all · Restart all
     6. Footer menu   — Preferences · Quit Portbay (⌘Q)
 
@@ -162,6 +163,25 @@
   async function openProject(id: string) {
     try {
       await safeInvoke("open_project", { id });
+    } catch {
+      /* toast already pushed */
+    }
+  }
+
+  /** Per-row controls for the "Projects running" list. Fire-and-forget: the
+   *  projects store updates from status events (and the focus refresh), so a
+   *  stopped project simply drops out of the running list. */
+  async function restartProject(id: string) {
+    try {
+      await safeInvoke("restart_project", { id });
+    } catch {
+      /* toast already pushed */
+    }
+  }
+
+  async function stopProject(id: string) {
+    try {
+      await safeInvoke("stop_project", { id });
     } catch {
       /* toast already pushed */
     }
@@ -406,58 +426,70 @@
     </div>
   </section>
 
-  <!-- 4. Running Now -->
-  <section class="mx-5 mt-4 flex min-h-0 flex-1 flex-col rounded-xl border border-border/60 bg-surface/40">
-    <div class="flex items-center justify-between px-4 pt-3 pb-2">
-      <h2 class="text-sm font-semibold text-fg">Running Now</h2>
-      <span class="flex items-center gap-1.5 text-xs text-fg-muted">
-        {runningProjects.length}
-        {runningProjects.length === 1 ? "Service" : "Services"}
-        <span
-          class="inline-block h-1.5 w-1.5 rounded-full {runningProjects.length > 0
-            ? 'bg-status-running'
-            : 'bg-fg-subtle/50'}"
-        ></span>
-      </span>
-    </div>
-    <div class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-      {#if runningProjects.length === 0}
-        <div class="px-2 py-5 text-center">
-          <p class="text-xs text-fg-muted">No services running.</p>
-          <button
-            type="button"
-            onclick={startAll}
-            disabled={projects.value.length === 0 || busy}
-            class="mt-1.5 text-xs font-medium text-accent transition-colors hover:text-accent-hover
-                   disabled:opacity-40"
-          >
-            {projects.value.length === 0 ? "Add a project →" : "Start all →"}
-          </button>
-        </div>
-      {:else}
+  <!-- 4. Projects running — one row per up project (URL left, controls right).
+       Hidden entirely when nothing is up; the header dot/label above already
+       conveys the aggregate, so there's no duplicate count here. The flex-1
+       spacer keeps Quick Controls + footer pinned to the bottom when hidden. -->
+  {#if runningProjects.length > 0}
+    <section class="mx-5 mt-4 flex min-h-0 flex-1 flex-col rounded-xl border border-border/60 bg-surface/40">
+      <div class="px-4 pt-3 pb-2">
+        <h2 class="text-sm font-semibold text-fg">Projects running</h2>
+      </div>
+      <div class="min-h-0 flex-1 overflow-y-auto px-2 pb-2 space-y-0.5">
         {#each runningProjects as project (project.id)}
-          <div class="flex items-center gap-2.5 rounded-lg px-2 py-1.5">
+          <div class="group flex min-h-9 items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-surface-2/60">
             <span
               class="inline-block h-1.5 w-1.5 shrink-0 rounded-full {dotClass[project.status]}"
               aria-hidden="true"
             ></span>
-            <button
-              type="button"
-              onclick={() => openProject(project.id)}
-              title="Open {project.hostname} in browser"
-              class="min-w-0 flex-1 truncate text-left text-[13px] text-fg transition-colors
-                     hover:text-accent hover:underline"
+            <!-- URL (left) — plain label; the open action lives in the globe
+                 button on the right (no duplicate clickable target / focus box). -->
+            <span
+              class="min-w-0 flex-1 truncate text-[13px] text-fg"
+              title={project.url ?? project.hostname}
             >
-              {project.hostname}
-            </button>
-            {#if project.port}
-              <span class="shrink-0 text-[13px] tabular-nums text-fg-muted">{project.port}</span>
-            {/if}
+              {project.url ?? project.hostname}
+            </span>
+            <!-- Controls (right): open · restart · stop -->
+            <div class="flex shrink-0 items-center gap-0.5">
+              <button
+                type="button"
+                onclick={() => openProject(project.id)}
+                title="Open in browser"
+                aria-label="Open {project.hostname} in browser"
+                class="inline-flex h-7 w-7 items-center justify-center rounded-md
+                       text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+              >
+                <Icon name="globe" size={13} />
+              </button>
+              <button
+                type="button"
+                onclick={() => restartProject(project.id)}
+                title="Restart {project.hostname}"
+                aria-label="Restart {project.hostname}"
+                class="inline-flex h-7 w-7 items-center justify-center rounded-md
+                       text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+              >
+                <Icon name="refresh-cw" size={13} />
+              </button>
+              <button
+                type="button"
+                onclick={() => stopProject(project.id)}
+                title="Stop {project.hostname}"
+                aria-label="Stop {project.hostname}"
+                class="inline-flex h-7 w-7 items-center justify-center rounded-md
+                       text-fg-muted transition-colors hover:bg-status-crashed/15 hover:text-status-crashed"
+              >
+                <Icon name="square" size={11} class="fill-current" />
+              </button>
+            </div>
           </div>
         {/each}
-      {/if}
-    </div>
-  </section>
+      </div>
+    </section>
+  {:else}
+    <div class="flex-1"></div>
+  {/if}
 
   <!-- 5. Quick Controls -->
   <section class="px-5 pt-4">

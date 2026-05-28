@@ -86,9 +86,13 @@
     --color-surface: oklch(1 0 0 / 0.92);
     --color-surface-2: oklch(0.9665 0.0045 258.32 / 0.94);
 
-    /* Opaque canvas + translucent sidebar glass (see dark theme above). */
+    /* Opaque canvas + translucent sidebar glass (see dark theme above). Light
+       mode keeps the rail mostly opaque (0.85): enough vibrancy to feel alive,
+       but a stable light backing so text doesn't wash out over the desktop
+       wallpaper showing through (the dark theme can sit lower at 0.55 because
+       its dark ink reads on almost anything). */
     --color-app: oklch(0.9846 0.0017 247.84);
-    --color-sidebar: oklch(1 0 0 / 0.6);
+    --color-sidebar: oklch(1 0 0 / 0.85);
     --color-border: oklch(0.9271 0.0075 260.73 / 0.85);
     --color-border-strong: oklch(0.855 0.009 260.73);
 
@@ -109,6 +113,18 @@
     --color-status-unhealthy: #d97706;
     --color-status-crashed: #dc2626;
     --color-status-port-conflict: #ea580c;
+  }
+
+  /* Light-theme sidebar legibility. The rail is translucent (vibrancy), so its
+     muted/subtle ink — fine on the dark glass — washes out over the light
+     surface + whatever wallpaper shows through. Re-map those tokens darker
+     *within the rail only* so inactive nav labels (text-fg-muted) and the
+     secondary text (text-fg-subtle: group counts, version, hints) clear WCAG AA,
+     without touching the dark theme or the rest of the light UI. Active items
+     and meter values use --color-fg (already dark) and are unaffected. */
+  body[data-theme="light"] aside[aria-label="Primary navigation"] {
+    --color-fg-muted: oklch(0.42 0 0);
+    --color-fg-subtle: oklch(0.48 0 0);
   }
 
   /* Default border-color is currentColor in Tailwind 4. Use our token. */
