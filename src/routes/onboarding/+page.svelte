@@ -20,8 +20,10 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
   import LighthouseLogo from "$lib/components/atoms/LighthouseLogo.svelte";
+  import Toggle from "$lib/components/atoms/Toggle.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { onboarding } from "$lib/stores/onboarding.svelte";
+  import { preferences } from "$lib/stores/preferences.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import {
     TEMPLATES,
@@ -61,6 +63,9 @@
   let scrollerEl: HTMLDivElement | null = $state(null);
 
   onMount(async () => {
+    // Onboarding can be the cold-boot landing route, so the consent toggle
+    // needs prefs even if the layout hasn't loaded them yet.
+    if (!preferences.loaded) void preferences.load();
     await runDoctor();
   });
 
@@ -380,6 +385,41 @@
             </div>
           {/if}
         </section>
+
+        <!-- First-run telemetry consent. Surfaces the choice instead of
+             burying it in Settings, but is not a dark pattern: the toggle
+             starts off and nothing is sent until the user opts in. The hosted
+             demo has no backend sink, so it's hidden there. -->
+        {#if !isSimulator}
+          <section
+            class="mt-4 p-5 rounded-xl border border-border bg-surface
+                   flex items-start justify-between gap-4"
+          >
+            <div class="flex items-start gap-3 min-w-0">
+              <div
+                class="w-9 h-9 shrink-0 rounded-lg bg-accent/10 text-accent
+                       flex items-center justify-center"
+              >
+                <Icon name="activity" size={16} />
+              </div>
+              <div class="min-w-0">
+                <div class="text-sm font-medium mb-0.5">
+                  Help improve PortBay
+                </div>
+                <p class="text-xs text-fg-muted leading-relaxed max-w-md">
+                  Send anonymous usage and crash data — OS, app version, and
+                  which features you use. Never your projects, files, or paths.
+                  Off unless you turn it on; change it anytime in Settings.
+                </p>
+              </div>
+            </div>
+            <Toggle
+              checked={preferences.value.telemetryEnabled}
+              label="Send anonymous usage and crash data"
+              onchange={(v) => preferences.update({ telemetryEnabled: v })}
+            />
+          </section>
+        {/if}
       {/if}
 
       {#if step === "gallery"}

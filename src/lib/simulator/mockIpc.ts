@@ -375,8 +375,13 @@ export function installSimulatorIpcBrowser(payload: {
         });
       case "list_crash_reports":
         return Promise.resolve([]);
+      // Telemetry is opt-out by default and the hosted demo has no backend
+      // sink, so usage events / JS-error capture are accepted and dropped.
+      case "record_js_error":
+        return Promise.resolve("demo-crash-0");
       case "send_crash_report":
       case "discard_crash_report":
+      case "record_telemetry_event":
       case "reset_onboarding":
       case "dnsmasq_install_resolver":
       case "dnsmasq_uninstall_resolver":
@@ -388,6 +393,10 @@ export function installSimulatorIpcBrowser(payload: {
         return startProject(args && args.id);
       case "open_project":
       case "open_in_ide":
+        return Promise.resolve(null);
+      // Icon detection is filesystem-only; the hosted demo has no project
+      // tree, so avatars fall back to their stack glyph.
+      case "project_icon":
         return Promise.resolve(null);
       case "update_project": {
         const p = project(args && args.id);

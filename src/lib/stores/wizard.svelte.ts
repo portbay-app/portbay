@@ -11,6 +11,7 @@
 import { entitlements } from "./entitlements.svelte";
 import { account } from "./account.svelte";
 import { projects } from "./projects.svelte";
+import { trackEvent } from "$lib/telemetry";
 
 function createWizardStore() {
   let open = $state<boolean>(false);
@@ -38,6 +39,7 @@ function createWizardStore() {
         open = true;
         return;
       }
+      trackEvent("project_limit_reached");
       account.open({ intent: entitlements.upgradePromptAt(count) ?? "pro" });
     },
   };

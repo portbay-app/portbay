@@ -250,11 +250,19 @@ fn crashes_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Production telemetry sink — the PortBay Cloud Worker (portbay-cloud). The
+/// app posts crash reports to `{endpoint}/crash` and usage events to
+/// `{endpoint}/telemetry`, and only ever talks to this first-party host (never
+/// a third-party analytics SDK). Forwarding to the analytics backend happens
+/// server-side inside the Worker.
+const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://cloud.portbay.app";
+
 fn endpoint() -> Option<String> {
-    option_env!("PORTBAY_TELEMETRY_ENDPOINT")
+    let raw = option_env!("PORTBAY_TELEMETRY_ENDPOINT")
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.trim_end_matches('/').to_string())
+        .unwrap_or(DEFAULT_TELEMETRY_ENDPOINT);
+    Some(raw.trim_end_matches('/').to_string())
 }
 
 fn report_id(prefix: &str) -> String {

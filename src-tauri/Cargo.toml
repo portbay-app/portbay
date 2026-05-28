@@ -107,13 +107,17 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSAp
 [dev-dependencies]
 tempfile = "3"
 
-# Release-build hygiene. `strip` drops debug symbols from the GUI binary
-# (~9 MB off an unstripped ~21 MB), `lto` + a single codegen unit shrink and
-# optimise across crates. opt-level is left at the default (3) so runtime
-# speed — a product positioning point — isn't traded away for size.
+# Release-build hygiene. `strip = "debuginfo"` drops DWARF line tables but keeps
+# the symbol table, so the in-process panic backtraces our crash reporter
+# captures (telemetry.rs) carry readable function names instead of bare
+# addresses — the difference between a triageable crash report and noise. The
+# symbol table is a fraction of the full debuginfo we used to strip, so most of
+# the size win is retained. `lto` + a single codegen unit shrink and optimise
+# across crates. opt-level is left at the default (3) so runtime speed — a
+# product positioning point — isn't traded away for size.
 # Applies workspace-wide (this is the workspace root); see scripts/build-*.sh
 # for the sidecar crates.
 [profile.release]
-strip = true
+strip = "debuginfo"
 lto = true
 codegen-units = 1

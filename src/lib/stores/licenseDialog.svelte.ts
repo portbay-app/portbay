@@ -6,6 +6,8 @@
  * upgrade CTA, this is the "what is it / how does it work" detail view.
  */
 
+import { trackEvent } from "$lib/telemetry";
+
 function createLicenseDialogStore() {
   let open = $state(false);
 
@@ -15,6 +17,7 @@ function createLicenseDialogStore() {
     },
     open() {
       open = true;
+      trackEvent("upgrade_dialog_viewed");
     },
     close() {
       open = false;

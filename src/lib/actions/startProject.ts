@@ -15,6 +15,7 @@
  */
 import { invokeQuiet } from "$lib/ipc";
 import { confirmDialog } from "$lib/stores/confirm.svelte";
+import { trackEvent } from "$lib/telemetry";
 import type { CommandError } from "$lib/types/error";
 
 export type StartResult =
@@ -28,6 +29,7 @@ export async function startProject(
 ): Promise<StartResult> {
   try {
     await invokeQuiet<void>("start_project", { id });
+    trackEvent("project_started");
     return { kind: "started" };
   } catch (raw) {
     const err = raw as CommandError;
@@ -45,6 +47,7 @@ export async function startProject(
 
     try {
       await invokeQuiet<void>("force_start_project", { id });
+      trackEvent("project_started");
       return { kind: "started" };
     } catch (raw2) {
       // e.g. the holder is root-owned and couldn't be killed — surface it.

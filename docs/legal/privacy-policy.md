@@ -33,10 +33,11 @@ it.
   or database contents. These never leave your machine except inside the end-to-end
   encrypted sync blob (§4), which we cannot decrypt.
 - We do **not** run analytics, tracking pixels, advertising SDKs, or third-party
-  trackers in the desktop app.
+  trackers in the desktop app. The app never connects to a third-party analytics
+  service; the only host it can send diagnostics to is our own.
 - The **anonymous** tier sends us nothing. No account, no telemetry by default.
 
-Optional, opt-in crash reporting is covered in §7.
+Optional, opt-in crash reporting and usage telemetry are covered in §7.
 
 ---
 
@@ -91,18 +92,32 @@ We keep the third-party processors to a minimum:
 
 | Sub-processor | Purpose | Data | Location |
 |---|---|---|---|
-| **Cloudflare** (Workers, D1, R2) | Hosting, database, encrypted blob storage | §3 data; encrypted sync blobs | Global edge; configurable region |
+| **Cloudflare** (Workers, D1, R2, Analytics Engine) | Hosting, database, encrypted blob storage, and aggregate telemetry ingest | §3 data; encrypted sync blobs; opt-in telemetry (§7) | Global edge; configurable region |
 | **AcumbaMail** | Transactional + lifecycle email delivery | Your email address, message content | EU |
 | **GitHub** (only if you choose GitHub sign-in) | OAuth identity | OAuth profile | US |
+| **PostHog** (only if you enable usage telemetry) | Aggregate product analytics dashboard | Opt-in telemetry only (§7); no account, device, or project identifiers | US |
 | Payment processor (only if you donate) | Process a voluntary donation | Handled by the processor; we receive a reference id, not card data | — |
 
 ---
 
-## 7. Optional crash reporting
+## 7. Optional crash reporting & usage telemetry
 
-PortBay can send crash reports, but only **opt-in** and only when you confirm a send.
-Reports contain a stack trace and app/OS version; they are scrubbed of obvious paths and
-never include your project contents. You can disable this in Settings.
+Both are **off by default** and controlled by a single toggle in Settings. When the
+toggle is off, the app sends neither. In all cases the data goes only to **our own**
+PortBay Cloud service; the app never contacts a third-party analytics provider directly.
+
+**Crash reports.** PortBay can send crash reports, but only **opt-in** and only when you
+confirm a send. Reports contain a stack trace and app/OS version; they are scrubbed of
+obvious paths and never include your project contents.
+
+**Usage telemetry.** When enabled, PortBay records a small set of product events — a
+command or funnel-step name (e.g. "project_started"), a success flag, and your OS,
+architecture, and app version. It carries **no project data, file paths, hostnames, or
+account/device identifiers**, and is not tied to your identity. We process it in aggregate
+to understand which features are used and where setup fails. Ingest runs through our
+Cloudflare Worker into Cloudflare Analytics Engine and is forwarded server-side to PostHog
+(§6) for the dashboard; because there is no per-user identifier, this produces counts and
+funnels, not individual profiles.
 
 ---
 
