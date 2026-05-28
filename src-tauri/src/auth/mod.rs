@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 /// the Worker in Cloudflare). Never localhost or workers.dev in shipped builds.
 pub const CLOUD_BASE_URL: &str = "https://cloud.portbay.app";
 
-const KEYCHAIN_SERVICE: &str = "app.portbay.session";
+// Shown verbatim in the macOS keychain access prompt ("…stored in
+// 'PortBay Account'…"), so it's worded for a human, not as a reverse-DNS id.
+// Renaming this points us at a fresh keychain item: any session stored under
+// the old name is abandoned (harmless — the user just signs in once more).
+const KEYCHAIN_SERVICE: &str = "PortBay Account";
 const KEYCHAIN_USER: &str = "default";
 
 // ---------------------------------------------------------------------------
