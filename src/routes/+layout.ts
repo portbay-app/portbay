@@ -4,18 +4,6 @@
 // See: https://v2.tauri.app/start/frontend/sveltekit/ for more info
 export const ssr = false;
 
-/**
- * In the hosted web-simulator build (`pnpm build:web`, PUBLIC_SIMULATOR=true),
- * install the mock IPC layer here — `load` is awaited before the layout renders
- * and before any store issues IPC, so the dummy roster is in place with no race.
- *
- * The flag is a compile-time constant (vite.config.js `define`), so in the
- * desktop/Tauri build this branch is statically dead and the dynamic import —
- * with the entire simulator module (mock + fixtures) — tree-shakes out.
- */
-export const load = async () => {
-  if (import.meta.env.PUBLIC_SIMULATOR === "true") {
-    const { installSimulator } = await import("$lib/simulator/mockIpc");
-    installSimulator();
-  }
-};
+// The web-simulator's mock IPC layer is installed in `src/hooks.client.ts`'s
+// `init` hook, which SvelteKit awaits *before* this layout mounts — so the
+// dummy roster is in place before any store issues IPC (no race).

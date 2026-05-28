@@ -13,7 +13,8 @@ export default defineConfig(async () => ({
 
   // Build-time flag for the hosted web simulator (`pnpm build:web`). Unset in
   // the desktop/Tauri build, so it folds to "" and the simulator mock + dummy
-  // fixtures tree-shake out of the bundle entirely. See src/hooks.client.ts.
+  // fixtures tree-shake out of the bundle entirely. Consumed by the `init`
+  // hook in src/hooks.client.ts.
   define: {
     "import.meta.env.PUBLIC_SIMULATOR": JSON.stringify(
       process.env.PUBLIC_SIMULATOR ?? "",
