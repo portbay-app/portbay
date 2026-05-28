@@ -23,7 +23,7 @@
   import ImportSection from "$lib/components/imports/ImportSection.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { density, type Density } from "$lib/stores/density.svelte";
-  import { theme, type Theme } from "$lib/stores/theme.svelte";
+  import { theme, type ThemePreference } from "$lib/stores/theme.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { updater } from "$lib/stores/updater.svelte";
@@ -288,37 +288,9 @@
   let appVersion = $state<string>("…");
   let tauriVersion = $state<string>("…");
 
-  // Theme has three options in the design — System maps to neither
-  // dark nor light, so we surface it as a separate user pref that
-  // overrides theme.value when set to "system". Stored locally
-  // because the theme store today only knows dark|light.
-  type ThemeChoice = "system" | Theme;
-  function readSystemThemeChoice(): ThemeChoice {
-    try {
-      const v = localStorage.getItem("portbay.themeChoice");
-      if (v === "system" || v === "dark" || v === "light") return v;
-    } catch {
-      /* private mode */
-    }
-    return theme.value;
-  }
-
-  let themeChoice = $state<ThemeChoice>(readSystemThemeChoice());
-
-  function applyThemeChoice(choice: ThemeChoice) {
-    themeChoice = choice;
-    try {
-      localStorage.setItem("portbay.themeChoice", choice);
-    } catch {
-      /* private mode */
-    }
-    if (choice === "system") {
-      const mq = window.matchMedia("(prefers-color-scheme: dark)");
-      theme.set(mq.matches ? "dark" : "light");
-    } else {
-      theme.set(choice);
-    }
-  }
+  // Theme (System / Light / Dark) is owned by the theme store, which
+  // resolves "system" against the OS appearance and live-switches when it
+  // flips. The Segmented control below binds straight to theme.preference.
 
   async function refreshTelemetry() {
     try {
@@ -474,7 +446,7 @@
       storeLogsLocally: true,
       logRetentionDays: 7,
     });
-    applyThemeChoice("system");
+    theme.set("system");
     density.set("comfortable");
     errorBus.push({
       code: "SETTINGS_RESTORED",
@@ -514,7 +486,7 @@
       closeToMenuBar: true,
       telemetryEnabled: false,
     });
-    applyThemeChoice("system");
+    theme.set("system");
     density.set("comfortable");
     try {
       await safeInvoke("reset_onboarding");
@@ -595,22 +567,10 @@
         tauriVersion = "unknown";
       }
     })();
-
-    // If "System" is the theme choice and the OS preference flips
-    // mid-session, follow it. We don't track in the store because
-    // it's an inherently page-local concern.
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const listener = () => {
-      if (themeChoice === "system") {
-        theme.set(mq.matches ? "dark" : "light");
-      }
-    };
-    mq.addEventListener("change", listener);
-    return () => mq.removeEventListener("change", listener);
   });
 
   // ---- Static option lists ----
-  const themeOptions: { value: ThemeChoice; label: string }[] = [
+  const themeOptions: { value: ThemePreference; label: string }[] = [
     { value: "system", label: "System" },
     { value: "light", label: "Light" },
     { value: "dark", label: "Dark" },
@@ -776,10 +736,10 @@
       <div class="flex items-center justify-between gap-3 py-2.5 first:pt-0">
         <span class="text-[13px] text-fg">Theme</span>
         <Segmented
-          value={themeChoice}
+          value={theme.preference}
           options={themeOptions}
           label="Theme"
-          onchange={(v) => applyThemeChoice(v)}
+          onchange={(v) => theme.set(v)}
         />
       </div>
       <div class="flex items-center justify-between gap-3 py-2.5">
