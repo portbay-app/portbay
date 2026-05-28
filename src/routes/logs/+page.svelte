@@ -266,7 +266,12 @@
                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
           {#if project}
-            <ProjectAvatar id={project.id} name={project.name} size={20} />
+            <ProjectAvatar
+              id={project.id}
+              name={project.name}
+              type={project.type}
+              size={20}
+            />
             <span class="flex-1 truncate text-[13px] font-medium text-fg"
               >{project.name}</span
             >
@@ -296,7 +301,7 @@
                   ? 'bg-accent/10'
                   : 'hover:bg-surface-2'}"
               >
-                <ProjectAvatar id={p.id} name={p.name} size={20} />
+                <ProjectAvatar id={p.id} name={p.name} type={p.type} size={20} />
                 <span class="flex-1 truncate text-[13px] text-fg">{p.name}</span>
                 <StatusDot status={p.status} size="md" />
               </button>

@@ -162,7 +162,12 @@
     <!-- Header -->
     <header class="flex items-start justify-between gap-3">
       <div class="flex items-center gap-3 min-w-0">
-        <ProjectAvatar id={project.id} name={project.name} size={40} />
+        <ProjectAvatar
+          id={project.id}
+          name={project.name}
+          type={project.type}
+          size={40}
+        />
         <div class="min-w-0 leading-tight">
           <p class="text-[15px] font-semibold text-fg truncate">
             {project.name}

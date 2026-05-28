@@ -107,7 +107,12 @@
          data-[selected=true]:ring-accent/40"
 >
   <header class="flex items-start gap-2.5 min-w-0">
-    <ProjectAvatar id={project.id} name={project.name} size={36} />
+    <ProjectAvatar
+      id={project.id}
+      name={project.name}
+      type={project.type}
+      size={36}
+    />
     <div class="min-w-0 flex-1 leading-tight">
       <p class="text-[13.5px] font-semibold text-fg truncate">
         {project.name}

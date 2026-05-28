@@ -95,6 +95,25 @@ pub async fn get_project(state: State<'_, AppState>, id: String) -> AppResult<Pr
     Ok(view)
 }
 
+/// `project_icon(id)` — best-effort detected favicon / app-icon for a
+/// project, as a `data:` URL, or `null` when none is found (the UI then shows
+/// the project's stack glyph). The scan result is cached per session in
+/// [`AppState`] so the avatar doesn't re-walk the tree on every render. The
+/// detection itself lives in [`crate::project_icon`].
+#[tauri::command]
+pub async fn project_icon(state: State<'_, AppState>, id: String) -> AppResult<Option<String>> {
+    if let Some(hit) = state.cached_icon(&id) {
+        return Ok(hit);
+    }
+    let registry = load_registry(&state)?;
+    let project = registry
+        .get_project(&ProjectId::new(id.clone()))
+        .ok_or_else(|| AppError::NotFound(id.clone()))?;
+    let data_url = crate::project_icon::detect_icon(project).map(|icon| icon.to_data_url());
+    state.cache_icon(&id, data_url.clone());
+    Ok(data_url)
+}
+
 /// `add_project(input)` — register a new project from a folder path.
 ///
 /// Mirrors the CLI's `add` flow (`bin/portbay.rs::cmd_add`). Best-effort
@@ -1125,6 +1144,7 @@ pub async fn remove_project(state: State<'_, AppState>, id: String) -> AppResult
     let pid = ProjectId::new(id.clone());
     let _removed = registry.remove_project(&pid)?;
     save_registry(&state, &registry)?;
+    state.invalidate_icon(&id);
     state.reconciler.mark_dirty();
     Ok(())
 }

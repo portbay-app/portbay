@@ -185,7 +185,12 @@
               : 'bg-surface border-border/70'}"
           >
             <div class="flex items-center gap-3">
-              <ProjectAvatar id={project.id} name={project.name} size={32} />
+              <ProjectAvatar
+                id={project.id}
+                name={project.name}
+                type={project.type}
+                size={32}
+              />
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
                   <h2 class="text-[13px] font-semibold text-fg truncate">

@@ -133,6 +133,13 @@ pub struct AppState {
     /// seeing tokens; cleared when the login completes or expires. Tokens
     /// themselves never live here — they go straight to the OS keychain.
     pub pending_login: Mutex<Option<crate::auth::PendingLogin>>,
+
+    /// Session cache of detected project avatar icons, keyed by project id.
+    /// The value is the `data:` URL of the detected favicon/app-icon, or
+    /// `None` when a scan found nothing (cached so we don't re-walk the tree
+    /// on every avatar render). Cleared per project on remove. See
+    /// [`crate::project_icon`] and `commands::projects::project_icon`.
+    pub icon_cache: Mutex<HashMap<String, Option<String>>>,
 }
 
 /// How long after a Stop request a non-zero exit is still considered
@@ -168,7 +175,36 @@ impl AppState {
             caddy_https_port: AtomicU16::new(DEFAULT_HTTPS_PORT),
             shutdown_done: AtomicBool::new(false),
             pending_login: Mutex::new(None),
+            icon_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Cached detected-icon result for a project, if one has been computed
+    /// this session. The outer `Option` is "have we scanned?"; the inner is
+    /// "did the scan find an icon?".
+    pub fn cached_icon(&self, id: &str) -> Option<Option<String>> {
+        self.icon_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    /// Record a project's detected-icon scan result for the session.
+    pub fn cache_icon(&self, id: &str, data_url: Option<String>) {
+        self.icon_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_string(), data_url);
+    }
+
+    /// Drop a project's cached icon so the next request re-scans (used when
+    /// a project is removed).
+    pub fn invalidate_icon(&self, id: &str) {
+        self.icon_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
     }
 
     /// Snapshot the current preferences. Returns by value so the lock

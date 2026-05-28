@@ -22,6 +22,7 @@ pub mod port_holder;
 pub mod portfile;
 pub mod preferences;
 pub mod process_compose;
+pub mod project_icon;
 pub mod project_runtime;
 pub mod reconciler;
 pub mod registry;
@@ -481,6 +482,7 @@ pub fn run() {
             commands::projects::detect_project,
             commands::projects::detect_workspace_apps,
             commands::projects::validate_project_folder,
+            commands::projects::project_icon,
             commands::lifecycle::start_project,
             commands::lifecycle::start_project_sandboxed,
             commands::lifecycle::force_start_project,

@@ -83,10 +83,13 @@
 
   // Subtitle = first group the project belongs to. Projects in zero
   // groups fall back to the type label so the row never feels empty.
-  const groupSubtitle = $derived.by<string>(() => {
+  // Subtitle under the name is the project's group, if any. We deliberately
+  // don't fall back to the stack label here — the Stack column already shows
+  // it (icon + label), so repeating it under the name is redundant. Ungrouped
+  // rows show just the name, vertically centred against the avatar.
+  const groupSubtitle = $derived.by<string | null>(() => {
     const g = groups.value.find((g) => g.knownIds.includes(project.id));
-    if (g) return g.name;
-    return typeLabel[project.type];
+    return g ? g.name : null;
   });
 
   const statusText = $derived(displayStatusLabel(display));
@@ -172,15 +175,18 @@
       <ProjectAvatar
         id={project.id}
         name={project.name}
+        type={project.type}
         size={32}
       />
       <div class="min-w-0 leading-tight">
         <p class="text-[13.5px] font-semibold text-fg truncate">
           {project.name}
         </p>
-        <p class="text-[11px] text-fg-subtle truncate">
-          {groupSubtitle}
-        </p>
+        {#if groupSubtitle}
+          <p class="text-[11px] text-fg-subtle truncate">
+            {groupSubtitle}
+          </p>
+        {/if}
       </div>
     </div>
   </td>
