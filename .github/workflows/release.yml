@@ -101,13 +101,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/private_keys"
           printf '%s' "${{ secrets.APPLE_API_KEY_P8 }}" > "$RUNNER_TEMP/private_keys/AuthKey.p8"
 
-      # Bake the macOS 26 Liquid Glass icon (Icon Composer) into the bundle
-      # BEFORE Tauri signs/notarises. Non-fatal: if no compiled Assets.car is
-      # committed and this runner lacks Xcode 26, it logs a warning and the
-      # build ships the icon.icns fallback. See
+      # The macOS 26 Liquid Glass icon (Icon Composer) is wired into the bundle
+      # statically: the compiled catalog lives at
+      # src-tauri/icons/macos-liquid-glass/compiled/Assets.car and is registered
+      # as a bundle resource in tauri.conf.json, with CFBundleIconName set in
+      # src-tauri/Info.plist (Tauri v2 merges it). So `tauri build` below bakes,
+      # signs and notarises it with no pre-build step and no Xcode 26 on the
+      # runner. To refresh the catalog run scripts/prepare-macos-liquid-glass-icon.sh
+      # locally and commit the result. See
       # src-tauri/icons/macos-liquid-glass/README.md.
-      - name: Bake macOS 26 Liquid Glass icon (pre-build)
-        run: bash scripts/prepare-macos-liquid-glass-icon.sh
 
       - name: Build signed app
         env:

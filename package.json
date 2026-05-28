@@ -31,7 +31,8 @@
     "deploy:docs": "DOCS_BASE=/ pnpm docs:build && npx wrangler deploy -c wrangler.docs.jsonc",
     "deploy:all": "pnpm deploy:web && pnpm deploy:docs",
     "tauri": "tauri",
-    "tauri:icon:macos": "bash scripts/inject-macos-liquid-glass-icon.sh"
+    "tauri:icon:macos": "bash scripts/inject-macos-liquid-glass-icon.sh",
+    "tauri:icon:macos:build": "bash scripts/prepare-macos-liquid-glass-icon.sh"
   },
   "license": "AGPL-3.0-only",
   "dependencies": {

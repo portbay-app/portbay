@@ -55,6 +55,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "icons/macos-liquid-glass/compiled/Assets.car": "Assets.car"
+    },
     "externalBin": [
       "binaries/process-compose",
       "binaries/caddy",
