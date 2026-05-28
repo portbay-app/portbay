@@ -19,6 +19,7 @@
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
+  import LighthouseLogo from "$lib/components/atoms/LighthouseLogo.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
@@ -214,7 +215,7 @@
     class="flex items-center justify-between pl-24 pr-8 py-5 border-b border-border bg-bg"
   >
     <div class="flex items-center gap-2 text-fg-muted">
-      <Icon name="rocket" size={18} />
+      <LighthouseLogo size={20} />
       <span class="text-sm font-medium tracking-wide">PortBay</span>
     </div>
     <button
@@ -232,11 +233,8 @@
     <div class="max-w-3xl mx-auto px-8 py-12">
       {#if step === "welcome"}
         <div class="text-center mb-10">
-          <div
-            class="mx-auto w-12 h-12 rounded-xl bg-accent/10 text-accent
-                   flex items-center justify-center mb-5"
-          >
-            <Icon name="sparkles" size={22} />
+          <div class="mx-auto w-14 h-14 flex items-center justify-center mb-5">
+            <LighthouseLogo size={56} />
           </div>
           <h1 class="text-2xl font-semibold tracking-tight mb-2">
             Welcome to PortBay
