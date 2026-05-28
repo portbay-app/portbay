@@ -21,6 +21,7 @@
   import { databases } from "$lib/stores/databases.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type {
+    BackupSnapshot,
     DatabaseInstanceView,
     InstanceStatus,
   } from "$lib/types/databases";
@@ -189,6 +190,120 @@
       /* toast already pushed */
     } finally {
       schemaBusy = false;
+    }
+  }
+
+  // ── Backups & restore ─────────────────────────────────────────────────────
+  // SQL engines only (mysqldump / pg_dumpall → restore via the client).
+  let backups = $state<BackupSnapshot[]>([]);
+  let backupBusy = $state<boolean>(false);
+  const canBackup = $derived(
+    !!selected && SQL_ENGINES.includes(selected.engine),
+  );
+
+  async function loadBackups() {
+    if (!selected || !canBackup) {
+      backups = [];
+      return;
+    }
+    try {
+      backups = await safeInvoke<BackupSnapshot[]>("list_database_backups", {
+        id: selected.id,
+      });
+    } catch {
+      backups = [];
+    }
+  }
+
+  // Reload backups when the selected instance changes.
+  $effect(() => {
+    void selected?.id;
+    void loadBackups();
+  });
+
+  async function backupNow() {
+    if (!selected || backupBusy) return;
+    backupBusy = true;
+    try {
+      await safeInvoke("backup_database_instance", { id: selected.id });
+      errorBus.push({
+        code: "DB_BACKUP_OK",
+        whatHappened: `Backed up ${selected.name}.`,
+        whyItMatters: "A new snapshot was written to the backups folder.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
+      await loadBackups();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function restoreBackup(snapshotId: string) {
+    if (!selected) return;
+    const choice = await confirmDialog.open({
+      title: "Restore this backup?",
+      message:
+        "Restoring replays the snapshot over the current data — anything created since this backup is lost. The instance should be running.",
+      destructive: true,
+      actions: [{ label: "Restore", value: "restore", tone: "destructive" }],
+    });
+    if (choice !== "restore") return;
+    backupBusy = true;
+    try {
+      await safeInvoke("restore_database_backup", {
+        id: selected.id,
+        snapshotId,
+      });
+      errorBus.push({
+        code: "DB_RESTORE_OK",
+        whatHappened: `Restored ${selected.name} from backup.`,
+        whyItMatters: "The snapshot's data replaced the current contents.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
+      await loadSchemas();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function deleteBackup(snapshotId: string) {
+    if (!selected) return;
+    backupBusy = true;
+    try {
+      await safeInvoke("delete_database_backup", {
+        id: selected.id,
+        snapshotId,
+      });
+      await loadBackups();
+    } catch {
+      /* toast already pushed */
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  function formatBytes(n: number): string {
+    if (n <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB"];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+    const v = n / 1024 ** i;
+    return `${i === 0 || v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+  }
+
+  function formatWhen(ms: number): string {
+    if (!ms) return "—";
+    try {
+      return new Date(ms).toLocaleString();
+    } catch {
+      return "—";
     }
   }
 
@@ -709,6 +824,83 @@
                   {/each}
                 </ul>
               {/if}
+            {/if}
+          </article>
+        {/if}
+
+        <!-- Backups — SQL engines only -->
+        {#if canBackup}
+          <article class="bg-surface border border-border/70 rounded-2xl px-5 py-4">
+            <header class="flex items-center justify-between gap-2 mb-3.5">
+              <div class="flex items-center gap-2">
+                <Icon name="folder" size={13} class="text-fg-muted" />
+                <h3 class="text-[13px] font-semibold text-fg">Backups</h3>
+              </div>
+              <button
+                type="button"
+                onclick={backupNow}
+                disabled={backupBusy || selected.status !== "running"}
+                title={selected.status !== "running"
+                  ? "Start the instance to back it up"
+                  : "Create a snapshot now"}
+                class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md
+                       bg-accent text-on-accent text-[12px] font-medium
+                       hover:brightness-110 active:brightness-95
+                       disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
+              >
+                {#if backupBusy}
+                  <Icon name="refresh-cw" size={11} class="animate-spin" />
+                {:else}
+                  <Icon name="plus" size={11} />
+                {/if}
+                Back up now
+              </button>
+            </header>
+
+            {#if backups.length === 0}
+              <p class="text-[12px] text-fg-subtle">
+                No backups yet. Snapshots are kept for {7} days and stored under the
+                backups folder.
+              </p>
+            {:else}
+              <ul class="space-y-1.5">
+                {#each backups as b (b.id)}
+                  <li
+                    class="flex items-center justify-between gap-2 px-3 py-2
+                           rounded-md bg-surface-2/50 border border-border/50"
+                  >
+                    <div class="min-w-0">
+                      <p class="text-[12.5px] text-fg truncate">{formatWhen(b.createdAt)}</p>
+                      <p class="text-[11px] font-mono text-fg-subtle">
+                        {formatBytes(b.sizeBytes)}
+                      </p>
+                    </div>
+                    <div class="flex shrink-0 gap-1.5">
+                      <button
+                        type="button"
+                        onclick={() => restoreBackup(b.id)}
+                        disabled={backupBusy}
+                        class="h-7 px-2 text-[11px] rounded border border-accent/40
+                               text-accent hover:bg-accent/10 disabled:opacity-50 transition-colors"
+                      >
+                        Restore
+                      </button>
+                      <button
+                        type="button"
+                        onclick={() => deleteBackup(b.id)}
+                        disabled={backupBusy}
+                        title="Delete backup"
+                        aria-label="Delete backup"
+                        class="h-7 w-7 grid place-items-center rounded border border-border
+                               text-fg-subtle hover:text-status-crashed hover:bg-status-crashed/10
+                               disabled:opacity-50 transition-colors"
+                      >
+                        <Icon name="x" size={12} />
+                      </button>
+                    </div>
+                  </li>
+                {/each}
+              </ul>
             {/if}
           </article>
         {/if}

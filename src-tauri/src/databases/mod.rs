@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 
 use crate::registry::{DatabaseEngine, DatabaseInstance};
 
+pub mod backup;
+
 /// Per-engine static metadata.
 #[derive(Debug, Clone, Copy)]
 struct EngineSpec {
@@ -216,6 +218,16 @@ pub fn client_binary_resolved(
     managed_bin: Option<&Path>,
 ) -> Option<PathBuf> {
     resolve_preferring_managed(engine, spec(engine).clients, managed_bin)
+}
+
+/// Resolve an engine-adjacent tool (e.g. `mysqldump`, `pg_dumpall`) by name,
+/// preferring a PortBay-managed install. Used by the backup module.
+pub fn tool_binary(
+    engine: DatabaseEngine,
+    names: &[&str],
+    managed_bin: Option<&Path>,
+) -> Option<PathBuf> {
+    resolve_preferring_managed(engine, names, managed_bin)
 }
 
 // ===========================================================================

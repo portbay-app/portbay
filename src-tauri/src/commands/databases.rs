@@ -800,6 +800,89 @@ fn upsert_dotenv(path: &Path, pairs: &[(&str, String)]) -> std::io::Result<()> {
     std::fs::write(path, out)
 }
 
+// ===========================================================================
+// Backups & restore
+// ===========================================================================
+
+/// Resolve an instance + its managed bin dir (if any) for backup tooling.
+fn instance_and_managed_bin(
+    state: &State<'_, AppState>,
+    id: &str,
+) -> AppResult<(DatabaseInstance, Option<PathBuf>)> {
+    let registry = load_registry(state)?;
+    let inst = registry
+        .get_database(&DatabaseInstanceId::new(id))
+        .ok_or_else(|| AppError::BadInput(format!("database `{id}` not found")))?;
+    let mb = managed_bin(&registry, inst.engine);
+    Ok((inst.clone(), mb))
+}
+
+/// `list_database_backups(id)` — snapshots on disk, newest first.
+#[tauri::command]
+pub async fn list_database_backups(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<Vec<engine::backup::BackupSnapshot>> {
+    let app_data = app_data_dir(&state)?;
+    Ok(engine::backup::list_backups(&app_data, &id))
+}
+
+/// `backup_database_instance(id)` — dump the instance, then prune old snapshots.
+#[tauri::command]
+pub async fn backup_database_instance(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<engine::backup::BackupSnapshot> {
+    let (inst, mb) = instance_and_managed_bin(&state, &id)?;
+    let app_data = app_data_dir(&state)?;
+
+    let ad = app_data.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        engine::backup::create_backup(&inst, mb.as_deref(), &ad)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("backup join: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    // Retention: prune past the default window (best-effort).
+    let ad = app_data.clone();
+    let pid = id.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        engine::backup::prune(&ad, &pid, engine::backup::DEFAULT_KEEP_DAYS)
+    })
+    .await;
+
+    Ok(snapshot)
+}
+
+/// `restore_database_backup(id, snapshotId)` — replay a snapshot's dump.
+#[tauri::command]
+pub async fn restore_database_backup(
+    state: State<'_, AppState>,
+    id: String,
+    snapshot_id: String,
+) -> AppResult<()> {
+    let (inst, mb) = instance_and_managed_bin(&state, &id)?;
+    let app_data = app_data_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        engine::backup::restore_backup(&inst, mb.as_deref(), &app_data, &snapshot_id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("restore join: {e}")))?
+    .map_err(AppError::Internal)
+}
+
+/// `delete_database_backup(id, snapshotId)` — remove one snapshot.
+#[tauri::command]
+pub async fn delete_database_backup(
+    state: State<'_, AppState>,
+    id: String,
+    snapshot_id: String,
+) -> AppResult<()> {
+    let app_data = app_data_dir(&state)?;
+    engine::backup::delete_backup(&app_data, &id, &snapshot_id).map_err(AppError::Internal)
+}
+
 async fn open_in_terminal(app: &AppHandle, command: &str) -> AppResult<()> {
     let safe = command.replace('"', "\\\"");
     let script =

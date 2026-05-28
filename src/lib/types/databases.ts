@@ -26,6 +26,14 @@ export interface DatabaseEngineView {
   managedVersion: string;
 }
 
+/** A backup snapshot on disk (from `list_database_backups`). */
+export interface BackupSnapshot {
+  /** Snapshot id — the unix-millis timestamp it was taken at. */
+  id: string;
+  createdAt: number;
+  sizeBytes: number;
+}
+
 /** Result of `provision_project_database`. */
 export interface ProjectDbProvision {
   database: string;
