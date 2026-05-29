@@ -146,13 +146,59 @@ pub fn detect_all() -> Vec<DetectedSource> {
 }
 
 /// Parse all sites from the given source. Errors per site are logged
-/// and skipped — the caller gets every site the parser could recover.
+/// and skipped — the caller gets every site the parser could recover,
+/// deduplicated so each real project appears exactly once with a unique id.
 pub fn read_all(source: ImportSource) -> Result<Vec<ImportedSite>> {
-    match source {
-        ImportSource::Herd => herd::read_sites(),
-        ImportSource::ServBay => servbay::read_sites(),
-        ImportSource::Mamp => mamp::read_sites(),
+    let sites = match source {
+        ImportSource::Herd => herd::read_sites()?,
+        ImportSource::ServBay => servbay::read_sites()?,
+        ImportSource::Mamp => mamp::read_sites()?,
+    };
+    Ok(dedupe_sites(sites))
+}
+
+/// Collapse a raw parsed site list to one row per real project.
+///
+/// Two distinct problems show up in real source configs and both are fixed
+/// here, at the shared entry point, so every surface (GUI / CLI / MCP) agrees:
+///
+/// * **Duplicate paths.** Herd can list a project explicitly in `sites` *and*
+///   have its parent directory in `parked_paths`, so the same path is emitted
+///   twice. The GUI's keyed `{#each … (site.path)}` crashes on the duplicate
+///   key, and [`import_sites`]'s id→site map would silently drop one of them.
+///   We keep the first occurrence (the explicit entry, which carries richer
+///   metadata — tld / secure / php — since parsers push those first).
+/// * **Colliding suggested ids.** Two projects in different directories can
+///   share a final path component (`…/tribal-house-cms` in two parents), which
+///   derives the same id. Left alone the id→site map collapses them; here we
+///   disambiguate later collisions with a `-2`, `-3`, … suffix so the import
+///   key stays unique and lossless.
+///
+/// Comparison normalizes only a trailing slash; the stored `path` is left
+/// untouched so path-collision checks against the registry stay exact.
+pub(crate) fn dedupe_sites(sites: Vec<ImportedSite>) -> Vec<ImportedSite> {
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut out: Vec<ImportedSite> = Vec::with_capacity(sites.len());
+    for mut site in sites {
+        let path_key = site.path.trim_end_matches('/').to_string();
+        if !seen_paths.insert(path_key) {
+            continue; // same project path already captured — drop the dup.
+        }
+        if seen_ids.contains(&site.suggested_id) {
+            let base = site.suggested_id.clone();
+            let mut n = 2u32;
+            let mut candidate = format!("{base}-{n}");
+            while seen_ids.contains(&candidate) {
+                n += 1;
+                candidate = format!("{base}-{n}");
+            }
+            site.suggested_id = candidate;
+        }
+        seen_ids.insert(site.suggested_id.clone());
+        out.push(site);
     }
+    out
 }
 
 // =============================================================================
@@ -576,6 +622,42 @@ mod tests {
         assert!(alpha.id_collision && alpha.path_collision);
         let beta = rows.iter().find(|r| r.site.suggested_id == "beta").unwrap();
         assert!(!beta.id_collision && !beta.path_collision);
+    }
+
+    #[test]
+    fn dedupe_sites_drops_duplicate_paths_keeping_first() {
+        // Herd's explicit `sites` entry + the same path under `parked_paths`
+        // emit the path twice. The first (richer, https) entry must win and the
+        // dup must vanish — otherwise the GUI's path-keyed `{#each}` crashes.
+        let out = dedupe_sites(vec![
+            site("/Volumes/x/Tribal House/tribal-house-cms", true),
+            site("/Volumes/x/Tribal House/tribal-house-cms", false),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].https, "the first (explicit) entry should be kept");
+    }
+
+    #[test]
+    fn dedupe_sites_treats_trailing_slash_as_same_path() {
+        let out = dedupe_sites(vec![
+            site("/Users/x/alpha", true),
+            site("/Users/x/alpha/", false),
+        ]);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn dedupe_sites_disambiguates_colliding_ids_from_distinct_paths() {
+        // Two real projects in different parents share a final component, so the
+        // derived id collides — but the paths differ, so both are real sites.
+        // Keep both, suffixing the later id so the import-by-id map is lossless.
+        let out = dedupe_sites(vec![
+            site("/Volumes/a/tribal-house-cms", true),
+            site("/Volumes/b/tribal-house-cms", true),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].suggested_id, "tribal-house-cms");
+        assert_eq!(out[1].suggested_id, "tribal-house-cms-2");
     }
 
     #[test]
