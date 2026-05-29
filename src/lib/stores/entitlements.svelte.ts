@@ -174,6 +174,17 @@ function createEntitlementsStore() {
     invalidateUserAvatar();
   }
 
+  /**
+   * Start the Pro purchase: ask the backend for a per-user Paddle checkout URL
+   * and open it in the system browser. Requires a signed-in session (the URL is
+   * attributed to the account so the webhook can issue Pro). `safeInvoke` toasts
+   * a friendly error if not signed in or checkout isn't configured yet.
+   */
+  async function startCheckout(): Promise<void> {
+    const url = await safeInvoke<string>("pro_checkout_url");
+    await openUrl(url);
+  }
+
   /** Whether a Pro-gated feature is currently unlocked. */
   function allows(feature: GatedFeature): boolean {
     const e = value.entitlements;
@@ -270,6 +281,7 @@ function createEntitlementsStore() {
     cancelLogin,
     logout: clear,
     clear,
+    startCheckout,
     allows,
     canAddProject,
     canSandbox,

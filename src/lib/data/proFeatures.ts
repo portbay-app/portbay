@@ -25,8 +25,8 @@ export interface ProFeature {
 
 export const PRO_PRICE = { amount: 59, currency: "USD", interval: "year", label: "$59/yr" };
 export const PRO_DEVICES = 2;
-export const PRO_CHECKOUT_ENABLED = false;
-export const WAITLIST_URL = "https://portbay.app/pro";
+/** Pro marketing / pricing page — the "Learn more about Pro" link target. */
+export const PRICING_URL = "https://portbay.app/pro";
 
 export const PRO_FEATURES: ProFeature[] = [
   {

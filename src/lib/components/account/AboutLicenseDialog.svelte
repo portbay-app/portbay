@@ -21,8 +21,7 @@
     PRIVACY_URL,
     TERMS_URL,
     LICENSE_URL,
-    PRO_CHECKOUT_ENABLED,
-    WAITLIST_URL,
+    PRICING_URL,
   } from "$lib/data/proFeatures";
 
   let dialogEl = $state<HTMLDivElement | null>(null);
@@ -67,6 +66,24 @@
   function upgrade() {
     close();
     account.open({ intent: signedIn ? "pro" : "signup" });
+  }
+
+  let checkoutBusy = $state(false);
+
+  /** "Get Pro" — checkout needs an account, so signed-out users sign in first
+   *  (the sign-in sheet's pro step then opens checkout). Signed-in users go
+   *  straight to the hosted Paddle checkout. */
+  async function getPro() {
+    if (!signedIn) {
+      upgrade();
+      return;
+    }
+    checkoutBusy = true;
+    try {
+      await entitlements.startCheckout();
+    } finally {
+      checkoutBusy = false;
+    }
   }
 </script>
 
@@ -152,23 +169,25 @@
             <button
               type="button"
               data-autofocus
-              disabled={!PRO_CHECKOUT_ENABLED}
-              class="w-full inline-flex items-center justify-center gap-2 h-10 rounded-xl bg-accent text-on-accent text-[13.5px] font-semibold hover:brightness-110 active:brightness-95 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              onclick={getPro}
+              disabled={checkoutBusy}
+              class="w-full inline-flex items-center justify-center gap-2 h-10 rounded-xl bg-accent text-on-accent text-[13.5px] font-semibold hover:brightness-110 active:brightness-95 transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <Icon name="sparkles" size={14} /> Get Pro (coming soon)
+              {#if checkoutBusy}
+                <span class="spinner"></span> Opening checkout…
+              {:else}
+                <Icon name="sparkles" size={14} /> Get Pro — $59/yr
+              {/if}
             </button>
-            {#if !PRO_CHECKOUT_ENABLED}
-              <div class="flex items-center justify-center gap-2">
-                <span class="text-[12px] text-fg-subtle">Coming soon —</span>
-                <button
-                  type="button"
-                  onclick={() => void openUrl(WAITLIST_URL)}
-                  class="text-[12px] text-accent hover:underline"
-                >
-                  Join the waitlist <Icon name="external-link" size={11} class="inline opacity-70" />
-                </button>
-              </div>
-            {/if}
+            <div class="flex items-center justify-center">
+              <button
+                type="button"
+                onclick={() => void openUrl(PRICING_URL)}
+                class="text-[12px] text-fg-subtle hover:text-fg transition"
+              >
+                Learn more about Pro <Icon name="external-link" size={11} class="inline opacity-60" />
+              </button>
+            </div>
           </div>
           <div class="flex gap-2.5">
             <button

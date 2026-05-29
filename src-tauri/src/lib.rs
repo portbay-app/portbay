@@ -567,6 +567,7 @@ pub fn run() {
             commands::entitlements::get_entitlement,
             commands::entitlements::refresh_entitlement,
             commands::entitlements::clear_entitlement,
+            commands::entitlements::pro_checkout_url,
             commands::auth::begin_login,
             commands::auth::poll_login,
             commands::auth::cancel_login,

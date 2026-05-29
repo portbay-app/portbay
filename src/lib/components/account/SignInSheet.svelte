@@ -15,10 +15,11 @@
   import { account } from "$lib/stores/account.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
-  import { PRO_PERKS, DONATE_URL, CONTRIBUTE_URL, PRO_CHECKOUT_ENABLED, WAITLIST_URL } from "$lib/data/proFeatures";
+  import { PRO_PERKS, DONATE_URL, CONTRIBUTE_URL, PRICING_URL } from "$lib/data/proFeatures";
 
   type Phase = "idle" | "waiting-github" | "waiting-email" | "pro-busy";
   let phase = $state<Phase>("idle");
+  let checkoutBusy = $state(false);
   let email = $state("");
   let notice = $state("");
   let dialogEl = $state<HTMLDivElement | null>(null);
@@ -123,6 +124,17 @@
     phase = "idle";
   }
 
+  async function getPro() {
+    checkoutBusy = true;
+    try {
+      await entitlements.startCheckout();
+      // The browser opens the Paddle checkout; the user completes payment there,
+      // then comes back — "Refresh my license" (or app restart) picks up Pro.
+    } finally {
+      checkoutBusy = false;
+    }
+  }
+
   async function refreshLicense() {
     phase = "pro-busy";
     notice = "";
@@ -201,23 +213,25 @@
             <button
               type="button"
               data-autofocus
-              disabled={!PRO_CHECKOUT_ENABLED}
-              class="inline-flex items-center justify-center gap-2 h-11 rounded-xl bg-accent text-on-accent text-[14px] font-semibold hover:brightness-110 active:brightness-95 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              onclick={getPro}
+              disabled={checkoutBusy}
+              class="inline-flex items-center justify-center gap-2 h-11 rounded-xl bg-accent text-on-accent text-[14px] font-semibold hover:brightness-110 active:brightness-95 transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <Icon name="sparkles" size={15} /> Get Pro — $59/yr
+              {#if checkoutBusy}
+                <span class="spinner"></span> Opening checkout…
+              {:else}
+                <Icon name="sparkles" size={15} /> Get Pro — $59/yr
+              {/if}
             </button>
-            {#if !PRO_CHECKOUT_ENABLED}
-              <div class="flex items-center justify-center gap-2">
-                <span class="text-[12px] text-fg-subtle">Coming soon —</span>
-                <button
-                  type="button"
-                  onclick={() => void openUrl(WAITLIST_URL)}
-                  class="text-[12px] text-accent hover:underline"
-                >
-                  Join the waitlist <Icon name="external-link" size={11} class="inline opacity-70" />
-                </button>
-              </div>
-            {/if}
+            <div class="flex items-center justify-center">
+              <button
+                type="button"
+                onclick={() => void openUrl(PRICING_URL)}
+                class="text-[12px] text-fg-subtle hover:text-fg transition"
+              >
+                Learn more about Pro <Icon name="external-link" size={11} class="inline opacity-60" />
+              </button>
+            </div>
           </div>
           <button
             type="button"
