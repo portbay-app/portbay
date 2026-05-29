@@ -80,6 +80,11 @@ pub struct DatabaseInstanceView {
     pub data_dir: String,
     pub config_path: Option<String>,
     pub socket_path: Option<String>,
+    /// Absolute path to the database file, for file-based engines (SQLite).
+    /// `None` for daemon engines.
+    pub file_path: Option<String>,
+    /// True for file-based engines (SQLite) — no daemon, port, or lifecycle.
+    pub file_based: bool,
     pub connection_url: String,
     pub account: String,
     pub linked_projects: Vec<String>,
@@ -96,8 +101,14 @@ pub struct CreateDatabaseInput {
     pub engine: String,
     /// User-facing name. Slugified into the instance id.
     pub name: String,
-    /// Optional explicit port; auto-allocated when absent.
+    /// Optional explicit port; auto-allocated when absent. Ignored for
+    /// file-based engines (SQLite).
     pub port: Option<u16>,
+    /// For file-based engines (SQLite): adopt an existing database file at this
+    /// absolute path instead of creating a fresh managed one. Ignored for
+    /// daemon engines.
+    #[serde(default)]
+    pub file_path: Option<String>,
     #[serde(default)]
     pub auto_start: bool,
 }
@@ -110,6 +121,7 @@ const ALL_ENGINES: &[DatabaseEngine] = &[
     DatabaseEngine::Mysql,
     DatabaseEngine::Postgres,
     DatabaseEngine::Mariadb,
+    DatabaseEngine::Sqlite,
     DatabaseEngine::Redis,
     DatabaseEngine::Mongo,
     DatabaseEngine::Memcached,
@@ -125,6 +137,8 @@ fn install_hint(e: DatabaseEngine) -> &'static str {
         DatabaseEngine::Redis => "brew install redis",
         DatabaseEngine::Mongo => "brew install mongodb-community",
         DatabaseEngine::Memcached => "brew install memcached",
+        // sqlite3 ships with macOS; the formula is only for stripped systems.
+        DatabaseEngine::Sqlite => "ships with macOS (brew install sqlite)",
     }
 }
 
@@ -315,6 +329,23 @@ fn instance_view(
     managed_bin: Option<&Path>,
 ) -> DatabaseInstanceView {
     let data = engine::data_dir(app_data, inst.id.as_str());
+    let file_based = inst.engine.is_file_based();
+    // File-based engines have no daemon to be "Stopped" — they're always
+    // available once the file exists. Provisioned == file present (an adopted
+    // file lives outside the managed data dir, so check `file_path` directly).
+    let (status, provisioned) = if file_based {
+        let present = inst.file_path.as_ref().map(|p| p.is_file()).unwrap_or(false);
+        (
+            if present {
+                InstanceStatus::Running
+            } else {
+                InstanceStatus::Errored
+            },
+            present,
+        )
+    } else {
+        (status, engine::is_initialized(inst.engine, &data))
+    };
     DatabaseInstanceView {
         id: inst.id.to_string(),
         name: inst.name.clone(),
@@ -331,11 +362,16 @@ fn instance_view(
             .socket_path
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned()),
+        file_path: inst
+            .file_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        file_based,
         connection_url: inst.connection_url(),
         account: inst.default_account().into(),
         linked_projects: inst.linked_projects.iter().map(|p| p.to_string()).collect(),
         binary_available: engine::daemon_binary_resolved(inst.engine, managed_bin).is_some(),
-        provisioned: engine::is_initialized(inst.engine, &data),
+        provisioned,
     }
 }
 
@@ -361,6 +397,61 @@ pub async fn create_database_instance(
     let mut registry = load_registry(&state)?;
     let id = unique_instance_id(&registry, name);
     let app_data = app_data_dir(&state)?;
+
+    // File-based engines (SQLite) have no daemon, port, or config: a "database"
+    // is a single file. Either adopt an existing file in place, or create a
+    // fresh managed one under the instance's data dir. No install check, no
+    // port allocation, no Process Compose entry.
+    if eng.is_file_based() {
+        let mb = managed_bin(&registry, eng);
+        let file_path = match input.file_path.as_deref().map(str::trim) {
+            Some(p) if !p.is_empty() => {
+                let path = PathBuf::from(p);
+                if !path.is_file() {
+                    return Err(AppError::BadInput(format!(
+                        "no database file at {} to adopt",
+                        path.display()
+                    )));
+                }
+                path
+            }
+            _ => {
+                // Fresh managed file: provision touches data/database.sqlite.
+                let provision_data = app_data.clone();
+                let provision_id = id.clone();
+                tokio::task::spawn_blocking(move || {
+                    engine::provision(eng, Path::new(""), &provision_data, &provision_id, 0, None)
+                })
+                .await
+                .map_err(|e| AppError::Internal(format!("provision join: {e}")))?
+                .map_err(AppError::Internal)?;
+                engine::sqlite_file(&app_data, &id)
+            }
+        };
+
+        let instance = DatabaseInstance {
+            id: DatabaseInstanceId::new(id.clone()),
+            name: name.to_string(),
+            engine: eng,
+            version: engine::detect_resolved(eng, mb.as_deref()).version,
+            port: 0,
+            data_dir: engine::data_dir(&app_data, &id),
+            config_path: None,
+            socket_path: None,
+            file_path: Some(file_path),
+            auto_start: false,
+            linked_projects: vec![],
+        };
+
+        registry.add_database(instance.clone())?;
+        save_registry(&state, &registry)?;
+        return Ok(instance_view(
+            &instance,
+            InstanceStatus::Running,
+            &app_data,
+            mb.as_deref(),
+        ));
+    }
 
     // Daemon must be installed before we can provision — prefer a PortBay-managed
     // build, falling back to a Homebrew/system copy.
@@ -415,6 +506,7 @@ pub async fn create_database_instance(
         data_dir: engine::data_dir(&app_data, &id),
         config_path: engine::config_path(eng, &app_data, &id),
         socket_path: engine::socket_path(eng, &app_data, &id),
+        file_path: None,
         auto_start: input.auto_start,
         linked_projects: vec![],
     };
@@ -483,6 +575,10 @@ pub async fn start_database_instance(
     id: String,
 ) -> AppResult<()> {
     require_instance(&state, &id)?;
+    // File-based engines (SQLite) have no daemon — they're always available.
+    if instance_is_file_based(&state, &id)? {
+        return Ok(());
+    }
     // Make sure the daemon process exists in PC's loaded YAML (a stale
     // reconcile could otherwise 404 the start).
     let _ = state.reconciler.tick(&app).await;
@@ -497,6 +593,9 @@ pub async fn start_database_instance(
 #[tauri::command]
 pub async fn stop_database_instance(state: State<'_, AppState>, id: String) -> AppResult<()> {
     require_instance(&state, &id)?;
+    if instance_is_file_based(&state, &id)? {
+        return Ok(());
+    }
     let client = state.pc_client()?;
     client
         .stop(&format!("db-{id}"))
@@ -512,6 +611,9 @@ pub async fn restart_database_instance(
     id: String,
 ) -> AppResult<()> {
     require_instance(&state, &id)?;
+    if instance_is_file_based(&state, &id)? {
+        return Ok(());
+    }
     let _ = state.reconciler.tick(&app).await;
     let client = state.pc_client()?;
     client
@@ -914,6 +1016,16 @@ fn require_instance(state: &State<'_, AppState>, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Whether the instance uses a file-based engine (SQLite). File-based engines
+/// have no daemon, so lifecycle start/stop/restart are no-ops.
+fn instance_is_file_based(state: &State<'_, AppState>, id: &str) -> AppResult<bool> {
+    let registry = load_registry(state)?;
+    Ok(registry
+        .get_database(&DatabaseInstanceId::new(id))
+        .map(|i| i.engine.is_file_based())
+        .unwrap_or(false))
+}
+
 /// PortBay app-data dir — the parent of `logs_dir` (e.g.
 /// `~/Library/Application Support/PortBay`).
 fn app_data_dir(state: &State<'_, AppState>) -> AppResult<PathBuf> {
@@ -984,6 +1096,7 @@ mod tests {
             DatabaseEngine::Mysql,
             DatabaseEngine::Postgres,
             DatabaseEngine::Mariadb,
+            DatabaseEngine::Sqlite,
             DatabaseEngine::Redis,
             DatabaseEngine::Mongo,
             DatabaseEngine::Memcached,
@@ -994,8 +1107,15 @@ mod tests {
         for engine in ALL_ENGINES {
             assert_eq!(DatabaseEngine::from_id(engine.id()), Some(*engine));
             assert!(!engine.label().is_empty());
-            assert!(engine.default_port() > 0);
-            assert!(install_hint(*engine).starts_with("brew install "));
+            assert!(!install_hint(*engine).is_empty());
+            if engine.is_file_based() {
+                // File-based engines (SQLite) have no listening port and ship
+                // with macOS rather than via a `brew install <daemon>`.
+                assert_eq!(engine.default_port(), 0);
+            } else {
+                assert!(engine.default_port() > 0);
+                assert!(install_hint(*engine).starts_with("brew install "));
+            }
         }
     }
 
@@ -1011,6 +1131,7 @@ mod tests {
             data_dir: PathBuf::from("/x"),
             config_path: None,
             socket_path: None,
+            file_path: None,
             auto_start: false,
             linked_projects: vec![],
         };
@@ -1064,6 +1185,7 @@ mod tests {
             data_dir: PathBuf::from("/x"),
             config_path: None,
             socket_path: None,
+            file_path: None,
             auto_start: false,
             linked_projects: vec![],
         };

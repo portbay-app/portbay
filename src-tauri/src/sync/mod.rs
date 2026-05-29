@@ -114,6 +114,25 @@ pub struct SyncMeta {
     pub last_version: u64,
     /// This device's id registered with the server (for the devices list).
     pub device_id: Option<String>,
+    /// Stable per-install identifier used as the activation key against the
+    /// 2-device cap. Generated once and persisted so reinstalls/restarts reuse
+    /// the same slot rather than churning a new device each time.
+    #[serde(default)]
+    pub client_device_id: Option<String>,
+}
+
+/// Return this install's stable `client_device_id`, generating + persisting one
+/// on first use. 16 random bytes as lowercase hex.
+pub fn ensure_client_device_id(meta: &mut SyncMeta) -> String {
+    if let Some(id) = &meta.client_device_id {
+        return id.clone();
+    }
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    let id = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    meta.client_device_id = Some(id.clone());
+    let _ = save_meta(meta);
+    id
 }
 
 fn meta_path() -> std::io::Result<PathBuf> {
@@ -234,31 +253,61 @@ pub async fn pull(base_url: &str, token: &str) -> Result<Option<(Vec<u8>, u64)>,
     Ok(Some((bytes.to_vec(), version)))
 }
 
+/// Why a device registration failed. `LimitReached` is the server's 409 when
+/// activating this install would exceed the license's device cap.
+#[derive(Debug)]
+pub enum RegisterError {
+    /// The license is already active on `max` devices; deactivate one first.
+    LimitReached { max: u32 },
+    /// Any other failure (network, auth, server error).
+    Other(String),
+}
+
+/// Register (or idempotently re-activate) this device against the account. The
+/// stable `client_device_id` is the activation key; the server enforces the
+/// 2-device cap and returns `LimitReached` when a *new* device would exceed it.
 pub async fn register_device(
     base_url: &str,
     token: &str,
     name: &str,
     platform: &str,
-) -> Result<String, String> {
+    client_device_id: &str,
+) -> Result<String, RegisterError> {
     let url = format!("{}/devices/register", base_url.trim_end_matches('/'));
     let resp = client()
         .post(&url)
         .bearer_auth(token)
-        .json(&serde_json::json!({ "name": name, "platform": platform }))
+        .json(&serde_json::json!({
+            "name": name,
+            "platform": platform,
+            "client_device_id": client_device_id,
+        }))
         .send()
         .await
-        .map_err(|e| format!("device registration failed: {e}"))?;
+        .map_err(|e| RegisterError::Other(format!("device registration failed: {e}")))?;
+
+    if resp.status().as_u16() == 409 {
+        let body = resp.json::<serde_json::Value>().await.unwrap_or_default();
+        let max = body
+            .get("max_devices")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2) as u32;
+        return Err(RegisterError::LimitReached { max });
+    }
     if !resp.status().is_success() {
-        return Err(format!("device registration returned {}", resp.status()));
+        return Err(RegisterError::Other(format!(
+            "device registration returned {}",
+            resp.status()
+        )));
     }
     let body = resp
         .json::<serde_json::Value>()
         .await
-        .map_err(|e| format!("reading device id failed: {e}"))?;
+        .map_err(|e| RegisterError::Other(format!("reading device id failed: {e}")))?;
     body.get("device_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| "device registration returned no id".to_string())
+        .ok_or_else(|| RegisterError::Other("device registration returned no id".to_string()))
 }
 
 pub async fn list_devices(base_url: &str, token: &str) -> Result<Vec<Device>, String> {

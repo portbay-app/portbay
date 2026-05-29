@@ -155,6 +155,11 @@ enum Cmd {
     /// Show the current account and entitlement (tier, project cap, features).
     License,
 
+    /// Re-verify the stored session and refresh the cached entitlement from
+    /// PortBay Cloud (mirrors the app's startup resync). Use after a license
+    /// change to pick up a new tier without reopening the app.
+    Resync,
+
     /// Sign out and clear the saved session.
     Logout,
 
@@ -381,6 +386,7 @@ enum CliProjectType {
     Flutter,
     Xcode,
     Android,
+    Expo,
     Custom,
 }
 
@@ -402,6 +408,7 @@ impl From<CliProjectType> for ProjectType {
             CliProjectType::Flutter => ProjectType::Flutter,
             CliProjectType::Xcode => ProjectType::Xcode,
             CliProjectType::Android => ProjectType::Android,
+            CliProjectType::Expo => ProjectType::Expo,
             CliProjectType::Custom => ProjectType::Custom,
         }
     }
@@ -602,15 +609,21 @@ enum DbCmd {
 
 #[derive(Args, Debug)]
 struct DbCreateArgs {
-    /// Engine id: mysql, postgres, mariadb, redis, mongo, memcached.
+    /// Engine id: mysql, postgres, mariadb, sqlite, redis, mongo, memcached.
     engine: String,
 
     /// Human-readable name (slugified into the instance id).
     name: String,
 
     /// Port to bind. Omit to auto-allocate from the engine default upward.
+    /// Ignored for file-based engines (sqlite).
     #[arg(long)]
     port: Option<u16>,
+
+    /// For file-based engines (sqlite): adopt an existing database file at this
+    /// path instead of creating a fresh managed one.
+    #[arg(long)]
+    file: Option<String>,
 
     /// Start the instance when the daemon boots.
     #[arg(long)]
@@ -815,6 +828,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Completions { shell } => cmd_completions(shell),
         Cmd::Login(args) => cmd_login(args).await,
         Cmd::License => cmd_license(),
+        Cmd::Resync => cmd_resync().await,
         Cmd::Logout => cmd_logout(),
         Cmd::Group(sub) => cmd_group(&ctx, sub).await,
         Cmd::Tunnel(sub) => cmd_tunnel(&ctx, sub).await,
@@ -913,6 +927,51 @@ fn cmd_license() -> Result<ExitCode, CliError> {
     if eff.tier != "pro" {
         println!("\nUpgrade: support PortBay with a donation or a merged PR to unlock Pro.");
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `portbay resync` — re-verify the stored session and refresh the cached
+/// entitlement from PortBay Cloud. Mirrors the app's startup `account_resync`:
+/// rotate the (likely-expired) access token via the refresh token, then
+/// re-fetch the signed license. Use after a license change to pick up a new
+/// tier without reopening the app.
+async fn cmd_resync() -> Result<ExitCode, CliError> {
+    use portbay_lib::auth::{self, RefreshOutcome, CLOUD_BASE_URL};
+    use portbay_lib::entitlements;
+
+    let Some(session) = auth::load_session() else {
+        return Err(CliError::BadInput(
+            "not signed in — run `portbay login` first.".into(),
+        ));
+    };
+
+    let eff = match auth::refresh_session(CLOUD_BASE_URL, &session.refresh_token).await {
+        RefreshOutcome::Rotated(new_session) => {
+            auth::store_session(&new_session).map_err(CliError::Other)?;
+            entitlements::refresh(CLOUD_BASE_URL, &new_session.access_token)
+                .await
+                .map_err(CliError::Other)?
+        }
+        RefreshOutcome::Unauthorized => {
+            let _ = auth::clear_session();
+            let _ = entitlements::clear_cache();
+            return Err(CliError::Other(
+                "session expired — run `portbay login` again.".into(),
+            ));
+        }
+        RefreshOutcome::Transient => {
+            return Err(CliError::Other(
+                "couldn't reach PortBay Cloud — try again.".into(),
+            ));
+        }
+    };
+
+    let who = eff
+        .account
+        .as_ref()
+        .map(|a| a.login.clone())
+        .unwrap_or_default();
+    println!("\u{2713} Resynced {who} — {} tier.", eff.tier);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1228,6 +1287,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         cors: None,
         sandbox: None,
         domain: None,
+        tunnel: None,
     };
 
     reg.add_project(project.clone())
@@ -2282,19 +2342,31 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
                     .ok();
             }
             for inst in instances {
-                let proc = pc.as_ref().and_then(|m| m.get(&format!("db-{}", inst.id)));
-                let status = db_status_str(proc);
-                let badge = if status == "running" {
-                    style("●").green()
+                // File-based engines (sqlite) have no daemon or port: they're
+                // always available once the file exists. Show "file" + the
+                // file's presence instead of a misleading `:0 stopped`.
+                let (badge, port_col, status) = if inst.engine.is_file_based() {
+                    let present = inst.file_path.as_ref().map(|p| p.is_file()).unwrap_or(false);
+                    if present {
+                        (style("●").green(), "file".to_string(), "available".to_string())
+                    } else {
+                        (style("○").dim(), "file".to_string(), "missing".to_string())
+                    }
                 } else {
-                    style("○").dim()
+                    let proc = pc.as_ref().and_then(|m| m.get(&format!("db-{}", inst.id)));
+                    let status = db_status_str(proc);
+                    let badge = if status == "running" {
+                        style("●").green()
+                    } else {
+                        style("○").dim()
+                    };
+                    (badge, format!(":{}", inst.port), status)
                 };
                 ctx.term
                     .write_line(&format!(
-                        "  {badge} {id:<16} {eng:<10} :{port:<6} {status}",
+                        "  {badge} {id:<16} {eng:<10} {port_col:<7} {status}",
                         id = style(inst.id.to_string()).bold(),
                         eng = style(inst.engine.id()).dim(),
-                        port = inst.port,
                         status = style(&status).dim(),
                     ))
                     .ok();
@@ -2342,41 +2414,74 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
                 return Err(CliError::BadInput("a database name is required".into()));
             }
             let mut reg = ctx.load_registry()?;
-            // Prefer a PortBay-managed engine install, falling back to Homebrew/system.
-            let managed_bin = reg
-                .managed_engine(eng)
-                .map(|m| engine::managed_bin_dir(&m.dir));
-            let daemon = engine::daemon_binary_resolved(eng, managed_bin.as_deref()).ok_or_else(|| {
-                CliError::BadInput(format!(
-                    "{} isn't installed ({}). Install the engine binary from the PortBay app, then retry.",
-                    eng.label(),
-                    db_install_hint(eng)
-                ))
-            })?;
             let id = db_unique_id(&reg, name);
-            let port = match args.port {
-                Some(p) => {
-                    if reg.database_port_in_use(p, None) {
-                        return Err(CliError::BadInput(format!(
-                            "port {p} is already used by another database instance"
-                        )));
+
+            // File-based engines (sqlite): no daemon, no port. Adopt an existing
+            // file or create a fresh managed one.
+            let (port, detection_version, file_path) = if eng.is_file_based() {
+                let managed_bin = reg
+                    .managed_engine(eng)
+                    .map(|m| engine::managed_bin_dir(&m.dir));
+                let file = match args.file.as_deref().map(str::trim) {
+                    Some(p) if !p.is_empty() => {
+                        let path = std::path::PathBuf::from(p);
+                        if !path.is_file() {
+                            return Err(CliError::BadInput(format!(
+                                "no database file at {} to adopt",
+                                path.display()
+                            )));
+                        }
+                        path
                     }
-                    p
-                }
-                None => db_alloc_port(&reg, eng),
+                    _ => {
+                        engine::provision(eng, std::path::Path::new(""), &app_data, &id, 0, None)
+                            .map_err(|e| CliError::Other(format!("provision: {e}")))?;
+                        engine::sqlite_file(&app_data, &id)
+                    }
+                };
+                (
+                    0u16,
+                    engine::detect_resolved(eng, managed_bin.as_deref()).version,
+                    Some(file),
+                )
+            } else {
+                // Prefer a PortBay-managed engine install, falling back to Homebrew/system.
+                let managed_bin = reg
+                    .managed_engine(eng)
+                    .map(|m| engine::managed_bin_dir(&m.dir));
+                let daemon = engine::daemon_binary_resolved(eng, managed_bin.as_deref()).ok_or_else(|| {
+                    CliError::BadInput(format!(
+                        "{} isn't installed ({}). Install the engine binary from the PortBay app, then retry.",
+                        eng.label(),
+                        db_install_hint(eng)
+                    ))
+                })?;
+                let port = match args.port {
+                    Some(p) => {
+                        if reg.database_port_in_use(p, None) {
+                            return Err(CliError::BadInput(format!(
+                                "port {p} is already used by another database instance"
+                            )));
+                        }
+                        p
+                    }
+                    None => db_alloc_port(&reg, eng),
+                };
+                let detection = engine::detect_resolved(eng, managed_bin.as_deref());
+                engine::provision(eng, &daemon, &app_data, &id, port, managed_bin.as_deref())
+                    .map_err(|e| CliError::Other(format!("provision: {e}")))?;
+                (port, detection.version, None)
             };
-            let detection = engine::detect_resolved(eng, managed_bin.as_deref());
-            engine::provision(eng, &daemon, &app_data, &id, port, managed_bin.as_deref())
-                .map_err(|e| CliError::Other(format!("provision: {e}")))?;
             let instance = DatabaseInstance {
                 id: DatabaseInstanceId::new(id.clone()),
                 name: name.to_string(),
                 engine: eng,
-                version: detection.version,
+                version: detection_version,
                 port,
                 data_dir: engine::data_dir(&app_data, &id),
                 config_path: engine::config_path(eng, &app_data, &id),
                 socket_path: engine::socket_path(eng, &app_data, &id),
+                file_path,
                 auto_start: args.auto_start,
                 linked_projects: vec![],
             };
@@ -2393,6 +2498,28 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
                         "connection_url": instance.connection_url(),
                     })
                 );
+            } else if eng.is_file_based() {
+                let file = instance
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                ctx.term
+                    .write_line(&format!(
+                        "{} provisioned {} ({} at {})",
+                        style("✓").green(),
+                        instance.id,
+                        eng.label(),
+                        style(file).dim(),
+                    ))
+                    .ok();
+                ctx.term
+                    .write_line(&format!(
+                        "  {} file-based — no daemon to start. Link it: `portbay db link {} <project>`.",
+                        style("·").dim(),
+                        instance.id
+                    ))
+                    .ok();
             } else {
                 ctx.term
                     .write_line(&format!(
@@ -2527,6 +2654,7 @@ fn db_install_hint(e: DatabaseEngine) -> &'static str {
         DatabaseEngine::Redis => "brew install redis",
         DatabaseEngine::Mongo => "brew install mongodb-community",
         DatabaseEngine::Memcached => "brew install memcached",
+        DatabaseEngine::Sqlite => "ships with macOS (brew install sqlite)",
     }
 }
 

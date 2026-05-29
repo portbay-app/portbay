@@ -57,6 +57,9 @@ pub enum ProjectType {
     Flutter,
     Xcode,
     Android,
+    /// Expo / React Native managed app. Play runs the Metro dev server
+    /// (`npx expo start`); the iOS/Android simulator opens from there.
+    Expo,
     Custom,
 }
 
@@ -240,6 +243,14 @@ pub struct Project {
     /// reproduces PortBay's behaviour from before these knobs existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<DomainConfig>,
+
+    /// Bring-your-own named Cloudflare tunnel for a stable public hostname
+    /// (Pro). `None` = only the free zero-config Quick Share is offered. Stores
+    /// the user's tunnel UUID, credentials-file path, and chosen hostname — no
+    /// secrets (the credentials file stays in `~/.cloudflared`, owned by the
+    /// user; PortBay only references it). Additive; absent registries → `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<CustomTunnelConfig>,
 }
 
 impl Project {
@@ -488,6 +499,30 @@ impl CorsConfig {
     }
 }
 
+/// A bring-your-own named Cloudflare tunnel attached to a project (Pro). PortBay
+/// generates its **own** ingress config from these fields and runs the user's
+/// tunnel; it never reads or edits `~/.cloudflared/config.yml`. Holds no secret
+/// — `credentials_file` is a path into the user-owned `~/.cloudflared`.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTunnelConfig {
+    /// Cloudflare tunnel UUID (matches a `~/.cloudflared/<uuid>.json` creds file).
+    pub tunnel_id: String,
+    /// Absolute path to the tunnel's credentials JSON in `~/.cloudflared`.
+    pub credentials_file: String,
+    /// Stable public hostname the user has already `route dns`-ed to this tunnel.
+    pub hostname: String,
+}
+
+impl CustomTunnelConfig {
+    /// Whether this config is complete enough to run a tunnel.
+    pub fn is_active(&self) -> bool {
+        !self.tunnel_id.is_empty()
+            && !self.credentials_file.is_empty()
+            && !self.hostname.is_empty()
+    }
+}
+
 /// A pinned language runtime for a project: which language toolchain and
 /// which version to launch it with. See [`Project::runtime`].
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -605,6 +640,11 @@ pub enum DatabaseEngine {
     Redis,
     Mongo,
     Memcached,
+    /// SQLite — a *file-based* engine. Unlike the others it has no daemon,
+    /// no listening port, and no socket: a "database" is a single `.sqlite`
+    /// file on disk. It is therefore never supervised by Process Compose;
+    /// see [`DatabaseEngine::is_file_based`].
+    Sqlite,
 }
 
 impl DatabaseEngine {
@@ -618,6 +658,7 @@ impl DatabaseEngine {
             DatabaseEngine::Redis => "redis",
             DatabaseEngine::Mongo => "mongo",
             DatabaseEngine::Memcached => "memcached",
+            DatabaseEngine::Sqlite => "sqlite",
         }
     }
 
@@ -630,10 +671,12 @@ impl DatabaseEngine {
             DatabaseEngine::Redis => "Redis",
             DatabaseEngine::Mongo => "MongoDB",
             DatabaseEngine::Memcached => "Memcached",
+            DatabaseEngine::Sqlite => "SQLite",
         }
     }
 
-    /// Canonical default listening port for the engine.
+    /// Canonical default listening port for the engine. File-based engines
+    /// ([`Self::is_file_based`]) have no port and return 0.
     pub fn default_port(&self) -> u16 {
         match self {
             DatabaseEngine::Mysql | DatabaseEngine::Mariadb => 3306,
@@ -641,6 +684,7 @@ impl DatabaseEngine {
             DatabaseEngine::Redis => 6379,
             DatabaseEngine::Mongo => 27017,
             DatabaseEngine::Memcached => 11211,
+            DatabaseEngine::Sqlite => 0,
         }
     }
 
@@ -653,8 +697,17 @@ impl DatabaseEngine {
             "redis" => Some(DatabaseEngine::Redis),
             "mongo" => Some(DatabaseEngine::Mongo),
             "memcached" => Some(DatabaseEngine::Memcached),
+            "sqlite" => Some(DatabaseEngine::Sqlite),
             _ => None,
         }
+    }
+
+    /// File-based engines store each database as a single file on disk and run
+    /// no daemon. PortBay never allocates a port, renders a config, or
+    /// supervises a Process Compose process for them; their lifecycle is a
+    /// no-op (always "available"). Currently only SQLite.
+    pub fn is_file_based(&self) -> bool {
+        matches!(self, DatabaseEngine::Sqlite)
     }
 }
 
@@ -689,6 +742,14 @@ pub struct DatabaseInstance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket_path: Option<PathBuf>,
 
+    /// Absolute path to the database file, for file-based engines (SQLite).
+    /// `None` for daemon engines, which locate their storage via `data_dir`.
+    /// This is the file injected as `DB_DATABASE` into linked projects, so it
+    /// can point either at a PortBay-managed file under `data_dir` or — when an
+    /// existing project `.sqlite` is *adopted* — at the file in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<PathBuf>,
+
     /// Whether the daemon auto-starts when PortBay boots.
     #[serde(default)]
     pub auto_start: bool,
@@ -711,8 +772,12 @@ impl DatabaseInstance {
         match self.engine {
             DatabaseEngine::Postgres => "postgres",
             DatabaseEngine::Mysql | DatabaseEngine::Mariadb => "root",
-            // Redis/Mongo have no user by default in a fresh local instance.
-            DatabaseEngine::Redis | DatabaseEngine::Mongo | DatabaseEngine::Memcached => "",
+            // Redis/Mongo/Memcached have no user by default in a fresh local
+            // instance; SQLite is a bare file with no auth at all.
+            DatabaseEngine::Redis
+            | DatabaseEngine::Mongo
+            | DatabaseEngine::Memcached
+            | DatabaseEngine::Sqlite => "",
         }
     }
 
@@ -729,6 +794,15 @@ impl DatabaseInstance {
             DatabaseEngine::Redis => format!("redis://127.0.0.1:{port}"),
             DatabaseEngine::Mongo => format!("mongodb://127.0.0.1:{port}"),
             DatabaseEngine::Memcached => format!("memcached://127.0.0.1:{port}"),
+            // SQLite has no host/port — the "URL" is the file path. The triple
+            // slash is the standard `sqlite:///absolute/path` form.
+            DatabaseEngine::Sqlite => {
+                let p = self.file_path.as_ref().map(|p| p.display().to_string());
+                match p {
+                    Some(path) => format!("sqlite://{path}"),
+                    None => "sqlite://".to_string(),
+                }
+            }
         }
     }
 
@@ -740,6 +814,16 @@ impl DatabaseInstance {
         let mut env = std::collections::BTreeMap::new();
         env.insert("DATABASE_URL".into(), self.connection_url());
         env.insert("DB_CONNECTION".into(), self.engine.id().into());
+
+        // File-based engines (SQLite) carry no host/port/account — the only
+        // connection coordinate is the file path, surfaced as DB_DATABASE.
+        if self.engine.is_file_based() {
+            if let Some(path) = &self.file_path {
+                env.insert("DB_DATABASE".into(), path.display().to_string());
+            }
+            return env;
+        }
+
         env.insert("DB_HOST".into(), "127.0.0.1".into());
         env.insert("DB_PORT".into(), self.port.to_string());
         let account = self.default_account();
@@ -879,6 +963,7 @@ impl RuntimeSettings {
             ProjectType::Static
             | ProjectType::Xcode
             | ProjectType::Android
+            | ProjectType::Expo
             | ProjectType::Custom => return None,
         };
         self.defaults.get(lang).map(|version| Runtime {
@@ -1081,6 +1166,7 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
             id: ProjectId::new("marketing-site"),
             name: "Marketing Site".into(),
             path: PathBuf::from("/Volumes/DEVSSD/Projects/Clients/Marketing Site"),
@@ -1120,6 +1206,7 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
             id: ProjectId::new("legacy-php"),
             name: "Legacy PHP".into(),
             path: PathBuf::from("/tmp/legacy-php"),

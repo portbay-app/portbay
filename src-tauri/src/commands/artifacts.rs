@@ -65,6 +65,12 @@ fn artifact_catalogue(kind: ProjectType) -> &'static [(&'static str, &'static st
             ("app/build", "Android app build"),
             (".gradle", "Gradle cache"),
         ],
+        ProjectType::Expo => &[
+            ("node_modules", "Dependencies"),
+            (".expo", "Expo cache"),
+            ("ios/build", "iOS build"),
+            ("android/build", "Android build"),
+        ],
         ProjectType::Custom => &[
             ("node_modules", "Dependencies"),
             ("dist", "Build output"),

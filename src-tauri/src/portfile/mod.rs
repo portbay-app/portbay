@@ -212,6 +212,7 @@ pub fn materialise_project(
         cors: None,
         sandbox: None,
         domain: None,
+        tunnel: None,
     })
 }
 
@@ -261,6 +262,7 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
         }
     }
 

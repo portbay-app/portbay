@@ -120,17 +120,18 @@
   const commandPlaceholder = $derived(
     kind === "php"
       ? "leave empty for PortBay-managed PHP-FPM"
-      : kind === "flutter"
-        ? "flutter run"
-        : kind === "xcode"
-          ? "xed ."
-          : kind === "android"
-            ? "./gradlew installDebug"
-            : "pnpm dev",
+      : isMobileKind(kind)
+        ? "leave empty — PortBay launches the simulator/emulator"
+        : "pnpm dev",
   );
 
   function isMobileKind(value: ProjectType): boolean {
-    return value === "flutter" || value === "xcode" || value === "android";
+    return (
+      value === "flutter" ||
+      value === "xcode" ||
+      value === "android" ||
+      value === "expo"
+    );
   }
 
   /**

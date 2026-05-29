@@ -317,6 +317,15 @@ export function installSimulatorIpcBrowser(payload: {
         return Promise.resolve(fixtures.entitlement);
       case "logout":
         return Promise.resolve(fixtures.entitlement);
+      // Avatar fetch is backend-only (network + disk cache); the hosted demo
+      // has neither, so the chip falls back to the account's initials.
+      case "get_account_avatar":
+        return Promise.resolve(null);
+      // Profile edits are no-ops in the hosted demo — echo the fixture entitlement.
+      case "update_display_name":
+      case "upload_avatar":
+      case "remove_avatar":
+        return Promise.resolve(fixtures.entitlement);
       case "begin_login":
         return Promise.resolve({ authorize_url: null });
       case "poll_login":

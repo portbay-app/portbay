@@ -15,7 +15,7 @@
   import { account } from "$lib/stores/account.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
-  import { PRO_PERKS, DONATE_URL, CONTRIBUTE_URL } from "$lib/data/proFeatures";
+  import { PRO_PERKS, DONATE_URL, CONTRIBUTE_URL, PRO_CHECKOUT_ENABLED, WAITLIST_URL } from "$lib/data/proFeatures";
 
   type Phase = "idle" | "waiting-github" | "waiting-email" | "pro-busy";
   let phase = $state<Phase>("idle");
@@ -133,7 +133,7 @@
       close();
     } else {
       notice =
-        "No Pro license yet. A donation can take a moment to process; a contribution unlocks once your PR is merged.";
+        "No Pro license found. Contributions unlock once your PR is merged — it may take a moment to reflect.";
     }
   }
 
@@ -193,19 +193,32 @@
           {/each}
         </ul>
         <p class="text-[12.5px] leading-relaxed text-fg-muted mb-4">
-          PortBay Pro is <span class="text-fg font-medium">pay-what-you-want</span> and perpetual — earn it with a
-          donation or a merged pull request. No subscription.
+          <span class="text-fg font-medium">$59/yr</span> — activates on up to 2 devices, renews annually, cancel
+          anytime. OSS contributors earn Pro by merging a pull request.
         </p>
         <div class="flex flex-col gap-2.5">
-          <button
-            type="button"
-            data-autofocus
-            onclick={() => void openUrl(DONATE_URL)}
-            class="inline-flex items-center justify-center gap-2 h-11 rounded-xl bg-accent text-on-accent text-[14px] font-semibold hover:brightness-110 active:brightness-95 transition shadow-sm"
-          >
-            <Icon name="sparkles" size={15} /> Support with a donation
-            <Icon name="external-link" size={13} class="opacity-70" />
-          </button>
+          <div class="flex flex-col gap-1">
+            <button
+              type="button"
+              data-autofocus
+              disabled={!PRO_CHECKOUT_ENABLED}
+              class="inline-flex items-center justify-center gap-2 h-11 rounded-xl bg-accent text-on-accent text-[14px] font-semibold hover:brightness-110 active:brightness-95 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Icon name="sparkles" size={15} /> Get Pro — $59/yr
+            </button>
+            {#if !PRO_CHECKOUT_ENABLED}
+              <div class="flex items-center justify-center gap-2">
+                <span class="text-[12px] text-fg-subtle">Coming soon —</span>
+                <button
+                  type="button"
+                  onclick={() => void openUrl(WAITLIST_URL)}
+                  class="text-[12px] text-accent hover:underline"
+                >
+                  Join the waitlist <Icon name="external-link" size={11} class="inline opacity-70" />
+                </button>
+              </div>
+            {/if}
+          </div>
           <button
             type="button"
             onclick={() => void openUrl(CONTRIBUTE_URL)}
@@ -214,18 +227,27 @@
             <Icon name="terminal" size={15} /> Contribute a pull request
             <Icon name="external-link" size={13} class="opacity-60" />
           </button>
-          <button
-            type="button"
-            onclick={refreshLicense}
-            disabled={phase === "pro-busy"}
-            class="inline-flex items-center justify-center gap-2 h-9 mt-1 rounded-lg text-[12.5px] font-medium text-fg-muted hover:text-fg hover:bg-surface-2 transition disabled:opacity-60"
-          >
-            {#if phase === "pro-busy"}
-              <span class="spinner"></span> Checking…
-            {:else}
-              <Icon name="refresh-cw" size={13} /> Already done it? Refresh my license
-            {/if}
-          </button>
+          <div class="flex items-center justify-between mt-1">
+            <button
+              type="button"
+              onclick={() => void openUrl(DONATE_URL)}
+              class="text-[12px] text-fg-subtle hover:text-fg transition"
+            >
+              Tip the project <Icon name="external-link" size={11} class="inline opacity-60" />
+            </button>
+            <button
+              type="button"
+              onclick={refreshLicense}
+              disabled={phase === "pro-busy"}
+              class="inline-flex items-center gap-1.5 text-[12px] font-medium text-fg-muted hover:text-fg transition disabled:opacity-60"
+            >
+              {#if phase === "pro-busy"}
+                <span class="spinner"></span> Checking…
+              {:else}
+                <Icon name="refresh-cw" size={12} /> Refresh my license
+              {/if}
+            </button>
+          </div>
         </div>
       {:else if phase === "waiting-github"}
         <div class="text-center py-4">

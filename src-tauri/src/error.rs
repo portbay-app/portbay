@@ -121,6 +121,12 @@ pub enum AppError {
         reason: &'static str,
     },
 
+    /// This Pro license is already active on its device cap (2 devices). The GUI
+    /// catches this code to point the user at Settings → Sync to deactivate a
+    /// device before adding this one. The server is authoritative for the count.
+    #[error("This Pro license is active on its limit of {max} devices")]
+    DeviceLimitReached { max: u32 },
+
     /// A failure that doesn't fit the other variants. Kept narrow on purpose.
     #[error("{0}")]
     Internal(String),
@@ -145,6 +151,7 @@ impl AppError {
             Self::SandboxCapReached { .. } => "SANDBOX_CAP_REACHED",
             Self::ProRequired { .. } => "PRO_REQUIRED",
             Self::Unsupported { .. } => "UNSUPPORTED",
+            Self::DeviceLimitReached { .. } => "DEVICE_LIMIT_REACHED",
             Self::Internal(_) => "INTERNAL",
         }
     }
@@ -187,6 +194,9 @@ impl AppError {
             Self::Unsupported { .. } => {
                 "This feature isn't available on your operating system.".into()
             }
+            Self::DeviceLimitReached { .. } => {
+                "Deactivate another device under Settings → Sync to use Pro on this one.".into()
+            }
             Self::Hosts(_) | Self::Io(_) | Self::Internal(_) => {
                 "The action did not complete.".into()
             }
@@ -202,7 +212,8 @@ impl AppError {
             | Self::PortConflict { .. }
             | Self::ProjectCapReached { .. }
             | Self::SandboxCapReached { .. }
-            | Self::ProRequired { .. } => "user",
+            | Self::ProRequired { .. }
+            | Self::DeviceLimitReached { .. } => "user",
             _ => "system",
         }
     }

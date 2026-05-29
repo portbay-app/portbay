@@ -62,6 +62,7 @@ mod tests {
     fn pro_ent() -> Entitlements {
         Entitlements {
             max_projects: None,
+            max_devices: Some(2),
             sync: true,
             custom_port_cors: true,
             mail: "full".into(),

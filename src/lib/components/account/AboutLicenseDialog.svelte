@@ -21,6 +21,8 @@
     PRIVACY_URL,
     TERMS_URL,
     LICENSE_URL,
+    PRO_CHECKOUT_ENABLED,
+    WAITLIST_URL,
   } from "$lib/data/proFeatures";
 
   let dialogEl = $state<HTMLDivElement | null>(null);
@@ -134,9 +136,8 @@
 
       <!-- honest framing -->
       <p class="mt-4 text-[12.5px] leading-relaxed text-fg-muted">
-        PortBay is open source (Apache-2.0) — you can build any Pro feature yourself for free. Pro is the
-        <span class="text-fg font-medium">pay-what-you-want, perpetual</span> way to support the project and get the
-        hosted account + sync conveniences without the work. No subscription.
+        <span class="text-fg font-medium">$59/yr</span>, activates on up to 2 devices, renews annually, cancel
+        anytime. Open source under AGPL-3.0 — you can always build any Pro feature yourself.
       </p>
 
       <!-- acquisition / state -->
@@ -147,16 +148,29 @@
         </div>
       {:else}
         <div class="mt-4 flex flex-col gap-2.5">
-          <div class="flex gap-2.5">
+          <div class="flex flex-col gap-1">
             <button
               type="button"
               data-autofocus
-              onclick={() => void openUrl(DONATE_URL)}
-              class="flex-1 inline-flex items-center justify-center gap-2 h-10 rounded-xl bg-accent text-on-accent text-[13.5px] font-semibold hover:brightness-110 active:brightness-95 transition shadow-sm"
+              disabled={!PRO_CHECKOUT_ENABLED}
+              class="w-full inline-flex items-center justify-center gap-2 h-10 rounded-xl bg-accent text-on-accent text-[13.5px] font-semibold hover:brightness-110 active:brightness-95 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Icon name="sparkles" size={14} /> Donate
-              <Icon name="external-link" size={12} class="opacity-70" />
+              <Icon name="sparkles" size={14} /> Get Pro (coming soon)
             </button>
+            {#if !PRO_CHECKOUT_ENABLED}
+              <div class="flex items-center justify-center gap-2">
+                <span class="text-[12px] text-fg-subtle">Coming soon —</span>
+                <button
+                  type="button"
+                  onclick={() => void openUrl(WAITLIST_URL)}
+                  class="text-[12px] text-accent hover:underline"
+                >
+                  Join the waitlist <Icon name="external-link" size={11} class="inline opacity-70" />
+                </button>
+              </div>
+            {/if}
+          </div>
+          <div class="flex gap-2.5">
             <button
               type="button"
               onclick={() => void openUrl(CONTRIBUTE_URL)}
@@ -165,13 +179,21 @@
               <Icon name="terminal" size={14} /> Contribute
               <Icon name="external-link" size={12} class="opacity-60" />
             </button>
+            <button
+              type="button"
+              onclick={() => void openUrl(DONATE_URL)}
+              class="flex-1 inline-flex items-center justify-center gap-2 h-10 rounded-xl border border-border bg-surface text-fg text-[13.5px] font-medium hover:bg-surface-2 transition"
+            >
+              Tip the project
+              <Icon name="external-link" size={12} class="opacity-60" />
+            </button>
           </div>
           <button
             type="button"
             onclick={upgrade}
             class="inline-flex items-center justify-center gap-1.5 h-9 rounded-lg text-[12.5px] font-medium text-fg-muted hover:text-fg hover:bg-surface-2 transition"
           >
-            {signedIn ? "Upgrade — already donated or contributed?" : "Sign in or create a free account first"}
+            {signedIn ? "Already contributed? Refresh your license" : "Sign in or create a free account first"}
             <Icon name="arrow-right" size={13} />
           </button>
         </div>

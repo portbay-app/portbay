@@ -60,12 +60,55 @@ fn tail(s: &str, max_bytes: usize) -> String {
     format!("… (truncated)\n{}", &s[start..])
 }
 
+/// Start every database instance linked to `project_id` so the app can connect
+/// on boot. File-based engines (SQLite) have no daemon and are always
+/// available, so they're skipped. Best-effort: a database that fails to start
+/// is logged but doesn't block the project (the app surfaces the connection
+/// error itself, which is more actionable than a blocked Play).
+async fn start_linked_databases(app: &AppHandle, state: &State<'_, AppState>, project_id: &str) {
+    let pid = ProjectId::new(project_id);
+    let linked: Vec<String> = {
+        let Ok(registry) = load_registry(state) else {
+            return;
+        };
+        registry
+            .list_databases()
+            .iter()
+            .filter(|inst| {
+                !inst.engine.is_file_based() && inst.linked_projects.iter().any(|p| p == &pid)
+            })
+            .map(|inst| inst.process_id())
+            .collect()
+    };
+    if linked.is_empty() {
+        return;
+    }
+    // Reconcile so the `db-<id>` processes exist in PC's loaded YAML before we
+    // start them (a stale reconcile would otherwise 404 the start).
+    let _ = state.reconciler.tick(app).await;
+    let Ok(client) = state.pc_client() else {
+        return;
+    };
+    for process_id in linked {
+        if let Err(e) = client.start(&process_id).await {
+            tracing::warn!(
+                target: "lifecycle",
+                "linked database `{process_id}` for project `{project_id}` failed to start: {e}"
+            );
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn start_project(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
+    // Bring up any database the project is linked to first, so the app can
+    // connect the moment its own process starts.
+    start_linked_databases(&app, &state, &id).await;
+
     // Pure Caddy-served projects have no Process Compose process. Generated
     // Nginx/Apache PHP backends do, but their process id is derived.
     if let Some(process_id) = project_pc_process_id(&state, &id)? {
@@ -286,9 +329,11 @@ pub async fn install_project_sandboxed(
             .map_err(|e| AppError::Internal(format!("could not start registry proxy: {e}")))?;
 
         // For node-type projects, put the managed Node bin dir on PATH during
-        // install so `corepack` (shimmed as `pnpm`/`yarn`/etc.) resolves to
-        // PortBay's own binary and materializes the pinned PM into COREPACK_HOME.
-        let node_env = {
+        // install so PortBay's own `corepack` resolves, enable the pnpm/yarn
+        // shims into the per-project corepack dir (our managed Node ships no
+        // `pnpm` shim), and run the install through them so the pinned PM is
+        // materialized into COREPACK_HOME for the offline run phase.
+        let (node_env, effective_install_cmd) = {
             use crate::registry::ProjectType;
             let is_node = matches!(
                 project.kind,
@@ -306,15 +351,28 @@ pub async fn install_project_sandboxed(
                     .join("sandbox")
                     .join(project.id.as_str())
                     .join("corepack");
-                crate::sandbox::node_install_env_prefix(bin_dir, Some(&corepack_home))
+                let env = crate::sandbox::node_install_env_prefix(bin_dir, Some(&corepack_home));
+                // Only enable shims when a managed Node actually resolved (env
+                // non-empty); otherwise leave the command untouched so a neutral
+                // install path is unaffected.
+                let cmd = if env.is_empty() {
+                    install_cmd.clone()
+                } else {
+                    format!(
+                        "{}{}",
+                        crate::sandbox::corepack_enable_preamble(&corepack_home),
+                        install_cmd
+                    )
+                };
+                (env, cmd)
             } else {
-                String::new()
+                (String::new(), install_cmd.clone())
             }
         };
         let wrapped = crate::sandbox::wrap_install_command(
             &data_dir,
             &project,
-            &install_cmd,
+            &effective_install_cmd,
             &proxy.proxy_url(),
             &node_env,
         );
@@ -897,6 +955,7 @@ mod tests {
             runtime: None,
             workspace: ws,
             domain: None,
+            tunnel: None,
         }
     }
 

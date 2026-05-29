@@ -575,58 +575,73 @@
 
         <!-- Action toolbar -->
         <div class="flex items-center gap-1.5 shrink-0 flex-wrap">
-          {#if selected.status === "running" || selected.status === "starting"}
-            <button
-              type="button"
-              onclick={() => databases.action(selected.id, "stop")}
-              disabled={busyLifecycle}
+          {#if selected.fileBased}
+            <!--
+              File-based engines (SQLite) have no daemon: there's nothing to
+              start, stop, or restart — the file is always available. Show that
+              state plainly instead of dead lifecycle buttons.
+            -->
+            <span
               class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md
-                     text-[12px] font-medium text-on-accent bg-status-crashed
-                     hover:brightness-110 active:brightness-95
-                     disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
+                     text-[12px] font-medium bg-status-running/15 text-status-running"
             >
-              {#if databases.isBusy(selected.id, "stop")}
-                <Icon name="refresh-cw" size={11} class="animate-spin" />
-              {:else}
-                <Icon name="square" size={11} class="fill-current" />
-              {/if}
-              Stop
-            </button>
+              <Icon name="check" size={11} />
+              Always available (file-based)
+            </span>
           {:else}
+            {#if selected.status === "running" || selected.status === "starting"}
+              <button
+                type="button"
+                onclick={() => databases.action(selected.id, "stop")}
+                disabled={busyLifecycle}
+                class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md
+                       text-[12px] font-medium text-on-accent bg-status-crashed
+                       hover:brightness-110 active:brightness-95
+                       disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
+              >
+                {#if databases.isBusy(selected.id, "stop")}
+                  <Icon name="refresh-cw" size={11} class="animate-spin" />
+                {:else}
+                  <Icon name="square" size={11} class="fill-current" />
+                {/if}
+                Stop
+              </button>
+            {:else}
+              <button
+                type="button"
+                onclick={() => databases.action(selected.id, "start")}
+                disabled={busyLifecycle || !selected.binaryAvailable}
+                class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md
+                       text-[12px] font-medium text-on-accent bg-status-running
+                       hover:brightness-110 active:brightness-95
+                       disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
+              >
+                {#if databases.isBusy(selected.id, "start")}
+                  <Icon name="refresh-cw" size={11} class="animate-spin" />
+                {:else}
+                  <Icon name="play" size={11} class="fill-current" />
+                {/if}
+                Start
+              </button>
+            {/if}
+
             <button
               type="button"
-              onclick={() => databases.action(selected.id, "start")}
-              disabled={busyLifecycle || !selected.binaryAvailable}
+              onclick={() => databases.action(selected.id, "restart")}
+              disabled={busyLifecycle || selected.status !== "running"}
               class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md
-                     text-[12px] font-medium text-on-accent bg-status-running
-                     hover:brightness-110 active:brightness-95
-                     disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
+                     border border-border bg-surface text-[12px] text-fg-muted
+                     hover:bg-surface-2 hover:text-fg transition-colors
+                     disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {#if databases.isBusy(selected.id, "start")}
+              {#if databases.isBusy(selected.id, "restart")}
                 <Icon name="refresh-cw" size={11} class="animate-spin" />
               {:else}
-                <Icon name="play" size={11} class="fill-current" />
+                <Icon name="refresh-cw" size={11} />
               {/if}
-              Start
+              Restart
             </button>
           {/if}
-
-          <button
-            type="button"
-            onclick={() => databases.action(selected.id, "restart")}
-            disabled={busyLifecycle || selected.status !== "running"}
-            class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md
-                   border border-border bg-surface text-[12px] text-fg-muted
-                   hover:bg-surface-2 hover:text-fg transition-colors
-                   disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {#if databases.isBusy(selected.id, "restart")}
-              <Icon name="refresh-cw" size={11} class="animate-spin" />
-            {:else}
-              <Icon name="refresh-cw" size={11} />
-            {/if}
-            Restart
-          </button>
           <button
             type="button"
             onclick={revealDataFolder}

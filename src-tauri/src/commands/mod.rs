@@ -30,6 +30,7 @@ pub mod metrics;
 pub mod onboarding;
 pub mod portfile;
 pub mod preferences;
+pub mod profile;
 pub mod projects;
 pub mod runtimes;
 pub mod sidecars;

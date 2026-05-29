@@ -24,6 +24,11 @@ export interface SyncDevice {
 
 export type PushOutcome = { result: "ok"; version: number } | { result: "conflict"; remote_version: number };
 
+export interface DeviceActivation {
+  device_id: string;
+  max_devices: number;
+}
+
 function createSyncStore() {
   let state = $state<SyncStateDto>({ signed_in: false, is_pro: false, enabled: false, last_version: 0 });
   let devices = $state<SyncDevice[]>([]);
@@ -102,6 +107,17 @@ function createSyncStore() {
     }
   }
 
+  /**
+   * Activate this device against the 2-device license cap. Throws (and
+   * `safeInvoke` toasts) a `DEVICE_LIMIT_REACHED` error when the account is
+   * already at its device limit, so the caller can prompt a deactivation.
+   */
+  async function activate(): Promise<DeviceActivation> {
+    const out = await safeInvoke<DeviceActivation>("activate_device");
+    await refreshDevices();
+    return out;
+  }
+
   async function revokeDevice(id: string): Promise<void> {
     await safeInvoke("revoke_sync_device", { deviceId: id });
     await refreshDevices();
@@ -125,6 +141,7 @@ function createSyncStore() {
     disable,
     push,
     pull,
+    activate,
     revokeDevice,
   };
 }

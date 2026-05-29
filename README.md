@@ -18,6 +18,8 @@ stack from your editor, your terminal, or your AI agent.
 
 `macOS` · Built with Tauri 2 · Rust · Svelte 5
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-support-FFDD00?style=flat&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/beiruti)
+
 > **Status:** released for macOS (Apple Silicon). Signed, notarized builds ship
 > via DMG and Homebrew — see [Getting started](#getting-started). Linux and
 > Windows are on the [roadmap](#roadmap).
@@ -96,10 +98,10 @@ native one.
 
 If you live in PHP on macOS today, Herd is excellent. PortBay's bet is a single
 open, lightweight tool that handles mixed Node/PHP/static stacks without a daemon
-zoo. It's free and open source (AGPL-3.0); an optional, pay-what-you-want
-[Pro tier](https://docs.portbay.app/pro/) — earned with a donation **or** a merged
-pull request — funds the project and unlocks hosted multi-device sync and a few
-power-user features. No subscription, and nothing you can't build yourself.
+zoo. It's free and open source (AGPL-3.0); an optional
+[Pro tier](https://docs.portbay.app/pro/) ($59/yr, or earned by merging a pull
+request) funds the project and unlocks hosted multi-device sync and a few
+power-user features. Nothing you can't build yourself.
 
 For head-to-head breakdowns, see the in-depth comparisons — PortBay vs
 [Laravel Herd](https://docs.portbay.app/comparisons/portbay-vs-laravel-herd),

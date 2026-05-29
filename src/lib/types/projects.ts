@@ -9,6 +9,7 @@
  */
 import type { PortbayStatus } from "./status";
 import type { CommandError } from "./error";
+import type { CustomTunnelConfig } from "./tunnel";
 
 export type ProjectType =
   | "next"
@@ -19,6 +20,7 @@ export type ProjectType =
   | "flutter"
   | "xcode"
   | "android"
+  | "expo"
   | "custom";
 
 export type WebServer = "caddy" | "nginx" | "apache";
@@ -164,6 +166,8 @@ export interface ProjectView {
   sandboxed: boolean;
   sandbox?: SandboxConfig | null;
   domain?: DomainConfig | null;
+  /** Attached bring-your-own named Cloudflare tunnel (Pro), or null. */
+  tunnel?: CustomTunnelConfig | null;
   status: PortbayStatus;
   runtime?: RuntimeInfo;
   /** A reason this project's selected web server can't serve (e.g. nginx/apache
@@ -191,6 +195,7 @@ export const typeLabel: Record<ProjectType, string> = {
   flutter: "Flutter",
   xcode: "Xcode",
   android: "Android",
+  expo: "Expo",
   custom: "Custom",
 };
 

@@ -34,6 +34,7 @@ pub enum McpProjectKind {
     Flutter,
     Xcode,
     Android,
+    Expo,
     Custom,
 }
 
@@ -48,6 +49,7 @@ impl From<McpProjectKind> for ProjectType {
             McpProjectKind::Flutter => ProjectType::Flutter,
             McpProjectKind::Xcode => ProjectType::Xcode,
             McpProjectKind::Android => ProjectType::Android,
+            McpProjectKind::Expo => ProjectType::Expo,
             McpProjectKind::Custom => ProjectType::Custom,
         }
     }
@@ -64,6 +66,7 @@ impl From<ProjectType> for McpProjectKind {
             ProjectType::Flutter => McpProjectKind::Flutter,
             ProjectType::Xcode => McpProjectKind::Xcode,
             ProjectType::Android => McpProjectKind::Android,
+            ProjectType::Expo => McpProjectKind::Expo,
             ProjectType::Custom => McpProjectKind::Custom,
         }
     }

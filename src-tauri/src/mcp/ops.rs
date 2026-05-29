@@ -1095,6 +1095,50 @@ impl McpContext {
         if name.is_empty() {
             return Err(AppError::BadInput("a database name is required".into()));
         }
+
+        let mut reg = self.load_registry()?;
+        let id = db_unique_instance_id(&reg, name);
+        let app_data = self.data_dir().to_path_buf();
+
+        // File-based engines (SQLite): no daemon, no port. Create a fresh
+        // managed file. (Adoption of an existing file is an app/CLI flow.)
+        if eng.is_file_based() {
+            crate::databases::provision(eng, std::path::Path::new(""), &app_data, &id, 0, None)
+                .map_err(AppError::Internal)?;
+            let instance = DatabaseInstance {
+                id: DatabaseInstanceId::new(id.clone()),
+                name: name.to_string(),
+                engine: eng,
+                version: crate::databases::detect(eng).version,
+                port: 0,
+                data_dir: crate::databases::data_dir(&app_data, &id),
+                config_path: None,
+                socket_path: None,
+                file_path: Some(crate::databases::sqlite_file(&app_data, &id)),
+                auto_start: false,
+                linked_projects: vec![],
+            };
+            reg.add_database(instance.clone())?;
+            self.save_registry(&reg)?;
+            let detail = format!(
+                "Provisioned {} ({} at {}). File-based — no daemon to start; link it to a project.",
+                instance.id,
+                eng.label(),
+                instance
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            );
+            let summary = db_instance_summary(&instance, "running".into(), &app_data);
+            return Ok(DatabaseOpResult {
+                ok: true,
+                detail,
+                instance: Some(summary),
+                warnings: vec![],
+            });
+        }
+
         let daemon = crate::databases::daemon_binary(eng).ok_or_else(|| {
             AppError::BadInput(format!(
                 "{} isn't installed ({}). Install the engine binary from the PortBay app, then retry.",
@@ -1102,10 +1146,6 @@ impl McpContext {
                 db_install_hint(eng)
             ))
         })?;
-
-        let mut reg = self.load_registry()?;
-        let id = db_unique_instance_id(&reg, name);
-        let app_data = self.data_dir().to_path_buf();
 
         let port = match args.port {
             Some(p) => {
@@ -1120,7 +1160,7 @@ impl McpContext {
         };
 
         let detection = crate::databases::detect(eng);
-        crate::databases::provision(eng, &daemon, &app_data, &id, port)
+        crate::databases::provision(eng, &daemon, &app_data, &id, port, None)
             .map_err(AppError::Internal)?;
 
         let instance = DatabaseInstance {
@@ -1132,6 +1172,7 @@ impl McpContext {
             data_dir: crate::databases::data_dir(&app_data, &id),
             config_path: crate::databases::config_path(eng, &app_data, &id),
             socket_path: crate::databases::socket_path(eng, &app_data, &id),
+            file_path: None,
             auto_start: args.auto_start.unwrap_or(false),
             linked_projects: vec![],
         };
@@ -2003,6 +2044,7 @@ fn db_install_hint(e: DatabaseEngine) -> &'static str {
         DatabaseEngine::Redis => "brew install redis",
         DatabaseEngine::Mongo => "brew install mongodb-community",
         DatabaseEngine::Memcached => "brew install memcached",
+        DatabaseEngine::Sqlite => "ships with macOS (brew install sqlite)",
     }
 }
 
@@ -3082,6 +3124,7 @@ mod tests {
             data_dir: crate::databases::data_dir(ctx.data_dir(), id),
             config_path: None,
             socket_path: None,
+            file_path: None,
             auto_start: false,
             linked_projects: vec![],
         })

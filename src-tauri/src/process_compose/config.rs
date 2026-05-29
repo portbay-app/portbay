@@ -410,7 +410,13 @@ fn project_to_pc_process(
     // (a pure Caddy-served site) produces no PC entry.
     let mut command = match &p.start_command {
         Some(cmd) => cmd.clone(),
-        None => p.workspace.as_ref().map(|ws| ws.derive_dev_command())?,
+        // No explicit command: a mobile kind (iOS/Android/Flutter/Expo) derives
+        // a simulator/emulator launch; a monorepo app derives a
+        // workspace-filtered dev command; anything else has no PC entry.
+        None => match crate::mobile::launch_command(p) {
+            Some(cmd) => cmd,
+            None => p.workspace.as_ref().map(|ws| ws.derive_dev_command())?,
+        },
     };
     let data_dir = logs_dir.parent().unwrap_or(logs_dir);
     if crate::sandbox::is_enabled(p) {
@@ -418,10 +424,15 @@ fn project_to_pc_process(
     }
 
     let log_path = logs_dir.join(format!("{}.log", p.id));
-    let readiness_probe = p
-        .readiness
-        .as_ref()
-        .and_then(|r| readiness_to_pc_probe(r, p.port));
+    // Mobile launches (simulator/emulator/Metro) don't answer an HTTP/TCP probe
+    // on the project port, so readiness is "process is alive" — no probe.
+    let readiness_probe = if crate::mobile::is_mobile_kind(p.kind) {
+        None
+    } else {
+        p.readiness
+            .as_ref()
+            .and_then(|r| readiness_to_pc_probe(r, p.port))
+    };
 
     let mut environment = BTreeMap::new();
     // Inject Mailpit defaults first; the per-project env below
@@ -514,14 +525,6 @@ fn inject_runtime_path(
         if let Some(binary) = node_binary {
             if let Some(bin_dir) = binary.parent() {
                 let node_modules_bin = format!("{}/node_modules/.bin", p.path.to_string_lossy());
-                environment.insert(
-                    "PATH".into(),
-                    format!(
-                        "{}:{}:/usr/bin:/bin",
-                        bin_dir.to_string_lossy(),
-                        node_modules_bin,
-                    ),
-                );
 
                 // Stable per-project corepack home: survives across install →
                 // run cycles and is not the ephemeral scratch (which is wiped
@@ -531,6 +534,20 @@ fn inject_runtime_path(
                     .join("sandbox")
                     .join(p.id.as_str())
                     .join("corepack");
+                // Corepack writes the pnpm/yarn shims into `<corepack_home>/shims`
+                // during the install phase; our managed Node ships no `pnpm`
+                // shim, so this dir must lead PATH for the recipe's `pnpm …` run
+                // command to resolve.
+                let corepack_shims = corepack_home.join("shims");
+                environment.insert(
+                    "PATH".into(),
+                    format!(
+                        "{}:{}:{}:/usr/bin:/bin",
+                        corepack_shims.to_string_lossy(),
+                        bin_dir.to_string_lossy(),
+                        node_modules_bin,
+                    ),
+                );
                 environment.insert(
                     "COREPACK_HOME".into(),
                     corepack_home.to_string_lossy().into_owned(),
@@ -661,6 +678,7 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
         }
     }
 
@@ -689,6 +707,7 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
         }
     }
 
@@ -1086,10 +1105,15 @@ mod tests {
         let path = env
             .get("PATH")
             .expect("PATH must be set for sandboxed node project");
-        // Must start with the managed node bin dir.
+        // Must start with the corepack shims dir (our managed Node ships no
+        // pnpm shim, so it must lead PATH), then the managed node bin dir.
         assert!(
-            path.starts_with(&bin_dir.to_string_lossy().to_string()),
-            "managed bin dir must be first in PATH, got: {path}"
+            path.starts_with("/") && path.contains("/corepack/shims:"),
+            "corepack shims dir must lead PATH, got: {path}"
+        );
+        assert!(
+            path.contains(&format!("/corepack/shims:{}", bin_dir.to_string_lossy())),
+            "managed bin dir must follow the shims dir in PATH, got: {path}"
         );
         // Must include node_modules/.bin.
         assert!(

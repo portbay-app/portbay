@@ -13,9 +13,11 @@
 
 pub mod error;
 pub mod lifecycle;
+pub mod named;
 
 pub use error::{Result, TunnelError};
 pub use lifecycle::{
     read_state, state_file_path, sweep_stale_cloudflared, wait_for_url, write_state, Tunnel,
     TunnelManager, TunnelStatus, TUNNEL_URL_TIMEOUT,
 };
+pub use named::{detect_named_tunnels, write_named_config, DetectedTunnel};

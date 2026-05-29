@@ -842,6 +842,7 @@ const DATABASE_INSTANCES: DatabaseInstanceView[] = [
     linkedProjects: ["billing-api"],
     binaryAvailable: true,
     provisioned: true,
+    fileBased: false,
   },
   {
     id: "acme-redis",
@@ -858,6 +859,7 @@ const DATABASE_INSTANCES: DatabaseInstanceView[] = [
     linkedProjects: [],
     binaryAvailable: true,
     provisioned: true,
+    fileBased: false,
   },
   {
     id: "relay-mariadb",
@@ -875,6 +877,7 @@ const DATABASE_INSTANCES: DatabaseInstanceView[] = [
     linkedProjects: ["relay-api"],
     binaryAvailable: true,
     provisioned: true,
+    fileBased: false,
   },
   {
     id: "hatchway-pg",
@@ -892,6 +895,7 @@ const DATABASE_INSTANCES: DatabaseInstanceView[] = [
     linkedProjects: ["hatchway-cms", "quill-docs"],
     binaryAvailable: true,
     provisioned: true,
+    fileBased: false,
   },
   {
     id: "pinpoint-mongo",
@@ -908,6 +912,7 @@ const DATABASE_INSTANCES: DatabaseInstanceView[] = [
     linkedProjects: ["pinpoint-maps"],
     binaryAvailable: true,
     provisioned: true,
+    fileBased: false,
   },
   {
     id: "cobalt-cache",
@@ -924,6 +929,27 @@ const DATABASE_INSTANCES: DatabaseInstanceView[] = [
     linkedProjects: ["cobalt-admin"],
     binaryAvailable: true,
     provisioned: true,
+    fileBased: false,
+  },
+  {
+    id: "quill-sqlite",
+    name: "quill-sqlite",
+    engine: "sqlite",
+    engineLabel: "SQLite",
+    version: "3.43.2",
+    port: 0,
+    status: "running",
+    autoStart: false,
+    dataDir: "/Users/dev/Library/Application Support/PortBay/db/quill-sqlite/data",
+    filePath:
+      "/Users/dev/Library/Application Support/PortBay/db/quill-sqlite/data/database.sqlite",
+    connectionUrl:
+      "sqlite:///Users/dev/Library/Application Support/PortBay/db/quill-sqlite/data/database.sqlite",
+    account: "",
+    linkedProjects: ["quill-docs"],
+    binaryAvailable: true,
+    provisioned: true,
+    fileBased: true,
   },
 ];
 

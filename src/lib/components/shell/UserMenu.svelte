@@ -13,6 +13,7 @@
   import { openUrl } from "$lib/security/openUrl";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import UserAvatar from "./UserAvatar.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
@@ -99,16 +100,19 @@
     role="menu"
     aria-label="User menu"
   >
-    <div class="px-3 py-2.5 border-b border-border">
-      {#if entitlements.isSignedIn}
-        <p class="text-[12px] font-medium text-fg truncate">{entitlements.account?.login}</p>
-        <p class="text-[11px] {tier === 'pro' ? 'text-accent' : 'text-fg-subtle'}">
-          {tier === "pro" ? "PortBay Pro" : "Free account"}
-        </p>
-      {:else}
-        <p class="text-[12px] font-medium text-fg">PortBay</p>
-        <p class="text-[11px] text-fg-subtle">Not signed in</p>
-      {/if}
+    <div class="px-3 py-2.5 border-b border-border flex items-center gap-2.5">
+      <UserAvatar size={36} />
+      <div class="min-w-0">
+        {#if entitlements.isSignedIn}
+          <p class="text-[12px] font-medium text-fg truncate">{entitlements.account?.login}</p>
+          <p class="text-[11px] {tier === 'pro' ? 'text-accent' : 'text-fg-subtle'}">
+            {tier === "pro" ? "PortBay Pro" : "Free account"}
+          </p>
+        {:else}
+          <p class="text-[12px] font-medium text-fg">PortBay</p>
+          <p class="text-[11px] text-fg-subtle">Not signed in</p>
+        {/if}
+      </div>
     </div>
 
     {#if tier === "anonymous"}

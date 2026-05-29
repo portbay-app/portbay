@@ -33,6 +33,7 @@
   let selectedEngine = $state<DatabaseEngineId | null>(null);
   let name = $state<string>("");
   let port = $state<number | null>(null);
+  let filePath = $state<string>("");
   let autoStart = $state<boolean>(true);
   let submitting = $state<boolean>(false);
   let installingEngine = $state<DatabaseEngineId | null>(null);
@@ -44,11 +45,15 @@
     databases.engines.find((e) => e.id === selectedEngine) ?? null,
   );
 
+  /** File-based engines (SQLite) have no daemon, port, or auto-start. */
+  const isFileBased = $derived(engine?.id === "sqlite");
+
   // Default the name to "<engine>-local" the first time an engine is picked.
   function pickEngine(e: DatabaseEngineView) {
     selectedEngine = e.id;
     if (!name.trim()) name = `${e.id}-local`;
     port = null;
+    filePath = "";
     formError = null;
   }
 
@@ -108,8 +113,9 @@
         input: {
           engine: selectedEngine,
           name: name.trim(),
-          port: port ?? null,
-          autoStart,
+          port: isFileBased ? null : (port ?? null),
+          filePath: isFileBased && filePath.trim() ? filePath.trim() : null,
+          autoStart: isFileBased ? false : autoStart,
         },
       });
       errorBus.push({
@@ -146,6 +152,7 @@
     selectedEngine = null;
     name = "";
     port = null;
+    filePath = "";
     autoStart = true;
     formError = null;
   }
@@ -236,6 +243,10 @@
                 </div>
                 {#if installingEngine === e.id && installLine}
                   <p class="text-[11px] text-accent truncate">{installLine}</p>
+                {:else if e.id === "sqlite"}
+                  <p class="text-[11px] text-fg-subtle">
+                    File-based — no daemon or port
+                  </p>
                 {:else}
                   <p class="text-[11px] text-fg-subtle">
                     Default port {e.defaultPort}
@@ -300,36 +311,63 @@
             </p>
           </div>
 
-          <div>
-            <label
-              for="db-port"
-              class="block text-[11px] font-medium text-fg-muted mb-1.5"
-            >
-              Port
-              <span class="text-fg-subtle font-normal">(blank = auto)</span>
-            </label>
-            <input
-              id="db-port"
-              type="number"
-              bind:value={port}
-              placeholder={engine.defaultPort.toString()}
-              class="w-40 px-3 h-9 rounded-md bg-bg border border-border
-                     text-[13px] font-mono text-fg placeholder:text-fg-subtle
-                     focus:outline-none focus:ring-1 focus:ring-accent/50
-                     focus:border-accent/40 transition-colors"
-            />
-            <p class="mt-1 text-[10.5px] text-fg-subtle">
-              PortBay allocates a free port near {engine.defaultPort} when
-              left blank.
-            </p>
-          </div>
+          {#if isFileBased}
+            <div>
+              <label
+                for="db-file"
+                class="block text-[11px] font-medium text-fg-muted mb-1.5"
+              >
+                Existing file
+                <span class="text-fg-subtle font-normal">(blank = new)</span>
+              </label>
+              <input
+                id="db-file"
+                type="text"
+                bind:value={filePath}
+                placeholder="/path/to/app/storage/database.sqlite"
+                class="w-full px-3 h-9 rounded-md bg-bg border border-border
+                       text-[13px] font-mono text-fg placeholder:text-fg-subtle
+                       focus:outline-none focus:ring-1 focus:ring-accent/50
+                       focus:border-accent/40 transition-colors"
+              />
+              <p class="mt-1 text-[10.5px] text-fg-subtle">
+                Adopt an existing <code>.sqlite</code> file in place, or leave
+                blank to create a fresh managed one. SQLite needs no daemon, so
+                there's no port and nothing to start.
+              </p>
+            </div>
+          {:else}
+            <div>
+              <label
+                for="db-port"
+                class="block text-[11px] font-medium text-fg-muted mb-1.5"
+              >
+                Port
+                <span class="text-fg-subtle font-normal">(blank = auto)</span>
+              </label>
+              <input
+                id="db-port"
+                type="number"
+                bind:value={port}
+                placeholder={engine.defaultPort.toString()}
+                class="w-40 px-3 h-9 rounded-md bg-bg border border-border
+                       text-[13px] font-mono text-fg placeholder:text-fg-subtle
+                       focus:outline-none focus:ring-1 focus:ring-accent/50
+                       focus:border-accent/40 transition-colors"
+              />
+              <p class="mt-1 text-[10.5px] text-fg-subtle">
+                PortBay allocates a free port near {engine.defaultPort} when
+                left blank.
+              </p>
+            </div>
 
-          <label class="flex items-center gap-2.5 cursor-pointer select-none">
-            <input type="checkbox" bind:checked={autoStart} class="accent-accent" />
-            <span class="text-[12.5px] text-fg">
-              Start automatically when PortBay launches
-            </span>
-          </label>
+            <label class="flex items-center gap-2.5 cursor-pointer select-none">
+              <input type="checkbox" bind:checked={autoStart} class="accent-accent" />
+              <span class="text-[12.5px] text-fg">
+                Start automatically when PortBay launches
+              </span>
+            </label>
+          {/if}
         </section>
       {/if}
     </div>

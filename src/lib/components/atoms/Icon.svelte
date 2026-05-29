@@ -52,6 +52,7 @@
     | "more-horizontal"
     | "lock"
     | "users"
+    | "user"
     | "activity"
     | "layers"
     | "list"
@@ -111,6 +112,7 @@
     MoreHorizontal,
     Lock,
     Users,
+    User,
     Activity,
     Layers,
     List,
@@ -185,6 +187,7 @@
     "more-horizontal": MoreHorizontal,
     lock: Lock,
     users: Users,
+    user: User,
     activity: Activity,
     layers: Layers,
     list: List,

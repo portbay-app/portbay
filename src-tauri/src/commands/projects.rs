@@ -220,6 +220,7 @@ pub async fn add_project(
         cors: None,
         sandbox: input.sandbox,
         domain: None,
+        tunnel: None,
     };
 
     if registry.hostname_conflict(&project.hostname, None) {
@@ -378,6 +379,18 @@ pub async fn update_project(
         // as `None` so projects that never touch domain settings keep a clean
         // registry entry and behave identically to before the field existed.
         project.domain = (domain != crate::registry::DomainConfig::default()).then_some(domain);
+    }
+    if let Some(tunnel) = patch.tunnel {
+        // Pro gate, mirroring CORS: attaching or changing an *active* custom
+        // tunnel requires Pro; an existing one survives downgrade (we only
+        // reject the change, never strip it). Clearing (blank config) is free.
+        let changed = project.tunnel.as_ref() != Some(&tunnel);
+        if changed && tunnel.is_active() && !crate::entitlements::is_pro() {
+            return Err(AppError::ProRequired {
+                feature: "Custom tunnel",
+            });
+        }
+        project.tunnel = tunnel.is_active().then_some(tunnel);
     }
 
     let snapshot = project.clone();
@@ -650,6 +663,7 @@ pub async fn clone_git_project_sandboxed(
         cors: None,
         sandbox: Some(SandboxConfig::enabled(input.network, input.ephemeral)),
         domain: None,
+        tunnel: None,
     };
     if registry.hostname_conflict(&project.hostname, None) {
         return Err(crate::registry::RegistryError::DuplicateHostname(project.hostname).into());
@@ -835,6 +849,14 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
         // matches the lockfile instead of always guessing `pnpm dev`.
         let cmd = standalone_dev_command(crate::registry::workspace::detect_package_manager(path));
         // Cheap string match — full JSON parse isn't worth the cycles.
+        // Expo first: an Expo app also lists react/react-native, so it must
+        // win over the generic Node fallback. Play runs `npx expo start`
+        // (Metro); the simulator opens from there. No port/start_command stored
+        // — the reconciler generates the launch from the kind.
+        if body.contains("\"expo\"") {
+            let mobile_run = detect_expo_run(path);
+            return detection_with_mobile(ProjectType::Expo, None, mobile_run);
+        }
         if body.contains("\"next\"") {
             return detection(ProjectType::Next, 3000, Some(cmd));
         }
@@ -952,52 +974,19 @@ fn detect_android_run(path: &Path) -> Option<MobileRunConfig> {
     })
 }
 
+/// Expo run config. `device` ("ios"/"android") selects which simulator
+/// `npx expo start` auto-opens; left unset so the user picks i/a in Metro.
+fn detect_expo_run(_path: &Path) -> Option<MobileRunConfig> {
+    Some(MobileRunConfig::default())
+}
+
+/// The Play command for a detected mobile project. Delegates to the single
+/// source of truth in [`crate::mobile`], which generates a complete launch
+/// (boot simulator/emulator → build → install → launch → attach logs) rather
+/// than a bare build/install — so Play actually opens the app in its simulator.
 fn mobile_start_command(kind: ProjectType, cfg: Option<&MobileRunConfig>) -> Option<String> {
-    match kind {
-        ProjectType::Flutter => {
-            let mut args = vec!["flutter".to_string(), "run".to_string()];
-            if let Some(flavor) = cfg.and_then(|c| clean_optional(&c.flavor)) {
-                args.push("--flavor".into());
-                args.push(shell_quote(flavor));
-            }
-            if let Some(device) = cfg.and_then(|c| clean_optional(&c.device)) {
-                args.push("-d".into());
-                args.push(shell_quote(device));
-            }
-            Some(args.join(" "))
-        }
-        ProjectType::Xcode => {
-            let scheme = cfg.and_then(|c| clean_optional(&c.target));
-            let Some(scheme) = scheme else {
-                return Some("xed .".into());
-            };
-            let mut args = vec![
-                "xcodebuild".to_string(),
-                "-scheme".into(),
-                shell_quote(scheme),
-            ];
-            if let Some(destination) = cfg.and_then(|c| clean_optional(&c.device)) {
-                args.push("-destination".into());
-                args.push(shell_quote(destination));
-            }
-            args.push("build".into());
-            Some(args.join(" "))
-        }
-        ProjectType::Android => {
-            let module = cfg.and_then(|c| clean_optional(&c.target)).unwrap_or("app");
-            let variant = cfg
-                .and_then(|c| clean_optional(&c.flavor))
-                .map(capitalize_ascii)
-                .unwrap_or_else(|| "Debug".into());
-            let command = format!("./gradlew :{}:install{}", module, variant);
-            if let Some(device) = cfg.and_then(|c| clean_optional(&c.device)) {
-                Some(format!("ANDROID_SERIAL={} {command}", shell_quote(device)))
-            } else {
-                Some(command)
-            }
-        }
-        _ => None,
-    }
+    let cfg = cfg.cloned().unwrap_or_default();
+    crate::mobile::launch_command_for(kind, &cfg)
 }
 
 fn has_php_index(path: &Path) -> bool {
@@ -1068,18 +1057,6 @@ fn find_android_module(path: &Path) -> Option<String> {
     None
 }
 
-fn clean_optional(value: &Option<String>) -> Option<&str> {
-    value.as_deref().map(str::trim).filter(|s| !s.is_empty())
-}
-
-fn capitalize_ascii(value: &str) -> String {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
-}
-
 fn has_child_with_extension(path: &Path, ext: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(path) else {
         return false;
@@ -1116,21 +1093,14 @@ fn detected_runtime_for(kind: ProjectType) -> Option<Runtime> {
 
 fn default_services(kind: ProjectType, https: bool, has_start_command: bool) -> Vec<String> {
     match kind {
-        ProjectType::Flutter | ProjectType::Xcode | ProjectType::Android => vec![],
+        ProjectType::Flutter
+        | ProjectType::Xcode
+        | ProjectType::Android
+        | ProjectType::Expo => vec![],
         ProjectType::Php if has_start_command => vec!["caddy".into()],
         ProjectType::Php => vec!["caddy".into(), "php-fpm".into()],
         _ if https => vec!["caddy".into()],
         _ => vec![],
-    }
-}
-
-fn shell_quote(s: &str) -> String {
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':'))
-    {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
 
@@ -1345,11 +1315,13 @@ mod tests {
         assert_eq!(detected.kind, ProjectType::Flutter);
         assert_eq!(detected.port, None);
         assert_eq!(detected.mobile_run, Some(MobileRunConfig::default()));
-        assert_eq!(detected.start_command.as_deref(), Some("flutter run"));
+        // Launch attaches to the running app (hot-reload host), so it stays a
+        // long-running PC process. See `crate::mobile`.
+        assert_eq!(detected.start_command.as_deref(), Some("exec flutter run"));
     }
 
     #[test]
-    fn detect_kind_xcode_project_opens_workspace() {
+    fn detect_kind_xcode_project_builds_and_launches_simulator() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(
             dir.path()
@@ -1378,14 +1350,17 @@ mod tests {
                 .and_then(|m| m.target.as_deref()),
             Some("TribalHouse")
         );
-        assert_eq!(
-            detected.start_command.as_deref(),
-            Some("xcodebuild -scheme TribalHouse build")
-        );
+        // The launcher boots a simulator, builds the detected scheme, installs,
+        // and launches attached to the console (full launch, not a bare build).
+        let cmd = detected.start_command.unwrap();
+        assert!(cmd.contains("SCHEME='TribalHouse'"));
+        assert!(cmd.contains("xcodebuild"));
+        assert!(cmd.contains("simctl install"));
+        assert!(cmd.contains("simctl launch --console-pty"));
     }
 
     #[test]
-    fn detect_kind_android_project_installs_debug_build() {
+    fn detect_kind_android_project_installs_and_launches() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("gradlew"), "").unwrap();
         std::fs::write(dir.path().join("settings.gradle.kts"), "").unwrap();
@@ -1398,10 +1373,13 @@ mod tests {
         let mobile = detected.mobile_run.as_ref().unwrap();
         assert_eq!(mobile.target.as_deref(), Some("app"));
         assert_eq!(mobile.flavor.as_deref(), Some("debug"));
-        assert_eq!(
-            detected.start_command.as_deref(),
-            Some("./gradlew :app:installDebug")
-        );
+        // Launcher installs the debug build then launches + tails logcat. The
+        // "debug" flavor is the build type, so the task is `installDebug` (not
+        // doubled into `installDebugDebug`).
+        let cmd = detected.start_command.unwrap();
+        assert!(cmd.contains(":app:installDebug"));
+        assert!(!cmd.contains("installDebugDebug"));
+        assert!(cmd.contains("adb -s \"$SER\" logcat"));
     }
 
     #[test]

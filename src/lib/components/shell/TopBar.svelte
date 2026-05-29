@@ -23,6 +23,7 @@
   import StopAllButton from "./StopAllButton.svelte";
   import NotificationsPanel from "./NotificationsPanel.svelte";
   import UserMenu from "./UserMenu.svelte";
+  import UserAvatar from "./UserAvatar.svelte";
   import PlatformIcon from "$lib/components/marketing/PlatformIcon.svelte";
   import { detectedPlatform } from "$lib/platform";
 
@@ -57,11 +58,6 @@
     if (userMenuOpen) notificationsOpen = false;
   }
 
-  // Avatar gradient is deterministic — PortBay is single-user, but we
-  // still want the topbar's chip to read as "an account UI" so the
-  // affordance is unmistakable. "P" initial sits on a brand-flavoured
-  // teal→indigo gradient.
-  const avatarGradient = "linear-gradient(135deg, #4d9cff 0%, #7b5cff 100%)";
 </script>
 
 <header
@@ -207,14 +203,7 @@
         class="inline-flex items-center gap-1 h-9 pl-1 pr-1.5 rounded-lg
                hover:bg-surface-2 transition-colors"
       >
-        <span
-          class="inline-flex items-center justify-center w-7 h-7 rounded-full
-                 text-on-accent text-[11px] font-semibold tracking-tight
-                 shadow-inner"
-          style:background={avatarGradient}
-        >
-          P
-        </span>
+        <UserAvatar size={28} />
         <Icon
           name="chevron-down"
           size={12}

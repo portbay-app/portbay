@@ -20,6 +20,8 @@
   let pasteValue = $state("");
 
   const isPro = $derived(entitlements.allows("sync"));
+  /** License device-activation cap (Pro = 2). */
+  const maxDevices = $derived(entitlements.maxDevices);
 
   onMount(() => {
     if (isPro) void sync.load();
@@ -31,6 +33,12 @@
 
   async function setup() {
     recoveryKey = await sync.enable();
+    // Register this device against the 2-device license cap (idempotent).
+    try {
+      await sync.activate();
+    } catch {
+      /* device-limit or transient — safeInvoke toasted; the key is still generated */
+    }
     mode = "show-key";
   }
 
@@ -57,6 +65,13 @@
     await sync.setRecoveryKey(key);
     pasteValue = "";
     mode = "idle";
+    // Activate this device against the 2-device license cap before pulling. A
+    // blocked 3rd device gets the DEVICE_LIMIT_REACHED toast and stops here.
+    try {
+      await sync.activate();
+    } catch {
+      return; // safeInvoke toasted (device limit or transient)
+    }
     // Pull the existing data for this account onto the new device.
     try {
       const pulled = await sync.pull();
@@ -274,7 +289,10 @@
       <!-- devices -->
       {#if sync.devices.length > 0}
         <div class="border-t border-border/60 pt-3">
-          <div class="text-[12px] font-medium text-fg-muted mb-2">Devices</div>
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-[12px] font-medium text-fg-muted">Devices</span>
+            <span class="text-[11.5px] text-fg-subtle">Active on {sync.devices.length} of {maxDevices}</span>
+          </div>
           <ul class="space-y-1.5">
             {#each sync.devices as d (d.id)}
               <li class="flex items-center justify-between gap-3 text-[12.5px]">

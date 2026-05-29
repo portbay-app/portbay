@@ -504,6 +504,7 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
         }
     }
 

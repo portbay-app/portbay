@@ -20,6 +20,7 @@
   import type { IconName } from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
   import ProjectAvatar from "$lib/components/atoms/ProjectAvatar.svelte";
+  import CustomTunnelField from "$lib/components/projects/CustomTunnelField.svelte";
 
   import { projects } from "$lib/stores/projects.svelte";
   import { tunnels } from "$lib/stores/tunnels.svelte";
@@ -273,6 +274,12 @@
                   "waking up" page until you start it.
                 </p>
               {/if}
+            {/if}
+
+            {#if !sharing}
+              <div class="mt-3 pt-3 border-t border-border/60">
+                <CustomTunnelField {project} />
+              </div>
             {/if}
           </article>
         {/each}

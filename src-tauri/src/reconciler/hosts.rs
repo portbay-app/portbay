@@ -183,6 +183,7 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
         }
     }
 

@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::process_compose::{Process, ProjectStatus};
 use crate::registry::{
-    CorsConfig, DomainConfig, MobileRunConfig, Project, ProjectType, Readiness, SandboxConfig,
+    CorsConfig, CustomTunnelConfig, DomainConfig, MobileRunConfig, Project, ProjectType, Readiness,
+    SandboxConfig,
     WebServer, Workspace, WorkspaceTool,
 };
 
@@ -63,6 +64,10 @@ pub struct ProjectView {
     /// setting at its default (PortBay's pre-`DomainConfig` behaviour).
     pub domain: Option<DomainConfig>,
 
+    /// Attached bring-your-own named Cloudflare tunnel (Pro). `None` = only the
+    /// free Quick Share is offered for this project.
+    pub tunnel: Option<CustomTunnelConfig>,
+
     /// PortBay status taxonomy (`docs/UX_DESIGN.md` §5.3).
     pub status: ProjectStatus,
 
@@ -106,6 +111,7 @@ impl ProjectView {
             sandboxed: crate::sandbox::is_enabled(project),
             sandbox: project.sandbox.clone(),
             domain: project.domain.clone(),
+            tunnel: project.tunnel.clone(),
             status: proc
                 .map(|p| p.portbay_status())
                 .unwrap_or(ProjectStatus::Stopped),
@@ -372,6 +378,12 @@ pub struct UpdateProjectPatch {
     /// (the editor always sends every field); an all-default config is stored
     /// as `None` by `update_project` to keep registries clean.
     pub domain: Option<DomainConfig>,
+
+    /// Bring-your-own named Cloudflare tunnel (Pro-gated). `Some` sets/replaces
+    /// the attached tunnel; an inactive (blank) config clears it. Introducing or
+    /// changing an active tunnel without Pro is rejected core-side (`ProRequired`);
+    /// an existing one is preserved on downgrade.
+    pub tunnel: Option<CustomTunnelConfig>,
 }
 
 #[cfg(test)]
@@ -405,6 +417,7 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
         }
     }
 

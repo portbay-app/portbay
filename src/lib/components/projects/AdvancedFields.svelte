@@ -18,6 +18,7 @@
   import { projects } from "$lib/stores/projects.svelte";
   import { runtimes } from "$lib/stores/runtimes.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
+  import CustomTunnelField from "./CustomTunnelField.svelte";
   import { account } from "$lib/stores/account.svelte";
   import type { CommandError } from "$lib/types/error";
   import type {
@@ -150,7 +151,8 @@
   const isMobile = $derived(
     project.type === "flutter" ||
       project.type === "xcode" ||
-      project.type === "android",
+      project.type === "android" ||
+      project.type === "expo",
   );
 
   const mobileDraft = $derived<MobileRunConfig>({
@@ -682,6 +684,14 @@
       </p>
     </section>
   {/if}
+
+  <!-- Custom tunnel (Pro) — self-saving, independent of the bar below. -->
+  <section class="space-y-2">
+    <div class="flex items-center gap-2">
+      <span class="text-xs uppercase tracking-wide text-fg-subtle">Public tunnel</span>
+    </div>
+    <CustomTunnelField {project} />
+  </section>
 
   {#if anyDirty}
     <div

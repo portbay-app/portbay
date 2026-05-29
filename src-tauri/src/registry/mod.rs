@@ -16,8 +16,9 @@ pub mod workspace;
 
 pub use error::{RegistryError, Result};
 pub use types::{
-    CorsConfig, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings,
-    DomainConfig, FpmTuning, Group, ManagedDatabaseEngine, ManagedRuntime, ManualRuntime,
+    CorsConfig, CustomTunnelConfig, DatabaseEngine, DatabaseInstance, DatabaseInstanceId,
+    DnsmasqSettings, DomainConfig, FpmTuning, Group, ManagedDatabaseEngine, ManagedRuntime,
+    ManualRuntime,
     MobileRunConfig, PhpVersionConfig, Project, ProjectId, ProjectType, Readiness, ResolverMode,
     Runtime, RuntimeSettings, SandboxConfig, SandboxNetworkPolicy, WebServer, Workspace,
     WorkspaceTool,
@@ -385,6 +386,7 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
         }
     }
 

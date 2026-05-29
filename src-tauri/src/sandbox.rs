@@ -313,14 +313,33 @@ pub fn node_install_env_prefix(
         return String::new();
     };
     let bin_dir_q = shell_quote(&bin_dir.to_string_lossy());
-    let corepack_home_q = corepack_home
-        .map(|p| shell_quote(&p.to_string_lossy()))
-        .unwrap_or_default();
-    let mut out = format!("PATH={bin_dir_q}:/usr/bin:/bin ");
-    if !corepack_home_q.is_empty() {
-        out.push_str(&format!("COREPACK_HOME={corepack_home_q} "));
+    match corepack_home {
+        Some(ch) => {
+            // Corepack writes the pnpm/yarn shims into `<corepack_home>/shims`
+            // (see `corepack_enable_preamble`). Our managed Node ships
+            // `node`/`npm`/`npx`/`corepack` but NOT a `pnpm` shim, so that dir
+            // must lead PATH for `pnpm install` to resolve during this phase.
+            let shims_q = shell_quote(&ch.join("shims").to_string_lossy());
+            let ch_q = shell_quote(&ch.to_string_lossy());
+            format!("PATH={shims_q}:{bin_dir_q}:/usr/bin:/bin COREPACK_HOME={ch_q} ")
+        }
+        None => format!("PATH={bin_dir_q}:/usr/bin:/bin "),
     }
-    out
+}
+
+/// Shell preamble that creates the corepack shim dir and enables the package
+/// manager shims (`pnpm`/`yarn`/`npm`) into `<corepack_home>/shims`. PortBay's
+/// managed Node ships `node`/`npm`/`npx`/`corepack` but NOT a `pnpm` shim, so
+/// without this the recipe's `pnpm …` run command — and the install phase's own
+/// `pnpm install` — can't resolve. `corepack enable` only creates symlinks (no
+/// network), so it is safe in the proxied install phase. Prepended to the
+/// install command; the trailing `;` lets the install proceed even if enable
+/// emits a warning. Pairs with [`node_install_env_prefix`], which puts the same
+/// shims dir first on PATH.
+#[cfg(target_os = "macos")]
+pub fn corepack_enable_preamble(corepack_home: &Path) -> String {
+    let shims_q = shell_quote(&corepack_home.join("shims").to_string_lossy());
+    format!("mkdir -p {shims_q} && corepack enable --install-directory {shims_q} >/dev/null 2>&1; ")
 }
 
 /// Environment that steers every package manager + git through the loopback
@@ -792,6 +811,7 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
         }
     }
 
@@ -858,6 +878,37 @@ mod tests {
         // RUN wrapper uses `-c` (no rc sourcing) so PATH comes from the
         // process-compose environment map, not the login shell.
         assert!(cmd.contains("/bin/zsh -c 'pnpm dev'"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn node_install_env_prefix_leads_path_with_corepack_shims() {
+        let bin = Path::new("/data/runtimes/node/22.14.0/bin");
+        let ch = Path::new("/data/sandbox/proj/corepack");
+        let prefix = node_install_env_prefix(Some(bin), Some(ch));
+        // Shims dir leads PATH (managed Node ships no pnpm shim), then bin dir,
+        // then the minimal system path — no inherited login-shell PATH. Each
+        // path is shell-quoted by `shell_quote`.
+        assert!(
+            prefix.contains(
+                "PATH='/data/sandbox/proj/corepack/shims':'/data/runtimes/node/22.14.0/bin':/usr/bin:/bin"
+            ),
+            "got: {prefix}"
+        );
+        assert!(prefix.contains("COREPACK_HOME='/data/sandbox/proj/corepack'"));
+        // No managed Node → empty prefix (neutral install path untouched).
+        assert!(node_install_env_prefix(None, Some(ch)).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn corepack_enable_preamble_creates_and_enables_shims() {
+        let pre = corepack_enable_preamble(Path::new("/data/sandbox/proj/corepack"));
+        assert!(pre.contains("mkdir -p"));
+        assert!(pre.contains("corepack enable --install-directory"));
+        assert!(pre.contains("/data/sandbox/proj/corepack/shims"));
+        // Ends in `; ` so the install command still runs after enable.
+        assert!(pre.trim_end().ends_with(';'));
     }
 
     #[cfg(target_os = "macos")]

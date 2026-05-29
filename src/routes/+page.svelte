@@ -64,7 +64,7 @@
           Control PortBay from Claude Code or Cursor —
           <button
             type="button"
-            onclick={() => void goto("/settings#ai-integrations")}
+            onclick={() => void goto("/settings?tab=ai")}
             class="text-accent hover:underline"
           >
             AI Integrations →

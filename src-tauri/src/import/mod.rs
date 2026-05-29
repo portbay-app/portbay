@@ -376,6 +376,7 @@ pub fn build_project(site: &ImportedSite) -> std::result::Result<Project, String
         cors: None,
         sandbox: None,
         domain: None,
+        tunnel: None,
     })
 }
 

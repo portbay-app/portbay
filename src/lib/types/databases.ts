@@ -7,6 +7,7 @@ export type DatabaseEngineId =
   | "mysql"
   | "mariadb"
   | "postgres"
+  | "sqlite"
   | "redis"
   | "mongo"
   | "memcached";
@@ -62,6 +63,10 @@ export interface DatabaseInstanceView {
   dataDir: string;
   configPath?: string | null;
   socketPath?: string | null;
+  /** Absolute path to the database file, for file-based engines (SQLite). */
+  filePath?: string | null;
+  /** True for file-based engines (SQLite) — no daemon, port, or lifecycle. */
+  fileBased: boolean;
   connectionUrl: string;
   account: string;
   linkedProjects: string[];
@@ -73,6 +78,8 @@ export interface CreateDatabaseInput {
   engine: DatabaseEngineId;
   name: string;
   port?: number | null;
+  /** For file-based engines (SQLite): adopt an existing file at this path. */
+  filePath?: string | null;
   autoStart?: boolean;
 }
 

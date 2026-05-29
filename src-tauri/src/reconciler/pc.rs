@@ -294,6 +294,12 @@ fn db_daemon_specs_for(
 ) -> Vec<process_compose::config::DatabaseDaemonSpec> {
     let mut specs = Vec::new();
     for inst in reg.list_databases() {
+        // File-based engines (SQLite) have no daemon to supervise — they're
+        // never a Process Compose process. Their connection env is still
+        // injected into linked projects (see `db_connection_env_for`).
+        if inst.engine.is_file_based() {
+            continue;
+        }
         // Prefer a PortBay-managed engine install, falling back to Homebrew/system.
         let managed_bin = reg
             .managed_engine(inst.engine)
@@ -419,6 +425,7 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
         }
     }
 

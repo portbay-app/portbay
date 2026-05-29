@@ -1,6 +1,7 @@
 // PortBay — Tauri 2 + Rust core.
 
 pub mod auth;
+pub mod avatar;
 pub mod caddy;
 pub mod commands;
 pub mod databases;
@@ -18,6 +19,7 @@ pub mod mailpit;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod mkcert;
+pub mod mobile;
 pub mod php;
 pub mod port_holder;
 pub mod portfile;
@@ -543,6 +545,7 @@ pub fn run() {
             commands::tunnel::stop_tunnel,
             commands::tunnel::list_tunnels,
             commands::tunnel::tunnel_status,
+            commands::tunnel::list_named_tunnels,
             commands::onboarding::onboarding_status,
             commands::onboarding::mark_onboarded,
             commands::onboarding::reset_onboarding,
@@ -569,6 +572,10 @@ pub fn run() {
             commands::auth::cancel_login,
             commands::auth::logout,
             commands::auth::account_resync,
+            commands::auth::get_account_avatar,
+            commands::profile::update_display_name,
+            commands::profile::upload_avatar,
+            commands::profile::remove_avatar,
             commands::sync::sync_state,
             commands::sync::enable_sync,
             commands::sync::get_recovery_key,
@@ -576,6 +583,7 @@ pub fn run() {
             commands::sync::disable_sync,
             commands::sync::sync_push,
             commands::sync::sync_pull,
+            commands::sync::activate_device,
             commands::sync::list_sync_devices,
             commands::sync::revoke_sync_device,
             commands::runtimes::list_runtimes,

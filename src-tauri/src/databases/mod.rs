@@ -93,6 +93,18 @@ const SPECS: &[EngineSpec] = &[
         clients: &["mongosh", "mongo"],
         init_bins: &[],
     },
+    // SQLite is file-based: there is no daemon to supervise. `sqlite3` ships
+    // with macOS (and is a Homebrew formula on stripped systems), so it doubles
+    // as both "daemon" (never launched — see `is_file_based`) and CLI client.
+    // Listing it under `daemons` keeps binary resolution + `expected_daemon_rel`
+    // total without special-casing; the reconciler skips file-based engines.
+    EngineSpec {
+        engine: DatabaseEngine::Sqlite,
+        formulae: &["sqlite"],
+        daemons: &["sqlite3"],
+        clients: &["sqlite3"],
+        init_bins: &[],
+    },
 ];
 
 fn spec(engine: DatabaseEngine) -> &'static EngineSpec {
@@ -380,6 +392,13 @@ pub fn data_dir(app_data: &Path, id: &str) -> PathBuf {
     instance_dir(app_data, id).join("data")
 }
 
+/// The default `.sqlite` file for a PortBay-managed SQLite instance:
+/// `<data-dir>/database.sqlite`. (An *adopted* instance points
+/// [`DatabaseInstance::file_path`] at an existing file elsewhere instead.)
+pub fn sqlite_file(app_data: &Path, id: &str) -> PathBuf {
+    data_dir(app_data, id).join("database.sqlite")
+}
+
 /// Default config-file path for an engine instance.
 pub fn config_path(engine: DatabaseEngine, app_data: &Path, id: &str) -> Option<PathBuf> {
     let dir = instance_dir(app_data, id);
@@ -390,6 +409,8 @@ pub fn config_path(engine: DatabaseEngine, app_data: &Path, id: &str) -> Option<
         DatabaseEngine::Memcached => None,
         // PostgreSQL keeps postgresql.conf inside its data dir (initdb writes it).
         DatabaseEngine::Postgres => Some(data_dir(app_data, id).join("postgresql.conf")),
+        // File-based: no daemon, no config file.
+        DatabaseEngine::Sqlite => None,
     }
 }
 
@@ -403,6 +424,8 @@ pub fn socket_path(engine: DatabaseEngine, app_data: &Path, id: &str) -> Option<
         DatabaseEngine::Memcached => None,
         // Postgres sockets live in a directory (-k), not a single file path.
         DatabaseEngine::Postgres => None,
+        // File-based: no daemon, no socket.
+        DatabaseEngine::Sqlite => None,
     }
 }
 
@@ -414,6 +437,10 @@ pub fn is_initialized(engine: DatabaseEngine, data: &Path) -> bool {
         DatabaseEngine::Postgres => data.join("PG_VERSION").is_file(),
         // Redis/Mongo/Memcached need no schema init - an existing dir is enough.
         DatabaseEngine::Redis | DatabaseEngine::Mongo | DatabaseEngine::Memcached => data.is_dir(),
+        // SQLite: the managed database file existing is the init marker. An
+        // adopted instance (file elsewhere) reports readiness via its own
+        // `file_path`; see `instance_view`.
+        DatabaseEngine::Sqlite => data.join("database.sqlite").is_file(),
     }
 }
 
@@ -445,6 +472,13 @@ pub fn provision(
             DatabaseEngine::Postgres => init_postgres(engine, &data, managed_bin)?,
             DatabaseEngine::Redis | DatabaseEngine::Mongo | DatabaseEngine::Memcached => {
                 /* dir is enough */
+            }
+            // Create an empty database file. SQLite materializes a valid empty
+            // database on first open, so an empty file is a sufficient seed.
+            DatabaseEngine::Sqlite => {
+                let file = data.join("database.sqlite");
+                std::fs::File::create(&file)
+                    .map_err(|e| format!("create sqlite file {}: {e}", file.display()))?;
             }
         }
     }
@@ -567,6 +601,8 @@ fn write_config(
             // Port + socket dir are passed as run-time flags instead.
             return Ok(());
         }
+        // File-based: no config (also unreachable — config_path is None above).
+        DatabaseEngine::Sqlite => return Ok(()),
     };
 
     if let Some(parent) = cfg_path.parent() {
@@ -624,6 +660,9 @@ pub fn run_command(instance: &DatabaseInstance, daemon: &Path, app_data: &Path) 
                 port = instance.port
             )
         }
+        // File-based engines have no daemon and never reach Process Compose
+        // (the reconciler skips them). Return an empty command defensively.
+        DatabaseEngine::Sqlite => String::new(),
     }
 }
 
@@ -640,6 +679,15 @@ pub fn client_invocation(instance: &DatabaseInstance, client: &Path) -> String {
         DatabaseEngine::Mongo => format!("{c} mongodb://127.0.0.1:{port}"),
         DatabaseEngine::Redis => format!("{c} -h 127.0.0.1 -p {port}"),
         DatabaseEngine::Memcached => format!("nc 127.0.0.1 {port}"),
+        // `sqlite3 <file>` opens an interactive shell on the database file.
+        DatabaseEngine::Sqlite => {
+            let file = instance
+                .file_path
+                .as_ref()
+                .map(|p| shell_quote(&p.to_string_lossy()))
+                .unwrap_or_default();
+            format!("{c} {file}")
+        }
     }
 }
 
@@ -1056,6 +1104,7 @@ mod tests {
             data_dir: PathBuf::from("/tmp/pb/databases/myapp/data"),
             config_path: None,
             socket_path: None,
+            file_path: None,
             auto_start: false,
             linked_projects: vec![],
         }

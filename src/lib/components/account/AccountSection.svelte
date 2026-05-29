@@ -1,10 +1,12 @@
 <!--
   AccountSection — the account + plan surface for Settings. Shows the current
-  tier, signed-in identity, a project-usage meter, and the right next step
-  (sign in, upgrade, or sign out). Mirrors the other Settings <section> cards.
+  tier, signed-in identity, a project-usage meter, the right next step (sign in,
+  upgrade, or sign out), and — when signed in — the profile (avatar + display
+  name) as a section of this same card. Mirrors the other Settings <section> cards.
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import UserAvatar from "$lib/components/shell/UserAvatar.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { account } from "$lib/stores/account.svelte";
   import { licenseDialog } from "$lib/stores/licenseDialog.svelte";
@@ -23,6 +25,69 @@
   // Usage meter fill (0–1). Unlimited shows a calm full-but-muted bar.
   const usagePct = $derived(cap === null ? 100 : Math.min(100, Math.round((projectCount / cap) * 100)));
   const nearCap = $derived(cap !== null && projectCount >= cap);
+
+  // ── Profile (avatar + display name) — folded into this card; the markup below
+  //    only renders it when signed in. ──
+  const acct = $derived(entitlements.account);
+  // Only a custom upload routes through the issuer's /avatar/ endpoint; a GitHub
+  // photo is a github CDN URL. Only offer "Remove" for a custom one.
+  const hasCustomAvatar = $derived(!!acct?.avatar_url?.includes("/avatar/"));
+  let nameDraft = $state("");
+  let seededFor = $state<string | null>(null);
+  let profileBusy = $state(false);
+
+  // Seed the name field when the signed-in identity changes (sign in/out/switch)
+  // — not on every entitlement resync — so it shows the current display name
+  // without clobbering an in-progress edit. (ProfileSection got this for free by
+  // only mounting while signed in; this card is always mounted.)
+  $effect(() => {
+    const login = acct?.login ?? null;
+    if (login !== seededFor) {
+      seededFor = login;
+      nameDraft = acct?.display_name ?? "";
+    }
+  });
+
+  async function saveName() {
+    const next = nameDraft.trim();
+    if (next === (acct?.display_name ?? "")) return;
+    profileBusy = true;
+    try {
+      await entitlements.updateDisplayName(next || null);
+    } finally {
+      profileBusy = false;
+    }
+  }
+
+  async function pickAvatar() {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const result = await open({
+        multiple: false,
+        directory: false,
+        title: "Choose a profile picture",
+        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }],
+      });
+      if (typeof result !== "string") return;
+      profileBusy = true;
+      try {
+        await entitlements.uploadAvatar(result);
+      } finally {
+        profileBusy = false;
+      }
+    } catch {
+      /* dialog plugin already toasted */
+    }
+  }
+
+  async function clearAvatar() {
+    profileBusy = true;
+    try {
+      await entitlements.removeAvatar();
+    } finally {
+      profileBusy = false;
+    }
+  }
 
   async function signOut() {
     const ok = await confirmDialog.open({
@@ -147,17 +212,68 @@
       {/if}
     </div>
 
+    {#if entitlements.isSignedIn}
+      <!-- Profile (avatar + display name) — same card, separated by a divider -->
+      <div class="border-t border-border/60 pt-4 space-y-4">
+        <div class="flex items-center gap-4">
+          <UserAvatar size={56} />
+          <div class="flex flex-col gap-1.5">
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                onclick={pickAvatar}
+                disabled={profileBusy}
+                class="h-8 px-3 rounded-md border border-border text-[12px] text-fg-muted
+                       hover:text-fg hover:bg-surface-2 transition-colors disabled:opacity-50"
+              >
+                Upload picture
+              </button>
+              {#if hasCustomAvatar}
+                <button
+                  type="button"
+                  onclick={clearAvatar}
+                  disabled={profileBusy}
+                  class="h-8 px-3 rounded-md text-[12px] text-fg-subtle
+                         hover:text-status-crashed transition-colors disabled:opacity-50"
+                >
+                  Remove
+                </button>
+              {/if}
+            </div>
+            <p class="text-[11px] text-fg-subtle">PNG, JPEG, or WebP — up to 256 KB.</p>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <span class="text-[13px] text-fg">Display name</span>
+            <p class="text-[11px] text-fg-subtle mt-0.5">
+              Shown in the app and used for your initials when there's no picture.
+            </p>
+          </div>
+          <input
+            type="text"
+            bind:value={nameDraft}
+            onblur={saveName}
+            onkeydown={(e) => {
+              if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+            }}
+            disabled={profileBusy}
+            maxlength="60"
+            placeholder={acct?.login ?? "Your name"}
+            class="h-8 w-56 rounded-md bg-bg border border-border px-2.5 text-[12px] text-fg
+                   focus:outline-none focus:border-accent/60 disabled:opacity-50"
+          />
+        </div>
+      </div>
+    {/if}
+
     <!-- about the license -->
     <div class="border-t border-border/60 pt-3">
-      <p class="text-[11.5px] leading-relaxed text-fg-subtle">
-        PortBay Pro is perpetual and pay-what-you-want — earned with a donation or a merged pull request, never a
-        subscription. Your projects and data are always yours; a lapsed or revoked license only blocks new gated
-        actions, never your existing work.
-      </p>
       <button
         type="button"
         onclick={() => licenseDialog.open()}
-        class="mt-2 inline-flex items-center gap-1 text-[11.5px] font-medium text-accent hover:underline"
+        class="inline-flex items-center gap-1 text-[11.5px] font-medium text-accent hover:underline"
       >
         <Icon name="info" size={12} /> What's in Pro &amp; how licensing works
       </button>

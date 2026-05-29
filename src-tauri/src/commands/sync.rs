@@ -127,12 +127,28 @@ pub async fn sync_push(state: State<'_, AppState>, force: bool) -> AppResult<Pus
         }
     }
 
+    let client_device_id = sync::ensure_client_device_id(&mut meta);
     if meta.device_id.is_none() {
-        if let Ok(id) =
-            sync::register_device(CLOUD_BASE_URL, &token, &device_name(), std::env::consts::OS)
-                .await
+        match sync::register_device(
+            CLOUD_BASE_URL,
+            &token,
+            &device_name(),
+            std::env::consts::OS,
+            &client_device_id,
+        )
+        .await
         {
-            meta.device_id = Some(id);
+            Ok(id) => {
+                meta.device_id = Some(id);
+                let _ = sync::save_meta(&meta);
+            }
+            // A blocked 3rd device must not silently push without a slot.
+            Err(sync::RegisterError::LimitReached { max }) => {
+                return Err(AppError::DeviceLimitReached { max })
+            }
+            // Registration is best-effort for visibility; a transient failure
+            // shouldn't block a push from an already-entitled device.
+            Err(sync::RegisterError::Other(_)) => {}
         }
     }
 
@@ -174,6 +190,50 @@ pub async fn sync_pull(state: State<'_, AppState>) -> AppResult<bool> {
     let _ = sync::save_meta(&meta);
     state.reconciler.mark_dirty();
     Ok(true)
+}
+
+#[derive(serde::Serialize)]
+pub struct DeviceActivation {
+    /// The server device id for this install.
+    pub device_id: String,
+    /// The license's device cap (Pro = 2).
+    pub max_devices: u32,
+}
+
+/// Activate this device against the account's 2-device license cap. Idempotent
+/// on the stable `client_device_id`; returns `DeviceLimitReached` when a *new*
+/// device would exceed the cap so the UI can prompt the user to deactivate one.
+#[tauri::command]
+pub async fn activate_device() -> AppResult<DeviceActivation> {
+    require_sync_entitlement()?;
+    let token = fresh_token().await?;
+    let mut meta = sync::load_meta();
+    let client_device_id = sync::ensure_client_device_id(&mut meta);
+
+    match sync::register_device(
+        CLOUD_BASE_URL,
+        &token,
+        &device_name(),
+        std::env::consts::OS,
+        &client_device_id,
+    )
+    .await
+    {
+        Ok(id) => {
+            meta.device_id = Some(id.clone());
+            let _ = sync::save_meta(&meta);
+            let max = crate::entitlements::current()
+                .entitlements
+                .max_devices
+                .unwrap_or(2);
+            Ok(DeviceActivation {
+                device_id: id,
+                max_devices: max,
+            })
+        }
+        Err(sync::RegisterError::LimitReached { max }) => Err(AppError::DeviceLimitReached { max }),
+        Err(sync::RegisterError::Other(e)) => Err(AppError::Internal(e)),
+    }
 }
 
 /// List this account's registered devices.
