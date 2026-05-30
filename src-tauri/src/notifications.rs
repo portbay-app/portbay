@@ -80,6 +80,8 @@ const FILENAME: &str = "notifications.json";
 
 /// Cap on stored notifications. Old entries fall off the end so the file can't
 /// grow without bound across long sessions; the bell is a recency surface.
+/// Only the tasks-gated `scan()` ingests items, so it's gated to match.
+#[cfg(feature = "tasks")]
 const MAX_ITEMS: usize = 200;
 
 /// What kind of agent activity a notification represents. The frontend maps
