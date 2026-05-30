@@ -29,7 +29,7 @@ Global options:
 | `portbay restart <id>` | Restart one project. |
 | `portbay logs <id>` | Print static log output for a project. |
 | `portbay open <id>` | Open the project URL in the default browser. |
-| `portbay doctor` | Diagnose runtime, ports, registry, and cert state. |
+| `portbay doctor` | Grouped, `flutter doctor`-style health check across registry, daemon, routing/TLS, PHP, services, and account. |
 | `portbay hosts <subcommand>` | Manage PortBay's `/etc/hosts` block. |
 | `portbay export <id>` | Write `<project_path>/.portbay.json`. |
 | `portbay completions <shell>` | Generate shell completion scripts. |
@@ -74,6 +74,27 @@ portbay logs <id> --limit 200 --offset 0
 ```
 
 `--limit` defaults to 200. `--offset` defaults to 0 (newest).
+
+## `doctor`
+
+```bash
+portbay doctor
+portbay --json doctor
+```
+
+A `flutter doctor`-style environment report. Checks are grouped into categories; each category header shows the worst verdict among its rows (`[✓]` ok · `[!]` warning · `[✗]` fatal), and every row carries an inline fix hint.
+
+| Category | Checks |
+| --- | --- |
+| **Core** | Registry loads (project count, schema version, domain suffix); Process Compose daemon reachability; `/etc/hosts` managed entries reconciled against the registry. |
+| **Web routing & TLS** | Caddy and mkcert (bundled sidecars — see note); local certificate count under the certs directory. |
+| **PHP runtimes** | Every detected PHP install (version, path, source), flagged when `php-fpm` is missing so it can't serve sites. |
+| **Services** | dnsmasq resolver routing for the wildcard suffix; Mailpit (bundled sidecar); available database engines (MySQL, MariaDB, Postgres, Redis, Mongo, Memcached). |
+| **Account & sharing** | Signed-in account, tier, and project cap; active tunnel count. |
+
+PortBay-bundled sidecars (Caddy, mkcert, dnsmasq, Mailpit, cloudflared) are **never resolved from `$PATH`** — they ship with the app, so a foreign install (e.g. another local dev tool) is never mistaken for PortBay's own. Their live state isn't observable from outside the daemon, so they report as informational rather than a guessed binary path, mirroring `portbay sidecar status`.
+
+`doctor` exits `0` even when warnings are present; it returns a non-zero code only when a check is fatal (e.g. the registry fails to load). With `--json` it prints an array of categories, each with a `verdict` and a `checks` array of `{ check, verdict, detail }` objects.
 
 ## `hosts`
 

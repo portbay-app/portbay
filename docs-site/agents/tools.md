@@ -319,16 +319,18 @@ Return recent log output for a project. The first thing to read when a project w
 
 ### `portbay_doctor` (read-only)
 
-Run an environment health check. Checks: registry readability, daemon reachability on the configured port, `mkcert` / `caddy` / `process-compose` on PATH, current license tier. Use when something is broken and you don't yet know what.
+Run a grouped environment health check — the **same data** the CLI `portbay doctor` renders (both call one shared core, so they can't drift). Categories: **Core** (registry, daemon, `/etc/hosts`), **Web routing & TLS** (Caddy, mkcert, certs), **PHP runtimes**, **Services** (dnsmasq, Mailpit, databases), **Account & sharing**. Bundled sidecars (Caddy, mkcert, dnsmasq, Mailpit, cloudflared) are reported via PortBay's own probe and **never resolved from `$PATH`** — a foreign install is never mistaken for PortBay's own. Use when something is broken and you don't yet know what.
 
 No arguments.
 
-**Returns:** `DoctorResult`
+**Returns:** `DoctorReport`
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `ok` | bool | `true` when no check returned `fail`. |
-| `findings` | `DoctorFinding[]` | Each finding has `check` (string), `verdict` (`ok` / `warn` / `fail`), and `detail` (string). |
+| `categories` | `DoctorCategory[]` | Each has `title` (string), `verdict` (`ok` / `warn` / `fail` — worst of its checks), and `checks`. |
+
+Each entry in `checks` has `check` (string), `verdict` (`ok` / `warn` / `fail`), and `detail` (string).
 
 ---
 
