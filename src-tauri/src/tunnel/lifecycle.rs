@@ -448,13 +448,7 @@ fn resolve_custom_command(
     config_path: &std::path::Path,
 ) -> Result<tauri_plugin_shell::process::Command> {
     let config_str = config_path.to_string_lossy().into_owned();
-    let args = [
-        "tunnel",
-        "--config",
-        &config_str,
-        "--no-autoupdate",
-        "run",
-    ];
+    let args = ["tunnel", "--config", &config_str, "--no-autoupdate", "run"];
 
     if let Ok(sidecar) = app.shell().sidecar("cloudflared") {
         return Ok(sidecar.args(args));

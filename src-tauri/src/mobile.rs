@@ -115,11 +115,9 @@ fn android_command(cfg: &MobileRunConfig) -> String {
     // flavor of "debug"/"release" is treated as the type — not doubled into
     // `installDebugDebug`. No flavor → `installDebug`.
     let pinned_serial = cfg.device.clone().unwrap_or_default();
-    let product_flavor = cfg
-        .flavor
-        .as_deref()
-        .map(str::trim)
-        .filter(|f| !f.is_empty() && !f.eq_ignore_ascii_case("debug") && !f.eq_ignore_ascii_case("release"));
+    let product_flavor = cfg.flavor.as_deref().map(str::trim).filter(|f| {
+        !f.is_empty() && !f.eq_ignore_ascii_case("debug") && !f.eq_ignore_ascii_case("release")
+    });
     let install_task = match product_flavor {
         Some(f) => format!("install{}Debug", capitalize(f)),
         None => "installDebug".to_string(),
@@ -269,7 +267,10 @@ mod tests {
     #[test]
     fn flutter_and_expo_are_long_running() {
         assert!(flutter_command(&MobileRunConfig::default()).starts_with("exec flutter run"));
-        assert_eq!(expo_command(&MobileRunConfig::default()), "exec npx expo start");
+        assert_eq!(
+            expo_command(&MobileRunConfig::default()),
+            "exec npx expo start"
+        );
         let cfg = MobileRunConfig {
             device: Some("ios".into()),
             ..Default::default()

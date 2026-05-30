@@ -99,7 +99,10 @@ pub fn detect_named_tunnels() -> Vec<DetectedTunnel> {
         // Offer the config.yml hostname only when its `tunnel:` maps this one.
         let suggested_hostname = hints
             .as_ref()
-            .filter(|h| h.tunnel.as_deref() == Some(uuid.as_str()) || h.tunnel.as_deref() == Some(stem.as_str()))
+            .filter(|h| {
+                h.tunnel.as_deref() == Some(uuid.as_str())
+                    || h.tunnel.as_deref() == Some(stem.as_str())
+            })
             .and_then(|h| h.hostname.clone());
 
         out.push(DetectedTunnel {
@@ -161,7 +164,13 @@ fn named_config_path(project_id: &str) -> Result<PathBuf> {
     // Sanitise the id for a filename (ids are slug-like already, but be safe).
     let safe: String = project_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     Ok(dir.join(format!("{safe}.yml")))
 }
@@ -173,7 +182,10 @@ fn named_config_path(project_id: &str) -> Result<PathBuf> {
 fn upstream_for(project: &Project) -> (String, Option<String>) {
     match project.port {
         Some(port) => (format!("http://127.0.0.1:{port}"), None),
-        None => ("http://127.0.0.1:80".to_string(), Some(project.hostname.clone())),
+        None => (
+            "http://127.0.0.1:80".to_string(),
+            Some(project.hostname.clone()),
+        ),
     }
 }
 
@@ -198,7 +210,9 @@ pub fn write_named_config(
             IngressRule {
                 hostname: Some(cfg.hostname.clone()),
                 service: upstream_url.clone(),
-                origin_request: host_header.map(|h| OriginRequest { http_host_header: h }),
+                origin_request: host_header.map(|h| OriginRequest {
+                    http_host_header: h,
+                }),
             },
             // Catch-all required by cloudflared: anything else 404s.
             IngressRule {

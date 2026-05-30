@@ -500,6 +500,36 @@ fn is_node_type(p: &Project) -> bool {
     )
 }
 
+/// Whether a per-project corepack home holds a *materialized* package manager
+/// (so pointing `COREPACK_HOME` at it lets the run phase resolve a PM offline).
+///
+/// Corepack stores a finished PM at `<home>/v1/<pm>/<version>/` and stages each
+/// in-progress download in a `<home>/v1/corepack-<pid>-<hash>/` temp dir that it
+/// renames into place on success — but **leaves behind on a failed or blocked
+/// download**. A home whose `v1/` holds nothing but those `corepack-*` temp dirs
+/// (e.g. run-phase download attempts a loopback-only policy refused) is NOT
+/// populated: trusting it would pin `COREPACK_HOME` at a cache with no real PM
+/// and force yet another download the network policy blocks — the crash this
+/// guards against. So look *inside* `v1` for a real PM directory, ignoring the
+/// `corepack-*` temp staging dirs (and the `shims` dir `corepack enable`
+/// creates, which is not a PM cache). An earlier version checked only the
+/// top-level `home` for any entry other than `shims`, which the `v1` dir full of
+/// failed-download temp dirs satisfied — a false positive that re-armed the
+/// download crash on every launch.
+fn corepack_home_is_populated(home: &Path) -> bool {
+    std::fs::read_dir(home.join("v1"))
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name != "shims"
+                    && !name.starts_with("corepack-")
+                    && e.path().is_dir()
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn inject_runtime_path(
     p: &Project,
     data_dir: &Path,
@@ -513,32 +543,38 @@ fn inject_runtime_path(
     // locally-installed CLI tools (like the project's own devDependencies)
     // available without a global install.
     if crate::sandbox::is_enabled(p) && is_node_type(p) {
+        // Stable per-project corepack home — it survives install → run cycles
+        // (it is NOT the ephemeral scratch, which is wiped each start) and is
+        // writable in the sandbox profile, unlike `~/.cache`, which the read
+        // jail leaves read-only. Routing COREPACK_HOME here keeps every corepack
+        // read AND write confined and permitted: the sandboxed install phase
+        // populates it, the run phase reads it. This applies to EVERY sandboxed
+        // node project — not just those on a managed Node — so a project on the
+        // system Node still gets a sandbox-safe corepack home instead of
+        // crashing on the read-only `~/.cache/node/corepack`.
+        let corepack_home = data_dir
+            .join("sandbox")
+            .join(p.id.as_str())
+            .join("corepack");
+        // Corepack writes the pnpm/yarn shims into `<corepack_home>/shims`
+        // during the install phase; a managed Node ships no `pnpm` shim, so this
+        // dir must lead PATH for a `pnpm …` run command to resolve.
+        let corepack_shims = corepack_home.join("shims");
+        let node_modules_bin = format!("{}/node_modules/.bin", p.path.to_string_lossy());
+
         // Resolve the node binary: prefer the pinned runtime, else the newest
-        // PortBay-managed Node, else nothing (fall through to non-sandboxed
-        // behaviour — neutral installs on the inherited PATH).
+        // PortBay-managed Node, else none (system Node on the inherited PATH).
         let node_binary = p
             .runtime
             .as_ref()
             .and_then(|rt| crate::runtimes::resolve_binary(rt, runtimes))
             .or_else(|| crate::runtimes::resolve_default_node(runtimes));
 
-        if let Some(binary) = node_binary {
-            if let Some(bin_dir) = binary.parent() {
-                let node_modules_bin = format!("{}/node_modules/.bin", p.path.to_string_lossy());
-
-                // Stable per-project corepack home: survives across install →
-                // run cycles and is not the ephemeral scratch (which is wiped
-                // on each sandboxed start). Written by the install phase,
-                // read offline by the run phase.
-                let corepack_home = data_dir
-                    .join("sandbox")
-                    .join(p.id.as_str())
-                    .join("corepack");
-                // Corepack writes the pnpm/yarn shims into `<corepack_home>/shims`
-                // during the install phase; our managed Node ships no `pnpm`
-                // shim, so this dir must lead PATH for the recipe's `pnpm …` run
-                // command to resolve.
-                let corepack_shims = corepack_home.join("shims");
+        match node_binary.as_deref().and_then(|b| b.parent()) {
+            // Managed Node: a minimal, fixed PATH so the RUN phase never inherits
+            // the login-shell PATH or a competitor's binaries. The install phase
+            // guarantees COREPACK_HOME is populated, so the run is hard-offline.
+            Some(bin_dir) => {
                 environment.insert(
                     "PATH".into(),
                     format!(
@@ -547,10 +583,6 @@ fn inject_runtime_path(
                         bin_dir.to_string_lossy(),
                         node_modules_bin,
                     ),
-                );
-                environment.insert(
-                    "COREPACK_HOME".into(),
-                    corepack_home.to_string_lossy().into_owned(),
                 );
                 // Hard-disable network in the RUN phase; the install phase
                 // already materialized the pinned PM into COREPACK_HOME.
@@ -566,12 +598,60 @@ fn inject_runtime_path(
                 if !version.is_empty() {
                     environment.insert("PORTBAY_RUNTIME_VERSION".into(), version);
                 }
+                // Managed Node: the install phase reliably populates the
+                // per-project corepack home, so pin corepack there.
+                environment.insert(
+                    "COREPACK_HOME".into(),
+                    corepack_home.to_string_lossy().into_owned(),
+                );
             }
-            return;
+            // No managed Node: keep the inherited PATH so the system Node
+            // resolves, but lead with the corepack shims + the project's
+            // node_modules/.bin.
+            None => {
+                let inherited = environment
+                    .get("PATH")
+                    .cloned()
+                    .or_else(|| std::env::var("PATH").ok())
+                    .unwrap_or_default();
+                environment.insert(
+                    "PATH".into(),
+                    format!(
+                        "{}:{}:{inherited}",
+                        corepack_shims.to_string_lossy(),
+                        node_modules_bin,
+                    ),
+                );
+                // Hard-disable corepack's network in the RUN phase, exactly as
+                // the managed-Node branch does. The run phase must NEVER
+                // download a package manager — that is the install phase's job
+                // (it stages the pinned PM into the per-project COREPACK_HOME
+                // through the registry proxy). Without this, a corepack that
+                // can't find the pinned PM in its cache fetches it from the
+                // registry; under a loopback-only/blocked policy that DNS lookup
+                // fails and crashes the supervised process with an opaque
+                // `ENOTFOUND` corepack stack trace. With it, corepack resolves
+                // the PM from its cache (the default ~/.cache or a populated
+                // per-project home, both sandbox-readable) and otherwise fails
+                // fast with a clear "network disabled" message instead of a
+                // crash — the signal to run a sandboxed install first.
+                environment.insert("COREPACK_ENABLE_NETWORK".into(), "0".into());
+                // Pin corepack at the per-project managed home ONLY once it's
+                // been populated (by a sandboxed install). Until then leave
+                // COREPACK_HOME unset so corepack uses its default (~/.cache,
+                // readable under the sandbox): an already-cached PM then runs
+                // offline instead of forcing a download the project's network
+                // policy (e.g. loopback-only) would block — the crash that
+                // unconditional routing caused on a fresh, empty home.
+                if corepack_home_is_populated(&corepack_home) {
+                    environment.insert(
+                        "COREPACK_HOME".into(),
+                        corepack_home.to_string_lossy().into_owned(),
+                    );
+                }
+            }
         }
-        // No managed Node found — fall through to the non-sandboxed branch so
-        // neutral installs on PATH still work (no regression). The user will
-        // see a "install PortBay Node" prompt from the UI layer.
+        return;
     }
 
     // Non-sandboxed path (or sandboxed non-node, or sandboxed node with no
@@ -1136,6 +1216,105 @@ mod tests {
             env.get("COREPACK_ENABLE_NETWORK").map(String::as_str),
             Some("0"),
             "COREPACK_ENABLE_NETWORK must be 0 in sandboxed run"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandboxed_system_node_routes_corepack_home_only_once_populated() {
+        // A sandboxed node project on the SYSTEM Node (no managed runtime). The
+        // corepack shims always lead the (inherited) PATH so the system Node
+        // resolves, but COREPACK_HOME is pinned at the per-project managed dir
+        // ONLY once that dir holds a downloaded PM. On a fresh/empty home,
+        // COREPACK_HOME is left unset so corepack falls back to ~/.cache (a
+        // cached PM then runs offline instead of forcing a download a
+        // loopback-only policy would block).
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let logs_dir = data_dir.join("logs");
+
+        let mut p = next_project("node-sys-sandboxed", 3022);
+        p.runtime = None;
+        p.sandbox = Some(SandboxConfig::enabled(
+            SandboxNetworkPolicy::LoopbackOnly,
+            false,
+        ));
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+
+        // ── Empty managed home → COREPACK_HOME unset (fallback to default) ──
+        let yaml = to_yaml(&r, &logs_dir, None, &[], &[], &[], true).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let env = env_kv_map(&doc["processes"]["node-sys-sandboxed"]["environment"]);
+        assert!(
+            !env.contains_key("COREPACK_HOME"),
+            "empty managed home must NOT pin COREPACK_HOME (fall back to ~/.cache)"
+        );
+        let path = env.get("PATH").expect("PATH must be set");
+        assert!(
+            path.contains("sandbox/node-sys-sandboxed/corepack/shims:"),
+            "corepack shims must still lead PATH, got: {path}"
+        );
+        assert!(path.contains("node_modules/.bin"), "got: {path}");
+        // The RUN phase is always hard-offline for corepack (same contract as
+        // the managed-Node branch): it resolves the PM from cache or fails
+        // cleanly, but never downloads — so a missing PM can't crash the
+        // supervised process with an `ENOTFOUND` registry stack trace.
+        assert_eq!(
+            env.get("COREPACK_ENABLE_NETWORK").map(String::as_str),
+            Some("0"),
+            "system-Node run phase must hard-disable corepack network"
+        );
+
+        // ── Populate the home with a PM → COREPACK_HOME now pinned ──
+        let pm = data_dir
+            .join("sandbox")
+            .join("node-sys-sandboxed")
+            .join("corepack")
+            .join("v1")
+            .join("pnpm")
+            .join("9.12.0");
+        std::fs::create_dir_all(&pm).unwrap();
+        let yaml2 = to_yaml(&r, &logs_dir, None, &[], &[], &[], true).unwrap();
+        let doc2: serde_yaml::Value = serde_yaml::from_str(&yaml2).unwrap();
+        let env2 = env_kv_map(&doc2["processes"]["node-sys-sandboxed"]["environment"]);
+        let home = env2
+            .get("COREPACK_HOME")
+            .expect("populated managed home must pin COREPACK_HOME");
+        assert!(
+            home.ends_with("sandbox/node-sys-sandboxed/corepack"),
+            "COREPACK_HOME must point to the per-project corepack dir, got: {home}"
+        );
+    }
+
+    // Regression guard for the run-phase crash: corepack leaves an empty
+    // `v1/corepack-<pid>-<hash>/` temp dir behind on a failed/blocked download
+    // (e.g. a loopback-only run trying to fetch a PM with no proxy). A home
+    // holding ONLY those temp dirs is NOT populated — pinning COREPACK_HOME at
+    // it would force another blocked download and crash the process. The old
+    // top-level "any entry other than shims" check treated the `v1` dir itself
+    // as proof of population; this asserts the corrected check looks inside.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn corepack_home_with_only_failed_download_temp_dirs_is_not_populated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("corepack");
+        // Mimic the on-disk state from a blocked run: v1/ with only the
+        // leftover temp staging dirs corepack failed to rename into place,
+        // plus the shims dir `corepack enable` creates.
+        std::fs::create_dir_all(home.join("v1").join("corepack-55106-706a9900.91598")).unwrap();
+        std::fs::create_dir_all(home.join("v1").join("corepack-60553-cab28fef.231eb")).unwrap();
+        std::fs::create_dir_all(home.join("shims")).unwrap();
+        assert!(
+            !corepack_home_is_populated(&home),
+            "a home with only corepack-* temp dirs must NOT count as populated"
+        );
+
+        // Now materialize a real PM → populated.
+        std::fs::create_dir_all(home.join("v1").join("pnpm").join("9.12.0")).unwrap();
+        assert!(
+            corepack_home_is_populated(&home),
+            "a home with a real v1/<pm>/<version> dir must count as populated"
         );
     }
 

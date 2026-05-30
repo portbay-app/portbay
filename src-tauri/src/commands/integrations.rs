@@ -337,6 +337,35 @@ fn tool_definition(id: &str) -> Option<ToolDefinition> {
         .find(|definition| definition.id == id)
 }
 
+/// Resolve a terminal tool id (`warp` / `iterm` / `ghostty` / `terminal`) to its
+/// installed `.app` bundle path. Used by the agent dispatcher to host an
+/// interactive run in the user's preferred terminal. Returns `None` for an
+/// unknown id, a non-terminal id, or a terminal that isn't installed.
+pub(crate) fn resolve_terminal_app(id: &str) -> Option<PathBuf> {
+    let def = tool_definition(id)?;
+    if def.kind != ToolKind::Terminal {
+        return None;
+    }
+    match def.launch {
+        LaunchMode::MacApp(app) => resolve_mac_app(app),
+        _ => None,
+    }
+}
+
+/// The first detected terminal id, in `TOOL_DEFINITIONS` order (user-installed
+/// terminals before the always-present macOS Terminal.app). Used as the default
+/// when the user hasn't picked a preferred terminal yet.
+pub(crate) fn first_detected_terminal() -> Option<String> {
+    TOOL_DEFINITIONS
+        .iter()
+        .filter(|d| d.kind == ToolKind::Terminal)
+        .find(|d| match d.launch {
+            LaunchMode::MacApp(app) => resolve_mac_app(app).is_some(),
+            _ => false,
+        })
+        .map(|d| d.id.to_string())
+}
+
 fn scheme_is_available(scheme: DeepLinkScheme) -> bool {
     match scheme {
         DeepLinkScheme::ClaudeCli => {

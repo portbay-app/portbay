@@ -56,6 +56,10 @@ pub enum ToolGroup {
     /// Migration import from other local-dev tools (Herd / ServBay / MAMP):
     /// detect sources, preview their sites, import into the registry.
     Migrate,
+    /// Per-project task board + session hand-off: list/next/create/ack/update
+    /// cards, read/append the rolling hand-off log. The live channel into
+    /// PortBay's canonical task model.
+    Tasks,
 }
 
 impl ToolGroup {
@@ -74,6 +78,7 @@ impl ToolGroup {
             ToolGroup::Inspector,
             ToolGroup::Certs,
             ToolGroup::Migrate,
+            ToolGroup::Tasks,
         ]
     }
 
@@ -205,6 +210,28 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_detect_import_sources", ToolGroup::Migrate, false),
     ("portbay_preview_import", ToolGroup::Migrate, false),
     ("portbay_import_projects", ToolGroup::Migrate, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_tasks_list", ToolGroup::Tasks, false),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_next", ToolGroup::Tasks, false),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_get", ToolGroup::Tasks, false),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_create", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_ack", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_update", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_check", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_checklist_add", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_comment", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_handoff_get", ToolGroup::Tasks, false),
+    #[cfg(feature = "tasks")]
+    ("portbay_handoff_update", ToolGroup::Tasks, true),
 ];
 
 /// The PortBay MCP server. Holds the operations context and the (possibly
@@ -251,6 +278,13 @@ impl PortbayMcp {
     /// in `tools/list` and can't be called at all.
     pub fn with_config(ctx: McpContext, config: McpConfig) -> Self {
         let mut router = Self::tool_router();
+        // Add the proprietary board tools when built with `tasks`; the public
+        // OSS build has no `board_tool_router`. Merged before filtering so the
+        // gated TOOL_REGISTRY entries can scope / read-only-filter them.
+        #[cfg(feature = "tasks")]
+        {
+            router += Self::board_tool_router();
+        }
         for &(name, group, is_mutating) in TOOL_REGISTRY {
             let group_enabled = config.toolsets.contains(&group);
             let blocked_by_read_only = config.read_only && is_mutating;
@@ -367,9 +401,12 @@ impl PortbayMcp {
 
     #[tool(
         name = "portbay_doctor",
-        description = "Run an environment health check: registry readability, whether the daemon \
-                       is reachable, required tooling on PATH, and the current license tier. Use \
-                       when something is broken and you don't yet know what.",
+        description = "Run a grouped environment health check (same data as the CLI `portbay \
+                       doctor`): Core (registry, daemon, /etc/hosts), Web routing & TLS (Caddy, \
+                       mkcert, certs), PHP runtimes, Services (dnsmasq, Mailpit, databases), and \
+                       Account & sharing. Bundled sidecars are reported via PortBay's own probe, \
+                       never off $PATH. Returns categories, each with a verdict and per-check \
+                       rows. Use when something is broken and you don't yet know what.",
         annotations(title = "Doctor", read_only_hint = true, open_world_hint = false)
     )]
     async fn doctor(&self) -> Result<CallToolResult, McpError> {
@@ -1351,6 +1388,170 @@ impl PortbayMcp {
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.import_projects(args))
     }
+
+}
+
+// ---- Task board + hand-off (proprietary `tasks` surface) ------------------
+// A SEPARATE #[tool_router] so the public OSS build (crates/mcp = `mcp` only,
+// no `tasks`) compiles without these — rmcp's router macro can't cfg-gate
+// individual #[tool] methods, so the whole impl is gated instead. `with_config`
+// merges `board_tool_router` into the live router when `tasks` is on. The board
+// logic lives in the overlay's `crate::context`; mirrors the CLI/GUI gating.
+#[cfg(feature = "tasks")]
+#[tool_router(router = board_tool_router)]
+impl PortbayMcp {
+    #[tool(
+        name = "portbay_tasks_list",
+        description = "List a project's task board cards (the live board PortBay also shows the \
+                       human). Optionally filter by column. Read this to see the plan before \
+                       acting; the board — not your memory — is the source of truth.",
+        annotations(title = "List tasks", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn tasks_list(
+        &self,
+        Parameters(args): Parameters<TasksListArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.tasks_list(args))
+    }
+
+    #[tool(
+        name = "portbay_task_next",
+        description = "Return the next actionable card — the top of the To Do column — or null \
+                       when there's nothing ready to work.",
+        annotations(title = "Next task", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn task_next(
+        &self,
+        Parameters(args): Parameters<TaskNextArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_next(args))
+    }
+
+    #[tool(
+        name = "portbay_task_get",
+        description = "Read one card in full by id — its title, description (body), acceptance \
+                       criteria, touchpoints, checklist, labels, status, and claim. Use this to \
+                       re-read the card you were dispatched to work when you need its details.",
+        annotations(title = "Get task", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn task_get(
+        &self,
+        Parameters(args): Parameters<TaskGetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_get(args))
+    }
+
+    #[tool(
+        name = "portbay_task_create",
+        description = "Capture a new card on the board. Use this for work you discover mid-task \
+                       rather than burying it in chat — it lands in Backlog by default.",
+        annotations(title = "Create task", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_create(
+        &self,
+        Parameters(args): Parameters<TaskCreateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_create(args))
+    }
+
+    #[tool(
+        name = "portbay_task_ack",
+        description = "Acknowledge a dispatched card with the run id from your prompt — proves you \
+                       engaged with it (distinct from the process merely launching).",
+        annotations(title = "Acknowledge task", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_ack(
+        &self,
+        Parameters(args): Parameters<TaskAckArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_ack(args))
+    }
+
+    #[tool(
+        name = "portbay_task_update",
+        description = "Advance a card and/or post a progress note. Set `status` to InProgress / \
+                       Done / Blocked / Review / Todo. Optionally pass `touchpoints` to record the \
+                       files you actually touched. Pass your `run_id` so a stale session can't \
+                       clobber a re-dispatched card. You may NOT set Rejected — that's human-only. \
+                       The response carries reminders (e.g. update the hand-off before finishing).",
+        annotations(title = "Update task", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_update(
+        &self,
+        Parameters(args): Parameters<TaskUpdateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_update(args))
+    }
+
+    #[tool(
+        name = "portbay_task_check",
+        description = "Tick (or, with done=false, reopen) a checklist item on a card by its index. \
+                       Use this to report sub-step progress as you work, so the human sees real \
+                       movement.",
+        annotations(title = "Check item", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_check(
+        &self,
+        Parameters(args): Parameters<TaskCheckArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_check(args))
+    }
+
+    #[tool(
+        name = "portbay_task_checklist_add",
+        description = "Append sub-task items to a card's checklist — your own breakdown / tracking \
+                       points (e.g. P0, P1, P2 steps). Then tick them with portbay_task_check as you \
+                       finish each, so the human watches real progress.",
+        annotations(title = "Add checklist items", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_checklist_add(
+        &self,
+        Parameters(args): Parameters<TaskChecklistAddArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_checklist_add(args))
+    }
+
+    #[tool(
+        name = "portbay_task_comment",
+        description = "Post a comment on a card. Shows in the card's activity thread alongside \
+                       your progress notes — use it to record decisions or ask the human something.",
+        annotations(title = "Comment", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_comment(
+        &self,
+        Parameters(args): Parameters<TaskCommentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_comment(args))
+    }
+
+    #[tool(
+        name = "portbay_handoff_get",
+        description = "Read the project's continuation brief — the minimal 'where we left off' \
+                       note. Read this FIRST when picking up work; trust it over your own memory.",
+        annotations(title = "Get hand-off", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn handoff_get(
+        &self,
+        Parameters(args): Parameters<HandoffGetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.handoff_get(args))
+    }
+
+    #[tool(
+        name = "portbay_handoff_update",
+        description = "Append a MINIMAL entry to the rolling hand-off log (what changed, the next \
+                       concrete step, open items, pointers). It's prepended as the newest entry; \
+                       older entries are kept until the log hits its size cap, then the oldest are \
+                       pruned. Sign it with `author` (your agent name). Call this before you finish \
+                       a card or end a session.",
+        annotations(title = "Update hand-off", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn handoff_update(
+        &self,
+        Parameters(args): Parameters<HandoffUpdateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.handoff_update(args))
+    }
 }
 
 const INSTRUCTIONS: &str = "\
@@ -1409,6 +1610,55 @@ Key facts:
   installed and how many sites each has. portbay_preview_import shows a source's sites with id/path \
   collision flags; portbay_import_projects imports the chosen ids (or all) into the registry, and the \
   app provisions them on its next reconcile. (Importing a committed .portbay.json is portbay_import_config.)";
+
+// Board (tasks-feature) resource resolution, split out so the ungated
+// `read_resource` body below carries no `crate::context` calls. The public
+// OSS MCP build compiles the `None` stub; the overlay build (`--features
+// tasks`) resolves the project context / tasks / hand-off URIs.
+#[cfg(feature = "tasks")]
+impl PortbayMcp {
+    fn read_board_resource(&self, uri: &str) -> Option<AppResult<String>> {
+        if let Some(id) = uri
+            .strip_prefix("portbay://project/")
+            .and_then(|rest| rest.strip_suffix("/context"))
+        {
+            Some(self.ctx.project_context_value(id).and_then(|v| to_json(&v)))
+        } else if let Some(id) = uri
+            .strip_prefix("portbay://project/")
+            .and_then(|rest| rest.strip_suffix("/tasks"))
+        {
+            Some(
+                self.ctx
+                    .tasks_list(TasksListArgs {
+                        project: id.to_string(),
+                        status: None,
+                    })
+                    .and_then(|v| to_json(&v)),
+            )
+        } else if let Some(id) = uri
+            .strip_prefix("portbay://project/")
+            .and_then(|rest| rest.strip_suffix("/handoff"))
+        {
+            Some(
+                self.ctx
+                    .handoff_get(HandoffGetArgs {
+                        project: id.to_string(),
+                    })
+                    .and_then(|v| to_json(&v)),
+            )
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "tasks"))]
+impl PortbayMcp {
+    /// Public OSS build: no board resources.
+    fn read_board_resource(&self, _uri: &str) -> Option<AppResult<String>> {
+        None
+    }
+}
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PortbayMcp {
@@ -1479,8 +1729,36 @@ impl ServerHandler for PortbayMcp {
         logs.description = Some("Recent log tail for a project, by id.".to_string());
         let mut detail = RawResourceTemplate::new("portbay://projects/{id}", "project");
         detail.description = Some("Live status + config for a single project, by id.".to_string());
+        // `mut` is used only when the gated board block below pushes more.
+        #[cfg_attr(not(feature = "tasks"), allow(unused_mut))]
+        let mut templates = vec![logs.no_annotation(), detail.no_annotation()];
+        // Board resources (context/tasks/hand-off) are the proprietary `tasks`
+        // surface. The public OSS MCP build advertises only the project/logs
+        // resources above; the overlay build adds these.
+        #[cfg(feature = "tasks")]
+        {
+            let mut context =
+                RawResourceTemplate::new("portbay://project/{id}/context", "project context");
+            context.description = Some(
+                "Derived, authoritative environment for a project: URL, ports, runtime, web server, \
+                 DB env-var references, services."
+                    .to_string(),
+            );
+            let mut board =
+                RawResourceTemplate::new("portbay://project/{id}/tasks", "project tasks");
+            board.description = Some("The live task board (all cards) for a project.".to_string());
+            let mut handoff =
+                RawResourceTemplate::new("portbay://project/{id}/handoff", "project hand-off");
+            handoff.description = Some(
+                "The continuation brief — read first to resume where the last session left off."
+                    .to_string(),
+            );
+            templates.push(context.no_annotation());
+            templates.push(board.no_annotation());
+            templates.push(handoff.no_annotation());
+        }
         Ok(ListResourceTemplatesResult {
-            resource_templates: vec![logs.no_annotation(), detail.no_annotation()],
+            resource_templates: templates,
             next_cursor: None,
             meta: None,
         })
@@ -1498,7 +1776,9 @@ impl ServerHandler for PortbayMcp {
             "portbay://sidecars" => self.ctx.sidecar_status().await.and_then(|s| to_json(&s)),
             "portbay://recipes" => to_json(&self.ctx.list_recipes()),
             other => {
-                if let Some(id) = other
+                if let Some(r) = self.read_board_resource(other) {
+                    r
+                } else if let Some(id) = other
                     .strip_prefix("portbay://projects/")
                     .and_then(|rest| rest.strip_suffix("/logs"))
                 {

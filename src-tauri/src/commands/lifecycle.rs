@@ -352,18 +352,18 @@ pub async fn install_project_sandboxed(
                     .join(project.id.as_str())
                     .join("corepack");
                 let env = crate::sandbox::node_install_env_prefix(bin_dir, Some(&corepack_home));
-                // Only enable shims when a managed Node actually resolved (env
-                // non-empty); otherwise leave the command untouched so a neutral
-                // install path is unaffected.
-                let cmd = if env.is_empty() {
-                    install_cmd.clone()
-                } else {
-                    format!(
-                        "{}{}",
-                        crate::sandbox::corepack_enable_preamble(&corepack_home),
-                        install_cmd
-                    )
-                };
+                // Always materialize the pnpm/yarn shims into the per-project
+                // corepack home and route the install through them, so the
+                // pinned PM lands in COREPACK_HOME (writable in the sandbox) for
+                // the offline run phase — whether on a managed Node (shims lead
+                // a minimal PATH) or the system Node (shims enabled via the
+                // login-shell corepack, COREPACK_HOME steered at the managed
+                // dir). `corepack enable` only creates symlinks (no network).
+                let cmd = format!(
+                    "{}{}",
+                    crate::sandbox::corepack_enable_preamble(&corepack_home),
+                    install_cmd
+                );
                 (env, cmd)
             } else {
                 (String::new(), install_cmd.clone())
@@ -916,6 +916,38 @@ pub async fn open_project(app: AppHandle, state: State<'_, AppState>, id: String
         .open_url(&url, None::<&str>)
         .map_err(|e| AppError::Internal(format!("opener failed: {e}")))?;
     Ok(())
+}
+
+/// Reveal a filesystem path in the OS file manager (Finder on macOS), robust to
+/// paths that don't exist yet.
+///
+/// The opener plugin's `reveal_item_in_dir` canonicalises the path first and
+/// errors if it's missing — so "Reveal data folder" on a database whose data
+/// dir hasn't been created yet (instance never started) would fail silently.
+/// Instead we reveal the path when it exists, else open the nearest existing
+/// ancestor directory, and only error when nothing along the path exists.
+#[tauri::command]
+pub async fn reveal_in_finder(app: AppHandle, path: String) -> AppResult<()> {
+    let target = std::path::PathBuf::from(&path);
+    if target.exists() {
+        return app
+            .opener()
+            .reveal_item_in_dir(&target)
+            .map_err(|e| AppError::Internal(format!("reveal failed: {e}")));
+    }
+    // Not created yet — open the closest ancestor that does exist so the button
+    // still lands the user in the right place rather than doing nothing.
+    let mut cursor = target.as_path();
+    while let Some(parent) = cursor.parent() {
+        if parent.exists() {
+            return app
+                .opener()
+                .open_path(parent.to_string_lossy(), None::<&str>)
+                .map_err(|e| AppError::Internal(format!("open failed: {e}")));
+        }
+        cursor = parent;
+    }
+    Err(AppError::NotFound(path))
 }
 
 #[cfg(test)]

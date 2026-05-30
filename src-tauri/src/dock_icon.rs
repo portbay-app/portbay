@@ -22,6 +22,26 @@ const LIGHT_PNG: &[u8] = include_bytes!("appicon/light.png");
 #[cfg(target_os = "macos")]
 const DARK_PNG: &[u8] = include_bytes!("appicon/dark.png");
 
+/// Does the running bundle carry the compiled Liquid Glass catalog?
+///
+/// `tauri build` copies `Assets.car` next to the executable at
+/// `PortBay.app/Contents/Resources/Assets.car` (via `bundle.resources`). Its
+/// presence means macOS 26+ will render the layered icon itself, so the runtime
+/// swap should stand down. Under `tauri dev` the executable runs outside a full
+/// bundle and the file is absent, so the swap takes over.
+#[cfg(target_os = "macos")]
+fn bundled_liquid_glass_icon_present() -> bool {
+    std::env::current_exe()
+        .ok()
+        // …/Contents/MacOS/PortBay -> …/Contents/Resources/Assets.car
+        .and_then(|exe| {
+            exe.parent()
+                .map(|macos_dir| macos_dir.join("../Resources/Assets.car"))
+        })
+        .map(|car| car.exists())
+        .unwrap_or(false)
+}
+
 /// Set the Dock icon to match the current system appearance. Must run on the
 /// main thread (Tauri's `setup` and window-event callbacks both do). Best-effort:
 /// any failure leaves the bundled icon in place.
@@ -35,16 +55,23 @@ pub fn apply() {
         use objc2_foundation::{NSArray, NSData, NSProcessInfo};
 
         // macOS 26+ (Tahoe) renders the Liquid Glass `.icon` itself — the
-        // compiled Assets.car + CFBundleIconName injected by
-        // scripts/inject-macos-liquid-glass-icon.sh — including every
-        // appearance (Default/Dark/Clear/Tinted). Overriding the Dock tile
-        // with `setApplicationIconImage` here would clobber it, so the runtime
-        // swap is scoped to macOS 11–15, which has no Liquid Glass and shows
-        // the static bundle icon. See icons/macos-liquid-glass/README.md.
+        // compiled Assets.car + CFBundleIconName that `tauri build` copies into
+        // Contents/Resources (registered via bundle.resources + Info.plist) —
+        // including every appearance (Default/Dark/Clear/Tinted). When that
+        // catalog is present, overriding the Dock tile with
+        // `setApplicationIconImage` would clobber the system's
+        // appearance-aware rendering, so we defer to the OS and return early.
+        //
+        // Under `tauri dev`, though, bundle.resources is NOT applied: there's
+        // no Assets.car and no merged CFBundleIconName, so the OS falls back to
+        // the static `.icns` (the light squircle) with no Dark variant. There's
+        // nothing to clobber, so fall through to the runtime swap and give dev
+        // the correct appearance-matched icon. See icons/macos-liquid-glass/README.md.
         if NSProcessInfo::processInfo()
             .operatingSystemVersion()
             .majorVersion
             >= 26
+            && bundled_liquid_glass_icon_present()
         {
             return;
         }

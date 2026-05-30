@@ -18,10 +18,9 @@ pub use error::{RegistryError, Result};
 pub use types::{
     CorsConfig, CustomTunnelConfig, DatabaseEngine, DatabaseInstance, DatabaseInstanceId,
     DnsmasqSettings, DomainConfig, FpmTuning, Group, ManagedDatabaseEngine, ManagedRuntime,
-    ManualRuntime,
-    MobileRunConfig, PhpVersionConfig, Project, ProjectId, ProjectType, Readiness, ResolverMode,
-    Runtime, RuntimeSettings, SandboxConfig, SandboxNetworkPolicy, WebServer, Workspace,
-    WorkspaceTool,
+    ManualRuntime, MobileRunConfig, PhpVersionConfig, Project, ProjectId, ProjectType, Readiness,
+    ResolverMode, Runtime, RuntimeSettings, SandboxConfig, SandboxNetworkPolicy, WebServer,
+    Workspace, WorkspaceTool,
 };
 
 /// The registry-file schema version this build reads and writes.

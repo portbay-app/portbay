@@ -1,12 +1,18 @@
 // PortBay — Tauri 2 + Rust core.
 
+pub mod agents;
 pub mod auth;
 pub mod avatar;
 pub mod caddy;
 pub mod commands;
+// Proprietary task board. Source injected from `portbay-cloud/desktop-pro` for
+// official builds; absent from the public OSS tree (no `tasks` feature).
+#[cfg(feature = "tasks")]
+pub mod context;
 pub mod databases;
 pub mod dnsmasq;
 pub mod dock_icon;
+pub mod doctor;
 pub mod domain;
 pub mod entitlements;
 pub mod error;
@@ -20,6 +26,7 @@ pub mod mailpit;
 pub mod mcp;
 pub mod mkcert;
 pub mod mobile;
+pub mod notifications;
 pub mod php;
 pub mod port_holder;
 pub mod portfile;
@@ -32,6 +39,7 @@ pub mod registry;
 pub mod runtimes;
 pub mod sandbox;
 pub mod sidecar_probe;
+pub mod sidecar_reclaim;
 pub mod smoke;
 pub mod state;
 pub mod sync;
@@ -146,7 +154,29 @@ pub fn run() {
     // process-compose) and before runtime detection.
     crate::runtimes::env::bootstrap_user_env();
 
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    // Single-instance guard MUST be the first plugin registered (Tauri
+    // requirement). When a user launches PortBay while a copy is already
+    // running, the second process invokes this callback in the *existing*
+    // instance and then exits — so it never reaches `setup` and never spawns a
+    // second sidecar stack squatting the canonical ports. We focus the live
+    // window so the relaunch feels like "bring to front", the standard desktop
+    // UX. (macOS's own Reopen event does the same on Dock-icon clicks; this
+    // covers `open -n`, the CLI, and `tauri dev`.)
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -259,6 +289,34 @@ pub fn run() {
             // CLI / MCP server report phantom tunnels.
             state.persist_tunnel_state();
 
+            // Recover-on-boot for the three sidecars spawned *directly* as app
+            // children — caddy, dnsmasq, mailpit. Unlike process-compose (swept
+            // above) these had no boot reclamation, so a crash / `tauri dev`
+            // rebuild left them orphaned to launchd, still holding :443 / the DNS
+            // port / the SMTP port. The fresh stack then couldn't bind :443 and
+            // silently fell back to an alternate port, serving no TLS for the
+            // canonical host (the ERR_SSL_PROTOCOL_ERROR incident). Reaping them
+            // here — before we boot our own — frees the canonical ports so the
+            // fresh Caddy binds :443. `All` mode is safe: none of ours is up yet,
+            // so any match is by definition stale. For Caddy the reclaim also
+            // waits for :443 to actually release before returning, closing the
+            // kill→rebind race. Foreign caddy/dnsmasq/mailpit (ServBay, Homebrew)
+            // never match — the signature keys on PortBay's own config paths.
+            for kind in [
+                sidecar_reclaim::SidecarKind::Caddy,
+                sidecar_reclaim::SidecarKind::Dnsmasq,
+                sidecar_reclaim::SidecarKind::Mailpit,
+            ] {
+                sidecar_reclaim::reclaim_stale(kind, sidecar_reclaim::SweepMode::All);
+            }
+
+            // Advisory pidfile so the CLI / `portbay doctor` can tell the app is
+            // live (and reclaim only orphans, never the live app's children).
+            // The single-instance plugin is the real double-spawn guard; this is
+            // just out-of-process visibility. Removed on graceful shutdown;
+            // `app_running` re-checks PID liveness so a crash-leftover is ignored.
+            sidecar_reclaim::write_pidfile();
+
             state.boot_pc(app.handle(), &yaml_path).map_err(boxed)?;
 
             let app_handle = app.handle().clone();
@@ -312,10 +370,34 @@ pub fn run() {
             // lifetime of the app.
             commands::events::spawn_status_poller(app.handle().clone());
             commands::metrics::spawn_metrics_poller(app.handle().clone());
+            // Watch every project's audit log for new agent activity (comments,
+            // blocks, warnings) and surface it to the topbar bell + desktop.
+            // Board-only: the bell shell ships in every build, but the scanner
+            // that feeds it is injected with the `tasks` feature.
+            #[cfg(feature = "tasks")]
+            notifications::spawn_scanner(app.handle().clone());
 
             // Tail Caddy's JSON access log → `portbay://request` events for the
             // HTTP request inspector. Idle until Caddy writes its first entry.
             commands::http_inspector::spawn_request_tailer(app.handle().clone());
+
+            // Reconcile per-project task-board leases on boot: a board dispatched
+            // an agent, then the app (or laptop) went down. Any lease whose
+            // process is gone / heartbeat expired is reclaimed (card → To Do,
+            // reason logged) so a crashed run never wedges the board (edge cases
+            // #2/#11). Best-effort; never blocks startup. Board-only.
+            #[cfg(feature = "tasks")]
+            {
+                let app_h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let st: tauri::State<AppState> = app_h.state();
+                    if let Ok(reg) = store::load_or_default(&st.registry_path, &st.domain_suffix) {
+                        for project in reg.list_projects() {
+                            let _ = crate::context::automation::reconcile(project);
+                        }
+                    }
+                });
+            }
 
             // Background build-artifact auto-clean. No-op unless the user opted
             // into a weekly/monthly cadence in Settings; the cadence gate lives
@@ -497,6 +579,7 @@ pub fn run() {
             commands::lifecycle::install_project_sandboxed,
             commands::lifecycle::stop_all,
             commands::lifecycle::open_project,
+            commands::lifecycle::reveal_in_finder,
             commands::lifecycle::preview_port_conflict,
             commands::integrations::installed_dev_tools,
             commands::integrations::open_in_ide,
@@ -624,6 +707,98 @@ pub fn run() {
             commands::telemetry::record_telemetry_event,
             commands::updater::check_for_update,
             commands::updater::install_update,
+            // Per-project task board (Project Context & Task Authority).
+            // Board-only handlers — injected with the `tasks` feature; absent
+            // from the public OSS build. `generate_handler!` honours the per-
+            // entry `#[cfg]`, so the public build registers none of these.
+            #[cfg(feature = "tasks")]
+            commands::tasks::tasks_list,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_get,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_config_get,
+            #[cfg(feature = "tasks")]
+            commands::tasks::agents_installed,
+            #[cfg(feature = "tasks")]
+            commands::tasks::set_agent_path,
+            #[cfg(feature = "tasks")]
+            commands::tasks::clear_agent_path,
+            #[cfg(feature = "tasks")]
+            commands::tasks::set_agent_launch_mode,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_audit,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_cloud_sync,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_templates,
+            #[cfg(feature = "tasks")]
+            commands::tasks::scratchpad_get,
+            #[cfg(feature = "tasks")]
+            commands::tasks::scratchpad_set,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_capture,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_promote,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_create,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_update,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_move,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_reorder,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_delete,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_check_item,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_comment,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_checklist_add,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_archive,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_subscribe,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_attach,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_detach,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_attachment_path,
+            #[cfg(feature = "tasks")]
+            commands::tasks::card_activity,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_run_log,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_branch,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_duplicate,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_start_with_agent,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_stop_agent,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_reconcile,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_config_set,
+            #[cfg(feature = "tasks")]
+            commands::tasks::context_sync,
+            #[cfg(feature = "tasks")]
+            commands::tasks::context_show,
+            #[cfg(feature = "tasks")]
+            commands::tasks::handoff_show,
+            #[cfg(feature = "tasks")]
+            commands::tasks::handoff_update,
+            #[cfg(feature = "tasks")]
+            commands::tasks::handoff_replace,
+            #[cfg(feature = "tasks")]
+            commands::tasks::tasks_watch,
+            #[cfg(feature = "tasks")]
+            commands::tasks::tasks_unwatch,
+            commands::notifications::notifications_list,
+            commands::notifications::notifications_mark_read,
+            commands::notifications::notifications_mark_all_read,
+            commands::notifications::notifications_clear,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -130,6 +130,13 @@ pub enum AppError {
     /// A failure that doesn't fit the other variants. Kept narrow on purpose.
     #[error("{0}")]
     Internal(String),
+
+    /// The per-project task board / agent-context layer (`crate::context`)
+    /// failed — parsing a card's frontmatter, an atomic write, a dispatch, etc.
+    /// Board-only; absent from the public OSS build (no `tasks` feature).
+    #[cfg(feature = "tasks")]
+    #[error("{0}")]
+    Context(#[from] crate::context::ContextError),
 }
 
 impl AppError {
@@ -153,6 +160,8 @@ impl AppError {
             Self::Unsupported { .. } => "UNSUPPORTED",
             Self::DeviceLimitReached { .. } => "DEVICE_LIMIT_REACHED",
             Self::Internal(_) => "INTERNAL",
+            #[cfg(feature = "tasks")]
+            Self::Context(_) => "CONTEXT_FAILURE",
         }
     }
 
@@ -196,6 +205,10 @@ impl AppError {
             }
             Self::DeviceLimitReached { .. } => {
                 "Deactivate another device under Settings → Sync to use Pro on this one.".into()
+            }
+            #[cfg(feature = "tasks")]
+            Self::Context(_) => {
+                "The project's task board or agent-context files weren't updated.".into()
             }
             Self::Hosts(_) | Self::Io(_) | Self::Internal(_) => {
                 "The action did not complete.".into()

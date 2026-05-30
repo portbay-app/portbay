@@ -234,6 +234,274 @@ enum Cmd {
     /// (Importing a committed `.portbay.json` is `portbay add <path>`.)
     #[command(subcommand)]
     Import(ImportCmd),
+
+    /// Manage a project's per-project task board (the "Project Context & Task
+    /// Authority" board stored as markdown under `<project>/.portbay/tasks/`).
+    /// Cards share the same status vocabulary as the in-app Kanban board.
+    #[cfg(feature = "tasks")]
+    #[command(subcommand)]
+    Tasks(TasksCmd),
+
+    /// Regenerate a project's agent-context projections (`AGENTS.md`,
+    /// `CLAUDE.md`, …) from PortBay's live, derived environment facts.
+    #[cfg(feature = "tasks")]
+    #[command(subcommand)]
+    Context(ContextCmd),
+
+    /// Show or update a project's session hand-off brief (`.portbay/HANDOFF.md`),
+    /// the minimal continuation note the next LLM session resumes from.
+    #[cfg(feature = "tasks")]
+    #[command(subcommand)]
+    Handoff(HandoffCmd),
+
+    /// Show or set a project's board scratchpad (`.portbay/SCRATCHPAD.md`), a
+    /// freeform notepad for loose notes and plans.
+    #[cfg(feature = "tasks")]
+    #[command(subcommand)]
+    Scratchpad(ScratchpadCmd),
+}
+
+#[cfg(feature = "tasks")]
+#[derive(Subcommand, Debug)]
+enum ScratchpadCmd {
+    /// Print the scratchpad.
+    Show {
+        /// Project id.
+        project: String,
+    },
+    /// Overwrite the scratchpad. The body is read from `--body` or stdin.
+    Set {
+        /// Project id.
+        project: String,
+        /// New scratchpad body. Read from stdin when omitted.
+        #[arg(long)]
+        body: Option<String>,
+    },
+}
+
+#[cfg(feature = "tasks")]
+#[derive(Subcommand, Debug)]
+enum ContextCmd {
+    /// Regenerate the enabled projection files for a project.
+    Sync {
+        /// Project id.
+        project: String,
+        /// Don't write — just report what would change.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the rendered managed block for each adapter.
+        #[arg(long)]
+        diff: bool,
+        /// Adopt an adapter whose target file pre-existed with hand-written
+        /// content (e.g. `--adopt claude_md`). Repeatable. `--adopt all` adopts
+        /// every adapter. Without this, PortBay refuses to graft its block onto
+        /// a file you already wrote and reports it as `needs-consent`.
+        #[arg(long)]
+        adopt: Vec<String>,
+    },
+    /// Print the derived ProjectContext as JSON.
+    Show {
+        /// Project id.
+        project: String,
+    },
+}
+
+#[cfg(feature = "tasks")]
+#[derive(Subcommand, Debug)]
+enum HandoffCmd {
+    /// Print the current hand-off brief.
+    Show {
+        /// Project id.
+        project: String,
+    },
+    /// Replace the hand-off (re-derives the skeleton from board state). The
+    /// narrative is read from `--narrative` or stdin.
+    Update {
+        /// Project id.
+        project: String,
+        /// New "where we left off" narrative. Read from stdin when omitted.
+        #[arg(long)]
+        narrative: Option<String>,
+    },
+}
+
+// Variants wrap clap `Args` structs (which clap's Subcommand derive can't box),
+// so the size spread between them is expected and harmless for a CLI enum.
+#[cfg(feature = "tasks")]
+#[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
+enum TasksCmd {
+    /// List a project's task cards, grouped by column.
+    List {
+        /// Project id.
+        project: String,
+        /// Filter query: free text + prefixes `#label`, `priority:high`,
+        /// `status:Todo`, `due:overdue`, `label:bug`.
+        #[arg(long)]
+        filter: Option<String>,
+    },
+    /// Add a new card (lands in Backlog unless `--status` is given).
+    Add(TaskAddArgs),
+    /// Tick (or untick with `--undone`) a card's checklist item by index.
+    Check {
+        /// Project id.
+        project: String,
+        /// Card id.
+        id: String,
+        /// Checklist item index.
+        idx: u32,
+        /// Mark the item not-done instead of done.
+        #[arg(long)]
+        undone: bool,
+    },
+    /// Post a comment on a card.
+    Comment {
+        /// Project id.
+        project: String,
+        /// Card id.
+        id: String,
+        /// Comment text.
+        text: String,
+    },
+    /// Append checklist item(s) to a card (the agent's sub-step tracker).
+    Checklist {
+        /// Project id.
+        project: String,
+        /// Card id.
+        id: String,
+        /// One or more item descriptions.
+        #[arg(required = true)]
+        items: Vec<String>,
+    },
+    /// Archive (or `--restore`) a card — hidden from the board, recoverable.
+    Archive {
+        /// Project id.
+        project: String,
+        /// Card id.
+        id: String,
+        /// Restore instead of archive.
+        #[arg(long)]
+        restore: bool,
+    },
+    /// Move a card to another column (Backlog|Todo|InProgress|Blocked|Review|Done|Rejected).
+    Move {
+        /// Project id.
+        project: String,
+        /// Card id.
+        id: String,
+        /// Destination column.
+        to: String,
+    },
+    /// Add (or `--remove`) a dependency: the card won't auto-dispatch to an
+    /// agent until the dependency card reaches Done/Rejected.
+    Block {
+        /// Project id.
+        project: String,
+        /// Card id (the dependent card).
+        id: String,
+        /// Dependency card id it is blocked by.
+        dep: String,
+        /// Remove the dependency instead of adding it.
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Mark a card Done.
+    Done {
+        /// Project id.
+        project: String,
+        /// Card id.
+        id: String,
+    },
+    /// Delete a card.
+    Rm {
+        /// Project id.
+        project: String,
+        /// Card id.
+        id: String,
+    },
+    /// Show one card's frontmatter + body.
+    Show {
+        /// Project id.
+        project: String,
+        /// Card id.
+        id: String,
+    },
+    /// Quick-capture a draft card (not in the board flow until promoted).
+    Capture {
+        /// Project id.
+        project: String,
+        /// Card title.
+        title: String,
+    },
+    /// Promote a draft out of the Inbox into the board flow.
+    Promote {
+        /// Project id.
+        project: String,
+        /// Card id.
+        id: String,
+    },
+    /// Export the whole board to a JSON snapshot (stdout, or `--out FILE`).
+    Export {
+        /// Project id.
+        project: String,
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Import a Trello board JSON export into this project's board.
+    ImportTrello {
+        /// Project id.
+        project: String,
+        /// Path to the Trello export `.json` file.
+        file: String,
+    },
+}
+
+#[cfg(feature = "tasks")]
+#[derive(Args, Debug)]
+struct TaskAddArgs {
+    /// Project id.
+    project: String,
+    /// Card title.
+    title: String,
+    /// Card body / description.
+    #[arg(long)]
+    body: Option<String>,
+    /// Initial column (default Backlog).
+    #[arg(long)]
+    status: Option<String>,
+    /// Priority: high|medium|low.
+    #[arg(long)]
+    priority: Option<String>,
+    /// Due date (ISO-8601).
+    #[arg(long)]
+    due: Option<String>,
+    /// Acceptance criteria.
+    #[arg(long)]
+    acceptance: Option<String>,
+    /// Affected file/module (repeatable): `--touchpoint src/a.rs --touchpoint src/b.rs`.
+    #[arg(long = "touchpoint")]
+    touchpoint: Vec<String>,
+    /// Label (repeatable): `--label bug --label frontend`.
+    #[arg(long = "label")]
+    label: Vec<String>,
+    /// Numeric effort estimate.
+    #[arg(long)]
+    estimate: Option<f64>,
+    /// Hex accent color (e.g. `#ff6b6b`).
+    #[arg(long)]
+    color: Option<String>,
+    /// External URL (issue / PR / doc).
+    #[arg(long)]
+    url: Option<String>,
+    /// Assign an agent to work this card: claude|codex|cursor|gemini|aider|custom.
+    /// Omit to inherit the project's default agent.
+    #[arg(long)]
+    agent: Option<String>,
+    /// Seed from a built-in template: "Implement feature"|"Fix bug"|"Write tests"|"Refactor".
+    /// Explicit flags above win; the template fills the rest.
+    #[arg(long)]
+    template: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -768,6 +1036,15 @@ enum SidecarStatusCmd {
     /// (live), the dnsmasq resolver file, and managed /etc/hosts. Caddy, mkcert,
     /// and Mailpit are app-owned — their live state shows `unknown` here.
     Status,
+
+    /// Reclaim orphaned PortBay sidecars (caddy, dnsmasq, mailpit,
+    /// process-compose) left squatting their ports after a crash or rebuild.
+    /// Only processes orphaned to launchd (PPID 1) and carrying PortBay's own
+    /// config paths are reaped — a live app's sidecars and any foreign
+    /// caddy/dnsmasq/mailpit (ServBay, Homebrew) are never touched. Safe to run
+    /// while the app is open. Normally the app self-heals on launch; this is the
+    /// manual escape hatch.
+    Reclaim,
 }
 
 // =============================================================================
@@ -841,6 +1118,14 @@ async fn dispatch(cli: Cli) -> Result<ExitCode, CliError> {
         Cmd::Sidecar(sub) => cmd_sidecar(&ctx, sub).await,
         Cmd::Detect { path, apps } => cmd_detect(&ctx, &path, apps).await,
         Cmd::Import(sub) => cmd_import(&ctx, sub).await,
+        #[cfg(feature = "tasks")]
+        Cmd::Tasks(sub) => cmd_tasks(&ctx, sub).await,
+        #[cfg(feature = "tasks")]
+        Cmd::Context(sub) => cmd_context(&ctx, sub).await,
+        #[cfg(feature = "tasks")]
+        Cmd::Handoff(sub) => cmd_handoff(&ctx, sub).await,
+        #[cfg(feature = "tasks")]
+        Cmd::Scratchpad(sub) => cmd_scratchpad(&ctx, sub).await,
     }
 }
 
@@ -1656,147 +1941,86 @@ async fn cmd_open(ctx: &CliContext, id: &str) -> Result<ExitCode, CliError> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// CLI status badge for a single doctor check row.
+fn doctor_badge(v: portbay_lib::doctor::Verdict) -> console::StyledObject<&'static str> {
+    use portbay_lib::doctor::Verdict;
+    match v {
+        Verdict::Ok => style("✓").green(),
+        Verdict::Warn => style("!").yellow(),
+        Verdict::Fail => style("✗").red(),
+    }
+}
+
+/// CLI status badge for a doctor category header.
+fn doctor_header_badge(v: portbay_lib::doctor::Verdict) -> console::StyledObject<&'static str> {
+    use portbay_lib::doctor::Verdict;
+    match v {
+        Verdict::Ok => style("[✓]").green(),
+        Verdict::Warn => style("[!]").yellow(),
+        Verdict::Fail => style("[✗]").red(),
+    }
+}
+
+/// `portbay doctor` — flutter-doctor-style environment report. Renders the
+/// shared [`portbay_lib::doctor`] report (the same data the MCP `portbay_doctor`
+/// tool returns) as grouped categories with a header verdict and indented
+/// sub-checks. Exits non-zero only on a fatal (Fail) check; warnings exit 0.
 async fn cmd_doctor(ctx: &CliContext) -> Result<ExitCode, CliError> {
-    let mut findings: Vec<(String, Verdict, String)> = Vec::new();
+    use portbay_lib::doctor;
 
-    // Registry
-    match ctx.load_registry() {
-        Ok(reg) => findings.push((
-            "registry".into(),
-            Verdict::Ok,
-            format!(
-                "{} project(s), v{} schema, suffix .{}",
-                reg.list_projects().len(),
-                reg.version,
-                reg.domain_suffix
-            ),
-        )),
-        Err(e) => findings.push(("registry".into(), Verdict::Fail, e.to_string())),
-    }
-
-    // PC daemon reachability
-    let pc_client = ctx.pc();
-    match pc_client.live().await {
-        Ok(true) => findings.push((
-            format!("process-compose :{}", ctx.pc_port),
-            Verdict::Ok,
-            "alive".into(),
-        )),
-        Ok(false) => findings.push((
-            format!("process-compose :{}", ctx.pc_port),
-            Verdict::Warn,
-            "not reachable".into(),
-        )),
-        Err(e) => findings.push((
-            format!("process-compose :{}", ctx.pc_port),
-            Verdict::Warn,
-            e.to_string(),
-        )),
-    }
-
-    // Tooling on PATH
-    for tool in ["mkcert", "caddy", "process-compose"] {
-        match which::which(tool) {
-            Ok(p) => findings.push((
-                format!("tool: {tool}"),
-                Verdict::Ok,
-                p.display().to_string(),
-            )),
-            Err(_) => findings.push((
-                format!("tool: {tool}"),
-                Verdict::Warn,
-                "not found on PATH (the bundled .app uses its sidecar — this only matters for CLI standalone use)".into(),
-            )),
-        }
-    }
-
-    // certs root presence
-    if let Some(root) = certs_root() {
-        let exists = root.exists();
-        let count = std::fs::read_dir(&root).map(|d| d.count()).unwrap_or(0);
-        let detail = if exists {
-            format!("{} ({} entries)", root.display(), count)
-        } else {
-            format!("{} (not created yet)", root.display())
-        };
-        findings.push((
-            "certs root".into(),
-            if exists { Verdict::Ok } else { Verdict::Warn },
-            detail,
-        ));
-    }
-
-    // /etc/hosts managed entries
-    match HostsManager::system().list_managed() {
-        Ok(entries) => {
-            let reg = ctx.load_registry().ok();
-            let expected: std::collections::HashSet<String> = reg
-                .as_ref()
-                .map(|r| {
-                    r.list_projects()
-                        .iter()
-                        .map(|p| p.hostname.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let present: std::collections::HashSet<String> =
-                entries.iter().map(|e| e.hostname.clone()).collect();
-            let missing: Vec<&String> = expected.difference(&present).collect();
-            let orphan: Vec<&String> = present.difference(&expected).collect();
-            let verdict = if missing.is_empty() && orphan.is_empty() {
-                Verdict::Ok
-            } else {
-                Verdict::Warn
-            };
-            let detail = if missing.is_empty() && orphan.is_empty() {
-                format!("{} entries, all match registry", entries.len())
-            } else {
-                format!(
-                    "{} entries (missing: {}, orphan: {}). Run `sudo portbay hosts reconcile` to fix.",
-                    entries.len(),
-                    missing.len(),
-                    orphan.len()
-                )
-            };
-            findings.push(("/etc/hosts".into(), verdict, detail));
-        }
-        Err(e) => findings.push(("/etc/hosts".into(), Verdict::Warn, e.to_string())),
-    }
+    let reg = ctx.load_registry().map_err(|e| e.to_string());
+    let data_dir = ctx
+        .registry_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| ctx.registry_path.clone());
+    let report =
+        doctor::report(reg.as_ref().map_err(|e| e.as_str()), ctx.pc_port, &data_dir).await;
 
     if ctx.json {
-        let out: Vec<_> = findings
-            .iter()
-            .map(|(label, verdict, detail)| {
-                serde_json::json!({
-                    "check": label,
-                    "verdict": match verdict {
-                        Verdict::Ok => "ok",
-                        Verdict::Warn => "warn",
-                        Verdict::Fail => "fail",
-                    },
-                    "detail": detail,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        for (label, verdict, detail) in &findings {
-            let badge = match verdict {
-                Verdict::Ok => style("✓").green(),
-                Verdict::Warn => style("!").yellow(),
-                Verdict::Fail => style("✗").red(),
-            };
+        for cat in &report.categories {
             ctx.term
-                .write_line(&format!("  {badge} {label:<28} {}", style(detail).dim()))
+                .write_line(&format!(
+                    "{} {}",
+                    doctor_header_badge(cat.verdict),
+                    style(&cat.title).bold()
+                ))
+                .ok();
+            for c in &cat.checks {
+                ctx.term
+                    .write_line(&format!(
+                        "    {} {:<16} {}",
+                        doctor_badge(c.verdict),
+                        c.check,
+                        style(&c.detail).dim()
+                    ))
+                    .ok();
+            }
+            ctx.term.write_line("").ok();
+        }
+        let (warns, fails) = report.counts();
+        if warns == 0 && fails == 0 {
+            ctx.term
+                .write_line(&format!("{} No issues found.", style("•").green()))
+                .ok();
+        } else {
+            ctx.term
+                .write_line(&format!(
+                    "{} {} issue(s) found ({} fatal).",
+                    style("•").yellow(),
+                    warns + fails,
+                    fails
+                ))
                 .ok();
         }
     }
 
-    let any_fail = findings.iter().any(|(_, v, _)| matches!(v, Verdict::Fail));
-    Ok(if any_fail {
-        ExitCode::from(1)
-    } else {
+    Ok(if report.ok {
         ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     })
 }
 
@@ -2346,9 +2570,17 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
                 // always available once the file exists. Show "file" + the
                 // file's presence instead of a misleading `:0 stopped`.
                 let (badge, port_col, status) = if inst.engine.is_file_based() {
-                    let present = inst.file_path.as_ref().map(|p| p.is_file()).unwrap_or(false);
+                    let present = inst
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.is_file())
+                        .unwrap_or(false);
                     if present {
-                        (style("●").green(), "file".to_string(), "available".to_string())
+                        (
+                            style("●").green(),
+                            "file".to_string(),
+                            "available".to_string(),
+                        )
                     } else {
                         (style("○").dim(), "file".to_string(), "missing".to_string())
                     }
@@ -3880,6 +4112,69 @@ async fn cmd_sidecar(ctx: &CliContext, sub: SidecarStatusCmd) -> Result<ExitCode
                 ))
                 .ok();
         }
+        SidecarStatusCmd::Reclaim => {
+            use portbay_lib::sidecar_reclaim::{self, SidecarKind, SweepMode};
+
+            // OrphansOnly: never reach into a live app's sidecar tree. If the
+            // app is up, its sidecars are parented to it (not launchd) and are
+            // skipped; only genuine crash-leftovers are reaped.
+            let mut total = 0usize;
+            let mut rows: Vec<(String, usize)> = Vec::new();
+            for kind in SidecarKind::ALL {
+                let n = sidecar_reclaim::reclaim_stale(kind, SweepMode::OrphansOnly);
+                total += n;
+                if n > 0 {
+                    rows.push((kind.display_name().to_string(), n));
+                }
+            }
+
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "reclaimed": total,
+                        "by_kind": rows
+                            .iter()
+                            .map(|(k, n)| serde_json::json!({ "kind": k, "count": n }))
+                            .collect::<Vec<_>>(),
+                        "app_running": sidecar_reclaim::app_running(),
+                    })
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            if total == 0 {
+                ctx.term
+                    .write_line(&format!(
+                        "{} No orphaned PortBay sidecars found — nothing to reclaim.",
+                        style("✓").green()
+                    ))
+                    .ok();
+            } else {
+                for (kind, n) in &rows {
+                    ctx.term
+                        .write_line(&format!(
+                            "  {} reclaimed {n} orphaned {kind}",
+                            style("✓").green()
+                        ))
+                        .ok();
+                }
+                ctx.term
+                    .write_line(&format!(
+                        "{} Reclaimed {total} orphaned sidecar(s).",
+                        style("•").green()
+                    ))
+                    .ok();
+            }
+            if let Some(pid) = sidecar_reclaim::app_running() {
+                ctx.term
+                    .write_line(&format!(
+                        "  {} PortBay is running (pid {pid}); its live sidecars were left untouched.",
+                        style("·").dim()
+                    ))
+                    .ok();
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -4063,12 +4358,6 @@ fn emit_hosts_hint(
 // Helpers
 // =============================================================================
 
-enum Verdict {
-    Ok,
-    Warn,
-    Fail,
-}
-
 /// Try to fetch process state from PC. Returns `None` (not an error) when
 /// the daemon is unreachable — many commands degrade gracefully.
 async fn fetch_pc_state(ctx: &CliContext) -> Option<std::collections::HashMap<String, Process>> {
@@ -4137,6 +4426,23 @@ impl From<serde_json::Error> for CliError {
     }
 }
 
+#[cfg(feature = "tasks")]
+impl From<portbay_lib::context::ContextError> for CliError {
+    fn from(e: portbay_lib::context::ContextError) -> Self {
+        use portbay_lib::context::ContextError as CE;
+        match e {
+            CE::ProjectNotFound(id) | CE::CardNotFound(id) => CliError::ProjectNotFound(id),
+            CE::BadInput(s) => CliError::BadInput(s),
+            CE::IllegalTransition { .. }
+            | CE::StaleRun { .. }
+            | CE::HandoffTooLarge { .. }
+            | CE::AgentNotFound(_)
+            | CE::ProRequired(_) => CliError::BadInput(e.to_string()),
+            other => CliError::Other(other.to_string()),
+        }
+    }
+}
+
 impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -4172,6 +4478,635 @@ fn print_error(e: &CliError) {
 }
 
 // =============================================================================
+// Tasks board (`portbay tasks …`)
+// =============================================================================
+
+#[cfg(feature = "tasks")]
+fn tasks_project_path(ctx: &CliContext, project: &str) -> Result<PathBuf, CliError> {
+    let reg = ctx.load_registry()?;
+    reg.get_project(&registry::ProjectId::new(project))
+        .map(|p| p.path.clone())
+        .ok_or_else(|| CliError::ProjectNotFound(project.to_string()))
+}
+
+#[cfg(feature = "tasks")]
+fn parse_cli_priority(
+    s: Option<String>,
+) -> Result<Option<portbay_lib::context::board::Priority>, CliError> {
+    use portbay_lib::context::board::Priority;
+    match s {
+        None => Ok(None),
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "high" => Ok(Some(Priority::High)),
+            "medium" | "med" => Ok(Some(Priority::Medium)),
+            "low" => Ok(Some(Priority::Low)),
+            other => Err(CliError::BadInput(format!(
+                "unknown priority '{other}' (expected high|medium|low)"
+            ))),
+        },
+    }
+}
+
+#[cfg(feature = "tasks")]
+async fn cmd_tasks(ctx: &CliContext, sub: TasksCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::context::audit::Actor;
+    use portbay_lib::context::board::{self, BoardStatus};
+    use portbay_lib::context::{clock, ops};
+
+    match sub {
+        TasksCmd::List { project, filter } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let mut cards = board::list_cards(&path)?;
+            let show_archived = filter.as_deref().is_some_and(|f| f.contains("is:archived"));
+            if !show_archived {
+                cards.retain(|c| !c.card.archived);
+            }
+            if let Some(f) = filter.as_deref() {
+                let today = clock::now_iso8601();
+                let today = &today[..10];
+                cards.retain(|c| board::card_matches(&c.card, &c.body, f, today));
+            }
+
+            if ctx.json {
+                #[derive(serde::Serialize)]
+                struct Row<'a> {
+                    #[serde(flatten)]
+                    card: &'a board::TaskCard,
+                    body: &'a str,
+                }
+                let rows: Vec<Row> = cards
+                    .iter()
+                    .map(|c| Row {
+                        card: &c.card,
+                        body: &c.body,
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            if cards.is_empty() {
+                ctx.term
+                    .write_line(&format!(
+                        "{} No tasks yet. {} `portbay tasks add {project} \"<title>\"`",
+                        style("·").dim(),
+                        style("Add one with").dim()
+                    ))
+                    .ok();
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            for col in BoardStatus::flow_order() {
+                let in_col: Vec<_> = cards.iter().filter(|c| c.card.status == col).collect();
+                if in_col.is_empty() {
+                    continue;
+                }
+                ctx.term
+                    .write_line(&format!(
+                        "{} {}",
+                        style(col.as_str()).bold(),
+                        style(format!("({})", in_col.len())).dim()
+                    ))
+                    .ok();
+                for c in in_col {
+                    let pri = c
+                        .card
+                        .priority
+                        .map(|p| format!("{p:?}").to_lowercase())
+                        .unwrap_or_default();
+                    ctx.term
+                        .write_line(&format!(
+                            "  {}  {:<7} {}",
+                            style(&c.card.id).dim(),
+                            pri,
+                            c.card.title
+                        ))
+                        .ok();
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Add(args) => {
+            let path = tasks_project_path(ctx, &args.project)?;
+            let status = match args.status {
+                Some(s) => Some(BoardStatus::parse(&s)?),
+                None => None,
+            };
+            let priority = parse_cli_priority(args.priority)?;
+            let agent = match args.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(s) => Some(
+                    portbay_lib::context::config::AgentKind::parse(s)
+                        .ok_or_else(|| CliError::Other(format!("unknown agent: {s}")))?,
+                ),
+                None => None,
+            };
+            let mut create = ops::CreateInput {
+                title: args.title,
+                body: args.body.unwrap_or_default(),
+                status,
+                priority,
+                due: args.due,
+                acceptance: args.acceptance,
+                touchpoints: args.touchpoint,
+                automation: None,
+                agent,
+                labels: args.label,
+                estimate: args.estimate,
+                color: args.color,
+                url: args.url,
+                checklist: None,
+            };
+            if let Some(name) = args.template.as_deref() {
+                let tpl = portbay_lib::context::templates::get(name)
+                    .ok_or_else(|| CliError::Other(format!("unknown template: {name}")))?;
+                tpl.seed(&mut create);
+            }
+            let pc = ops::create_card(&path, create, Actor::Cli, &clock::now_iso8601())?;
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&pc.card)?);
+            } else {
+                ctx.term
+                    .write_line(&format!(
+                        "{} added {} in {}",
+                        style("✓").green(),
+                        style(&pc.card.id).bold(),
+                        pc.card.status.as_str()
+                    ))
+                    .ok();
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Move { project, id, to } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let to = BoardStatus::parse(&to)?;
+            let pc = ops::move_card(&path, &id, to, false, None, Actor::Cli, &clock::now_iso8601())?;
+            ctx.term
+                .write_line(&format!(
+                    "{} {} → {}",
+                    style("✓").green(),
+                    style(&pc.card.id).bold(),
+                    pc.card.status.as_str()
+                ))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Block {
+            project,
+            id,
+            dep,
+            remove,
+        } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let mut deps = board::read_card(&path, &id)?.card.blocked_by;
+            if remove {
+                deps.retain(|d| d != &dep);
+            } else if dep != id && !deps.contains(&dep) {
+                deps.push(dep.clone());
+            }
+            ops::update_card(
+                &path,
+                &id,
+                ops::UpdatePatch {
+                    blocked_by: Some(deps),
+                    ..Default::default()
+                },
+                Actor::Cli,
+                &clock::now_iso8601(),
+            )?;
+            ctx.term
+                .write_line(&format!(
+                    "{} {} {} dependency {}",
+                    style("✓").green(),
+                    style(&id).bold(),
+                    if remove { "removed" } else { "blocked by" },
+                    style(&dep).bold()
+                ))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Done { project, id } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let pc = ops::move_card(
+                &path,
+                &id,
+                BoardStatus::Done,
+                false,
+                None,
+                Actor::Cli,
+                &clock::now_iso8601(),
+            )?;
+            ctx.term
+                .write_line(&format!("{} {} done", style("✓").green(), style(&pc.card.id).bold()))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Rm { project, id } => {
+            let path = tasks_project_path(ctx, &project)?;
+            ops::delete_card(&path, &id, Actor::Cli, &clock::now_iso8601())?;
+            ctx.term
+                .write_line(&format!("{} removed {}", style("✓").green(), style(&id).bold()))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Show { project, id } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let pc = board::read_card(&path, &id)?;
+            if ctx.json {
+                #[derive(serde::Serialize)]
+                struct Row<'a> {
+                    #[serde(flatten)]
+                    card: &'a board::TaskCard,
+                    body: &'a str,
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&Row {
+                        card: &pc.card,
+                        body: &pc.body
+                    })?
+                );
+            } else {
+                println!("{}", board::render_card(&pc.card, &pc.body)?);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Capture { project, title } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let now = clock::now_iso8601();
+            let created = ops::create_card(
+                &path,
+                ops::CreateInput { title, ..Default::default() },
+                Actor::Cli,
+                &now,
+            )?;
+            ops::update_card(
+                &path,
+                &created.card.id,
+                ops::UpdatePatch { draft: Some(true), ..Default::default() },
+                Actor::Cli,
+                &now,
+            )?;
+            ctx.term
+                .write_line(&format!(
+                    "{} captured {} → Drafts",
+                    style("✓").green(),
+                    style(&created.card.id).bold()
+                ))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Promote { project, id } => {
+            let path = tasks_project_path(ctx, &project)?;
+            ops::update_card(
+                &path,
+                &id,
+                ops::UpdatePatch { draft: Some(false), ..Default::default() },
+                Actor::Cli,
+                &clock::now_iso8601(),
+            )?;
+            ctx.term
+                .write_line(&format!("{} promoted {} to the board", style("✓").green(), style(&id).bold()))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Export { project, out } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let json = portbay_lib::context::portage::export_board(&path)?;
+            match out {
+                Some(file) => {
+                    std::fs::write(&file, &json)
+                        .map_err(|e| CliError::Other(format!("write {file}: {e}")))?;
+                    ctx.term
+                        .write_line(&format!("{} board exported → {}", style("✓").green(), style(&file).bold()))
+                        .ok();
+                }
+                None => println!("{json}"),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::ImportTrello { project, file } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let json = std::fs::read_to_string(&file)
+                .map_err(|e| CliError::Other(format!("read {file}: {e}")))?;
+            let n = portbay_lib::context::portage::import_trello(&path, &json, &clock::now_iso8601())?;
+            ctx.term
+                .write_line(&format!("{} imported {n} card(s) from Trello", style("✓").green()))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Check {
+            project,
+            id,
+            idx,
+            undone,
+        } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let pc = ops::check_item(&path, &id, idx, !undone, Actor::Cli, &clock::now_iso8601())?;
+            let (done, total) = pc
+                .card
+                .checklist
+                .as_ref()
+                .map(|c| c.progress())
+                .unwrap_or((0, 0));
+            ctx.term
+                .write_line(&format!(
+                    "{} item {idx} {} ({done}/{total})",
+                    style("✓").green(),
+                    if undone { "reopened" } else { "done" }
+                ))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Comment { project, id, text } => {
+            let path = tasks_project_path(ctx, &project)?;
+            ops::comment(&path, &id, &text, Actor::Cli, &clock::now_iso8601())?;
+            ctx.term
+                .write_line(&format!("{} comment added to {}", style("✓").green(), style(&id).bold()))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Checklist { project, id, items } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let n = items.len();
+            ops::add_checklist_items(&path, &id, items, None, Actor::Cli, &clock::now_iso8601())?;
+            ctx.term
+                .write_line(&format!(
+                    "{} added {n} checklist item(s) to {}",
+                    style("✓").green(),
+                    style(&id).bold()
+                ))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+
+        TasksCmd::Archive {
+            project,
+            id,
+            restore,
+        } => {
+            let path = tasks_project_path(ctx, &project)?;
+            ops::set_archived(&path, &id, !restore, Actor::Cli, &clock::now_iso8601())?;
+            ctx.term
+                .write_line(&format!(
+                    "{} {} {}",
+                    style("✓").green(),
+                    style(&id).bold(),
+                    if restore { "restored" } else { "archived" }
+                ))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+// =============================================================================
+// Context projections (`portbay context …`) + hand-off (`portbay handoff …`)
+// =============================================================================
+
+#[cfg(feature = "tasks")]
+async fn cmd_context(ctx: &CliContext, sub: ContextCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::context::sync;
+
+    match sub {
+        ContextCmd::Sync {
+            project,
+            dry_run,
+            diff,
+            adopt,
+        } => {
+            use portbay_lib::context::{adapters, config};
+            let reg = ctx.load_registry()?;
+            let p = reg
+                .get_project(&registry::ProjectId::new(&project))
+                .ok_or_else(|| CliError::ProjectNotFound(project.clone()))?;
+
+            // Record adoptions before syncing so the gated files get written
+            // this run. `all` adopts every shipped adapter.
+            if !adopt.is_empty() && !dry_run {
+                let mut cfg = config::load(&p.path)?;
+                for id in &adopt {
+                    if id == "all" {
+                        for spec in adapters::ALL {
+                            cfg.adapter_adopt.insert(spec.id.to_string());
+                        }
+                    } else if adapters::by_id(id).is_some() {
+                        cfg.adapter_adopt.insert(id.clone());
+                    } else {
+                        return Err(CliError::Other(format!("unknown adapter id: {id}")));
+                    }
+                }
+                config::save(&p.path, &cfg)?;
+            }
+
+            if diff || dry_run {
+                let preview = sync::sync_project(&reg, p, true)?;
+                if ctx.json {
+                    println!("{}", serde_json::to_string_pretty(&preview)?);
+                    if dry_run {
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                } else {
+                    for r in &preview.results {
+                        if let Some(pv) = &r.preview {
+                            ctx.term
+                                .write_line(&format!(
+                                    "{} {}",
+                                    style("──").dim(),
+                                    style(&r.path).bold()
+                                ))
+                                .ok();
+                            println!("{pv}");
+                        }
+                    }
+                    if dry_run {
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                }
+            }
+
+            let report = sync::sync_project(&reg, p, false)?;
+            if ctx.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            for r in &report.results {
+                if r.action == sync::SyncAction::NeedsConsent {
+                    ctx.term
+                        .write_line(&format!(
+                            "{} {:<12} {} — adopt with `portbay context sync {} --adopt {}`",
+                            style("!").yellow(),
+                            "needs-consent",
+                            r.path,
+                            project,
+                            r.id,
+                        ))
+                        .ok();
+                    continue;
+                }
+                let action = format!("{:?}", r.action).to_lowercase();
+                if r.enabled || r.action != sync::SyncAction::Skipped {
+                    ctx.term
+                        .write_line(&format!(
+                            "{} {:<12} {}",
+                            style("·").dim(),
+                            action,
+                            r.path
+                        ))
+                        .ok();
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        ContextCmd::Show { project } => {
+            let reg = ctx.load_registry()?;
+            let p = reg
+                .get_project(&registry::ProjectId::new(&project))
+                .ok_or_else(|| CliError::ProjectNotFound(project.clone()))?;
+            let context = sync::derive_context(&reg, p);
+            println!("{}", serde_json::to_string_pretty(&context)?);
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+#[cfg(feature = "tasks")]
+async fn cmd_handoff(ctx: &CliContext, sub: HandoffCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::context::{board, clock, config, handoff, sync};
+
+    match sub {
+        HandoffCmd::Show { project } => {
+            let path = tasks_project_path(ctx, &project)?;
+            match handoff::read(&path)? {
+                Some(h) => {
+                    if ctx.json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "updated": h.meta.updated,
+                                "tokenBudget": h.meta.token_budget,
+                                "autoGenerated": h.meta.auto_generated,
+                                "tokens": handoff::estimate_tokens(&h.body),
+                                "body": h.body,
+                            })
+                        );
+                    } else {
+                        println!("{}", h.body);
+                    }
+                }
+                None => {
+                    ctx.term
+                        .write_line(&format!("{} no hand-off yet", style("·").dim()))
+                        .ok();
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        HandoffCmd::Update { project, narrative } => {
+            let reg = ctx.load_registry()?;
+            let p = reg
+                .get_project(&registry::ProjectId::new(&project))
+                .ok_or_else(|| CliError::ProjectNotFound(project.clone()))?;
+            let path = p.path.clone();
+            let cfg = config::load(&path)?;
+            let context = sync::derive_context(&reg, p);
+            let cards = board::list_cards(&path)?;
+
+            let text = match narrative {
+                Some(n) => n,
+                None => {
+                    use std::io::Read;
+                    let mut s = String::new();
+                    std::io::stdin().read_to_string(&mut s).ok();
+                    s
+                }
+            };
+
+            let up = handoff::update(
+                &path,
+                Some(&text),
+                "you (CLI)",
+                &context,
+                &cards,
+                cfg.handoff.max_chars,
+                &clock::now_iso8601(),
+                false,
+            )?;
+            let _ = sync::sync_project(&reg, p, false);
+
+            ctx.term
+                .write_line(&format!(
+                    "{} hand-off entry added ({}/{} chars{})",
+                    style("✓").green(),
+                    up.chars,
+                    up.handoff.meta.max_chars,
+                    if up.trimmed { ", oldest entries pruned" } else { "" }
+                ))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+#[cfg(feature = "tasks")]
+async fn cmd_scratchpad(ctx: &CliContext, sub: ScratchpadCmd) -> Result<ExitCode, CliError> {
+    use portbay_lib::context::scratchpad;
+
+    match sub {
+        ScratchpadCmd::Show { project } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let body = scratchpad::read(&path)?;
+            if ctx.json {
+                println!("{}", serde_json::json!({ "body": body }));
+            } else if body.trim().is_empty() {
+                ctx.term
+                    .write_line(&format!("{} scratchpad is empty", style("·").dim()))
+                    .ok();
+            } else {
+                println!("{body}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        ScratchpadCmd::Set { project, body } => {
+            let path = tasks_project_path(ctx, &project)?;
+            let text = match body {
+                Some(b) => b,
+                None => {
+                    use std::io::Read;
+                    let mut s = String::new();
+                    std::io::stdin().read_to_string(&mut s).ok();
+                    s
+                }
+            };
+            scratchpad::write(&path, &text)?;
+            ctx.term
+                .write_line(&format!(
+                    "{} scratchpad saved ({} chars)",
+                    style("✓").green(),
+                    text.chars().count()
+                ))
+                .ok();
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -4184,6 +5119,19 @@ mod tests {
         let cli = Cli::try_parse_from(["portbay", "list"]).unwrap();
         assert!(matches!(cli.cmd, Some(Cmd::List)));
         assert!(!cli.json);
+    }
+
+    #[test]
+    fn cli_parses_doctor() {
+        let cli = Cli::try_parse_from(["portbay", "doctor"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Doctor)));
+    }
+
+    #[test]
+    fn cli_parses_doctor_json() {
+        let cli = Cli::try_parse_from(["portbay", "--json", "doctor"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Doctor)));
+        assert!(cli.json);
     }
 
     #[test]

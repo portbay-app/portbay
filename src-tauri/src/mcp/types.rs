@@ -359,22 +359,8 @@ pub struct DetectResult {
     pub suggested_php_version: Option<String>,
 }
 
-/// One environment-health check.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct DoctorFinding {
-    pub check: String,
-    /// `ok`, `warn`, or `fail`.
-    pub verdict: String,
-    pub detail: String,
-}
-
-/// Result of `portbay_doctor`.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct DoctorResult {
-    /// True when no check returned `fail`.
-    pub ok: bool,
-    pub findings: Vec<DoctorFinding>,
-}
+// `portbay_doctor` returns `crate::doctor::DoctorReport` directly (the shared
+// core behind the CLI `portbay doctor`), so there's no MCP-local doctor type.
 
 /// One sidecar's state.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -776,4 +762,180 @@ pub struct ImportProjectsArgs {
     /// Import every site the source exposes, ignoring `ids`. Defaults to false.
     #[serde(default)]
     pub all: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Per-project task board ("Project Context & Task Authority")
+// ---------------------------------------------------------------------------
+
+/// List a project's task cards.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TasksListArgs {
+    /// Project id.
+    pub project: String,
+    /// Optional column filter: `Backlog`, `Todo`, `InProgress`, `Blocked`,
+    /// `Review`, `Done`, or `Rejected`.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// Get the next actionable card (the top `Todo`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskNextArgs {
+    /// Project id.
+    pub project: String,
+}
+
+/// Read one card in full (all fields + the markdown body).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskGetArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+}
+
+/// Create a new card. Lands in `Backlog` unless `status` is given.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskCreateArgs {
+    /// Project id.
+    pub project: String,
+    /// Card title.
+    pub title: String,
+    /// Markdown description / body.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Initial column. Defaults to `Backlog`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// `critical`, `high`, `medium`, or `low`.
+    #[serde(default)]
+    pub priority: Option<String>,
+    /// Acceptance criteria.
+    #[serde(default)]
+    pub acceptance: Option<String>,
+    /// Files or modules this task is expected to touch — a starting set for the
+    /// agent (it may touch more). Naming them lifts first-run success.
+    #[serde(default)]
+    pub touchpoints: Option<Vec<String>>,
+    /// Labels to tag the card with.
+    #[serde(default)]
+    pub labels: Option<Vec<String>>,
+    /// Numeric effort estimate.
+    #[serde(default)]
+    pub estimate: Option<f64>,
+    /// Seed from a built-in template by name ("Implement feature", "Fix bug",
+    /// "Write tests", "Refactor"). Explicit fields above win; the template fills
+    /// the rest (body, checklist sub-steps, acceptance criteria, labels).
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+/// Tick or untick a card's checklist item.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskCheckArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// Checklist item index.
+    pub idx: u32,
+    /// Mark done (true) or reopen (false). Defaults to true.
+    #[serde(default)]
+    pub done: Option<bool>,
+    /// Run id from the dispatch prompt (validated against the card's claim).
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+/// Append items to a card's checklist — the agent's own sub-step tracker.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskChecklistAddArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// Sub-task descriptions to append (e.g. `["P0: wire form", "P1: tests"]`).
+    pub items: Vec<String>,
+    /// Optional checklist heading (set on first use).
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Run id from the dispatch prompt.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+/// Post a comment on a card (shows in its activity thread).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskCommentArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// Comment text (markdown).
+    pub text: String,
+    /// Run id from the dispatch prompt.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+/// Acknowledge a dispatched card — proves the agent engaged.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskAckArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// The run id from the dispatch prompt.
+    pub run_id: String,
+}
+
+/// Advance a card and/or post a progress note. Validates `run_id` against the
+/// card's active claim and enforces the transition rules (an agent may never
+/// set `Rejected`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskUpdateArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// The run id from the dispatch prompt. Required to advance a claimed card.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// New column: `InProgress`, `Done`, `Blocked`, `Review`, or `Todo`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// A short progress note (recorded in the audit log; also a heartbeat).
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Reason, when moving to `Blocked`.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Record the files / modules you actually touched (or found relevant).
+    /// Replaces the card's touchpoints — a working artifact for the next run
+    /// and the human's review. Other card content stays human-owned.
+    #[serde(default)]
+    pub touchpoints: Option<Vec<String>>,
+}
+
+/// Read the current continuation brief.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct HandoffGetArgs {
+    /// Project id.
+    pub project: String,
+}
+
+/// Append a new entry to the rolling hand-off log (newest on top).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct HandoffUpdateArgs {
+    /// Project id.
+    pub project: String,
+    /// The "where we left off" note: current goal, what was just done, and the
+    /// next concrete step. Keep it minimal — the log is size-capped and prunes
+    /// oldest entries first.
+    pub narrative: String,
+    /// Who is writing this entry (e.g. your agent name, "claude", "codex"). Used
+    /// to sign the entry. Optional; defaults to "agent".
+    #[serde(default)]
+    pub author: Option<String>,
 }

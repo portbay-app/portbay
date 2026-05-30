@@ -302,6 +302,15 @@ pub async fn update_project(
     if let Some(name) = patch.name {
         project.name = name;
     }
+    // Mutable kind: promote/demote a project — e.g. a board-only `custom`
+    // project (created from the Tasks page with no server) grows into a real
+    // `next`/`php` app. `services` is recomputed from the new kind below
+    // (unless the patch sends its own), so the converted project is actually
+    // runnable instead of keeping the empty service list a board started with.
+    let kind_changed = patch.kind.is_some_and(|k| k != project.kind);
+    if let Some(kind) = patch.kind {
+        project.kind = kind;
+    }
     if let Some(hostname) = patch.hostname {
         project.hostname = hostname;
     }
@@ -328,6 +337,12 @@ pub async fn update_project(
     }
     if let Some(services) = patch.services {
         project.services = services;
+    } else if kind_changed {
+        // No explicit service list, but the kind switched — derive the right
+        // services for the new kind (e.g. add `caddy`/`php-fpm`) so a promoted
+        // board can serve. `https`/`start_command` above are already patched.
+        project.services =
+            default_services(project.kind, project.https, project.start_command.is_some());
     }
     if let Some(env) = patch.env {
         project.env = env;
@@ -1093,10 +1108,9 @@ fn detected_runtime_for(kind: ProjectType) -> Option<Runtime> {
 
 fn default_services(kind: ProjectType, https: bool, has_start_command: bool) -> Vec<String> {
     match kind {
-        ProjectType::Flutter
-        | ProjectType::Xcode
-        | ProjectType::Android
-        | ProjectType::Expo => vec![],
+        ProjectType::Flutter | ProjectType::Xcode | ProjectType::Android | ProjectType::Expo => {
+            vec![]
+        }
         ProjectType::Php if has_start_command => vec!["caddy".into()],
         ProjectType::Php => vec!["caddy".into(), "php-fpm".into()],
         _ if https => vec!["caddy".into()],

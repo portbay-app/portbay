@@ -13,6 +13,7 @@
 //! Concurrency: held behind a `std::sync::Mutex` in `AppState`. Reads
 //! and writes are sub-millisecond; no async needed.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -124,6 +125,36 @@ pub struct Preferences {
     #[serde(default)]
     pub default_web_server: Option<WebServer>,
 
+    /// Terminal app used to host an *interactive* agent dispatch (the board's
+    /// "Start with agent" / auto-on-To-Do). One of the detected terminal tool
+    /// ids — `"warp"`, `"iterm"`, `"ghostty"`, `"terminal"`. `None` resolves at
+    /// launch time to the first detected terminal, falling back to macOS
+    /// Terminal.app. Lets the agent (the LLM/CLI) and the terminal (the host
+    /// window) be chosen independently.
+    #[serde(default)]
+    pub preferred_terminal: Option<String>,
+
+    /// Global default agent (kind id, e.g. `"claude"`) dispatched for project
+    /// boards that haven't saved their own automation config yet. A project's
+    /// own board config overrides this once edited. `None` → Claude.
+    #[serde(default)]
+    pub preferred_agent: Option<String>,
+
+    /// Per-agent absolute binary path overrides, keyed by agent id. For agents
+    /// installed outside PATH and the scanned dirs (external drives, custom
+    /// prefixes) — the analogue of the runtimes "add by path" flow. Detection
+    /// and dispatch prefer these when set and executable.
+    #[serde(default)]
+    pub agent_paths: BTreeMap<String, String>,
+
+    /// Per-agent launch mode, keyed by agent id: `"cli"` runs the command-line
+    /// tool (default), `"app"` opens the agent's desktop app/IDE at the project
+    /// and hands the prompt over via the clipboard. A key is absent until the
+    /// user changes it; a missing or unknown value reads as `"cli"`. Only
+    /// honoured for agents whose app form is actually detected.
+    #[serde(default)]
+    pub agent_launch_modes: BTreeMap<String, String>,
+
     // -------- Domains & HTTPS --------
     /// Permit PortBay to write managed entries to /etc/hosts. On by
     /// default for new installs; turning this off pins the user to a
@@ -219,6 +250,10 @@ impl Default for Preferences {
             default_sort: default_sort(),
             default_start_behavior: default_start_behavior(),
             default_web_server: None,
+            preferred_terminal: None,
+            preferred_agent: None,
+            agent_paths: BTreeMap::new(),
+            agent_launch_modes: BTreeMap::new(),
             manage_hosts_automatically: true,
             auto_renew_certificates: true,
             store_logs_locally: true,
@@ -327,6 +362,13 @@ mod tests {
             default_sort: "status".to_string(),
             default_start_behavior: "auto".to_string(),
             default_web_server: Some(WebServer::Nginx),
+            preferred_terminal: Some("warp".to_string()),
+            preferred_agent: Some("codex".to_string()),
+            agent_paths: BTreeMap::from([(
+                "codex".to_string(),
+                "/Volumes/Ext/bin/codex".to_string(),
+            )]),
+            agent_launch_modes: BTreeMap::from([("codex".to_string(), "app".to_string())]),
             manage_hosts_automatically: false,
             auto_renew_certificates: false,
             store_logs_locally: false,
@@ -347,6 +389,9 @@ mod tests {
         assert!(json.contains("\"autoCleanSchedule\":\"weekly\""));
         assert!(json.contains("\"lastAutoClean\":1700000000"));
         assert!(json.contains("\"defaultWebServer\":\"nginx\""));
+        assert!(json.contains("\"preferredTerminal\":\"warp\""));
+        assert!(json.contains("\"preferredAgent\":\"codex\""));
+        assert!(json.contains("\"agentPaths\":{\"codex\":\"/Volumes/Ext/bin/codex\"}"));
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
     }

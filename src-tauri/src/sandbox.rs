@@ -299,31 +299,45 @@ pub fn wrap_install_command(
     }
 }
 
-/// Build an env prefix that puts the managed Node bin dir on PATH and sets
-/// `COREPACK_HOME` for the install phase. Empty when `node_bin_dir` is `None`.
-/// The install wrapper uses `/bin/zsh -lc` (sources rc files for PATH), but this
-/// prefix **replaces** PATH with a minimal set so a ServBay corepack on the
-/// login-shell PATH never wins over PortBay's managed one.
+/// Build an env prefix that steers the install phase's package manager. The
+/// install wrapper uses `/bin/zsh -lc` (sources rc files for PATH); the four
+/// cases:
+/// - managed Node + corepack home: **replace** PATH with a minimal set (managed
+///   shims + bin dir) so a ServBay corepack on the login PATH never wins, and
+///   point `COREPACK_HOME` at the per-project managed dir.
+/// - managed Node only: minimal PATH, no corepack steering.
+/// - corepack home only (system Node, no managed binary): keep the login-shell
+///   PATH so the system Node + corepack resolve, but still set `COREPACK_HOME`
+///   so the pinned PM is materialized into the per-project managed dir — which
+///   is writable in the sandbox, unlike `~/.cache` — for the offline run phase.
+/// - neither: empty (neutral install path, untouched).
 #[cfg(target_os = "macos")]
 pub fn node_install_env_prefix(
     node_bin_dir: Option<&Path>,
     corepack_home: Option<&Path>,
 ) -> String {
-    let Some(bin_dir) = node_bin_dir else {
-        return String::new();
-    };
-    let bin_dir_q = shell_quote(&bin_dir.to_string_lossy());
-    match corepack_home {
-        Some(ch) => {
+    match (node_bin_dir, corepack_home) {
+        (Some(bin_dir), Some(ch)) => {
             // Corepack writes the pnpm/yarn shims into `<corepack_home>/shims`
             // (see `corepack_enable_preamble`). Our managed Node ships
             // `node`/`npm`/`npx`/`corepack` but NOT a `pnpm` shim, so that dir
             // must lead PATH for `pnpm install` to resolve during this phase.
             let shims_q = shell_quote(&ch.join("shims").to_string_lossy());
+            let bin_dir_q = shell_quote(&bin_dir.to_string_lossy());
             let ch_q = shell_quote(&ch.to_string_lossy());
             format!("PATH={shims_q}:{bin_dir_q}:/usr/bin:/bin COREPACK_HOME={ch_q} ")
         }
-        None => format!("PATH={bin_dir_q}:/usr/bin:/bin "),
+        (Some(bin_dir), None) => {
+            let bin_dir_q = shell_quote(&bin_dir.to_string_lossy());
+            format!("PATH={bin_dir_q}:/usr/bin:/bin ")
+        }
+        (None, Some(ch)) => {
+            // System Node: don't touch PATH (the login shell finds Node +
+            // corepack), just route corepack at the managed home.
+            let ch_q = shell_quote(&ch.to_string_lossy());
+            format!("COREPACK_HOME={ch_q} ")
+        }
+        (None, None) => String::new(),
     }
 }
 
@@ -486,7 +500,15 @@ fn profile(project: &Project, data_dir: &Path, home: &Path) -> String {
   (global-name "com.apple.dnssd.service")
   (global-name "com.apple.mDNSResponder")
   (global-name "com.apple.coreservices.launchservicesd")
-  (global-name "com.apple.CoreServices.coreservicesd"))
+  (global-name "com.apple.CoreServices.coreservicesd")
+  ; FSEvents: dev servers (Next.js/Vite/webpack via watchpack/chokidar) watch
+  ; the project tree for hot-reload through this service. Denying it doesn't
+  ; just disable HMR — Node falls back to per-descriptor kqueue watching, which
+  ; floods the log with `EMFILE: too many open files, watch` and balloons cold
+  ; start (~1.3s → ~16s of watcher thrashing) even though the fd limit is huge.
+  ; The fseventsd device (`/dev/fsevents`) is already covered by the broad
+  ; `(allow file-read*)` above; only the mach service was missing.
+  (global-name "com.apple.FSEvents"))
 
 ; Runtimes read toolchains, frameworks, lockfiles, and package caches all over
 ; the disk, so reads outside $HOME are broadly allowed …
@@ -538,21 +560,37 @@ fn profile(project: &Project, data_dir: &Path, home: &Path) -> String {
     )
 }
 
-/// Flip `$HOME` to default-deny for reads, then re-allow the directories and
-/// dotfiles dev/build tooling legitimately needs. This is the core of the
-/// allowlist read model: everything under the user's home is unreadable unless
-/// it's named here, so a credential stashed in a home location we never
-/// enumerated (`~/.somecloud/token`, a new CLI's config dir, …) is denied by
-/// default — the structural gap a broad-read deny-list can't cover.
+/// Flip `$HOME` to default-deny for *content* reads, then re-allow the
+/// directories and dotfiles dev/build tooling legitimately needs. This is the
+/// core of the allowlist read model: the bytes of everything under the user's
+/// home are unreadable unless named here, so a credential stashed in a home
+/// location we never enumerated (`~/.somecloud/token`, a new CLI's config dir,
+/// …) has its contents denied by default — the structural gap a broad-read
+/// deny-list can't cover.
 ///
-/// Reads *outside* `$HOME` stay broadly allowed (the `(allow file-read*)` above
-/// this in `profile`), because toolchains read system frameworks, `/opt`
-/// homebrew, `/usr`, etc. Credential stores that live *inside* a re-allowed dir
-/// (e.g. `.cargo/credentials`, `.config/gh`, `.composer/auth.json`) are clawed
-/// back afterwards by [`secret_read_denies`], which is emitted after this and
-/// wins by last-match. `home` is already canonical (resolved in `profile`); each
-/// entry is canonicalized again so a symlinked toolchain dir matches the path
-/// Seatbelt actually evaluates.
+/// The home deny is `file-read-data`, **not** `file-read*`: it blocks reading
+/// file *contents* and directory *listings* under `$HOME`, but leaves
+/// `file-read-metadata` (`lstat`/`stat`/`readlink`) allowed by the broad
+/// `(allow file-read*)` above this in `profile`. That metadata path is load-
+/// bearing: Node's module loader calls `realpathSync` on the entry script,
+/// which `lstat`s **every** ancestor component — including `/Users/<me>` itself
+/// — to detect symlinks. A package manager or runtime that lives under `$HOME`
+/// (corepack/pnpm in `~/.cache`, or node via `nvm`/`fnm`/`volta`) therefore
+/// walks through the home root, and a blanket `file-read*` deny there made that
+/// `lstat` fail with EPERM, crashing the sandboxed project before its first
+/// line ran. Allowing metadata leaks only existence/size of un-enumerated home
+/// paths (low value — a malicious dep already assumes `~/.ssh` exists); the
+/// secret *bytes* stay denied, which is the protection that matters.
+///
+/// Reads *outside* `$HOME` stay broadly allowed (toolchains read system
+/// frameworks, `/opt` homebrew, `/usr`, etc.). Credential stores that live
+/// *inside* a re-allowed dir (e.g. `.cargo/credentials`, `.config/gh`,
+/// `.composer/auth.json`) are clawed back afterwards by [`secret_read_denies`],
+/// which is emitted after this, wins by last-match, and uses `file-read*` — so
+/// known secrets are denied *including* their metadata (you can't even `stat`
+/// `~/.ssh`). `home` is already canonical (resolved in `profile`); each entry is
+/// canonicalized again so a symlinked toolchain dir matches the path Seatbelt
+/// actually evaluates against the resolved target.
 #[cfg(target_os = "macos")]
 fn home_read_rules(data_dir: &Path, home: &Path) -> String {
     let _ = data_dir; // reserved for future per-data-dir rules; kept for API symmetry
@@ -620,8 +658,15 @@ fn home_read_rules(data_dir: &Path, home: &Path) -> String {
     ];
 
     let mut out = String::new();
+    // `file-read-data`, not `file-read*`: deny contents + directory listings
+    // under $HOME while leaving metadata (lstat/stat/readlink) allowed, so
+    // Node's `realpathSync` can lstat the home root and traverse symlinked
+    // toolchain dirs (e.g. corepack/pnpm under `~/.cache`, or node via nvm/fnm).
+    // See this fn's doc comment for the full rationale and the security
+    // tradeoff. Known secrets are still fully denied (metadata included) by
+    // `secret_read_denies`, which runs after this and uses `file-read*`.
     out.push_str(&format!(
-        "(deny file-read* (subpath {}))\n",
+        "(deny file-read-data (subpath {}))\n",
         sbpl_string(&home.to_string_lossy())
     ));
     for rel in TOOLCHAIN_DIRS {
@@ -896,8 +941,16 @@ mod tests {
             "got: {prefix}"
         );
         assert!(prefix.contains("COREPACK_HOME='/data/sandbox/proj/corepack'"));
-        // No managed Node → empty prefix (neutral install path untouched).
-        assert!(node_install_env_prefix(None, Some(ch)).is_empty());
+
+        // System Node (no managed bin) + corepack home: keep the login PATH
+        // untouched, but still route corepack at the managed home so the pinned
+        // PM lands there for the offline run phase.
+        let sys = node_install_env_prefix(None, Some(ch));
+        assert_eq!(sys, "COREPACK_HOME='/data/sandbox/proj/corepack' ");
+        assert!(!sys.contains("PATH="), "system-Node prefix must not touch PATH");
+
+        // Neither managed Node nor corepack home → empty (neutral path).
+        assert!(node_install_env_prefix(None, None).is_empty());
     }
 
     #[cfg(target_os = "macos")]
@@ -956,8 +1009,9 @@ mod tests {
         let p = project();
         let prof = profile(&p, Path::new("/tmp/portbay"), Path::new("/Users/demo"));
 
-        // $HOME is flipped to default-deny for reads …
-        assert!(prof.contains(r#"(deny file-read* (subpath "/Users/demo"))"#));
+        // $HOME content reads are flipped to default-deny (data only, so
+        // metadata/realpath traversal still works) …
+        assert!(prof.contains(r#"(deny file-read-data (subpath "/Users/demo"))"#));
         // … then known toolchain dirs are re-allowed.
         assert!(prof.contains(r#"(allow file-read* (subpath "/Users/demo/.cargo"))"#));
         assert!(prof.contains(r#"(allow file-read* (subpath "/Users/demo/.npm"))"#));
@@ -969,7 +1023,7 @@ mod tests {
         // allowed toolchain dir must be denied *after* that dir is allowed.
         let broad = prof.find("(allow file-read*)\n").unwrap();
         let home_deny = prof
-            .find(r#"(deny file-read* (subpath "/Users/demo"))"#)
+            .find(r#"(deny file-read-data (subpath "/Users/demo"))"#)
             .unwrap();
         let cargo_allow = prof
             .find(r#"(allow file-read* (subpath "/Users/demo/.cargo"))"#)
@@ -1005,6 +1059,34 @@ mod tests {
         assert!(!prof.contains("/Users/demo/.somecloud"));
     }
 
+    // Regression guard: the $HOME read jail must deny *data* (contents +
+    // directory listings) while leaving *metadata* (lstat/stat/readlink)
+    // allowed. Node's module loader `realpathSync`-es the entry script, which
+    // lstats every ancestor — including the home root. A package manager or
+    // runtime living under $HOME (corepack/pnpm in `~/.cache`, node via
+    // nvm/fnm/volta) walks through `/Users/<me>`, so a blanket `file-read*`
+    // deny there made that lstat EPERM and crashed the sandboxed project on
+    // launch. The deny must be `file-read-data`, not `file-read*`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn home_deny_is_data_only_so_realpath_can_traverse() {
+        let p = project();
+        let prof = profile(&p, Path::new("/tmp/portbay"), Path::new("/Users/demo"));
+        // Data-only deny on the home root …
+        assert!(
+            prof.contains(r#"(deny file-read-data (subpath "/Users/demo"))"#),
+            "home root must deny file-read-data so metadata stays readable: {prof}"
+        );
+        // … and NOT the metadata-killing blanket form that broke realpath.
+        assert!(
+            !prof.contains(r#"(deny file-read* (subpath "/Users/demo"))"#),
+            "home root must not deny file-read* (would block lstat/realpath traversal)"
+        );
+        // Known secrets are still fully denied (data + metadata) by the later
+        // claw-back, which uses file-read* — so `stat ~/.ssh` stays blocked.
+        assert!(prof.contains(r#"(deny file-read* (subpath "/Users/demo/.ssh"))"#));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn profile_reallows_ephemeral_scratch_for_reads_when_on() {
@@ -1027,6 +1109,9 @@ mod tests {
         let p = project();
         let prof = profile(&p, Path::new("/tmp/portbay"), Path::new("/Users/demo"));
         assert!(prof.contains(r#"(global-name "com.apple.mDNSResponder")"#));
+        // FSEvents must be allowed so dev-server file-watching (HMR) works;
+        // denying it triggers an EMFILE kqueue-fallback flood (see profile()).
+        assert!(prof.contains(r#"(global-name "com.apple.FSEvents")"#));
         // Not the wide-open form.
         assert!(!prof.contains("(allow mach-lookup)\n"));
     }

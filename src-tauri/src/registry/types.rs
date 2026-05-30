@@ -517,9 +517,7 @@ pub struct CustomTunnelConfig {
 impl CustomTunnelConfig {
     /// Whether this config is complete enough to run a tunnel.
     pub fn is_active(&self) -> bool {
-        !self.tunnel_id.is_empty()
-            && !self.credentials_file.is_empty()
-            && !self.hostname.is_empty()
+        !self.tunnel_id.is_empty() && !self.credentials_file.is_empty() && !self.hostname.is_empty()
     }
 }
 

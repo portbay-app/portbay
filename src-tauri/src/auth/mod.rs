@@ -221,9 +221,7 @@ pub async fn refresh_session_locked(base_url: &str) -> RefreshOutcome {
 /// the session is definitively dead (a transient failure falls back to the
 /// stored access token so an offline op can still be attempted).
 pub async fn access_token_refreshing(base_url: &str) -> Option<String> {
-    if load_session().is_none() {
-        return None;
-    }
+    load_session()?;
     match refresh_session_locked(base_url).await {
         RefreshOutcome::Rotated(ns) => Some(ns.access_token),
         RefreshOutcome::Unauthorized => None,

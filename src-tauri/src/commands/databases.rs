@@ -222,7 +222,7 @@ pub async fn install_database_engine(
             let _ = channel.send(ev.clone());
             let _ = app_for_progress.emit(DB_ENGINE_INSTALL_CHANNEL, ev);
         },
-        |bin| probe_engine(bin),
+        probe_engine,
     )
     .await
     .map_err(|e| AppError::Internal(format!("engine install failed: {e}")))?;
@@ -334,7 +334,11 @@ fn instance_view(
     // available once the file exists. Provisioned == file present (an adopted
     // file lives outside the managed data dir, so check `file_path` directly).
     let (status, provisioned) = if file_based {
-        let present = inst.file_path.as_ref().map(|p| p.is_file()).unwrap_or(false);
+        let present = inst
+            .file_path
+            .as_ref()
+            .map(|p| p.is_file())
+            .unwrap_or(false);
         (
             if present {
                 InstanceStatus::Running

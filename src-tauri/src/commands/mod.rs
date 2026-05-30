@@ -27,6 +27,7 @@ pub mod integrations;
 pub mod lifecycle;
 pub mod log_stream;
 pub mod metrics;
+pub mod notifications;
 pub mod onboarding;
 pub mod portfile;
 pub mod preferences;
@@ -36,6 +37,8 @@ pub mod runtimes;
 pub mod sidecars;
 pub mod sync;
 pub mod system;
+#[cfg(feature = "tasks")]
+pub mod tasks;
 pub mod telemetry;
 pub mod tunnel;
 pub mod updater;

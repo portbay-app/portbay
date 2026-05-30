@@ -16,8 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::process_compose::{Process, ProjectStatus};
 use crate::registry::{
     CorsConfig, CustomTunnelConfig, DomainConfig, MobileRunConfig, Project, ProjectType, Readiness,
-    SandboxConfig,
-    WebServer, Workspace, WorkspaceTool,
+    SandboxConfig, WebServer, Workspace, WorkspaceTool,
 };
 
 /// A merged registry + runtime view of one project.
@@ -347,6 +346,12 @@ pub struct WorkspaceAppDto {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProjectPatch {
     pub name: Option<String>,
+    /// Project kind/type. Mutable so a board-only `custom` project (created
+    /// from the Tasks page with no server) can later be promoted into a
+    /// runnable web/app project — and the reverse. When this changes the
+    /// kind, `update_project` recomputes `services` from the new kind unless
+    /// the patch also carries an explicit `services` list.
+    pub kind: Option<ProjectType>,
     pub hostname: Option<String>,
     pub port: Option<u16>,
     pub extra_ports: Option<Vec<u16>>,

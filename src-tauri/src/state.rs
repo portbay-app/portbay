@@ -140,6 +140,11 @@ pub struct AppState {
     /// on every avatar render). Cleared per project on remove. See
     /// [`crate::project_icon`] and `commands::projects::project_icon`.
     pub icon_cache: Mutex<HashMap<String, Option<String>>>,
+
+    /// Cross-project agent-activity notifications (the topbar bell). A
+    /// background scan ([`crate::notifications`]) fills this from each
+    /// project's audit log; the `notifications_*` commands read/mutate it.
+    pub notifications: Mutex<crate::notifications::NotificationCenter>,
 }
 
 /// How long after a Stop request a non-zero exit is still considered
@@ -176,6 +181,7 @@ impl AppState {
             shutdown_done: AtomicBool::new(false),
             pending_login: Mutex::new(None),
             icon_cache: Mutex::new(HashMap::new()),
+            notifications: Mutex::new(crate::notifications::NotificationCenter::load()),
         }
     }
 
@@ -465,6 +471,27 @@ impl AppState {
         // Empty the cross-process state mirror: with the app going down there
         // are no live tunnels for the CLI / MCP server to report.
         self.persist_tunnel_state();
+
+        // Defence-in-depth backstop: reap any of OUR sidecars already orphaned
+        // to launchd by an *earlier* crashed run that the boot sweep somehow
+        // missed. `OrphansOnly` (PPID 1) guarantees we never touch a sidecar
+        // still parented to a live PortBay — the children we just killed above
+        // were our own and are already reaped, so this only catches genuine
+        // leftovers. The boot-time `All` sweep is the real fix; this keeps
+        // orphans from accumulating across crash/quit cycles.
+        for kind in [
+            crate::sidecar_reclaim::SidecarKind::Caddy,
+            crate::sidecar_reclaim::SidecarKind::Dnsmasq,
+            crate::sidecar_reclaim::SidecarKind::Mailpit,
+        ] {
+            crate::sidecar_reclaim::reclaim_stale(
+                kind,
+                crate::sidecar_reclaim::SweepMode::OrphansOnly,
+            );
+        }
+
+        // Drop the advisory pidfile — the app is no longer live.
+        crate::sidecar_reclaim::remove_pidfile();
     }
 
     /// Mirror the current tunnel list to the cross-process state file
