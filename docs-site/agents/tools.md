@@ -1,5 +1,5 @@
 ---
-title: PortBay MCP Tool Reference — All 58 Tools
+title: PortBay MCP Tool Reference — All 69 Tools
 description: "Complete reference for every tool and resource exposed by portbay-mcp: project registration, lifecycle controls, diagnostics, scaffolding, databases, groups, DNS, certificates, sandbox, runtimes, tunnels, HTTP inspector, and migration import."
 ---
 
@@ -9,7 +9,7 @@ The full surface exposed by `portbay-mcp`. Every tool returns `structuredContent
 
 Tools are grouped into [toolsets](./index.md#governance) you can enable or disable with `--toolsets`.
 
-**58 tools · 4 static resources · 2 resource templates**
+**69 tools · 4 static resources · 5 resource templates**
 
 Legend: read-only · mutates state · destructive (confirm first)
 
@@ -956,6 +956,178 @@ Import sites from a migration source into the PortBay registry. Pass the `ids` t
 
 ---
 
+## Tasks toolset
+
+The task board is a per-project Kanban whose cards are Markdown files in the project's repo (`.portbay/tasks/`). The same board is shown in the GUI, edited by the `portbay tasks` CLI, and exposed here — one source of truth, not three. These tools appear when a project has a board.
+
+A dispatched agent's loop is: read `portbay_handoff_get` and `portbay_task_next` to pick up where work left off, `portbay_task_ack` the run, do the work while posting progress with `portbay_task_update` / `portbay_task_check`, then `portbay_handoff_update` and move the card to `Done` (or `Review`) before finishing. See the [Task Board guide](/guides/task-board) for the human side.
+
+Statuses are `Backlog`, `Todo`, `InProgress`, `Blocked`, `Review`, `Done`, `Rejected`. An agent may move a card to any status **except `Rejected`**, which is human-only.
+
+### `portbay_tasks_list` (read-only)
+
+List a project's board cards — the live board the human sees. Optionally filter by column. Read this to see the plan before acting; the board, not your memory, is the source of truth.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `status` | string? | Filter to one column (e.g. `Todo`, `InProgress`). Omit for the whole board. |
+
+**Returns:** `TaskCard[]`
+
+---
+
+### `portbay_task_next` (read-only)
+
+Return the next actionable card — the top of the `Todo` column — or `null` when nothing is ready to work.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+
+**Returns:** `TaskCard | null`
+
+---
+
+### `portbay_task_get` (read-only)
+
+Read one card in full by id — title, description (body), acceptance criteria, touchpoints, checklist, labels, status, and claim. Use this to re-read the card you were dispatched to work.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `id` | string | **Required.** Card id. |
+
+**Returns:** `TaskCard`
+
+---
+
+### `portbay_task_create` (mutates state)
+
+Capture a new card. Use it for work you discover mid-task rather than burying it in chat — it lands in `Backlog` by default.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `title` | string | **Required.** Card title. |
+| `body` | string? | Markdown description. |
+| `status` | string? | Starting column. Default `Backlog`. |
+| `priority` | string? | `critical` / `high` / `medium` / `low`. |
+| `acceptance` | string? | Acceptance criteria. |
+| `touchpoints` | string[]? | Files/modules the work is expected to touch. |
+| `labels` | string[]? | Label ids (colours come from the board config). |
+| `estimate` | number? | Display-only estimate. |
+| `template` | string? | Built-in card template id (e.g. `feature`, `bug`, `tests`, `refactor`). |
+
+**Returns:** `TaskCard`
+
+---
+
+### `portbay_task_ack` (mutates state)
+
+Acknowledge a dispatched card with the `run_id` from your prompt — proof you engaged with it (distinct from the process merely launching). Refreshes the run's lease.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `id` | string | **Required.** Card id. |
+| `run_id` | string | **Required.** The run id PortBay passed in your dispatch prompt. |
+
+**Returns:** `TaskCard`
+
+---
+
+### `portbay_task_update` (mutates state)
+
+Advance a card and/or post a progress note. Set `status` to `InProgress` / `Done` / `Blocked` / `Review` / `Todo`, and record what you changed with `touchpoints`. Pass your `run_id` so a stale session can't clobber a re-dispatched card. You may **not** set `Rejected`. The response carries reminders (e.g. update the hand-off before finishing).
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `id` | string | **Required.** Card id. |
+| `run_id` | string? | Your dispatch run id; guards against stale-session writes. |
+| `status` | string? | New column. Any status except `Rejected`. |
+| `note` | string? | Progress note added to the card's activity. |
+| `reason` | string? | Why — e.g. what blocked the card when moving to `Blocked`. |
+| `touchpoints` | string[]? | Files/modules you touched. |
+
+**Returns:** `TaskCard`
+
+---
+
+### `portbay_task_check` (mutates state)
+
+Tick (or, with `done: false`, reopen) a checklist item by its index, to report sub-step progress as you work.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `id` | string | **Required.** Card id. |
+| `idx` | number | **Required.** Checklist item index. |
+| `done` | bool? | `true` to tick (default), `false` to reopen. |
+| `run_id` | string? | Your dispatch run id. |
+
+**Returns:** `TaskCard`
+
+---
+
+### `portbay_task_checklist_add` (mutates state)
+
+Append sub-task items to a card's checklist — your own breakdown (e.g. P0/P1/P2 steps) — then tick them with `portbay_task_check` as you finish each.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `id` | string | **Required.** Card id. |
+| `items` | string[] | **Required.** Checklist item descriptions to append. |
+| `label` | string? | Optional checklist heading (e.g. `Steps`). |
+| `run_id` | string? | Your dispatch run id. |
+
+**Returns:** `TaskCard`
+
+---
+
+### `portbay_task_comment` (mutates state)
+
+Post a comment on a card. Shows in the card's activity thread — record a decision or ask the human something.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `id` | string | **Required.** Card id. |
+| `text` | string | **Required.** Comment body. |
+| `run_id` | string? | Your dispatch run id. |
+
+**Returns:** `TaskCard`
+
+---
+
+### `portbay_handoff_get` (read-only)
+
+Read the project's continuation brief — the minimal "where we left off" note. Read this **first** when picking up work; trust it over your own memory.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+
+**Returns:** `HandoffView`
+
+---
+
+### `portbay_handoff_update` (mutates state)
+
+Append a **minimal** entry to the rolling hand-off log (what changed, the next concrete step, open items, pointers). It's prepended as the newest entry; older entries are kept until the log hits its size cap, then the oldest are pruned. Sign it with `author`. Call this before you finish a card or end a session.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `narrative` | string | **Required.** The entry to prepend. |
+| `author` | string? | Your agent name (defaults to the calling agent). |
+
+**Returns:** `HandoffView`
+
+---
+
 ## Common output types
 
 ### `ProjectSummary`
@@ -1080,6 +1252,42 @@ Returned by runtime tools.
 
 ---
 
+### `TaskCard`
+
+One card on a project's board. Returned by the task tools above.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `id` | string | Card id (stable; the Markdown file's name). |
+| `title` | string | Card title. |
+| `status` | string | Column: `Backlog` / `Todo` / `InProgress` / `Blocked` / `Review` / `Done` / `Rejected`. |
+| `body` | string | Markdown description. |
+| `priority` | string? | `critical` / `high` / `medium` / `low`. |
+| `labels` | string[]? | Label ids (board config maps them to colours). |
+| `acceptance` | string? | Acceptance criteria. |
+| `touchpoints` | string[]? | Files/modules the work touches. |
+| `checklist` | object? | `{ label?, items: { idx, desc, done }[] }`. |
+| `blockedBy` | string[]? | Card ids that must reach a terminal column before this one can dispatch. |
+| `agent` | string? | Assigned agent (`claude`, `codex`, `cursor`, `gemini`, `aider`, …). |
+| `claim` | object? | Live run claim `{ host, runId, at }` while an agent is working the card. |
+| `created` | string | ISO-8601 creation time. |
+| `updated` | string? | ISO-8601 of last activity. |
+
+---
+
+### `HandoffView`
+
+The parsed `.portbay/HANDOFF.md` continuation log.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `updated` | string | ISO-8601 of the most recent entry. |
+| `maxChars` | number | Size cap; oldest entries are pruned past it. |
+| `autoGenerated` | bool | Whether PortBay derived the brief vs. an agent/human wrote it. |
+| `body` | string | The rolling log — newest `## <timestamp> · <author>` entry first. |
+
+---
+
 ## Resources
 
 The server exposes read-only [MCP resources](https://modelcontextprotocol.io/specification/2025-11-25/server/resources) an agent can read into its context without making tool calls. All resources return `application/json`.
@@ -1099,6 +1307,9 @@ The server exposes read-only [MCP resources](https://modelcontextprotocol.io/spe
 | --- | --- |
 | `portbay://projects/{id}` | Live status + config for a single project, by id. |
 | `portbay://projects/{id}/logs` | Recent log tail for a single project (200 lines). |
+| `portbay://project/{id}/context` | Derived project context — URL, ports, runtime, web server, database vars, services. |
+| `portbay://project/{id}/tasks` | The full task board for a project (all cards, by column). |
+| `portbay://project/{id}/handoff` | The project's rolling hand-off log (continuation brief). |
 
 ---
 

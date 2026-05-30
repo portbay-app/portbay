@@ -7,7 +7,7 @@ description: View and search your local project's process logs in PortBay — sn
 
 The log viewer shows output from a single project's process. It supports static snapshots and live streaming.
 
-![PortBay log viewer](/screenshots/logs.png)
+<ThemeImage name="logs" alt="PortBay log viewer" />
 
 ## Opening Logs
 

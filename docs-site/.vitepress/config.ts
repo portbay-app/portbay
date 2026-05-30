@@ -85,6 +85,7 @@ export default defineConfig({
       {
         text: "Features",
         items: [
+          { text: "Task Board & Agents", link: "/guides/task-board" },
           { text: "HTTP Inspector", link: "/guides/http-inspector" },
           { text: "Databases", link: "/guides/databases" },
           { text: "Languages & Runtimes", link: "/guides/languages" },

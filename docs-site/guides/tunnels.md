@@ -7,7 +7,7 @@ description: Share any local PortBay project on a public trycloudflare.com URL i
 
 Share a local project on a public URL — no account, no port-forwarding, no firewall rules.
 
-![PortBay public tunnels](/screenshots/tunnels.png)
+<ThemeImage name="tunnels" alt="PortBay public tunnels" />
 
 ## Concept
 

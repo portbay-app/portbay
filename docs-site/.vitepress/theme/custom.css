@@ -96,3 +96,14 @@
 .custom-block {
   border-radius: 8px;
 }
+
+/* Theme-inverted docs screenshots (see ThemeImage.vue). Both variants render;
+   reveal exactly one so the framed window contrasts with the page: light
+   capture on the dark site, dark capture on the light site. */
+.theme-image {
+  display: none;
+}
+html.dark .theme-image--light,
+html:not(.dark) .theme-image--dark {
+  display: block;
+}

@@ -7,7 +7,7 @@ description: Change your PortBay project hostnames from .test to .localhost or a
 
 PortBay defaults to local hostnames such as `project.test`. The suffix is part of each project hostname stored in the registry.
 
-![PortBay domains — one row per project hostname](/screenshots/domains.png)
+<ThemeImage name="domains" alt="PortBay domains — one row per project hostname" />
 
 ## Current Behavior
 
@@ -42,7 +42,7 @@ Changing the suffix without reconciling hostnames leaves stale entries behind.
 
 PortBay routes exact hostnames through the privileged `/etc/hosts` helper and resolves wildcard `*.<suffix>` through the bundled dnsmasq sidecar. The DNS view shows resolver status, the managed records, and the cache tuning.
 
-![PortBay local DNS](/screenshots/dns.png)
+<ThemeImage name="dns" alt="PortBay local DNS" />
 
 ## Via MCP (agent-driven)
 

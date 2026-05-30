@@ -16,7 +16,7 @@ This section installs PortBay and adds your first project. Most people install t
 
 ## What it looks like
 
-![PortBay managing local projects](/screenshots/projects.png)
+<ThemeImage name="projects" alt="PortBay managing local projects" />
 
 The pages below walk through each step with screenshots and the expected state changes.
 

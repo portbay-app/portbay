@@ -7,7 +7,7 @@ description: "What to verify after launching PortBay for the first time: registr
 
 The first run should establish three things: the registry location, the sidecar health state, and whether PortBay can safely route hostnames on this machine.
 
-![PortBay services and sidecar health](/screenshots/services.png)
+<ThemeImage name="services" alt="PortBay services and sidecar health" />
 
 ## Expected State
 

@@ -38,11 +38,14 @@ features:
     details: Run an untrusted project inside a macOS sandbox profile, inspect it, then promote it to a normal local run.
     link: /guides/sandbox
   - title: Drive it from an AI agent
-    details: An MCP server exposes PortBay's tools and resources to Claude Code, Cursor, and Zed.
+    details: An MCP server exposes 69 tools and resources to Claude Code, Cursor, Zed, and any MCP-aware client.
     link: /agents/
+  - title: A task board your agents work
+    details: Move a card to To Do and the AI agent you assigned picks it up, works it in your repo, and writes a hand-off note for the next run.
+    link: /guides/task-board
 ---
 
-![PortBay managing local projects](/screenshots/projects.png)
+<ThemeImage name="projects" alt="PortBay managing local projects" />
 
 > **See it without installing.** The [interactive simulator](https://try.portbay.app) runs the real PortBay interface against a set of sample projects, right in your browser — click Play on a project and watch it start.
 

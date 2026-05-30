@@ -62,13 +62,37 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 - **Bundled databases** — PortBay-supervised MySQL, MariaDB, Postgres, Redis, MongoDB, and Memcached.
 - **Public sharing** — expose any project over a [Cloudflare](https://www.cloudflare.com/products/tunnel/) tunnel with one click.
 - **A sandboxed runner** — run an untrusted or freshly-cloned project inside a macOS sandbox, inspect it, then promote it to a normal local run.
-- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as agent tools.
+- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 69 agent tools.
+- **A task board your agents work** — every project gets a Kanban board whose cards are Markdown in your repo. Move a card to *To Do* and the coding agent you assigned — Claude Code, Codex, Cursor, Gemini, Aider, and more — picks it up, does the work, and writes a handoff note for the next run.
 - **A declarative registry** — projects live in JSON; the daemon reconciles reality to match.
 - **Live logs, status, and metrics** per project, plus a macOS menu-bar mode.
 - **Already using Herd, ServBay, or MAMP?** Import your existing sites in one step — no re-entering paths, ports, and PHP versions.
 
 Everything is driven by a Rust core with full CLI parity, so the GUI — and your
 AI agent — are clients, not the source of truth.
+
+## A task board your AI agents actually work
+
+Every project in PortBay gets a board. The cards are plain Markdown files inside
+your repo (`.portbay/tasks/`), so they version with your code and stay readable
+with or without PortBay.
+
+Move a card to **To Do** and the agent you assigned picks it up and starts
+working — in your project, on your machine. PortBay launches the coding agent you
+already have installed; it never runs a model of its own. Claude Code, Codex,
+Cursor, Gemini, Aider, Copilot, OpenCode, Amp, Qwen, and Antigravity are
+recognised out of the box, and you can point it at any other CLI.
+
+<div align="center">
+
+<img src="docs-site/public/screenshots/tasks-dark.png" alt="PortBay's per-project task board with AI agents working cards" width="840" />
+
+</div>
+
+- **Assign per card, or set a board default.** Auto-dispatch the moment a card hits *To Do*, or require a click to confirm each run.
+- **A handoff doc that travels with the work.** When a run ends it appends to `.portbay/HANDOFF.md` — a short, newest-first brief the next run (or the next person) reads to continue without re-deriving context.
+- **It stays out of trouble.** A card can be blocked on others until they land, an optional *Review* column holds agent-"done" work for a human to approve, and runs whose process dies are reclaimed automatically.
+- **One board, three front ends.** The GUI, the `portbay` CLI, and the MCP server read and write the same cards — so an agent connected over MCP can claim the next card, record the files it touched, and move it to *Review* or *Done*, all through PortBay's agent tools.
 
 ## A look around
 
@@ -187,7 +211,7 @@ follows is already shipped — not planned.
 
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, full CLI. *Shipped.*
 - **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, and one-step import from Herd / ServBay / MAMP. *Shipped.*
-- **AI & automation** — an MCP server (58 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed. *Shipped.*
+- **AI & automation** — an MCP server (69 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed, and a per-project task board hands cards to the coding agent of your choice. *Shipped.*
 - **Release** — signed & notarized DMG, Homebrew cask, and in-app auto-update. *Shipped.*
 
 ### On the roadmap
