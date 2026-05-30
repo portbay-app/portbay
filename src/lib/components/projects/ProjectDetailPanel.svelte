@@ -16,7 +16,7 @@
   import ArtifactsSection from "./ArtifactsSection.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import { safeInvoke, invokeQuiet } from "$lib/ipc";
-  import { startProject } from "$lib/actions/startProject";
+  import { startProject, startProjectSandboxed } from "$lib/actions/startProject";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { logViewer } from "$lib/stores/logViewer.svelte";
@@ -29,8 +29,8 @@
   import { createCertInfo } from "$lib/stores/certInfo.svelte";
   import type { CommandError } from "$lib/types/error";
   import type {
+    ProjectType,
     ProjectView,
-    SandboxConfig,
     SandboxNetworkPolicy,
     WebServer,
   } from "$lib/types/projects";
@@ -72,6 +72,10 @@
   const systemSuffix = $derived(dns.status?.suffix ?? "portbay.test");
   let portDraft = $state<number | null>(null);
   let startCommandDraft = $state<string>("");
+  // Editable project kind, so a board-only `custom` project can be promoted
+  // into a runnable web/app project (and back). Gates the PHP-only fields and
+  // is sent to `update_project`, which recomputes services on a kind change.
+  let kindDraft = $state<ProjectType>("custom");
   let webServerDraft = $state<WebServer>("caddy");
   let httpsDraft = $state<boolean>(true);
   let autoStartDraft = $state<boolean>(false);
@@ -122,6 +126,7 @@
       hostnameDraft = p.hostname;
       portDraft = p.port ?? null;
       startCommandDraft = p.startCommand ?? "";
+      kindDraft = p.type;
       webServerDraft = p.webServer ?? "caddy";
       httpsDraft = p.https;
       autoStartDraft = p.autoStart;
@@ -143,11 +148,11 @@
       id: project.id,
       name: nameDraft,
       path: project.path,
-      type: project.type,
+      type: kindDraft,
       hostname: hostnameDraft,
       port: portDraft ?? undefined,
       startCommand: startCommandDraft || undefined,
-      webServer: project.type === "php" ? webServerDraft : undefined,
+      webServer: kindDraft === "php" ? webServerDraft : undefined,
       https: httpsDraft,
       autoStart: autoStartDraft,
     };
@@ -159,6 +164,7 @@
     try {
       const parsed = JSON.parse(rawDraft);
       if (typeof parsed.name === "string") nameDraft = parsed.name;
+      if (typeof parsed.type === "string") kindDraft = parsed.type as ProjectType;
       if (typeof parsed.hostname === "string") hostnameDraft = parsed.hostname;
       if (typeof parsed.port === "number") portDraft = parsed.port;
       if (typeof parsed.startCommand === "string")
@@ -197,10 +203,11 @@
         id: project.id,
         patch: {
           name: nameDraft,
+          kind: kindDraft !== project.type ? kindDraft : undefined,
           hostname: hostnameDraft,
           port: portDraft ?? undefined,
           startCommand: startCommandDraft.trim() ? startCommandDraft : null,
-          webServer: project.type === "php" ? webServerDraft : undefined,
+          webServer: kindDraft === "php" ? webServerDraft : undefined,
           https: httpsDraft,
           autoStart: autoStartDraft,
         },
@@ -227,6 +234,7 @@
     hostnameDraft = project.hostname;
     portDraft = project.port ?? null;
     startCommandDraft = project.startCommand ?? "";
+    kindDraft = project.type;
     webServerDraft = project.webServer ?? "caddy";
     httpsDraft = project.https;
     autoStartDraft = project.autoStart;
@@ -364,13 +372,21 @@
     projects.beginTransition(id, "start");
     try {
       await dns.ensureReady();
-      await safeInvoke("start_project_sandboxed", {
-        id,
-        options: {
-          network: sandboxNetwork,
-          ephemeral: sandboxEphemeral,
-        } satisfies Partial<SandboxConfig>,
+      // Resolves a port conflict via the shared confirm + force-quit prompt,
+      // identical to the normal Play path.
+      const r = await startProjectSandboxed(id, name, {
+        network: sandboxNetwork,
+        ephemeral: sandboxEphemeral,
       });
+      if (r.kind === "declined") {
+        projects.failTransition(id); // nothing started — roll back
+        return;
+      }
+      if (r.kind === "error") {
+        projects.failTransition(id);
+        errorBus.push(r.error);
+        return;
+      }
       await projects.refresh();
     } catch {
       projects.failTransition(id);
@@ -978,7 +994,28 @@
             oninput={markDirty}
             class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg font-mono"
           />
-          {#if project.type === "php"}
+          <label for="detail-type" class="text-fg-muted self-start pt-1.5">Type</label>
+          <div class="space-y-1">
+            <select
+              id="detail-type"
+              bind:value={kindDraft}
+              onchange={markDirty}
+              class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg w-40"
+            >
+              {#each Object.entries(typeLabel) as [value, label] (value)}
+                <option value={value}>{label}</option>
+              {/each}
+            </select>
+            {#if kindDraft !== project.type}
+              <p class="text-[11px] text-fg-subtle">
+                Changing the type promotes this into a
+                <span class="font-mono">{typeLabel[kindDraft]}</span> project.
+                Set a port and start command above so it can run; save, then
+                start it from the projects table.
+              </p>
+            {/if}
+          </div>
+          {#if kindDraft === "php"}
             <label for="detail-web-server" class="text-fg-muted">Web server</label>
             <div class="space-y-1">
               <select

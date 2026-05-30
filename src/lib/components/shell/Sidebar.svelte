@@ -47,9 +47,14 @@
 
   /** Running database instances — surfaced as a badge on the Databases nav
    *  item (N running). Reflects the databases store, refreshed app-wide on
-   *  boot and whenever the Databases page or its actions run. */
+   *  boot and whenever the Databases page or its actions run.
+   *
+   *  File-based engines (SQLite) are excluded: they have no daemon and are
+   *  always "running", so counting them would keep a permanent badge that
+   *  isn't really live activity. Only daemon instances that are actually up
+   *  contribute to the count. */
   const runningDbCount = $derived(
-    databases.value.filter((d) => d.status === "running").length,
+    databases.value.filter((d) => d.status === "running" && !d.fileBased).length,
   );
 
   /** Compact density renders the rail as an icon-only strip. Driven by the

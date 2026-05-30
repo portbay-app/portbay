@@ -30,6 +30,9 @@
     | "check"
     | "chevron-right"
     | "chevron-down"
+    | "chevron-left"
+    | "command"
+    | "inbox"
     | "home"
     | "server"
     | "link"
@@ -50,6 +53,7 @@
     | "sun"
     | "moon"
     | "more-horizontal"
+    | "share"
     | "lock"
     | "users"
     | "user"
@@ -69,7 +73,14 @@
     | "sliders-horizontal"
     | "power"
     | "panel-left-close"
-    | "panel-left-open";
+    | "panel-left-open"
+    | "square-kanban"
+    | "trash-2"
+    | "calendar"
+    | "flag"
+    | "bot"
+    | "circle-dot"
+    | "play-circle";
 </script>
 
 <script lang="ts">
@@ -90,6 +101,9 @@
     Check,
     ChevronRight,
     ChevronDown,
+    ChevronLeft,
+    Command,
+    Inbox,
     Home,
     Server,
     Link as LinkIcon,
@@ -110,6 +124,7 @@
     Sun,
     Moon,
     MoreHorizontal,
+    Share2,
     Lock,
     Users,
     User,
@@ -130,6 +145,13 @@
     Power,
     PanelLeftClose,
     PanelLeftOpen,
+    SquareKanban,
+    Trash2,
+    Calendar,
+    Flag,
+    Bot,
+    CircleDot,
+    PlayCircle,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -165,6 +187,9 @@
     check: Check,
     "chevron-right": ChevronRight,
     "chevron-down": ChevronDown,
+    "chevron-left": ChevronLeft,
+    command: Command,
+    inbox: Inbox,
     home: Home,
     server: Server,
     link: LinkIcon,
@@ -185,6 +210,7 @@
     sun: Sun,
     moon: Moon,
     "more-horizontal": MoreHorizontal,
+    share: Share2,
     lock: Lock,
     users: Users,
     user: User,
@@ -205,6 +231,13 @@
     power: Power,
     "panel-left-close": PanelLeftClose,
     "panel-left-open": PanelLeftOpen,
+    "square-kanban": SquareKanban,
+    "trash-2": Trash2,
+    calendar: Calendar,
+    flag: Flag,
+    bot: Bot,
+    "circle-dot": CircleDot,
+    "play-circle": PlayCircle,
   };
 
   const Component = $derived(iconMap[name]);

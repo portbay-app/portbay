@@ -23,7 +23,8 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import type { IconName } from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
-  import StackIcon from "$lib/components/atoms/StackIcon.svelte";
+  import ProjectAvatar from "$lib/components/atoms/ProjectAvatar.svelte";
+  import OpenInButton from "$lib/components/projects/OpenInButton.svelte";
 
   import { safeInvoke } from "$lib/ipc";
   import { projects } from "$lib/stores/projects.svelte";
@@ -31,6 +32,7 @@
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
+  import { startProjectSandboxed } from "$lib/actions/startProject";
   import { dns } from "$lib/stores/dns.svelte";
   import { displayStatusLabel } from "$lib/types/status";
   import type {
@@ -155,16 +157,23 @@
     projects.beginTransition(p.id, "start");
     try {
       await dns.ensureReady();
-      await safeInvoke("start_project_sandboxed", {
-        id: p.id,
-        options: {
-          network: policyOf(p),
-          ephemeral: p.sandbox?.ephemeral ?? false,
-        },
+      // Resolves a port conflict via the shared confirm + force-quit prompt,
+      // same as the projects list and detail panel.
+      const r = await startProjectSandboxed(p.id, p.name, {
+        network: policyOf(p),
+        ephemeral: p.sandbox?.ephemeral ?? false,
       });
+      if (r.kind === "declined") {
+        projects.failTransition(p.id); // nothing started — roll back
+        return;
+      }
+      if (r.kind === "error") {
+        projects.failTransition(p.id);
+        errorBus.push(r.error);
+      }
     } catch {
       projects.failTransition(p.id);
-      /* safeInvoke already pushed a toast */
+      /* toast already pushed */
     } finally {
       busy = null;
     }
@@ -185,6 +194,12 @@
 
   function openInBrowser(p: ProjectView) {
     void safeInvoke("open_project", { id: p.id }).catch(() => {});
+  }
+
+  function revealInFinder(p: ProjectView) {
+    // Same IPC the projects-table row uses — reveals the project folder
+    // highlighted inside its parent.
+    void safeInvoke("reveal_in_finder", { path: p.path }).catch(() => {});
   }
 
   function openDetails(p: ProjectView) {
@@ -262,28 +277,6 @@
       </button>
     </header>
 
-    <!-- Honest boundary: say plainly what the OS sandbox does and does NOT do,
-         so nobody mistakes it for VM-grade isolation and runs genuinely hostile
-         code under it. Seatbelt confines file + network access, not CPU/memory,
-         and shares the host kernel. -->
-    <div
-      class="flex items-start gap-2.5 rounded-lg border border-border bg-surface-2 px-3.5 py-2.5"
-    >
-      <Icon name="shield" size={14} class="mt-0.5 shrink-0 text-fg-subtle" />
-      <p class="text-[11.5px] text-fg-subtle leading-relaxed">
-        <span class="text-fg-muted font-medium">What this protects:</span>
-        file writes are confined to the project, and reads of your credentials,
-        keychains, browser data, and other projects' <span class="font-mono">.env</span>
-        files are blocked. Network is restricted to the policy you pick.
-        <span class="text-fg-muted font-medium">What it doesn't:</span>
-        it's macOS Seatbelt, not a virtual machine — it shares the host kernel,
-        sets no CPU/memory limits (it won't stop a fork bomb or a miner), and
-        isn't a barrier against a determined attacker exploiting the kernel. It
-        contains careless and opportunistic code; for software you truly distrust,
-        use a disposable VM.
-      </p>
-    </div>
-
     {#if sandboxed.length === 0}
       <!-- Empty state — explain the concept and the real way to enter it. -->
       <div
@@ -354,13 +347,13 @@
           >
             <!-- Card header -->
             <div class="flex items-start gap-4 px-5 pt-5 pb-4">
-              <span
-                class="shrink-0 grid place-items-center w-11 h-11 rounded-xl
-                       bg-surface-2 border border-border"
-                title={p.type}
-              >
-                <StackIcon type={p.type} size={24} />
-              </span>
+              <ProjectAvatar
+                id={p.id}
+                name={p.name}
+                type={p.type}
+                size={44}
+                class="rounded-xl border border-border"
+              />
 
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2.5 flex-wrap">
@@ -391,8 +384,38 @@
                 </p>
               </div>
 
-              <!-- Actions -->
-              <div class="shrink-0 flex items-center gap-1">
+              <!-- Actions — mirror the projects-table row strip so the two
+                   pages feel uniform: open-in-browser · reveal-in-Finder ·
+                   divider · filled start/stop · settings. -->
+              <div class="shrink-0 flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onclick={() => openInBrowser(p)}
+                  title="Open in browser"
+                  aria-label="Open {p.name} in browser"
+                  class="inline-flex items-center justify-center w-7 h-7 rounded-md
+                         text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+                >
+                  <Icon name="globe" size={13} />
+                </button>
+
+                <button
+                  type="button"
+                  onclick={() => revealInFinder(p)}
+                  title="Reveal in Finder"
+                  aria-label="Reveal {p.name} in Finder"
+                  class="inline-flex items-center justify-center w-7 h-7 rounded-md
+                         text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+                >
+                  <Icon name="folder" size={13} />
+                </button>
+
+                <!-- Open in editor / agent (LLM) / terminal — same dropdown
+                     the projects-table row uses. -->
+                <OpenInButton projectId={p.id} variant="icon" />
+
+                <span class="w-px h-5 bg-border/60 mx-1" aria-hidden="true"></span>
+
                 {#if isRunning}
                   <button
                     type="button"
@@ -400,20 +423,15 @@
                     disabled={busy === p.id}
                     title="Stop sandbox"
                     aria-label="Stop {p.name}"
-                    class="p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2
-                           active:scale-95 transition disabled:opacity-50"
+                    class="inline-flex items-center justify-center w-8 h-8 rounded-md
+                           text-on-accent bg-status-crashed hover:brightness-110
+                           active:brightness-95 disabled:opacity-50 transition"
                   >
-                    <Icon name="square" size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onclick={() => openInBrowser(p)}
-                    title="Open {p.url}"
-                    aria-label="Open {p.name} in browser"
-                    class="p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2
-                           active:scale-95 transition"
-                  >
-                    <Icon name="external-link" size={14} />
+                    {#if busy === p.id}
+                      <Icon name="refresh-cw" size={12} class="animate-spin" />
+                    {:else}
+                      <Icon name="square" size={11} class="fill-current" />
+                    {/if}
                   </button>
                 {:else}
                   <button
@@ -422,22 +440,25 @@
                     disabled={busy === p.id}
                     title="Start in sandbox"
                     aria-label="Start {p.name} in sandbox"
-                    class="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md
-                           text-[12px] font-medium text-status-running
-                           border border-status-running/40 hover:bg-status-running/10
-                           active:scale-[0.98] transition disabled:opacity-50"
+                    class="inline-flex items-center justify-center w-8 h-8 rounded-md
+                           text-on-accent bg-status-running hover:brightness-110
+                           active:brightness-95 disabled:opacity-50 transition"
                   >
-                    <Icon name="play" size={12} />
-                    Start
+                    {#if busy === p.id}
+                      <Icon name="refresh-cw" size={12} class="animate-spin" />
+                    {:else}
+                      <Icon name="play" size={12} class="fill-current" />
+                    {/if}
                   </button>
                 {/if}
+
                 <button
                   type="button"
                   onclick={() => openDetails(p)}
                   title="Open project details"
                   aria-label="Open details for {p.name}"
-                  class="p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2
-                         active:scale-95 transition"
+                  class="inline-flex items-center justify-center w-7 h-7 rounded-md
+                         text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
                 >
                   <Icon name="settings" size={14} />
                 </button>

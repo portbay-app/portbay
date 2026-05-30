@@ -56,6 +56,13 @@ export interface Preferences {
   defaultStartBehavior: StartBehavior;
   /** Web server pre-selected for new PHP projects. null → Caddy. */
   defaultWebServer: WebServer | null;
+  /** Terminal that hosts interactive agent dispatches (id from `installed_dev_tools`,
+   * e.g. "warp" | "iterm" | "ghostty" | "terminal"). null → first detected. */
+  preferredTerminal: string | null;
+  /** Global default dispatch agent (kind id) for boards without their own config. null → Claude. */
+  preferredAgent: string | null;
+  /** Per-agent absolute binary path overrides, keyed by agent id (external drive / custom prefix). */
+  agentPaths: Record<string, string>;
 
   // Domains & HTTPS
   manageHostsAutomatically: boolean;
@@ -92,6 +99,9 @@ const DEFAULTS: Preferences = {
   defaultSort: "name-asc",
   defaultStartBehavior: "manual",
   defaultWebServer: null,
+  preferredTerminal: null,
+  preferredAgent: null,
+  agentPaths: {},
   manageHostsAutomatically: true,
   autoRenewCertificates: true,
   storeLogsLocally: true,

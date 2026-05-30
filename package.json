@@ -45,7 +45,8 @@
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2.5.4",
     "@tauri-apps/plugin-shell": "^2.3.5",
-    "ansi-to-html": "^0.7.2"
+    "ansi-to-html": "^0.7.2",
+    "svelte-dnd-action": "^0.9.61"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.1",

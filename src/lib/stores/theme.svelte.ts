@@ -64,11 +64,19 @@ function persist(pref: ThemePreference) {
 }
 
 function createThemeStore() {
-  let preference = $state<ThemePreference>(loadPreference());
-  let resolved = $state<ResolvedTheme>(resolve(preference));
+  // Compute the initial values as plain locals first, then seed the runes from
+  // them. Initializing one `$state` by reading another (`resolve(preference)`)
+  // — or passing a rune to `apply()` at setup — trips Svelte's
+  // `state_referenced_locally` warning, since those top-level reads capture
+  // only the initial value. The runes below are only ever read through the
+  // getters and mutated in the handlers, which is the reactive path.
+  const initialPreference = loadPreference();
+  const initialResolved = resolve(initialPreference);
+  let preference = $state<ThemePreference>(initialPreference);
+  let resolved = $state<ResolvedTheme>(initialResolved);
 
   if (browser) {
-    apply(resolved);
+    apply(initialResolved);
     // Follow the OS when (and only when) the preference is "system".
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
       if (preference !== "system") return;

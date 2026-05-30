@@ -9,7 +9,6 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
@@ -89,9 +88,12 @@
   async function reveal(path: string) {
     if (!path) return;
     try {
-      await revealItemInDir(path);
+      // `reveal_in_finder` reveals the path, or opens the nearest existing
+      // ancestor when it doesn't exist yet (e.g. a DB whose data dir is created
+      // on first start) — the plugin's revealItemInDir would just error there.
+      await safeInvoke("reveal_in_finder", { path });
     } catch {
-      /* opener pushes a toast */
+      /* safeInvoke already pushed the toast */
     }
   }
 
@@ -551,6 +553,9 @@
               <span
                 class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
                        text-[11px] font-medium {statusToneClass[selected.status]}"
+                title={selected.fileBased
+                  ? "Always available — SQLite is file-based, so there's no daemon to start or stop."
+                  : undefined}
               >
                 <StatusDot
                   status={selected.status === "running" ? "running" : "stopped"}
@@ -575,20 +580,12 @@
 
         <!-- Action toolbar -->
         <div class="flex items-center gap-1.5 shrink-0 flex-wrap">
-          {#if selected.fileBased}
-            <!--
-              File-based engines (SQLite) have no daemon: there's nothing to
-              start, stop, or restart — the file is always available. Show that
-              state plainly instead of dead lifecycle buttons.
-            -->
-            <span
-              class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md
-                     text-[12px] font-medium bg-status-running/15 text-status-running"
-            >
-              <Icon name="check" size={11} />
-              Always available (file-based)
-            </span>
-          {:else}
+          <!--
+            File-based engines (SQLite) have no daemon — nothing to start, stop,
+            or restart — so the lifecycle buttons are simply omitted. The "always
+            available" rationale now lives in the header status-pill tooltip.
+          -->
+          {#if !selected.fileBased}
             {#if selected.status === "running" || selected.status === "starting"}
               <button
                 type="button"

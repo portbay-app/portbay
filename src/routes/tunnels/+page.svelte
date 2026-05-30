@@ -20,7 +20,6 @@
   import type { IconName } from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
   import ProjectAvatar from "$lib/components/atoms/ProjectAvatar.svelte";
-  import CustomTunnelField from "$lib/components/projects/CustomTunnelField.svelte";
 
   import { projects } from "$lib/stores/projects.svelte";
   import { tunnels } from "$lib/stores/tunnels.svelte";
@@ -276,9 +275,18 @@
               {/if}
             {/if}
 
-            {#if !sharing}
-              <div class="mt-3 pt-3 border-t border-border/60">
-                <CustomTunnelField {project} />
+            {#if !sharing && project.tunnel?.hostname}
+              <!-- A custom tunnel is attached in the project's settings, so Share
+                   routes through it (stable hostname) instead of an ephemeral
+                   quick link. Attach/detach lives in project settings, not here. -->
+              <div
+                class="mt-3 flex items-center gap-2 px-3 py-2 rounded-md bg-bg/40 border border-border/60"
+              >
+                <Icon name="globe" size={13} class="text-fg-muted shrink-0" />
+                <span class="min-w-0 text-[11.5px] text-fg-muted">
+                  Shares via your custom domain
+                  <code class="font-mono text-fg">{project.tunnel.hostname}</code>
+                </span>
               </div>
             {/if}
           </article>

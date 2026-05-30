@@ -77,6 +77,31 @@ export function installSimulatorIpcBrowser(payload: {
     autoCleanExtraDirs: [],
   };
 
+  // Mutable task-board state so create / move / edit / check persist across
+  // calls within a session (deep-cloned so the shared fixture is never touched).
+  const boardCards: Record<string, any[]> = JSON.parse(
+    JSON.stringify(fixtures.tasks ?? {}),
+  );
+  const boardConfigs: Record<string, any> = JSON.parse(
+    JSON.stringify(fixtures.boardConfigs ?? {}),
+  );
+  const handoffs: Record<string, any> = JSON.parse(
+    JSON.stringify(fixtures.handoffs ?? {}),
+  );
+  const scratchpads: Record<string, string> = JSON.parse(
+    JSON.stringify(fixtures.scratchpads ?? {}),
+  );
+  const cardActivity: Record<string, any[]> = JSON.parse(
+    JSON.stringify(fixtures.cardActivity ?? {}),
+  );
+  const runLogs: Record<string, any> = JSON.parse(
+    JSON.stringify(fixtures.runLogs ?? {}),
+  );
+  // Mutable agent roster so Settings → AI Integrations toggles (launch mode,
+  // path override) round-trip within the session.
+  const agents: any[] = JSON.parse(JSON.stringify(fixtures.agentOptions ?? []));
+  let taskIdSeq = 1;
+
   let nextCb = 1;
   let nextListenerId = 1;
   let nextEventId = 1;
@@ -94,6 +119,54 @@ export function installSimulatorIpcBrowser(payload: {
 
   function project(id: unknown): any {
     return projects.find((p) => p.id === id);
+  }
+
+  /* ----------------------------------------------------------------- tasks */
+
+  function nowIso(): string {
+    return new Date(Date.now()).toISOString();
+  }
+  function newCardId(): string {
+    return "demo-card-" + taskIdSeq++;
+  }
+  function boardOf(pid: unknown): any[] {
+    const key = typeof pid === "string" ? pid : "";
+    if (!boardCards[key]) boardCards[key] = [];
+    return boardCards[key];
+  }
+  function findCard(pid: unknown, id: unknown): any {
+    return boardOf(pid).find((c) => c.id === id);
+  }
+  function maxOrder(list: any[]): number {
+    return list.reduce((m, c) => Math.max(m, c.order ?? 0), 0);
+  }
+  function emitTasksChanged(pid: unknown): void {
+    if (typeof pid === "string") emit("tasks://changed", { projectId: pid });
+  }
+  // A template's string checklist → the wire Checklist object.
+  function templateChecklist(t: any): any {
+    if (!t || !Array.isArray(t.checklist) || t.checklist.length === 0) return null;
+    return {
+      label: "Steps",
+      items: t.checklist.map((desc: string, idx: number) => ({ idx, desc, done: false })),
+    };
+  }
+  // Begin a (simulated) agent run on a card: claim it, move to In Progress, and
+  // seed a short transcript. Used by manual "Start with agent" and the
+  // auto-dispatch a To-Do move triggers on an `autoOnTodo` board.
+  function beginRun(pid: unknown, card: any, agent: string): void {
+    card.status = "InProgress";
+    card.claim = { host: "studio.local", runId: "run_" + agent + "_" + taskIdSeq++, at: nowIso() };
+    card.updated = nowIso();
+    runLogs[card.id] = {
+      runId: card.claim.runId,
+      agent,
+      running: true,
+      text:
+        "● Claimed card · run " + card.claim.runId + "\n" +
+        "✓ Loaded project context (CLAUDE.md, HANDOFF.md)\n" +
+        "▸ Working…",
+    };
   }
 
   function runtimeFor(p: any): unknown {
@@ -416,6 +489,9 @@ export function installSimulatorIpcBrowser(payload: {
           if (patch.https !== undefined) p.https = patch.https;
           if (patch.autoStart !== undefined) p.autoStart = patch.autoStart;
           if (patch.name !== undefined) p.name = patch.name;
+          if (patch.kind !== undefined) p.type = patch.kind;
+          if (patch.startCommand !== undefined)
+            p.startCommand = patch.startCommand ?? undefined;
           if (patch.domain !== undefined) {
             const d = patch.domain as Record<string, unknown> | null;
             // Normalise an all-default config to null, mirroring the core.
@@ -487,6 +563,358 @@ export function installSimulatorIpcBrowser(payload: {
       // an array rather than the default null.
       case "detect_sources":
         return Promise.resolve([]);
+      // Agent-activity notifications: the hosted demo has no audit logs, so the
+      // bell starts empty. List must be an array (the store reduces over it).
+      case "notifications_list":
+        return Promise.resolve([]);
+      case "notifications_mark_read":
+      case "notifications_mark_all_read":
+      case "notifications_clear":
+        return Promise.resolve(null);
+
+      // --- Task board ("Project Context & Task Authority") ------------------
+      case "tasks_list":
+        return Promise.resolve(boardOf(args && args.projectId));
+      case "board_config_get": {
+        const pid = typeof (args && args.projectId) === "string" ? (args!.projectId as string) : "";
+        return Promise.resolve(
+          boardConfigs[pid] ?? JSON.parse(JSON.stringify(fixtures.defaultBoardConfig)),
+        );
+      }
+      case "board_config_set": {
+        const pid = args && (args.projectId as string);
+        if (pid && args && args.config) boardConfigs[pid] = args.config;
+        return Promise.resolve((pid && boardConfigs[pid]) || (args && args.config) || null);
+      }
+      case "handoff_show": {
+        const pid = args && (args.projectId as string);
+        return Promise.resolve(
+          (pid && handoffs[pid]) || {
+            exists: false,
+            updated: null,
+            maxChars: 1200,
+            chars: 0,
+            autoGenerated: false,
+            body: "",
+          },
+        );
+      }
+      case "handoff_update":
+      case "handoff_replace": {
+        const pid = args && (args.projectId as string);
+        const incoming = (args && ((args.body as string) ?? (args.narrative as string))) || "";
+        const prev = (pid && handoffs[pid] && handoffs[pid].body) || "";
+        const nextBody =
+          cmd === "handoff_replace"
+            ? incoming
+            : incoming
+              ? incoming + "\n\n" + prev
+              : prev;
+        const view = {
+          exists: nextBody.length > 0,
+          updated: nowIso(),
+          maxChars: 1200,
+          chars: nextBody.length,
+          autoGenerated: false,
+          body: nextBody,
+        };
+        if (pid) handoffs[pid] = view;
+        return Promise.resolve(view);
+      }
+      case "scratchpad_get":
+        return Promise.resolve(
+          (args && scratchpads[args.projectId as string]) || "",
+        );
+      case "scratchpad_set": {
+        const pid = args && (args.projectId as string);
+        if (pid) scratchpads[pid] = (args && (args.body as string)) || "";
+        return Promise.resolve(null);
+      }
+      case "agents_installed":
+        return Promise.resolve(agents);
+      // Settings → AI Integrations: flip an agent's CLI/Desktop launch form.
+      case "set_agent_launch_mode": {
+        const a = agents.find((x) => x.id === (args && args.agent));
+        if (a && (args!.mode === "cli" || args!.mode === "app")) a.mode = args!.mode;
+        return Promise.resolve(agents);
+      }
+      // Settings → AI Integrations: set a manual binary path override.
+      case "set_agent_path": {
+        const a = agents.find((x) => x.id === (args && args.agent));
+        if (a) {
+          a.path = (args && (args.path as string)) || a.path;
+          a.overridden = true;
+          a.cliInstalled = true;
+          a.installed = true;
+        }
+        return Promise.resolve(agents);
+      }
+      // Settings → AI Integrations: clear a path override (fall back to PATH).
+      case "clear_agent_path": {
+        const a = agents.find((x) => x.id === (args && args.agent));
+        if (a) a.overridden = false;
+        return Promise.resolve(agents);
+      }
+      // Settings → AI Integrations (MCP): the resolved PortBay MCP binary.
+      case "resolve_mcp_binary_path":
+        return Promise.resolve("/usr/local/bin/portbay");
+      case "board_templates":
+        return Promise.resolve(fixtures.boardTemplates ?? []);
+      case "tasks_watch":
+      case "tasks_unwatch":
+      case "board_reconcile":
+        return Promise.resolve(null);
+      case "card_activity":
+        return Promise.resolve((args && cardActivity[args.id as string]) || []);
+      case "task_run_log":
+        return Promise.resolve(
+          (args && runLogs[args.id as string]) || {
+            runId: null,
+            agent: null,
+            running: false,
+            text: "",
+          },
+        );
+      case "task_create": {
+        const pid = args && args.projectId;
+        const input: any = (args && args.input) || {};
+        const tmpl = input.template
+          ? (fixtures.boardTemplates ?? []).find(
+              (t) => t.name.toLowerCase() === String(input.template).toLowerCase(),
+            )
+          : null;
+        const list = boardOf(pid);
+        const c = {
+          id: newCardId(),
+          title: input.title || "Untitled task",
+          status: input.status || "Backlog",
+          priority: input.priority ?? (tmpl ? tmpl.priority : null) ?? null,
+          labels: input.labels ?? (tmpl ? tmpl.labels : []) ?? [],
+          estimate: input.estimate ?? null,
+          color: input.color ?? null,
+          url: input.url ?? null,
+          checklist: input.checklist ?? (tmpl ? templateChecklist(tmpl) : null) ?? null,
+          acceptance: input.acceptance ?? (tmpl ? tmpl.acceptance : null) ?? null,
+          touchpoints: input.touchpoints ?? [],
+          automation: input.automation || "inherit",
+          agent: input.agent ?? null,
+          order: maxOrder(list) + 1000,
+          created: nowIso(),
+          updated: nowIso(),
+          schemaVersion: 1,
+          body: input.body ?? (tmpl ? tmpl.body : "") ?? "",
+        };
+        list.push(c);
+        emitTasksChanged(pid);
+        return Promise.resolve(c);
+      }
+      case "task_update": {
+        const pid = args && args.projectId;
+        const input: any = (args && args.input) || {};
+        const c = findCard(pid, input.id);
+        if (!c) return Promise.resolve(null);
+        const fields = [
+          "title", "body", "priority", "due", "acceptance", "touchpoints",
+          "blockedBy", "automation", "order", "labels", "estimate", "color",
+          "url", "checklist", "custom", "subscribed", "archived", "autoBranch",
+          "autoArchive",
+        ];
+        for (const f of fields) if (input[f] !== undefined) c[f] = input[f];
+        // agent / assignee / icon: "" clears (inherit/none), a value sets.
+        for (const f of ["agent", "assignee", "icon"]) {
+          if (input[f] !== undefined) c[f] = input[f] === "" ? null : input[f];
+        }
+        c.updated = nowIso();
+        emitTasksChanged(pid);
+        return Promise.resolve(c);
+      }
+      case "task_move": {
+        const pid = args && args.projectId;
+        const c = findCard(pid, args && args.id);
+        if (!c) return Promise.resolve(null);
+        c.status = args && args.to;
+        if (args && args.order != null) c.order = args.order;
+        c.updated = nowIso();
+        // autoOnTodo: entering To Do auto-dispatches the card's agent. Simulate
+        // the run after a short beat so the move reads, then the card "starts".
+        const cfg = pid ? boardConfigs[pid as string] : null;
+        const eligible =
+          c.automation !== "off" && (c.automation === "on" || c.agent != null);
+        if (
+          args && args.to === "Todo" &&
+          cfg && cfg.automation && cfg.automation.mode === "autoOnTodo" &&
+          eligible
+        ) {
+          const agent = c.agent || cfg.automation.agent || "claude";
+          const cardId = c.id;
+          setTimeout(() => {
+            const card = findCard(pid, cardId);
+            if (!card || card.status !== "Todo") return; // moved on meanwhile
+            beginRun(pid, card, agent);
+            emitTasksChanged(pid);
+          }, 1200);
+        }
+        emitTasksChanged(pid);
+        return Promise.resolve(null);
+      }
+      case "task_reorder": {
+        const c = findCard(args && args.projectId, args && args.id);
+        if (c && args && args.order != null) {
+          c.order = args.order;
+          c.updated = nowIso();
+        }
+        return Promise.resolve(null);
+      }
+      case "task_delete": {
+        const list = boardOf(args && args.projectId);
+        const idx = list.findIndex((c) => c.id === (args && args.id));
+        if (idx >= 0) list.splice(idx, 1);
+        emitTasksChanged(args && args.projectId);
+        return Promise.resolve(null);
+      }
+      case "task_check_item": {
+        const c = findCard(args && args.projectId, args && args.id);
+        if (c && c.checklist && Array.isArray(c.checklist.items)) {
+          const it = c.checklist.items.find((i: any) => i.idx === (args && args.idx));
+          if (it) it.done = !!(args && args.done);
+          c.updated = nowIso();
+        }
+        return Promise.resolve(null);
+      }
+      case "task_checklist_add": {
+        const c = findCard(args && args.projectId, args && args.id);
+        if (c) {
+          const items =
+            c.checklist && Array.isArray(c.checklist.items)
+              ? c.checklist.items.slice()
+              : [];
+          let nextIdx = items.reduce((m: number, i: any) => Math.max(m, i.idx + 1), 0);
+          for (const desc of (args && (args.items as string[])) || [])
+            items.push({ idx: nextIdx++, desc, done: false });
+          c.checklist = {
+            label: (c.checklist && c.checklist.label) || (args && args.label) || "Steps",
+            items,
+          };
+          c.updated = nowIso();
+        }
+        emitTasksChanged(args && args.projectId);
+        return Promise.resolve(null);
+      }
+      case "task_archive": {
+        const c = findCard(args && args.projectId, args && args.id);
+        if (c) {
+          c.archived = !!(args && args.archived);
+          c.updated = nowIso();
+        }
+        emitTasksChanged(args && args.projectId);
+        return Promise.resolve(null);
+      }
+      case "task_subscribe": {
+        const c = findCard(args && args.projectId, args && args.id);
+        if (c) c.subscribed = !!(args && args.subscribed);
+        emitTasksChanged(args && args.projectId);
+        return Promise.resolve(null);
+      }
+      case "task_capture": {
+        const pid = args && args.projectId;
+        const list = boardOf(pid);
+        const c = {
+          id: newCardId(),
+          title: (args && (args.title as string)) || "Untitled",
+          status: "Backlog",
+          draft: true,
+          automation: "inherit",
+          order: maxOrder(list) + 1000,
+          created: nowIso(),
+          updated: nowIso(),
+          schemaVersion: 1,
+          body: "",
+        };
+        list.push(c);
+        emitTasksChanged(pid);
+        return Promise.resolve(c);
+      }
+      case "task_promote": {
+        const c = findCard(args && args.projectId, args && args.id);
+        if (c) {
+          c.draft = false;
+          c.status = "Backlog";
+          c.updated = nowIso();
+        }
+        emitTasksChanged(args && args.projectId);
+        return Promise.resolve(null);
+      }
+      case "task_duplicate": {
+        const pid = args && args.projectId;
+        const src = findCard(pid, args && args.id);
+        if (!src) return Promise.resolve(null);
+        const list = boardOf(pid);
+        const copy = JSON.parse(JSON.stringify(src));
+        copy.id = newCardId();
+        copy.title = src.title + " (copy)";
+        copy.status = "Backlog";
+        copy.claim = null;
+        copy.order = maxOrder(list) + 1000;
+        copy.created = nowIso();
+        copy.updated = nowIso();
+        list.push(copy);
+        emitTasksChanged(pid);
+        return Promise.resolve(copy);
+      }
+      case "task_start_with_agent": {
+        const pid = args && args.projectId;
+        const c = findCard(pid, args && args.id);
+        if (c) {
+          const cfg = pid ? boardConfigs[pid as string] : null;
+          const agent =
+            c.agent || (cfg && cfg.automation && cfg.automation.agent) || "claude";
+          beginRun(pid, c, agent);
+        }
+        emitTasksChanged(pid);
+        return Promise.resolve(null);
+      }
+      case "task_stop_agent": {
+        const c = findCard(args && args.projectId, args && args.id);
+        if (c) {
+          c.claim = null;
+          c.updated = nowIso();
+          const rl = runLogs[c.id];
+          if (rl) rl.running = false;
+        }
+        emitTasksChanged(args && args.projectId);
+        return Promise.resolve(null);
+      }
+      case "task_branch":
+        return Promise.resolve({
+          branch: "task/" + ((args && (args.id as string)) || "card"),
+          created: true,
+        });
+      case "task_comment": {
+        const id = args && (args.id as string);
+        if (id) {
+          const list = cardActivity[id] || (cardActivity[id] = []);
+          list.unshift({
+            at: nowIso(),
+            cardId: id,
+            action: "comment",
+            actor: { kind: "human" },
+            note: (args && (args.text as string)) || "",
+          });
+        }
+        return Promise.resolve(null);
+      }
+      case "task_attach":
+      case "task_detach":
+        return Promise.resolve(null);
+      case "task_attachment_path":
+        return Promise.resolve("/Users/dev/Sites/demo/.portbay/attachments/file");
+      case "context_sync":
+        return Promise.resolve({
+          projectId: args && args.projectId,
+          dryRun: !!(args && args.dryRun),
+          results: [],
+        });
+
       default:
         // Unknown list_* commands get an empty array (stores expecting arrays
         // don't throw on boot); everything else resolves null.

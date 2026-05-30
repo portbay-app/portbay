@@ -100,45 +100,97 @@
   }
 </script>
 
-<section
-  class="bg-surface border border-border rounded-2xl p-5
-         grid grid-cols-[180px,1fr] gap-x-6"
->
-  <div class="flex items-start gap-2.5">
-    <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-fg-muted/10 text-fg-muted">
-      <Icon name="users" size={15} />
+<section class="bg-surface border border-border rounded-2xl p-5">
+  {#snippet tierBadge()}
+    <span
+      class="shrink-0 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full text-[11.5px] font-semibold
+             {tier === 'pro'
+        ? 'bg-accent/15 text-accent'
+        : tier === 'free'
+          ? 'bg-status-running/15 text-status-running'
+          : 'bg-fg-muted/15 text-fg-muted'}"
+    >
+      {#if tier === "pro"}<Icon name="sparkles" size={12} />{/if}
+      {tierLabel}
     </span>
-    <span class="text-[14px] font-semibold text-fg pt-1">Account</span>
-  </div>
+  {/snippet}
 
   <div class="space-y-4">
-    <!-- identity + tier -->
-    <div class="flex items-center justify-between gap-3">
-      <div class="min-w-0">
-        {#if entitlements.isSignedIn}
-          <div class="text-[13.5px] font-medium text-fg truncate">
-            {entitlements.account?.login}
+    {#if entitlements.isSignedIn}
+      <!-- Profile first: avatar + display name + tier, then the avatar controls.
+           The editable display-name field follows directly below. -->
+      <div class="flex items-start gap-4">
+        <UserAvatar size={56} />
+        <div class="min-w-0 flex-1 space-y-2">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-[14px] font-semibold text-fg truncate">
+                {acct?.display_name || acct?.login}
+              </div>
+              <div class="text-[12px] text-fg-muted truncate">
+                {tier === "pro" ? "Thanks for supporting PortBay." : "Free account"}
+              </div>
+            </div>
+            {@render tierBadge()}
           </div>
-          <div class="text-[12px] text-fg-muted">
-            {tier === "pro" ? "Thanks for supporting PortBay." : "Free account"}
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <button
+              type="button"
+              onclick={pickAvatar}
+              disabled={profileBusy}
+              class="h-8 px-3 rounded-md border border-border text-[12px] text-fg-muted
+                     hover:text-fg hover:bg-surface-2 transition-colors disabled:opacity-50"
+            >
+              Upload picture
+            </button>
+            {#if hasCustomAvatar}
+              <button
+                type="button"
+                onclick={clearAvatar}
+                disabled={profileBusy}
+                class="h-8 px-3 rounded-md text-[12px] text-fg-subtle
+                       hover:text-status-crashed transition-colors disabled:opacity-50"
+              >
+                Remove
+              </button>
+            {/if}
+            <span class="text-[11px] text-fg-subtle">PNG, JPEG, or WebP — up to 256 KB.</span>
           </div>
-        {:else}
+        </div>
+      </div>
+
+      <!-- display name -->
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <span class="text-[13px] text-fg">Display name</span>
+          <p class="text-[11px] text-fg-subtle mt-0.5">
+            Shown in the app and used for your initials when there's no picture.
+          </p>
+        </div>
+        <input
+          type="text"
+          bind:value={nameDraft}
+          onblur={saveName}
+          onkeydown={(e) => {
+            if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+          }}
+          disabled={profileBusy}
+          maxlength="60"
+          placeholder={acct?.login ?? "Your name"}
+          class="h-8 w-56 rounded-md bg-bg border border-border px-2.5 text-[12px] text-fg
+                 focus:outline-none focus:border-accent/60 disabled:opacity-50"
+        />
+      </div>
+    {:else}
+      <!-- anonymous identity + tier -->
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
           <div class="text-[13.5px] font-medium text-fg">Using PortBay anonymously</div>
           <div class="text-[12px] text-fg-muted">No account — up to 3 projects on this Mac.</div>
-        {/if}
+        </div>
+        {@render tierBadge()}
       </div>
-      <span
-        class="shrink-0 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full text-[11.5px] font-semibold
-               {tier === 'pro'
-          ? 'bg-accent/15 text-accent'
-          : tier === 'free'
-            ? 'bg-status-running/15 text-status-running'
-            : 'bg-fg-muted/15 text-fg-muted'}"
-      >
-        {#if tier === "pro"}<Icon name="sparkles" size={12} />{/if}
-        {tierLabel}
-      </span>
-    </div>
+    {/if}
 
     {#if isGrace}
       <p class="text-[12px] leading-relaxed text-status-unhealthy flex items-start gap-1.5">
@@ -211,62 +263,6 @@
         </button>
       {/if}
     </div>
-
-    {#if entitlements.isSignedIn}
-      <!-- Profile (avatar + display name) — same card, separated by a divider -->
-      <div class="border-t border-border/60 pt-4 space-y-4">
-        <div class="flex items-center gap-4">
-          <UserAvatar size={56} />
-          <div class="flex flex-col gap-1.5">
-            <div class="flex items-center gap-2">
-              <button
-                type="button"
-                onclick={pickAvatar}
-                disabled={profileBusy}
-                class="h-8 px-3 rounded-md border border-border text-[12px] text-fg-muted
-                       hover:text-fg hover:bg-surface-2 transition-colors disabled:opacity-50"
-              >
-                Upload picture
-              </button>
-              {#if hasCustomAvatar}
-                <button
-                  type="button"
-                  onclick={clearAvatar}
-                  disabled={profileBusy}
-                  class="h-8 px-3 rounded-md text-[12px] text-fg-subtle
-                         hover:text-status-crashed transition-colors disabled:opacity-50"
-                >
-                  Remove
-                </button>
-              {/if}
-            </div>
-            <p class="text-[11px] text-fg-subtle">PNG, JPEG, or WebP — up to 256 KB.</p>
-          </div>
-        </div>
-
-        <div class="flex items-center justify-between gap-3">
-          <div class="min-w-0">
-            <span class="text-[13px] text-fg">Display name</span>
-            <p class="text-[11px] text-fg-subtle mt-0.5">
-              Shown in the app and used for your initials when there's no picture.
-            </p>
-          </div>
-          <input
-            type="text"
-            bind:value={nameDraft}
-            onblur={saveName}
-            onkeydown={(e) => {
-              if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
-            }}
-            disabled={profileBusy}
-            maxlength="60"
-            placeholder={acct?.login ?? "Your name"}
-            class="h-8 w-56 rounded-md bg-bg border border-border px-2.5 text-[12px] text-fg
-                   focus:outline-none focus:border-accent/60 disabled:opacity-50"
-          />
-        </div>
-      </div>
-    {/if}
 
     <!-- about the license -->
     <div class="border-t border-border/60 pt-3">

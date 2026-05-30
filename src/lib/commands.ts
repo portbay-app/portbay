@@ -11,6 +11,7 @@ import { goto } from "$app/navigation";
 import { openUrl } from "$lib/security/openUrl";
 
 import { safeInvoke } from "$lib/ipc";
+import { startProject, startProjectSandboxed } from "$lib/actions/startProject";
 import { addProjectWizard } from "$lib/stores/wizard.svelte";
 import { density } from "$lib/stores/density.svelte";
 import { errorBus } from "$lib/stores/errors.svelte";
@@ -138,7 +139,17 @@ export function collectCommands(): PaletteCommand[] {
         run: async () => {
           try {
             await dns.ensureReady();
-            await safeInvoke("start_project", { id: p.id });
+            // Same conflict-resolving path as every Play button: a port
+            // conflict surfaces the "kill it & start" prompt. Already-sandboxed
+            // projects go through the sandboxed start so their profile +
+            // ephemeral reset still run.
+            const r = p.sandboxed
+              ? await startProjectSandboxed(p.id, p.name, {
+                  network: p.sandbox?.network ?? "loopback_only",
+                  ephemeral: p.sandbox?.ephemeral ?? true,
+                })
+              : await startProject(p.id, p.name);
+            if (r.kind === "error") errorBus.push(r.error);
           } catch {
             /* toast pushed */
           }

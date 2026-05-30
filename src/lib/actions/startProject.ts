@@ -17,18 +17,30 @@ import { invokeQuiet } from "$lib/ipc";
 import { confirmDialog } from "$lib/stores/confirm.svelte";
 import { trackEvent } from "$lib/telemetry";
 import type { CommandError } from "$lib/types/error";
+import type { SandboxNetworkPolicy } from "$lib/types/projects";
 
 export type StartResult =
   | { kind: "started" }
   | { kind: "declined" }
   | { kind: "error"; error: CommandError };
 
-export async function startProject(
+/**
+ * Run an initial start attempt, and on `PORT_CONFLICT` resolve it with the
+ * shared confirm + force-quit flow. Both the normal and the sandboxed start go
+ * through this so a port conflict surfaces the SAME "kill it & start" prompt
+ * everywhere — including the sandbox page. The conflict is detected by the
+ * backend (`start_project` / `start_project_sandboxed` both run the same
+ * `preflight_port`), and the force path is identical (`force_start_project`
+ * frees the port then starts the already-reconciled — and, for a sandboxed
+ * project, already sandbox-wrapped — command).
+ */
+async function startWithConflictResolution(
   id: string,
   name: string,
+  attempt: () => Promise<void>,
 ): Promise<StartResult> {
   try {
-    await invokeQuiet<void>("start_project", { id });
+    await attempt();
     trackEvent("project_started");
     return { kind: "started" };
   } catch (raw) {
@@ -54,4 +66,32 @@ export async function startProject(
       return { kind: "error", error: raw2 as CommandError };
     }
   }
+}
+
+export function startProject(id: string, name: string): Promise<StartResult> {
+  return startWithConflictResolution(id, name, () =>
+    invokeQuiet<void>("start_project", { id }),
+  );
+}
+
+export interface SandboxStartOptions {
+  network: SandboxNetworkPolicy;
+  ephemeral: boolean;
+}
+
+/**
+ * Start a project under the macOS sandbox, resolving a port conflict with the
+ * same interactive prompt as {@link startProject}. The first attempt enables
+ * the sandbox, validates the Seatbelt profile, and reconciles before the port
+ * check fires — so on the force path `force_start_project` launches the
+ * already-sandbox-wrapped command. macOS only (the command errors elsewhere).
+ */
+export function startProjectSandboxed(
+  id: string,
+  name: string,
+  options: SandboxStartOptions,
+): Promise<StartResult> {
+  return startWithConflictResolution(id, name, () =>
+    invokeQuiet<void>("start_project_sandboxed", { id, options }),
+  );
 }
