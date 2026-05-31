@@ -1451,8 +1451,11 @@ impl PortbayMcp {
 
     #[tool(
         name = "portbay_task_create",
-        description = "Capture a new card on the board. Use this for work you discover mid-task \
-                       rather than burying it in chat — it lands in Backlog by default.",
+        description = "Add a card to the project's PortBay board (PortBay is this project's to-do \
+                       board). Use it BOTH when the user asks you to add a task or build a to-do \
+                       list — one call per item — and to capture work you discover mid-task rather \
+                       than burying it in chat. Lands in Backlog by default; pass `status` and \
+                       `priority` to place it.",
         annotations(title = "Create task", read_only_hint = false, open_world_hint = false)
     )]
     async fn task_create(
