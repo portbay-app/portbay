@@ -78,9 +78,18 @@ TARGET_TRIPLE="$TARGET" ./scripts/build-mcp.sh
 # already includes it — no pre-build bake step needed.
 
 # ---- Build: signs the app + sidecars, and styles the DMG via Finder (local GUI).
+# Enable the proprietary task board when the desktop-pro overlay is present (same
+# `tasks` feature scripts/dev-pro.sh uses for `tauri dev`, and that build-mcp.sh
+# auto-detects for the sidecar above). A public OSS checkout lacks src/context,
+# so the DMG stays board-free with no flag.
 echo "==> Building + signing (Finder will style the DMG)..."
 pnpm install --frozen-lockfile
-pnpm tauri build --target "$TARGET"
+tauri_feature_args=()
+if [ -f "$REPO_DIR/src-tauri/src/context/board.rs" ]; then
+  tauri_feature_args=(--features tasks)
+  echo "==> desktop-pro overlay detected — building app with --features tasks"
+fi
+pnpm tauri build --target "$TARGET" "${tauri_feature_args[@]}"
 
 DMG="$(ls -t "src-tauri/target/$TARGET/release/bundle/dmg/"*.dmg | head -1)"
 [[ -n "$DMG" && -f "$DMG" ]] || die "No DMG was produced."

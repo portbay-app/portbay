@@ -51,8 +51,18 @@ for ours in portbay-hosts-helper portbay-mcp; do
   [ -f "$ph" ] || : > "$ph"
 done
 
-echo "build-mcp: cargo build --release --target ${triple} -p portbay-mcp"
-cargo build --release --manifest-path "$manifest" --target "$triple" -p portbay-mcp
+# Light up the proprietary task board in the sidecar when the desktop-pro
+# overlay is present in this checkout (same source the GUI/CLI gate behind
+# `tasks`). The public OSS checkout lacks src/context, so the released sidecar
+# stays board-free without any flag here. Mirrors scripts/dev-pro.sh.
+feature_args=()
+if [ -f "${repo_root}/src-tauri/src/context/board.rs" ]; then
+  feature_args=(--features tasks)
+  echo "build-mcp: desktop-pro overlay detected — building with --features tasks"
+fi
+
+echo "build-mcp: cargo build --release --target ${triple} -p portbay-mcp ${feature_args[*]}"
+cargo build --release --manifest-path "$manifest" --target "$triple" -p portbay-mcp "${feature_args[@]}"
 
 src="${repo_root}/src-tauri/target/${triple}/release/portbay-mcp"
 cp "$src" "$dest"

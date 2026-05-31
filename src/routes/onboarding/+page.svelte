@@ -14,7 +14,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { Channel, invoke } from "@tauri-apps/api/core";
+  import { Channel } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
@@ -148,7 +148,10 @@
     };
 
     try {
-      await invoke("scaffold_template", {
+      // safeInvoke (not raw invoke) so a scaffold failure — the highest-stakes
+      // onboarding moment — reaches the toast/notification bus + crash reporter,
+      // not just the inline log. The Channel rides inside the args record.
+      await safeInvoke("scaffold_template", {
         kind: chosenKind,
         parentPath: chosenParent,
         name: chosenName.trim(),
@@ -157,7 +160,7 @@
       await onboarding.markOnboarded();
       await goto("/");
     } catch (raw) {
-      // Already toasted via the underlying envelope; surface inline
+      // safeInvoke already pushed the envelope as a toast; surface inline
       // too so the user sees what went wrong in the log scroller.
       const message =
         typeof raw === "object" && raw !== null && "whatHappened" in raw

@@ -1762,7 +1762,10 @@ impl McpContext {
                 });
                 continue;
             }
-            let process_id = process_id.expect("checked above");
+            // Guarded by the `is_none()` early-continue above; bind without panicking.
+            let Some(process_id) = process_id else {
+                continue;
+            };
             // Note: mark_stop_requested is app-only state; OMIT here (cross-process).
             let res = match op {
                 GroupOp::Start => client.start(&process_id).await,
@@ -3512,7 +3515,7 @@ impl McpContext {
         let pc = board_ops::create_card(
             &path,
             create,
-            Actor::agent("mcp", "external"),
+            Actor::agent("mcp", mcp_agent_label()),
             &clock::now_iso8601(),
         )?;
         Ok(card_json(&pc))
@@ -3530,7 +3533,7 @@ impl McpContext {
                 action: "ack".into(),
                 from: None,
                 to: Some(pc.card.status),
-                actor: Actor::agent(args.run_id, "external"),
+                actor: Actor::agent(args.run_id, mcp_agent_label()),
                 note: None,
             },
         )?;
@@ -3543,7 +3546,7 @@ impl McpContext {
         let path = self.board_project_path(&args.project)?;
         let pc = board::read_card(&path, &args.id)?;
         validate_run(&pc, args.run_id.as_deref())?;
-        let actor = Actor::agent(args.run_id.unwrap_or_else(|| "mcp".into()), "external");
+        let actor = Actor::agent(args.run_id.unwrap_or_else(|| "mcp".into()), mcp_agent_label());
         let updated = board_ops::check_item(
             &path,
             &args.id,
@@ -3560,7 +3563,7 @@ impl McpContext {
         let path = self.board_project_path(&args.project)?;
         let pc = board::read_card(&path, &args.id)?;
         validate_run(&pc, args.run_id.as_deref())?;
-        let actor = Actor::agent(args.run_id.unwrap_or_else(|| "mcp".into()), "external");
+        let actor = Actor::agent(args.run_id.unwrap_or_else(|| "mcp".into()), mcp_agent_label());
         let updated = board_ops::add_checklist_items(
             &path,
             &args.id,
@@ -3577,7 +3580,7 @@ impl McpContext {
         let path = self.board_project_path(&args.project)?;
         let pc = board::read_card(&path, &args.id)?;
         validate_run(&pc, args.run_id.as_deref())?;
-        let actor = Actor::agent(args.run_id.unwrap_or_else(|| "mcp".into()), "external");
+        let actor = Actor::agent(args.run_id.unwrap_or_else(|| "mcp".into()), mcp_agent_label());
         board_ops::comment(&path, &args.id, &args.text, actor, &clock::now_iso8601())?;
         let _ = crate::context::automation::touch_heartbeat(&path, &args.id);
         Ok(serde_json::json!({ "ok": true, "id": args.id }))
@@ -3591,7 +3594,7 @@ impl McpContext {
         let now = clock::now_iso8601();
         let actor = Actor::agent(
             args.run_id.clone().unwrap_or_else(|| "mcp".into()),
-            "external",
+            mcp_agent_label(),
         );
         let mut reminders: Vec<String> = Vec::new();
         let mut card = pc.card.clone();
@@ -3740,6 +3743,20 @@ impl McpContext {
             "trimmed": up.trimmed,
         }))
     }
+}
+
+/// The agent label to attribute board mutations to in the audit log + activity
+/// view. PortBay stamps the dispatched agent's name into the MCP server env
+/// (`PORTBAY_AGENT`) at launch; fall back to "external" for a manually-run
+/// server with no dispatch context. Previously every board op hardcoded
+/// "external", so the audit trail couldn't tell `claude` from `codex`.
+#[cfg(feature = "tasks")]
+fn mcp_agent_label() -> String {
+    std::env::var("PORTBAY_AGENT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "external".to_string())
 }
 
 /// Reject a stale/zombie run: if the card carries a soft cross-machine claim

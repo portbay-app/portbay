@@ -302,10 +302,19 @@ pub fn run() {
             // waits for :443 to actually release before returning, closing the
             // kill→rebind race. Foreign caddy/dnsmasq/mailpit (ServBay, Homebrew)
             // never match — the signature keys on PortBay's own config paths.
+            //
+            // php-fpm is reaped here too — it's a process-compose child, so the
+            // stale-PC sweep above orphans it (PC gets SIGKILLed before it can
+            // drain a 5 s FPM shutdown), and an orphaned FPM master keeps its
+            // unix socket bound. The fresh build's php-fpm then fails to start
+            // ("Another FPM instance seems to already listen…") and surfaces as a
+            // spurious "php-fpm crashed" notification. Reaping it now — after the
+            // PC sweep, before we boot our own PC — frees the socket.
             for kind in [
                 sidecar_reclaim::SidecarKind::Caddy,
                 sidecar_reclaim::SidecarKind::Dnsmasq,
                 sidecar_reclaim::SidecarKind::Mailpit,
+                sidecar_reclaim::SidecarKind::PhpFpm,
             ] {
                 sidecar_reclaim::reclaim_stale(kind, sidecar_reclaim::SweepMode::All);
             }

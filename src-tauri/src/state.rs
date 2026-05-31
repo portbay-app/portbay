@@ -368,15 +368,24 @@ impl AppState {
             return Ok(());
         }
         let avoid = self.registered_project_ports();
-        let port = dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE, &avoid)
-            .ok_or(crate::dnsmasq::DnsmasqError::NoFreePort {
-            start: DNSMASQ_DEFAULT_PORT,
-        })?;
         // The registry is the source of truth for both the wildcard suffix
         // and the tunable dnsmasq settings; `self.domain_suffix` is only the
         // first-run fallback. Reading it here means a suffix migration or a
         // settings change is picked up on the next boot/restart.
         let reg = store::load_or_default(&self.registry_path, &self.domain_suffix)?;
+        // Prefer re-binding the port the resolver file already points at, so
+        // wildcard DNS survives a restart with no re-point needed (the drift
+        // root cause). `find_free_port` returns this exact port when it's free,
+        // else scans upward from it; first run falls back to the default.
+        let scan_start = crate::dnsmasq::resolver::read_installed_port(&reg.domain_suffix)
+            .unwrap_or(DNSMASQ_DEFAULT_PORT);
+        let port = dnsmasq::find_free_port(scan_start, DNSMASQ_PORT_SCAN_RANGE, &avoid)
+            .or_else(|| {
+                dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE, &avoid)
+            })
+            .ok_or(crate::dnsmasq::DnsmasqError::NoFreePort {
+                start: DNSMASQ_DEFAULT_PORT,
+            })?;
         let config_path = dnsmasq::write_config(&reg.domain_suffix, port, &reg.dnsmasq)?;
         self.dnsmasq
             .lock()
@@ -483,6 +492,7 @@ impl AppState {
             crate::sidecar_reclaim::SidecarKind::Caddy,
             crate::sidecar_reclaim::SidecarKind::Dnsmasq,
             crate::sidecar_reclaim::SidecarKind::Mailpit,
+            crate::sidecar_reclaim::SidecarKind::PhpFpm,
         ] {
             crate::sidecar_reclaim::reclaim_stale(
                 kind,

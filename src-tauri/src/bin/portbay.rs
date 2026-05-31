@@ -617,6 +617,10 @@ struct RemoveArgs {
     /// project from the registry.
     #[arg(long)]
     keep_artifacts: bool,
+
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -906,6 +910,10 @@ struct DbRemoveArgs {
     /// Also delete the on-disk data directory (irreversible).
     #[arg(long)]
     delete_data: bool,
+
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -924,6 +932,10 @@ enum DnsCmd {
         /// New suffix (e.g. test, localhost, portbay.test). Reserved public
         /// TLDs like .com are rejected.
         suffix: String,
+
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1575,6 +1587,23 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         tunnel: None,
     };
 
+    // Reject hostname/port collisions up front (mirrors the MCP add_project
+    // path). Without this, two projects could silently share a hostname or port
+    // and Caddy would route only one of them, leaving the other unreachable with
+    // no visible error.
+    if reg.hostname_conflict(&project.hostname, None) {
+        return Err(CliError::Registry(
+            portbay_lib::registry::RegistryError::DuplicateHostname(project.hostname.clone()),
+        ));
+    }
+    if let Some(port) = project.port {
+        if reg.port_conflict(port, None) {
+            return Err(CliError::Registry(
+                portbay_lib::registry::RegistryError::DuplicatePort(port),
+            ));
+        }
+    }
+
     reg.add_project(project.clone())
         .map_err(CliError::Registry)?;
     if let Some(runtime) = &project.runtime {
@@ -1764,6 +1793,18 @@ async fn cmd_export(ctx: &CliContext, id: &str) -> Result<ExitCode, CliError> {
 async fn cmd_remove(ctx: &CliContext, args: RemoveArgs) -> Result<ExitCode, CliError> {
     let mut reg = ctx.load_registry()?;
     let pid = ProjectId::new(args.id.clone());
+    confirm_destructive(
+        args.force,
+        &format!(
+            "This unregisters project '{}'{}.",
+            args.id,
+            if args.keep_artifacts {
+                ""
+            } else {
+                " and deletes its certs + hosts entries"
+            }
+        ),
+    )?;
     let removed = reg.remove_project(&pid).map_err(CliError::Registry)?;
     ctx.save_registry(&reg)?;
 
@@ -2774,6 +2815,18 @@ async fn cmd_db(ctx: &CliContext, sub: DbCmd) -> Result<ExitCode, CliError> {
 
         DbCmd::Remove(args) => {
             let did = DatabaseInstanceId::new(args.id.clone());
+            confirm_destructive(
+                args.force,
+                &format!(
+                    "This removes database instance '{}'{}.",
+                    args.id,
+                    if args.delete_data {
+                        " AND permanently deletes its on-disk data"
+                    } else {
+                        ""
+                    }
+                ),
+            )?;
             // Best-effort stop so we don't orphan a running daemon.
             let _ = ctx.pc().stop(&format!("db-{}", args.id)).await;
             let mut reg = ctx.load_registry()?;
@@ -2873,6 +2926,7 @@ const DB_ENGINES: &[DatabaseEngine] = &[
     DatabaseEngine::Mysql,
     DatabaseEngine::Postgres,
     DatabaseEngine::Mariadb,
+    DatabaseEngine::Sqlite,
     DatabaseEngine::Redis,
     DatabaseEngine::Mongo,
     DatabaseEngine::Memcached,
@@ -3069,8 +3123,15 @@ async fn cmd_dns(ctx: &CliContext, sub: DnsCmd) -> Result<ExitCode, CliError> {
             }
         }
 
-        DnsCmd::Suffix { suffix } => {
+        DnsCmd::Suffix { suffix, force } => {
             let mut reg = ctx.load_registry()?;
+            confirm_destructive(
+                force,
+                &format!(
+                    "This rewrites every project hostname to '.{}' and drops all HTTPS certs (reissued on next reconcile).",
+                    suffix.trim().trim_start_matches('.')
+                ),
+            )?;
             let migration =
                 portbay_lib::domain::migrate_registry_suffix(&mut reg, &suffix, certs_root())
                     .map_err(|e| CliError::BadInput(e.to_string()))?;
@@ -4412,11 +4473,39 @@ impl CliError {
         match self {
             CliError::ProjectNotFound(_) | CliError::BadInput(_) => 2,
             CliError::Pc(_) => 3,
+            // Port conflict gets its own documented code (4) so scripts can
+            // distinguish it from a generic registry error.
+            CliError::Registry(registry::RegistryError::DuplicatePort(_)) => 4,
             CliError::Hosts(HostsError::PermissionDenied { .. }) => 6,
             CliError::Registry(_) | CliError::Json(_) | CliError::Other(_) | CliError::Hosts(_) => {
                 1
             }
         }
+    }
+}
+
+/// Confirm an irreversible action. `--force` bypasses the prompt. On an
+/// interactive terminal the user is asked [y/N]; in a non-interactive context
+/// (script/CI) without `--force` we refuse rather than silently destroy data —
+/// a mistyped id then aborts cleanly instead of wiping the wrong thing.
+fn confirm_destructive(force: bool, what: &str) -> Result<(), CliError> {
+    use std::io::{IsTerminal, Write};
+    if force {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(CliError::BadInput(format!(
+            "{what} is destructive; re-run with --force to confirm (no terminal to prompt on)"
+        )));
+    }
+    eprint!("{what}\nProceed? [y/N]: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(CliError::BadInput("aborted by user".into()))
     }
 }
 

@@ -50,13 +50,20 @@ if command -v brew >/dev/null 2>&1; then
   # `brew fetch --bottle-tag` downloads the precompiled tarball
   # without installing it system-wide; quiet output, predictable
   # location in the brew cache.
+  # `brew fetch` validates the downloaded bottle against the SHA-256 in the
+  # formula before it lands in the cache, so integrity for this path is
+  # delegated to Homebrew (a pinned digest here would be fragile — bottles are
+  # rebuilt/re-tagged for the same dnsmasq version, unlike immutable upstream
+  # release archives).
   brew fetch --bottle-tag="${bottle_tag}" --force "dnsmasq" >/dev/null 2>&1 || \
     brew fetch --force "dnsmasq" >/dev/null 2>&1
   cache_root="$(brew --cache)"
-  bottle_file="$(find "${cache_root}" -maxdepth 4 -type f -name "*--dnsmasq--*.bottle.tar.gz" -mmin -5 | head -n1)"
+  # Match the exact version + bottle tag so we never pick up an unrelated or
+  # stale dnsmasq bottle left in the cache.
+  bottle_file="$(find "${cache_root}" -maxdepth 4 -type f -name "*--dnsmasq--${DNSMASQ_VERSION}.${bottle_tag}.bottle.tar.gz" -mmin -5 | head -n1)"
   if [[ -z "${bottle_file}" ]]; then
-    # Fall back to *any* recently downloaded dnsmasq bottle.
-    bottle_file="$(ls -t "${cache_root}"/downloads/*--dnsmasq--*.bottle.tar.gz 2>/dev/null | head -n1 || true)"
+    # Fall back to a previously downloaded bottle of the SAME version + tag.
+    bottle_file="$(ls -t "${cache_root}"/downloads/*--dnsmasq--${DNSMASQ_VERSION}.${bottle_tag}.bottle.tar.gz 2>/dev/null | head -n1 || true)"
   fi
   if [[ -z "${bottle_file}" ]]; then
     echo "fetch-dnsmasq: could not locate downloaded bottle under ${cache_root}" >&2

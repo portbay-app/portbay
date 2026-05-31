@@ -99,10 +99,14 @@ impl ToolGroup {
             "inspector" => Ok(vec![ToolGroup::Inspector]),
             "certs" => Ok(vec![ToolGroup::Certs]),
             "migrate" => Ok(vec![ToolGroup::Migrate]),
+            // `Tasks` is a real group on the pro build; on the OSS build it
+            // scopes to an empty set (no task tools are registered) rather than
+            // erroring, so config that names it stays portable across builds.
+            "tasks" => Ok(vec![ToolGroup::Tasks]),
             other => Err(format!(
                 "unknown toolset `{other}` (valid: projects, lifecycle, diagnostics, scaffold, \
                  groups, tunnels, runtimes, databases, dns, sandbox, inspector, certs, migrate, \
-                 all)"
+                 tasks, all)"
             )),
         }
     }
@@ -392,7 +396,9 @@ impl PortbayMcp {
             self.ctx
                 .logs(
                     &args.id,
-                    args.lines.unwrap_or(200),
+                    // Cap the tail so a confused/hallucinating agent can't request
+                    // billions of lines and OOM/stall the sidecar.
+                    args.lines.unwrap_or(200).min(5_000),
                     args.offset.unwrap_or(0),
                 )
                 .await,
@@ -586,6 +592,7 @@ impl PortbayMcp {
         annotations(
             title = "Stop all",
             read_only_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = false
         )
@@ -1379,6 +1386,7 @@ impl PortbayMcp {
         annotations(
             title = "Import projects",
             read_only_hint = false,
+            destructive_hint = true,
             open_world_hint = false
         )
     )]
@@ -1618,37 +1626,36 @@ Key facts:
 #[cfg(feature = "tasks")]
 impl PortbayMcp {
     fn read_board_resource(&self, uri: &str) -> Option<AppResult<String>> {
-        if let Some(id) = uri
-            .strip_prefix("portbay://project/")
-            .and_then(|rest| rest.strip_suffix("/context"))
-        {
-            Some(self.ctx.project_context_value(id).and_then(|v| to_json(&v)))
-        } else if let Some(id) = uri
-            .strip_prefix("portbay://project/")
-            .and_then(|rest| rest.strip_suffix("/tasks"))
-        {
-            Some(
+        // Accept BOTH the canonical plural `projects/` (matching the
+        // `projects/{id}` + `/logs` resources) and the legacy singular
+        // `project/` prefix, so neither already-shipped dispatch briefs nor
+        // agents following the advertised templates can hit a routing mismatch.
+        let rest = uri
+            .strip_prefix("portbay://projects/")
+            .or_else(|| uri.strip_prefix("portbay://project/"))?;
+        if let Some(id) = rest.strip_suffix("/context") {
+            return Some(self.ctx.project_context_value(id).and_then(|v| to_json(&v)));
+        }
+        if let Some(id) = rest.strip_suffix("/tasks") {
+            return Some(
                 self.ctx
                     .tasks_list(TasksListArgs {
                         project: id.to_string(),
                         status: None,
                     })
                     .and_then(|v| to_json(&v)),
-            )
-        } else if let Some(id) = uri
-            .strip_prefix("portbay://project/")
-            .and_then(|rest| rest.strip_suffix("/handoff"))
-        {
-            Some(
+            );
+        }
+        if let Some(id) = rest.strip_suffix("/handoff") {
+            return Some(
                 self.ctx
                     .handoff_get(HandoffGetArgs {
                         project: id.to_string(),
                     })
                     .and_then(|v| to_json(&v)),
-            )
-        } else {
-            None
+            );
         }
+        None
     }
 }
 
@@ -1738,17 +1745,17 @@ impl ServerHandler for PortbayMcp {
         #[cfg(feature = "tasks")]
         {
             let mut context =
-                RawResourceTemplate::new("portbay://project/{id}/context", "project context");
+                RawResourceTemplate::new("portbay://projects/{id}/context", "project context");
             context.description = Some(
                 "Derived, authoritative environment for a project: URL, ports, runtime, web server, \
                  DB env-var references, services."
                     .to_string(),
             );
             let mut board =
-                RawResourceTemplate::new("portbay://project/{id}/tasks", "project tasks");
+                RawResourceTemplate::new("portbay://projects/{id}/tasks", "project tasks");
             board.description = Some("The live task board (all cards) for a project.".to_string());
             let mut handoff =
-                RawResourceTemplate::new("portbay://project/{id}/handoff", "project hand-off");
+                RawResourceTemplate::new("portbay://projects/{id}/handoff", "project hand-off");
             handoff.description = Some(
                 "The continuation brief — read first to resume where the last session left off."
                     .to_string(),

@@ -6,9 +6,11 @@
 //! :9999, doesn't trap us.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tauri::AppHandle;
-use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 use crate::process_compose::client::PcClient;
@@ -35,6 +37,12 @@ pub struct SidecarManager {
     /// sharing this config (the recover-on-quit complement to the boot sweep),
     /// keyed on a path unique to this install.
     config_path: Option<PathBuf>,
+    /// True only while the spawned process-compose is actually alive. The Tauri
+    /// `CommandChild` handle exists the instant `.spawn()` returns even if PC
+    /// exits immediately (e.g. a YAML parse error), so `child.is_some()` alone
+    /// is a liar and would block any restart attempt. A background task watching
+    /// the event stream flips this to `false` on `Terminated`.
+    alive: Arc<AtomicBool>,
 }
 
 impl Default for SidecarManager {
@@ -49,11 +57,12 @@ impl SidecarManager {
             child: None,
             port: DEFAULT_PORT,
             config_path: None,
+            alive: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.child.is_some()
+        self.child.is_some() && self.alive.load(Ordering::Relaxed)
     }
 
     pub fn port(&self) -> u16 {
@@ -78,7 +87,9 @@ impl SidecarManager {
         config_path: &Path,
         avoid: &[u16],
     ) -> Result<PcClient> {
-        if self.child.is_some() {
+        // is_running() (not child.is_some()) so a crashed-but-not-reaped PC is
+        // respawned rather than wrongly treated as still up.
+        if self.is_running() {
             // Idempotent: already running, hand back the existing client.
             return Ok(PcClient::new(self.port));
         }
@@ -106,11 +117,39 @@ impl SidecarManager {
                 "up",
             ]);
 
-        let (_rx, child) = cmd
+        let (mut rx, child) = cmd
             .spawn()
             .map_err(|e| PcError::SpawnFailed(e.to_string()))?;
+        self.alive.store(true, Ordering::Relaxed);
         self.child = Some(child);
         self.config_path = Some(config_path.to_path_buf());
+
+        // Drain the event stream so PC's own diagnostics surface, and flip
+        // `alive` the moment it exits so `is_running` can't keep claiming a
+        // dead supervisor is up (which would block every restart).
+        let alive = self.alive.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(bytes) => {
+                        let line = String::from_utf8_lossy(&bytes);
+                        let line = line.trim_end();
+                        if !line.is_empty() {
+                            tracing::debug!(target: "process-compose", "{line}");
+                        }
+                    }
+                    CommandEvent::Error(err) => {
+                        tracing::warn!(target: "process-compose", error = %err, "process-compose sidecar error");
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        tracing::warn!(target: "process-compose", code = ?payload.code, "process-compose sidecar terminated");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            alive.store(false, Ordering::Relaxed);
+        });
 
         Ok(PcClient::new(port))
     }
@@ -124,6 +163,7 @@ impl SidecarManager {
     /// lets PC run its shutdown handler (which signals every managed process);
     /// after a short grace we SIGKILL-reap whatever's left.
     pub fn stop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
         let own_pid = self.child.as_ref().map(|c| c.pid());
         if let Some(child) = self.child.take() {
             let pid = child.pid();

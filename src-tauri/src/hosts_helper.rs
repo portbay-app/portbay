@@ -249,7 +249,12 @@ pub const INSTALLED_BIN: &str = "/usr/local/bin/portbay-hosts-helper";
 
 /// The LaunchDaemon plist that runs the helper as root at boot and keeps it
 /// alive. Installed to `/Library/LaunchDaemons/<PLIST_NAME>`.
-fn daemon_plist() -> String {
+///
+/// `allow_uid` is the UID of the user installing PortBay; it is baked into the
+/// daemon's argv so the root daemon will only honour socket connections from
+/// that user (see [`serve`]). Without it, any local process could drive the
+/// root helper.
+fn daemon_plist(allow_uid: u32) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -261,6 +266,7 @@ fn daemon_plist() -> String {
     <string>{INSTALLED_BIN}</string>
     <string>--socket</string><string>{SOCKET_PATH}</string>
     <string>--hosts-file</string><string>/etc/hosts</string>
+    <string>--allow-uid</string><string>{allow_uid}</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -308,7 +314,9 @@ pub fn install_daemon(helper_bin: &Path) -> Result<()> {
          /bin/launchctl bootstrap system '{plist_path}'\n\
          /bin/launchctl enable system/{HELPER_LABEL}\n",
         src = shell_single_quote(&staged_bin.to_string_lossy()),
-        plist = daemon_plist(),
+        // This runs as the (unprivileged) console user — only the inner script
+        // is elevated — so getuid() here is the user the daemon must trust.
+        plist = daemon_plist(unsafe { libc::getuid() }),
     );
 
     let tmp = work.join("install.sh");
@@ -493,39 +501,92 @@ fn ensure_valid_resolver_suffix(suffix: &str) -> Result<()> {
     }
 }
 
-pub fn serve(socket_path: &Path, manager: HostsManager) -> Result<()> {
+/// Run the privileged helper, listening on `socket_path` and applying every
+/// mutation through `manager`.
+///
+/// `allow_uid` is the only UID (besides root) permitted to drive the daemon.
+/// The daemon runs as root, so without an owner restriction any local process
+/// could connect and rewrite `/etc/hosts` within the dev suffix or wipe the
+/// PortBay block. We enforce this two ways: the socket is chowned to `allow_uid`
+/// at mode `0600` (kernel-level gate), AND every accepted connection's peer
+/// credentials are checked via `getpeereid` (defence in depth, in case the mode
+/// didn't take on some filesystem). `None` is the dev/manual path (`sudo
+/// portbay-hosts-helper …` with no installer): it keeps the socket world-
+/// connectable and skips the peer check, relying on the suffix guard alone.
+pub fn serve(socket_path: &Path, manager: HostsManager, allow_uid: Option<u32>) -> Result<()> {
     if socket_path.exists() {
         std::fs::remove_file(socket_path).map_err(|e| HelperError::io(socket_path, e))?;
     }
     let listener = UnixListener::bind(socket_path).map_err(|e| HelperError::io(socket_path, e))?;
 
-    // The daemon runs as root, so the socket it creates is root-owned. The
-    // PortBay app connects as the logged-in user, which needs write access to
-    // the socket to open it. Loosen the mode to 0666 — the security boundary
-    // is `request_allowed`/`ensure_host_matches_suffix` (every mutation must
-    // target a hostname under the configured dev suffix), not socket
-    // ownership, so a world-connectable socket can still only touch PortBay's
-    // own `/etc/hosts` block under `*.<suffix>`.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(socket_path)
-            .map_err(|e| HelperError::io(socket_path, e))?
-            .permissions();
-        perms.set_mode(0o666);
-        std::fs::set_permissions(socket_path, perms)
-            .map_err(|e| HelperError::io(socket_path, e))?;
+        match allow_uid {
+            // Production: restrict the socket to the installing user at 0600 so
+            // the kernel rejects every other unprivileged process before it can
+            // even send a byte. root still has access (it owns the daemon).
+            Some(uid) => {
+                use std::os::unix::ffi::OsStrExt;
+                let c_path = std::ffi::CString::new(socket_path.as_os_str().as_bytes())
+                    .map_err(|e| HelperError::Protocol(e.to_string()))?;
+                // gid (uid_t)-1 == "leave group unchanged".
+                let rc = unsafe { libc::chown(c_path.as_ptr(), uid, u32::MAX) };
+                if rc != 0 {
+                    return Err(HelperError::io(
+                        socket_path,
+                        std::io::Error::last_os_error(),
+                    ));
+                }
+                let perms = std::fs::Permissions::from_mode(0o600);
+                std::fs::set_permissions(socket_path, perms)
+                    .map_err(|e| HelperError::io(socket_path, e))?;
+            }
+            // Dev/manual: no installer recorded an owner. Keep it permissive;
+            // the suffix guard remains the boundary.
+            None => {
+                let perms = std::fs::Permissions::from_mode(0o666);
+                std::fs::set_permissions(socket_path, perms)
+                    .map_err(|e| HelperError::io(socket_path, e))?;
+            }
+        }
     }
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                // Defence in depth on top of the socket mode: reject any peer
+                // that isn't the allowed user or root, then drop the connection.
+                if let Some(uid) = allow_uid {
+                    match peer_uid(&stream) {
+                        Some(peer) if peer == uid || peer == 0 => {}
+                        peer => {
+                            tracing::warn!(
+                                target: "hosts-helper",
+                                ?peer, allowed = uid,
+                                "rejected hosts-helper connection from unauthorized uid"
+                            );
+                            continue;
+                        }
+                    }
+                }
                 let _ = handle_stream(stream, &manager);
             }
             Err(e) => return Err(HelperError::io(socket_path, e)),
         }
     }
     Ok(())
+}
+
+/// Resolve the connecting peer's UID via `getpeereid(2)`. `None` if the lookup
+/// fails (treated as untrusted by the caller).
+#[cfg(unix)]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    use std::os::unix::io::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    (rc == 0).then_some(uid)
 }
 
 fn handle_stream(mut stream: UnixStream, manager: &HostsManager) -> Result<()> {
@@ -581,6 +642,15 @@ mod tests {
         let path = dir.path().join("hosts");
         std::fs::write(&path, contents).unwrap();
         (dir, HostsManager::new(path))
+    }
+
+    #[test]
+    fn peer_uid_resolves_the_connecting_uid() {
+        // getpeereid against a real socketpair must report our own uid — this
+        // is the mechanism serve() relies on to reject foreign-uid callers.
+        let (a, _b) = UnixStream::pair().expect("socketpair");
+        let me = unsafe { libc::getuid() };
+        assert_eq!(peer_uid(&a), Some(me));
     }
 
     #[test]

@@ -339,7 +339,33 @@ pub fn store_cache(signed_json: &str) -> std::io::Result<()> {
         fetched_at: now_unix(),
     };
     let path = cache_path()?;
-    std::fs::write(path, serde_json::to_string_pretty(&cached)?)
+    let body = serde_json::to_string_pretty(&cached)?;
+
+    // The cached signed payload carries account PII (login, github_id, tier).
+    // Tampering still fails signature verification, but the file must not be
+    // world-readable on a shared machine, so write it 0600. On unix, create
+    // with restrictive mode up front (and chmod any pre-existing 0644 file from
+    // an older build); elsewhere fall back to a plain write.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // Repair permissions on a file left behind by an older build.
+        if path.exists() {
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        f.write_all(body.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, body)
+    }
 }
 
 pub fn clear_cache() -> std::io::Result<()> {

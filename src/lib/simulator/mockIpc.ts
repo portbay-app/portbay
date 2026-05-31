@@ -469,7 +469,9 @@ export function installSimulatorIpcBrowser(payload: {
       case "dnsmasq_uninstall_resolver":
         return Promise.resolve(null);
       case "onboarding_status":
-        return Promise.resolve({ onboarded: true, seenCloseToast: true });
+        // Shape must match OnboardingStatus { onboarded, registryEmpty } — the
+        // simulator ships seeded fixtures, so the board is onboarded + non-empty.
+        return Promise.resolve({ onboarded: true, registryEmpty: false });
       case "start_project":
       case "force_start_project":
         return startProject(args && args.id);

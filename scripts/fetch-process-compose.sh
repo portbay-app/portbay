@@ -51,6 +51,23 @@ trap 'rm -rf "$tmp"' EXIT
 echo "fetch-process-compose: downloading ${url}"
 curl -fL --retry 3 -o "${tmp}/${archive}" "$url"
 
+# Supply-chain: verify against a SHA-256 pinned in-repo before bundling. Fail
+# closed on mismatch. Recompute on a PROCESS_COMPOSE_VERSION bump with:
+# shasum -a 256 "${tmp}/${archive}". Linux unpinned (not shipped) → fails closed.
+case "$triple" in
+  aarch64-apple-darwin) want_sha="4abc00e402bee5a700e3ec1c94ffda2fe73b414866286a59134d81f372595ebb" ;;
+  x86_64-apple-darwin)  want_sha="1101270e1ac63e02e9f97ef834a3b8387d4e6641682366ac193de466a2d1747e" ;;
+  *) echo "fetch-process-compose: no pinned sha256 for $triple (process-compose $PROCESS_COMPOSE_VERSION); add one before building this arch" >&2; exit 1 ;;
+esac
+got_sha="$(shasum -a 256 "${tmp}/${archive}" | cut -d' ' -f1)"
+if [ "$got_sha" != "$want_sha" ]; then
+  echo "fetch-process-compose: SHA-256 mismatch for ${archive} ($triple)" >&2
+  echo "  expected ${want_sha}" >&2
+  echo "  got      ${got_sha}" >&2
+  exit 1
+fi
+echo "fetch-process-compose: ✓ sha256 verified"
+
 echo "fetch-process-compose: extracting"
 # Tarball layout: LICENSE, README.md, process-compose
 tar -xzf "${tmp}/${archive}" -C "$tmp" process-compose

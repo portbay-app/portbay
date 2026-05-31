@@ -53,6 +53,19 @@ pub fn read_installed(suffix: &str) -> Option<String> {
     std::fs::read_to_string(resolver_file_path(suffix)).ok()
 }
 
+/// The port the installed resolver file currently points at, parsed from its
+/// `port <N>` line. None if the file is missing or malformed. Used at boot to
+/// prefer re-binding the SAME port, so wildcard DNS keeps working across
+/// restarts even when the privileged helper isn't available to re-point the
+/// file (the drift the resolver guard otherwise has to repair).
+pub fn read_installed_port(suffix: &str) -> Option<u16> {
+    let contents = read_installed(suffix)?;
+    contents
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("port "))
+        .and_then(|p| p.trim().parse::<u16>().ok())
+}
+
 /// Write `/etc/resolver/<suffix>` via osascript-with-admin. Blocks
 /// until the user dismisses the macOS auth dialog. On cancel,
 /// returns a `PermissionDenied`-equivalent error so the GUI can

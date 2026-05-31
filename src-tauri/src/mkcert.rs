@@ -199,6 +199,17 @@ impl Mkcert {
             });
         }
 
+        // The TLS private key must not be world-readable: on a shared/multi-user
+        // Mac any local user could otherwise read it and MITM the developer's
+        // own HTTPS sessions to *.test. mkcert writes it with the process umask
+        // (typically 0644), so tighten it to 0600 (key) and 0700 (dir) here.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+
         Ok(CertPaths {
             certificate: cert_path,
             key: key_path,

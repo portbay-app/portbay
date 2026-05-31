@@ -21,12 +21,19 @@ struct Args {
     /// Hosts file path. Defaults to /etc/hosts in production.
     #[arg(long, default_value = "/etc/hosts")]
     hosts_file: PathBuf,
+
+    /// UID permitted to drive the daemon. The LaunchDaemon plist sets this to
+    /// the installing user's UID; the daemon then rejects socket connections
+    /// from any other (non-root) process. Omitted only for manual `sudo` dev
+    /// runs, where the socket stays world-connectable.
+    #[arg(long)]
+    allow_uid: Option<u32>,
 }
 
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
     let manager = HostsManager::new(args.hosts_file);
-    match serve(&args.socket, manager) {
+    match serve(&args.socket, manager, args.allow_uid) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("portbay-hosts-helper: {e}");

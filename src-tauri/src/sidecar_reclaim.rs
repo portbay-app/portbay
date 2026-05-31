@@ -51,21 +51,30 @@ const PORT_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Poll interval while waiting for a port to free up.
 const PORT_RELEASE_POLL: Duration = Duration::from_millis(100);
 
-/// The four helper processes PortBay owns.
+/// The helper processes PortBay owns. Caddy/dnsmasq/mailpit/process-compose are
+/// spawned directly as app children; `php-fpm` is one level deeper (a
+/// process-compose child), but it leaks the same way — when PC is SIGKILLed at
+/// boot before it can drain its children, the FPM master orphans to launchd and
+/// keeps its unix socket bound, so the fresh build's `php-fpm` can't start
+/// ("Another FPM instance seems to already listen…"). Same signature-based
+/// reclaim, so it lives here too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidecarKind {
     Caddy,
     Dnsmasq,
     Mailpit,
+    PhpFpm,
     ProcessCompose,
 }
 
 impl SidecarKind {
-    /// Every kind, in boot order (PC last because it's the supervisor).
-    pub const ALL: [SidecarKind; 4] = [
+    /// Every kind, in boot order (PC last because it's the supervisor; php-fpm
+    /// just before it, since it's a thing PC supervises).
+    pub const ALL: [SidecarKind; 5] = [
         SidecarKind::Caddy,
         SidecarKind::Dnsmasq,
         SidecarKind::Mailpit,
+        SidecarKind::PhpFpm,
         SidecarKind::ProcessCompose,
     ];
 
@@ -75,6 +84,7 @@ impl SidecarKind {
             SidecarKind::Caddy => "caddy",
             SidecarKind::Dnsmasq => "dnsmasq",
             SidecarKind::Mailpit => "mailpit",
+            SidecarKind::PhpFpm => "php-fpm",
             SidecarKind::ProcessCompose => "process-compose",
         }
     }
@@ -97,6 +107,8 @@ impl SidecarKind {
             SidecarKind::Caddy => "--config",
             SidecarKind::Dnsmasq => "-C",
             SidecarKind::Mailpit => "--db-file",
+            // `php-fpm -F -y <pool.conf>` (see process_compose::config).
+            SidecarKind::PhpFpm => "-y",
             SidecarKind::ProcessCompose => "-f",
         }
     }
@@ -106,6 +118,13 @@ impl SidecarKind {
             SidecarKind::Caddy => "caddy.bootstrap.json",
             SidecarKind::Dnsmasq => "dnsmasq.conf",
             SidecarKind::Mailpit => "mailpit.db",
+            // php-fpm's pool config lives in a per-version subdir
+            // (`…/PortBay/php/<ver>/php-fpm.conf`), so we deliberately key on the
+            // version-agnostic `php` dir prefix rather than a single file: the
+            // marker `-y …/PortBay/php` matches a stale pool of ANY version,
+            // which is exactly what we want to reap. The data-dir prefix still
+            // keeps a foreign (Herd/ServBay/Homebrew) php-fpm from matching.
+            SidecarKind::PhpFpm => "php",
             SidecarKind::ProcessCompose => "process-compose.yaml",
         }
     }
@@ -138,6 +157,10 @@ impl SidecarKind {
             SidecarKind::Dnsmasq => &[53053],
             // 1025 = SMTP, 8025 = web UI.
             SidecarKind::Mailpit => &[1025, 8025],
+            // php-fpm listens on a unix socket, not a TCP port — nothing for
+            // `doctor` to flag as squatted, and nothing to wait on after a
+            // reclaim (killing the master frees the socket).
+            SidecarKind::PhpFpm => &[],
             SidecarKind::ProcessCompose => &[9999],
         }
     }
@@ -487,6 +510,8 @@ mod tests {
   507  4242 /opt/homebrew/bin/mailpit --smtp 127.0.0.1:1025
   508     1 /Applications/PortBay.app/Contents/MacOS/process-compose -f {DATA}/process-compose.yaml --port 9999 --tui=false up
   509  4242 /usr/bin/process-compose -f /Users/dev/other/process-compose.yaml up
+  510     1 {DATA}/runtimes/php/8.4.21/sbin/php-fpm -F -y {DATA}/php/8.4.21/php-fpm.conf
+  511     1 /Applications/ServBay/package/sbin/php-fpm -F -y /Applications/ServBay/etc/php/8.4/php-fpm.conf
 ",
         )
     }
@@ -506,6 +531,7 @@ mod tests {
             SidecarKind::Caddy => "--config",
             SidecarKind::Dnsmasq => "-C",
             SidecarKind::Mailpit => "--db-file",
+            SidecarKind::PhpFpm => "-y",
             SidecarKind::ProcessCompose => "-f",
         }
     }
@@ -515,6 +541,8 @@ mod tests {
             SidecarKind::Caddy => "caddy.bootstrap.json",
             SidecarKind::Dnsmasq => "dnsmasq.conf",
             SidecarKind::Mailpit => "mailpit.db",
+            // Version-agnostic dir prefix — see the production `config_file`.
+            SidecarKind::PhpFpm => "php",
             SidecarKind::ProcessCompose => "process-compose.yaml",
         }
     }
@@ -560,6 +588,27 @@ mod tests {
             vec![508],
             "foreign process-compose (509) must not match"
         );
+    }
+
+    #[test]
+    fn matches_only_portbay_php_fpm_never_foreign() {
+        let pids = matching_pids(&ps_fixture(), &sig(SidecarKind::PhpFpm), &[], SweepMode::All);
+        assert_eq!(
+            pids,
+            vec![510],
+            "PortBay's php-fpm (510) must match; ServBay's (511) must not — \
+             its pool config is outside our data dir"
+        );
+    }
+
+    #[test]
+    fn php_fpm_marker_is_version_agnostic() {
+        // The `-y …/PortBay/php` prefix must catch a pool of ANY version, so a
+        // stale 8.3 master gets reaped by the same signature that finds 8.4.
+        let s = sig(SidecarKind::PhpFpm);
+        assert!(s.matches(&format!(
+            "{DATA}/runtimes/php/8.3.14/sbin/php-fpm -F -y {DATA}/php/8.3.14/php-fpm.conf"
+        )));
     }
 
     #[test]

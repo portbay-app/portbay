@@ -50,6 +50,25 @@ trap 'rm -rf "$tmp"' EXIT
 echo "fetch-caddy: downloading ${url}"
 curl -fL --retry 3 -o "${tmp}/${archive}" "$url"
 
+# Supply-chain: verify the download against a SHA-256 pinned in-repo before we
+# trust the binary enough to bundle it in the signed .app. A mismatch means the
+# download was corrupted or tampered with — fail closed. On a CADDY_VERSION bump,
+# recompute with: shasum -a 256 "${tmp}/${archive}". Linux is intentionally
+# unpinned (not shipped yet) and fails closed with guidance.
+case "$triple" in
+  aarch64-apple-darwin) want_sha="8445900771cb8455d1dee729486d692c6a60519bb682322270b32d1d602d37dc" ;;
+  x86_64-apple-darwin)  want_sha="d566885bfed36198f980fdefa63aabdb18f1e3264a0e3121ad9f028de851f311" ;;
+  *) echo "fetch-caddy: no pinned sha256 for $triple (caddy $CADDY_VERSION); add one before building this arch" >&2; exit 1 ;;
+esac
+got_sha="$(shasum -a 256 "${tmp}/${archive}" | cut -d' ' -f1)"
+if [ "$got_sha" != "$want_sha" ]; then
+  echo "fetch-caddy: SHA-256 mismatch for ${archive} ($triple)" >&2
+  echo "  expected ${want_sha}" >&2
+  echo "  got      ${got_sha}" >&2
+  exit 1
+fi
+echo "fetch-caddy: ✓ sha256 verified"
+
 echo "fetch-caddy: extracting"
 tar -xzf "${tmp}/${archive}" -C "$tmp" caddy
 
