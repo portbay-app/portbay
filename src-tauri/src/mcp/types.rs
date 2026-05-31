@@ -939,3 +939,37 @@ pub struct HandoffUpdateArgs {
     #[serde(default)]
     pub author: Option<String>,
 }
+
+/// Finish (or block) a dispatched card in one call: acknowledge, optionally
+/// comment + update the hand-off, then set the terminal status. Idempotent — a
+/// retry once the card already sits in the target status is a no-op (no
+/// duplicate comment / hand-off entry).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskCompleteArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// The run id from the dispatch prompt.
+    pub run_id: String,
+    /// Terminal status to set: `Done` (default), `Blocked`, or `Review`. You may
+    /// NOT set `Rejected` — that's human-only.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Optional acceptance/confirmation comment for the card's thread. Skip for
+    /// routine work — a comment per task is not required.
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// Optional minimal hand-off note (what changed, the next step, open items),
+    /// appended as the newest continuation-brief entry.
+    #[serde(default)]
+    pub handoff: Option<String>,
+    /// Sign the hand-off entry (your agent name). Optional; falls back to the
+    /// dispatched agent, then "agent".
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Record the files / modules you actually touched (working artifact for the
+    /// next run and the human's review).
+    #[serde(default)]
+    pub touchpoints: Option<Vec<String>>,
+}

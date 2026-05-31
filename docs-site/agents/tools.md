@@ -1307,9 +1307,9 @@ The server exposes read-only [MCP resources](https://modelcontextprotocol.io/spe
 | --- | --- |
 | `portbay://projects/{id}` | Live status + config for a single project, by id. |
 | `portbay://projects/{id}/logs` | Recent log tail for a single project (200 lines). |
-| `portbay://project/{id}/context` | Derived project context — URL, ports, runtime, web server, database vars, services. |
-| `portbay://project/{id}/tasks` | The full task board for a project (all cards, by column). |
-| `portbay://project/{id}/handoff` | The project's rolling hand-off log (continuation brief). |
+| `portbay://projects/{id}/context` | Derived project context — URL, ports, runtime, web server, database vars, services. |
+| `portbay://projects/{id}/tasks` | The full task board for a project (all cards, by column). |
+| `portbay://projects/{id}/handoff` | The project's rolling hand-off log (continuation brief). |
 
 ---
 

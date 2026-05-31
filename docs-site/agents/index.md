@@ -229,7 +229,7 @@ A dispatched run follows a simple loop:
 
 The board enforces its rules even when an agent gets them wrong: an agent can't set `Rejected` (human-only), a card blocked on others won't dispatch until they land, and a run whose process dies is reclaimed so the card returns to the queue. The full tool list is in the [Tasks toolset](./tools#tasks-toolset); the human-facing setup is in the [Task Board guide](/guides/task-board).
 
-Three resources expose board state for the agent to read without tool calls: `portbay://project/{id}/context` (the derived environment), `portbay://project/{id}/tasks` (the whole board), and `portbay://project/{id}/handoff` (the rolling brief).
+Three resources expose board state for the agent to read without tool calls: `portbay://projects/{id}/context` (the derived environment), `portbay://projects/{id}/tasks` (the whole board), and `portbay://projects/{id}/handoff` (the rolling brief).
 
 ## Governance: read-only and toolsets {#governance}
 

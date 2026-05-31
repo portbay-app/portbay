@@ -236,6 +236,8 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_handoff_get", ToolGroup::Tasks, false),
     #[cfg(feature = "tasks")]
     ("portbay_handoff_update", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_complete", ToolGroup::Tasks, true),
 ];
 
 /// The PortBay MCP server. Holds the operations context and the (possibly
@@ -1563,6 +1565,23 @@ impl PortbayMcp {
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.handoff_update(args))
     }
+
+    #[tool(
+        name = "portbay_task_complete",
+        description = "Finish a dispatched card in ONE call: acknowledge it, optionally post a \
+                       comment and update the hand-off, then set the terminal status (`Done` by \
+                       default; `Blocked` or `Review` if you pass `status`). Prefer this over \
+                       calling ack / comment / handoff_update / update separately. Idempotent — \
+                       re-calling once the card already sits in that status is a no-op, so a retry \
+                       won't double-post. You may NOT set Rejected (human-only).",
+        annotations(title = "Complete task", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_complete(
+        &self,
+        Parameters(args): Parameters<TaskCompleteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_complete(args))
+    }
 }
 
 const INSTRUCTIONS: &str = "\
@@ -1626,39 +1645,100 @@ Key facts:
 // `read_resource` body below carries no `crate::context` calls. The public
 // OSS MCP build compiles the `None` stub; the overlay build (`--features
 // tasks`) resolves the project context / tasks / hand-off URIs.
+/// A board resource addressable under EITHER the canonical plural `projects/`
+/// or the legacy singular `project/` prefix. Pure (no ctx) so the prefix/suffix
+/// routing — the exact thing that regressed when only the singular prefix was
+/// accepted (`projects/<id>/context` fell through to a bare-id lookup and 404'd
+/// as `project '<id>/context' not found`) — is unit-testable.
+#[cfg(feature = "tasks")]
+#[derive(Debug, PartialEq, Eq)]
+enum BoardResource<'a> {
+    Context(&'a str),
+    Tasks(&'a str),
+    Handoff(&'a str),
+}
+
+#[cfg(feature = "tasks")]
+fn parse_board_resource_uri(uri: &str) -> Option<BoardResource<'_>> {
+    let rest = uri
+        .strip_prefix("portbay://projects/")
+        .or_else(|| uri.strip_prefix("portbay://project/"))?;
+    if let Some(id) = rest.strip_suffix("/context") {
+        return Some(BoardResource::Context(id));
+    }
+    if let Some(id) = rest.strip_suffix("/tasks") {
+        return Some(BoardResource::Tasks(id));
+    }
+    if let Some(id) = rest.strip_suffix("/handoff") {
+        return Some(BoardResource::Handoff(id));
+    }
+    None
+}
+
 #[cfg(feature = "tasks")]
 impl PortbayMcp {
     fn read_board_resource(&self, uri: &str) -> Option<AppResult<String>> {
-        // Accept BOTH the canonical plural `projects/` (matching the
-        // `projects/{id}` + `/logs` resources) and the legacy singular
-        // `project/` prefix, so neither already-shipped dispatch briefs nor
-        // agents following the advertised templates can hit a routing mismatch.
-        let rest = uri
-            .strip_prefix("portbay://projects/")
-            .or_else(|| uri.strip_prefix("portbay://project/"))?;
-        if let Some(id) = rest.strip_suffix("/context") {
-            return Some(self.ctx.project_context_value(id).and_then(|v| to_json(&v)));
-        }
-        if let Some(id) = rest.strip_suffix("/tasks") {
-            return Some(
+        match parse_board_resource_uri(uri)? {
+            BoardResource::Context(id) => {
+                Some(self.ctx.project_context_value(id).and_then(|v| to_json(&v)))
+            }
+            BoardResource::Tasks(id) => Some(
                 self.ctx
                     .tasks_list(TasksListArgs {
                         project: id.to_string(),
                         status: None,
                     })
                     .and_then(|v| to_json(&v)),
-            );
-        }
-        if let Some(id) = rest.strip_suffix("/handoff") {
-            return Some(
+            ),
+            BoardResource::Handoff(id) => Some(
                 self.ctx
                     .handoff_get(HandoffGetArgs {
                         project: id.to_string(),
                     })
                     .and_then(|v| to_json(&v)),
+            ),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "tasks"))]
+mod board_resource_uri_tests {
+    use super::{parse_board_resource_uri, BoardResource};
+
+    #[test]
+    fn both_prefixes_and_all_suffixes_route_identically() {
+        for prefix in ["portbay://projects/", "portbay://project/"] {
+            assert_eq!(
+                parse_board_resource_uri(&format!("{prefix}blog/context")),
+                Some(BoardResource::Context("blog"))
+            );
+            assert_eq!(
+                parse_board_resource_uri(&format!("{prefix}blog/tasks")),
+                Some(BoardResource::Tasks("blog"))
+            );
+            assert_eq!(
+                parse_board_resource_uri(&format!("{prefix}blog/handoff")),
+                Some(BoardResource::Handoff("blog"))
             );
         }
-        None
+    }
+
+    #[test]
+    fn regression_plural_prefix_context_is_not_swallowed_into_the_id() {
+        // The original incident: `projects/bookslash/context` must parse as the
+        // `bookslash` project's context, NOT a project literally named
+        // `bookslash/context`.
+        assert_eq!(
+            parse_board_resource_uri("portbay://projects/bookslash/context"),
+            Some(BoardResource::Context("bookslash"))
+        );
+    }
+
+    #[test]
+    fn non_board_and_bare_project_uris_do_not_match() {
+        assert_eq!(parse_board_resource_uri("portbay://registry"), None);
+        assert_eq!(parse_board_resource_uri("portbay://projects/blog"), None);
+        assert_eq!(parse_board_resource_uri("portbay://projects/blog/logs"), None);
     }
 }
 
@@ -1797,8 +1877,24 @@ impl ServerHandler for PortbayMcp {
                     self.ctx.status(Some(id)).await.and_then(|s| to_json(&s))
                 } else {
                     return Err(McpError::resource_not_found(
-                        "unknown resource",
-                        Some(json!({ "uri": uri })),
+                        "unknown resource — valid forms: portbay://registry, portbay://doctor, \
+                         portbay://sidecars, portbay://recipes, and \
+                         portbay://projects/{id} with optional /context, /tasks, /handoff, or \
+                         /logs (note the plural `projects`)",
+                        Some(json!({
+                            "uri": uri,
+                            "valid": [
+                                "portbay://registry",
+                                "portbay://doctor",
+                                "portbay://sidecars",
+                                "portbay://recipes",
+                                "portbay://projects/{id}",
+                                "portbay://projects/{id}/context",
+                                "portbay://projects/{id}/tasks",
+                                "portbay://projects/{id}/handoff",
+                                "portbay://projects/{id}/logs"
+                            ]
+                        })),
                     ));
                 }
             }
@@ -1819,5 +1915,7 @@ impl ServerHandler for PortbayMcp {
 }
 
 fn to_json<T: Serialize>(v: &T) -> AppResult<String> {
-    serde_json::to_string_pretty(v).map_err(|e| AppError::Internal(format!("serialise: {e}")))
+    // Compact (not pretty) — resource bodies are read by the model, so the
+    // indentation whitespace is pure token cost with no reader benefit.
+    serde_json::to_string(v).map_err(|e| AppError::Internal(format!("serialise: {e}")))
 }

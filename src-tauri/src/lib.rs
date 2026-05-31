@@ -785,6 +785,12 @@ pub fn run() {
             #[cfg(feature = "tasks")]
             commands::tasks::task_start_with_agent,
             #[cfg(feature = "tasks")]
+            commands::tasks::task_comment_dispatch,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_comment_edit,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_comment_delete,
+            #[cfg(feature = "tasks")]
             commands::tasks::task_stop_agent,
             #[cfg(feature = "tasks")]
             commands::tasks::board_reconcile,

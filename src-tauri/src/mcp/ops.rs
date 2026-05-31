@@ -3404,6 +3404,90 @@ mod tests {
             .collect();
         assert_eq!(tp, vec!["src/feed.rs", "templates/atom.xml"]);
     }
+
+    // task_complete runs the whole finish pipeline in one call and is idempotent:
+    // the first call advances the card and reports noop=false; an identical retry
+    // once it's already Done is a no-op (noop=true), so a retry never double-posts.
+    #[tokio::test]
+    async fn task_complete_finishes_then_is_idempotent_on_retry() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let id = ctx
+            .add_project(AddProjectArgs {
+                path: proj.path().to_string_lossy().to_string(),
+                name: Some("Blog".into()),
+                hostname: Some("blog.test".into()),
+                kind: Some(McpProjectKind::Static),
+                port: None,
+                start_command: None,
+                https: Some(true),
+                auto_start: Some(false),
+                php_version: None,
+                document_root: None,
+            })
+            .await
+            .unwrap()
+            .project
+            .unwrap()
+            .id;
+
+        let created = ctx
+            .task_create(TaskCreateArgs {
+                project: id.clone(),
+                title: "Ship the feed".into(),
+                body: None,
+                // Start in Todo (a dispatchable column); task_complete stages it
+                // into InProgress before reporting Done.
+                status: Some("Todo".into()),
+                priority: None,
+                acceptance: None,
+                touchpoints: None,
+                labels: None,
+                estimate: None,
+                template: None,
+            })
+            .unwrap();
+        let card_id = created["id"].as_str().unwrap().to_string();
+
+        let args = TaskCompleteArgs {
+            project: id.clone(),
+            id: card_id.clone(),
+            run_id: "r_1".into(),
+            status: Some("Done".into()),
+            comment: Some("acceptance met".into()),
+            handoff: Some("shipped the feed; next: announce".into()),
+            author: Some("claude".into()),
+            touchpoints: Some(vec!["src/feed.rs".into()]),
+        };
+
+        // First call finishes the card.
+        let first = ctx.task_complete(args.clone()).unwrap();
+        assert_eq!(first["ok"], true);
+        assert_eq!(first["noop"], false);
+
+        let after = ctx
+            .task_get(TaskGetArgs {
+                project: id.clone(),
+                id: card_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(after["status"], "Done");
+
+        // The hand-off picked up our note.
+        let h = ctx
+            .handoff_get(HandoffGetArgs {
+                project: id.clone(),
+            })
+            .unwrap();
+        assert_eq!(h["exists"], true);
+        assert!(h["body"].as_str().unwrap().contains("shipped the feed"));
+
+        // An identical retry is a no-op — no second comment / hand-off entry.
+        let second = ctx.task_complete(args).unwrap();
+        assert_eq!(second["noop"], true);
+        assert_eq!(second["status"], "Done");
+    }
 }
 
 // ===========================================================================
@@ -3533,7 +3617,7 @@ impl McpContext {
                 action: "ack".into(),
                 from: None,
                 to: Some(pc.card.status),
-                actor: Actor::agent(args.run_id, mcp_agent_label()),
+                actor: Actor::agent(args.run_id.clone(), agent_for_run(&path, &args.run_id)),
                 note: None,
             },
         )?;
@@ -3546,7 +3630,8 @@ impl McpContext {
         let path = self.board_project_path(&args.project)?;
         let pc = board::read_card(&path, &args.id)?;
         validate_run(&pc, args.run_id.as_deref())?;
-        let actor = Actor::agent(args.run_id.unwrap_or_else(|| "mcp".into()), mcp_agent_label());
+        let run_id = args.run_id.unwrap_or_else(|| "mcp".into());
+        let actor = Actor::agent(run_id.clone(), agent_for_run(&path, &run_id));
         let updated = board_ops::check_item(
             &path,
             &args.id,
@@ -3563,7 +3648,8 @@ impl McpContext {
         let path = self.board_project_path(&args.project)?;
         let pc = board::read_card(&path, &args.id)?;
         validate_run(&pc, args.run_id.as_deref())?;
-        let actor = Actor::agent(args.run_id.unwrap_or_else(|| "mcp".into()), mcp_agent_label());
+        let run_id = args.run_id.unwrap_or_else(|| "mcp".into());
+        let actor = Actor::agent(run_id.clone(), agent_for_run(&path, &run_id));
         let updated = board_ops::add_checklist_items(
             &path,
             &args.id,
@@ -3580,7 +3666,8 @@ impl McpContext {
         let path = self.board_project_path(&args.project)?;
         let pc = board::read_card(&path, &args.id)?;
         validate_run(&pc, args.run_id.as_deref())?;
-        let actor = Actor::agent(args.run_id.unwrap_or_else(|| "mcp".into()), mcp_agent_label());
+        let run_id = args.run_id.unwrap_or_else(|| "mcp".into());
+        let actor = Actor::agent(run_id.clone(), agent_for_run(&path, &run_id));
         board_ops::comment(&path, &args.id, &args.text, actor, &clock::now_iso8601())?;
         let _ = crate::context::automation::touch_heartbeat(&path, &args.id);
         Ok(serde_json::json!({ "ok": true, "id": args.id }))
@@ -3592,9 +3679,10 @@ impl McpContext {
         validate_run(&pc, args.run_id.as_deref())?;
 
         let now = clock::now_iso8601();
+        let run_id = args.run_id.clone().unwrap_or_else(|| "mcp".into());
         let actor = Actor::agent(
-            args.run_id.clone().unwrap_or_else(|| "mcp".into()),
-            mcp_agent_label(),
+            run_id.clone(),
+            agent_for_run(&path, &run_id),
         );
         let mut reminders: Vec<String> = Vec::new();
         let mut card = pc.card.clone();
@@ -3743,6 +3831,110 @@ impl McpContext {
             "trimmed": up.trimmed,
         }))
     }
+
+    /// Finish (or block) a card in one call: ack → optional comment → optional
+    /// hand-off → terminal status. Collapses the 4–5 fine-grained calls a
+    /// dispatched agent otherwise makes into one round-trip.
+    ///
+    /// Idempotent at the completion boundary: if the card already sits in the
+    /// requested status (a retried completion), it's a no-op — no second comment
+    /// or hand-off entry. (A *partial* prior failure — acked but status not yet
+    /// set — re-runs from ack on retry, which is the safe direction.) Each step
+    /// still validates `run_id`, so a stale session can't clobber a re-dispatched
+    /// card.
+    pub fn task_complete(&self, args: TaskCompleteArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let pc = board::read_card(&path, &args.id)?;
+        validate_run(&pc, Some(&args.run_id))?;
+
+        let status_str = args.status.clone().unwrap_or_else(|| "Done".into());
+        let target = BoardStatus::parse(&status_str)?;
+        if pc.card.status == target {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "noop": true,
+                "id": args.id,
+                "status": target,
+                "card": card_json(&pc),
+            }));
+        }
+
+        // 1. Acknowledge (liveness + audit; re-ack is harmless).
+        self.task_ack(TaskAckArgs {
+            project: args.project.clone(),
+            id: args.id.clone(),
+            run_id: args.run_id.clone(),
+        })?;
+
+        // 1b. A terminal report is only legal from InProgress (or Review). A
+        // dispatched card is normally already InProgress; if it's still Todo,
+        // stage it so "finish in one call" doesn't trip the Todo→Done rule. A
+        // Backlog card was never dispatched and stays un-completable by design —
+        // the transition check below will surface that rather than guessing.
+        if matches!(
+            target,
+            BoardStatus::Done | BoardStatus::Review | BoardStatus::Blocked
+        ) && pc.card.status == BoardStatus::Todo
+        {
+            self.task_update(TaskUpdateArgs {
+                project: args.project.clone(),
+                id: args.id.clone(),
+                run_id: Some(args.run_id.clone()),
+                status: Some("InProgress".into()),
+                note: None,
+                reason: None,
+                touchpoints: None,
+            })?;
+        }
+
+        // 2. Optional acceptance/confirmation comment.
+        if let Some(text) = args
+            .comment
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.task_comment(TaskCommentArgs {
+                project: args.project.clone(),
+                id: args.id.clone(),
+                text: text.to_string(),
+                run_id: Some(args.run_id.clone()),
+            })?;
+        }
+
+        // 3. Optional hand-off note (newest continuation-brief entry).
+        if let Some(narrative) = args
+            .handoff
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.handoff_update(HandoffUpdateArgs {
+                project: args.project.clone(),
+                narrative: narrative.to_string(),
+                author: args.author.clone(),
+            })?;
+        }
+
+        // 4. Terminal status (applies acceptance/handoff policy, frees the lease).
+        let update = self.task_update(TaskUpdateArgs {
+            project: args.project.clone(),
+            id: args.id.clone(),
+            run_id: Some(args.run_id.clone()),
+            status: Some(status_str),
+            note: None,
+            reason: None,
+            touchpoints: args.touchpoints.clone(),
+        })?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "noop": false,
+            "id": args.id,
+            "card": update.get("card").cloned().unwrap_or(serde_json::Value::Null),
+            "reminders": update.get("reminders").cloned().unwrap_or_else(|| serde_json::json!([])),
+        }))
+    }
 }
 
 /// The agent label to attribute board mutations to in the audit log + activity
@@ -3757,6 +3949,29 @@ fn mcp_agent_label() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "external".to_string())
+}
+
+/// Resolve the dispatched agent for a run. The intended source is the
+/// `PORTBAY_AGENT` env stamp, but an MCP server the agent launched from a
+/// cached/global config won't have it (reports "external"). In that case recover
+/// the agent from the audit trail: the dispatcher records the run's transitions
+/// with the real agent kind, keyed by `run_id`.
+#[cfg(feature = "tasks")]
+fn agent_for_run(project_path: &std::path::Path, run_id: &str) -> String {
+    let env = mcp_agent_label();
+    if env != "external" {
+        return env;
+    }
+    if let Ok(entries) = crate::context::audit::read(project_path) {
+        for e in entries.iter().rev() {
+            if let crate::context::audit::Actor::Agent { run_id: rid, agent } = &e.actor {
+                if rid == run_id && agent != "external" && agent != "mcp" {
+                    return agent.clone();
+                }
+            }
+        }
+    }
+    env
 }
 
 /// Reject a stale/zombie run: if the card carries a soft cross-machine claim

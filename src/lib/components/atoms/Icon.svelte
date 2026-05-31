@@ -80,7 +80,9 @@
     | "flag"
     | "bot"
     | "circle-dot"
-    | "play-circle";
+    | "play-circle"
+    | "message-square"
+    | "reply";
 </script>
 
 <script lang="ts">
@@ -152,6 +154,8 @@
     Bot,
     CircleDot,
     PlayCircle,
+    MessageSquare,
+    Reply,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -238,6 +242,8 @@
     bot: Bot,
     "circle-dot": CircleDot,
     "play-circle": PlayCircle,
+    "message-square": MessageSquare,
+    reply: Reply,
   };
 
   const Component = $derived(iconMap[name]);

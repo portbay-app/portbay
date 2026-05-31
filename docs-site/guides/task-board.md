@@ -80,4 +80,4 @@ Agent actions surface as activity on each card — progress notes, comments, blo
 
 The board is also the coordination channel for agents connected over MCP. A dispatched run reads the hand-off and the next card, acknowledges its run id, posts progress and touched files, then updates the hand-off and moves the card on. The full loop and the eleven board tools are documented in the [Tasks toolset](/agents/tools#tasks-toolset), and the workflow walkthrough is in [Drive PortBay from an AI Agent](/agents/#tasks).
 
-Three MCP resources expose board state read-only: `portbay://project/{id}/context`, `portbay://project/{id}/tasks`, and `portbay://project/{id}/handoff`.
+Three MCP resources expose board state read-only: `portbay://projects/{id}/context`, `portbay://projects/{id}/tasks`, and `portbay://projects/{id}/handoff`.
