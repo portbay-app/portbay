@@ -1,6 +1,73 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
 
 const base = process.env.DOCS_BASE ?? "/";
+
+const OG_ORIGIN = "https://docs.portbay.app";
+const PUBLIC_DIR = fileURLToPath(new URL("../public", import.meta.url));
+// Existing shipped image, used until the cohesive /og/ art is generated (see
+// the Obsidian image-gen cards) so previews never unfurl a broken image.
+const FALLBACK_OG = "/screenshots/projects-dark.png";
+
+// First path segment of a page → its section Open Graph image (1200x630, under
+// docs-site/public/og/). Pages in any other section use the docs home image.
+const DEFAULT_DOCS_OG = "/og/docs-home.png";
+const SECTION_OG: Record<string, string> = {
+  "getting-started": "/og/docs-getting-started.png",
+  guides: "/og/docs-guides.png",
+  reference: "/og/docs-reference.png",
+  agents: "/og/docs-agents.png",
+  comparisons: "/og/docs-comparisons.png",
+};
+
+/** Absolute image URL, falling back to a shipped image if the art isn't built yet. */
+function ogImageUrl(rel: string): string {
+  const resolved = existsSync(join(PUBLIC_DIR, rel.replace(/^\//, "")))
+    ? rel
+    : FALLBACK_OG;
+  return `${OG_ORIGIN}${resolved}`;
+}
+
+// Social-preview length limits. Beyond these, unfurlers (WhatsApp, Slack,
+// iMessage, X, LinkedIn, Facebook, Discord) truncate with an ellipsis, so we
+// keep og:/twitter: tags inside them — fitting in full rather than being cut.
+const SOCIAL_TITLE_MAX = 60;
+const SOCIAL_DESC_MAX = 155;
+
+/**
+ * Trim to `max` without cutting a word. Prefers ending on a sentence boundary
+ * inside the window; else falls back to the last whole word + an ellipsis.
+ * Returns the input untouched when it already fits.
+ */
+function clip(input: string, max: number): string {
+  const s = input.trim();
+  if (s.length <= max) return s;
+  const window = s.slice(0, max);
+  const sentenceEnd = Math.max(
+    window.lastIndexOf(". "),
+    window.lastIndexOf("? "),
+    window.lastIndexOf("! "),
+  );
+  if (sentenceEnd >= max * 0.55) return window.slice(0, sentenceEnd + 1).trim();
+  const wordEnd = window.lastIndexOf(" ");
+  return `${window.slice(0, wordEnd > 0 ? wordEnd : max).trim()}…`;
+}
+
+/**
+ * A concise social title: the part before the first " — " (drops long SEO
+ * tails) and no " — PortBay Docs" suffix, since og:site_name already carries
+ * the brand. A page may override with frontmatter `ogTitle`. Hard-capped as a
+ * final guard.
+ */
+function socialTitle(rawTitle: string, override?: unknown): string {
+  if (typeof override === "string" && override.trim()) {
+    return clip(override, SOCIAL_TITLE_MAX);
+  }
+  const core = rawTitle.split(" — ")[0];
+  return clip(core, SOCIAL_TITLE_MAX);
+}
 
 export default defineConfig({
   title: "PortBay",
@@ -12,34 +79,50 @@ export default defineConfig({
   sitemap: {
     hostname: "https://docs.portbay.app",
   },
+  // Per-page social metadata. VitePress prerenders every page to static HTML,
+  // so crawlers DO see these — but only if they're page-specific. We derive
+  // title/description from the page itself and pick the section image, then
+  // append the og:* / twitter:* tags to the page's own <head>.
+  transformPageData(pageData) {
+    const isHome = pageData.relativePath === "index.md";
+    const title = isHome
+      ? "PortBay Documentation"
+      : socialTitle(pageData.title, pageData.frontmatter.ogTitle);
+    const description = clip(
+      pageData.description ||
+        (pageData.frontmatter.description as string | undefined) ||
+        "Install, configure, and operate PortBay for local projects, HTTPS, runtime services, and troubleshooting.",
+      SOCIAL_DESC_MAX,
+    );
+    const section = pageData.relativePath.split("/")[0];
+    const image = ogImageUrl(SECTION_OG[section] ?? DEFAULT_DOCS_OG);
+    const path = pageData.relativePath
+      .replace(/(^|\/)index\.md$/, "$1")
+      .replace(/\.md$/, "");
+    const url = `${OG_ORIGIN}/${path}`;
+
+    pageData.frontmatter.head ??= [];
+    pageData.frontmatter.head.push(
+      ["meta", { property: "og:title", content: title }],
+      ["meta", { property: "og:description", content: description }],
+      ["meta", { property: "og:url", content: url }],
+      ["meta", { property: "og:image", content: image }],
+      ["meta", { name: "twitter:title", content: title }],
+      ["meta", { name: "twitter:description", content: description }],
+      ["meta", { name: "twitter:image", content: image }],
+    );
+  },
   head: [
     ["link", { rel: "icon", type: "image/png", href: "/favicon.png" }],
     ["link", { rel: "apple-touch-icon", sizes: "180x180", href: "/apple-touch-icon.png" }],
     ["meta", { name: "theme-color", content: "#0b0f14" }],
     ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:site_name", content: "PortBay" }],
-    ["meta", { property: "og:title", content: "PortBay Documentation" }],
-    [
-      "meta",
-      {
-        property: "og:description",
-        content:
-          "Install, configure, and operate PortBay for local projects, HTTPS, runtime services, and troubleshooting.",
-      },
-    ],
-    ["meta", { property: "og:url", content: "https://docs.portbay.app/" }],
-    ["meta", { property: "og:image", content: "https://docs.portbay.app/screenshots/projects-dark.png" }],
     ["meta", { name: "twitter:card", content: "summary_large_image" }],
-    ["meta", { name: "twitter:title", content: "PortBay Documentation" }],
-    [
-      "meta",
-      {
-        name: "twitter:description",
-        content:
-          "Install, configure, and operate PortBay for local projects, HTTPS, runtime services, and troubleshooting.",
-      },
-    ],
-    ["meta", { name: "twitter:image", content: "https://docs.portbay.app/screenshots/projects-dark.png" }],
+    // og:title / og:description / og:url / og:image and their twitter:*
+    // equivalents are emitted PER PAGE by transformPageData below, so each doc
+    // unfurls with its own title, description, and section image instead of one
+    // global pair.
   ],
   markdown: {
     lineNumbers: true,
