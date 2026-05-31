@@ -316,40 +316,16 @@
 
 <svelte:head>
   {#if isSimulator}
+    <!--
+      Title / description / canonical / Open Graph / Twitter tags for
+      try.portbay.app are stamped per-route into the static HTML at build time
+      by scripts/stamp-og-meta.mjs (run from `pnpm build:web`). That is the only
+      thing link unfurlers see, since the app is a client-rendered SPA
+      (ssr=false) and crawlers don't execute JavaScript. Tags injected here at
+      runtime would be invisible to them and would duplicate the stamped ones in
+      the live DOM, so the meta lives entirely in the build step now.
+    -->
     <title>PortBay — Local development environment manager</title>
-    <meta
-      name="description"
-      content="Manage every local dev project behind clean .test domains with automatic HTTPS and one-click start/stop — no Docker, no config files. Try the live interactive demo of PortBay for macOS."
-    />
-    <link rel="canonical" href="https://try.portbay.app/" />
-
-    <!-- Open Graph -->
-    <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="PortBay" />
-    <meta property="og:url" content="https://try.portbay.app/" />
-    <meta
-      property="og:title"
-      content="PortBay — Local development environment manager"
-    />
-    <meta
-      property="og:description"
-      content="Local dev projects behind clean .test domains with automatic HTTPS and one-click start/stop. Try the live interactive demo for macOS."
-    />
-    <meta property="og:image" content="https://try.portbay.app/og-image.png" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-
-    <!-- Twitter -->
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta
-      name="twitter:title"
-      content="PortBay — Local development environment manager"
-    />
-    <meta
-      name="twitter:description"
-      content="Local dev projects behind clean .test domains with automatic HTTPS and one-click start/stop. Try the live interactive demo for macOS."
-    />
-    <meta name="twitter:image" content="https://try.portbay.app/og-image.png" />
   {/if}
 </svelte:head>
 
