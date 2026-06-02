@@ -58,6 +58,11 @@ const SHOTS: Shot[] = [
   { name: "sandbox", route: "/sandbox", title: "PortBay — Sandbox" },
   { name: "certificates", route: "/certificates", title: "PortBay — Certificates" },
   { name: "web-servers", route: "/web-servers", title: "PortBay — Web Servers" },
+  // The SSH workspace is a deep-link into a saved host (`?host=<id>`): the
+  // full-pane IDE takeover with the SFTP file tree, editor, and terminal. The
+  // sidebar nav points at `/ssh` (the host workbench), so the query route never
+  // matches a sidebar link → capture() falls back to a direct load.
+  { name: "ssh", route: "/ssh?host=acme-prod-web", title: "PortBay — SSH Workspace" },
   { name: "tunnels", route: "/tunnels", title: "PortBay — Public Tunnels" },
   { name: "logs", route: "/logs", title: "PortBay — Logs" },
   { name: "settings", route: "/settings", title: "PortBay — Settings" },

@@ -26,6 +26,11 @@ import type { DnsPreflight, DnsRecord, ResolverStatus } from "$lib/types/dns";
 import type { WebServerInfo } from "$lib/types/webservers";
 import type { SystemMetrics } from "$lib/types/metrics";
 import type { DevToolInfo } from "$lib/types/devTools";
+import type { ProbeResult, SshConnectionView } from "$lib/types/sshConnections";
+import type { SshIdentityView } from "$lib/types/sshIdentities";
+import type { SftpEntry, SshTunnelRuntimeStatus } from "$lib/types/sshTunnels";
+import type { DetectedTunnel, TunnelStatus } from "$lib/types/tunnel";
+import type { AgentInfo } from "$lib/ssh/agent";
 
 /** Everything the mock IPC layer can serve, in one bag. */
 export interface DemoFixtures {
@@ -44,6 +49,39 @@ export interface DemoFixtures {
   metrics: SystemMetrics;
   devTools: DevToolInfo[];
   logs: Record<string, string[]>;
+  /** Saved SSH/remote connections (the host table). */
+  sshConnections: SshConnectionView[];
+  /** Reusable SSH identities (key/agent/password presets). */
+  sshIdentities: SshIdentityView[];
+  /** Saved port-forwards / tunnels with their live runtime state. */
+  sshTunnels: SshTunnelRuntimeStatus[];
+  /** Reachability + host-trust per connection id (the Health column). */
+  sshProbes: Record<string, ProbeResult>;
+  /** Per-connection behavioural data the workspace serves: home dir, snapshot
+   *  + ps + ss output, an SFTP tree with file contents, and the on-host agent. */
+  sshHosts: Record<string, DemoSshHost>;
+  /** Active Cloudflare quick tunnels (public sharing). */
+  cfTunnels: TunnelStatus[];
+  /** Named Cloudflare tunnels detected under ~/.cloudflared. */
+  cfNamedTunnels: DetectedTunnel[];
+}
+
+/** Everything the SSH workspace needs to render one host without a real server. */
+export interface DemoSshHost {
+  /** Absolute home directory `sftp_connect` / `sftp_home_dir` return. */
+  homeDir: string;
+  /** Marker-delimited stdout for the host-snapshot command. */
+  snapshotStdout: string;
+  /** `ps aux` stdout (header + rows) for the Processes panel. */
+  psStdout: string;
+  /** `ss -tlnpH` stdout for the Ports panel. */
+  portsStdout: string;
+  /** SFTP directory listings keyed by absolute path. */
+  sftp: Record<string, SftpEntry[]>;
+  /** Readable file contents keyed by absolute path (the editor + preview). */
+  files: Record<string, string>;
+  /** What model tooling the on-host AI agent panel reports. */
+  agent: AgentInfo;
 }
 
 /** A healthy-looking process snapshot for a running project. */
@@ -104,6 +142,27 @@ const PROJECTS: ProjectView[] = [
     sandboxed: false,
     status: "running",
     runtime: runtimeOf(48377, 96, 0.4),
+  },
+  {
+    id: "pulsar-api",
+    name: "Pulsar API",
+    path: "/Users/dev/Sites/pulsar-api",
+    type: "python",
+    startCommand: "uvicorn app.main:app --reload --port 8000",
+    port: 8000,
+    extraPorts: [],
+    hostname: "pulsar-api.test",
+    url: "https://pulsar-api.test",
+    https: true,
+    preStart: [],
+    postStart: [],
+    services: ["postgres"],
+    env: { APP_ENV: "local", PYTHONUNBUFFERED: "1" },
+    autoStart: false,
+    tags: ["python", "fastapi"],
+    sandboxed: false,
+    status: "running",
+    runtime: runtimeOf(48533, 134, 1.2),
   },
   {
     id: "dashboard-ui",
@@ -1182,9 +1241,785 @@ const LOGS: Record<string, string[]> = {
   ],
 };
 
+// ── SSH / Cloudflare fixture helpers ─────────────────────────────────────────
+
+const DAY_MS = 86_400_000;
+const NOW = Date.now();
+
+
+// ── SSH / remote connections (demo) ──────────────────────────────────────────
+// A small fictional fleet for "Acme". Hostnames use the RFC-2606 `.example`
+// reserved TLD; every key path, account, fingerprint, and IP is invented.
+// ⛔ DUMMY DATA ONLY — never a real host, key, or credential.
+
+const SSH_SECS = Math.floor(NOW / 1000);
+const sshAgoSecs = (mins: number): number => SSH_SECS - mins * 60;
+const sshAgoMs = (mins: number): number => NOW - mins * 60_000;
+
+function sftpFile(
+  dir: string,
+  name: string,
+  size: number,
+  mode: number,
+  daysAgo: number,
+): SftpEntry {
+  return {
+    name,
+    path: `${dir}/${name}`.replace("//", "/"),
+    isDir: false,
+    isSymlink: false,
+    size,
+    permissions: mode,
+    mtimeSecs: Math.floor((NOW - daysAgo * DAY_MS) / 1000),
+  };
+}
+function sftpDir(dir: string, name: string, daysAgo: number): SftpEntry {
+  return {
+    name,
+    path: `${dir}/${name}`.replace("//", "/"),
+    isDir: true,
+    isSymlink: false,
+    size: 4096,
+    permissions: 0o755,
+    mtimeSecs: Math.floor((NOW - daysAgo * DAY_MS) / 1000),
+  };
+}
+
+/** Build the marker-delimited stdout the host-snapshot command parses. */
+function snapshotOut(
+  user: string,
+  os: string,
+  uptimeLine: string,
+  memTotal: number,
+  memUsed: number,
+  dfLine: string,
+): string {
+  return [
+    "###USER",
+    user,
+    "###OS",
+    os,
+    "###UP",
+    uptimeLine,
+    "###MEM",
+    "              total        used        free      shared  buff/cache   available",
+    `Mem:        ${memTotal}        ${memUsed}        ${Math.max(0, memTotal - memUsed - 1800)}         512        7454        ${memTotal - memUsed}`,
+    "Swap:           0           0           0",
+    "###DISK",
+    "Filesystem      Size  Used Avail Use% Mounted on",
+    dfLine,
+  ].join("\n");
+}
+
+const NO_AGENT: AgentInfo = {
+  hasCurl: true,
+  hasWget: true,
+  hasOllama: false,
+  hasLlm: false,
+  ollamaModels: [],
+  port: 11434,
+};
+
+const SSH_CONNECTIONS: SshConnectionView[] = [
+  {
+    id: "acme-prod-web",
+    name: "acme-prod-web",
+    sshHost: "web1.acme.example",
+    sshPort: 22,
+    sshUser: "deploy",
+    authKind: "key",
+    keyPath: "~/.ssh/acme_deploy_ed25519",
+    proxyJump: null,
+    identityId: "id-acme-deploy",
+    proxy: null,
+    tags: ["production", "web"],
+    color: "#e5484d",
+    notes: "Primary web node behind the load balancer.",
+    detectedOs: "Ubuntu 22.04.4 LTS",
+    environment: "ubuntu",
+    stage: "production",
+    region: "us-east-1",
+    provider: "AWS EC2",
+    createdAt: sshAgoSecs(60 * 24 * 90),
+    lastUsed: sshAgoSecs(18),
+    tunnelCount: 1,
+    inUse: false,
+  },
+  {
+    id: "acme-staging",
+    name: "acme-staging",
+    sshHost: "stage.acme.example",
+    sshPort: 22,
+    sshUser: "deploy",
+    authKind: "key",
+    keyPath: "~/.ssh/acme_deploy_ed25519",
+    proxyJump: null,
+    identityId: "id-acme-deploy",
+    proxy: null,
+    tags: ["staging"],
+    color: "#f5a623",
+    notes: null,
+    detectedOs: "Debian GNU/Linux 12 (bookworm)",
+    environment: "ubuntu",
+    stage: "staging",
+    region: "us-east-1",
+    provider: "AWS EC2",
+    createdAt: sshAgoSecs(60 * 24 * 74),
+    lastUsed: sshAgoSecs(180),
+    tunnelCount: 1,
+    inUse: false,
+  },
+  {
+    id: "acme-db-primary",
+    name: "acme-db-primary",
+    sshHost: "db1.internal.acme.example",
+    sshPort: 22,
+    sshUser: "dbadmin",
+    authKind: "key",
+    keyPath: "~/.ssh/acme_deploy_ed25519",
+    proxyJump: "bastion.acme.example",
+    identityId: "id-acme-deploy",
+    proxy: null,
+    tags: ["database", "production"],
+    color: "#3b82f6",
+    notes: "Reachable only through the bastion. MySQL on 3306.",
+    detectedOs: "Ubuntu 22.04.4 LTS",
+    environment: "ubuntu",
+    stage: "production",
+    region: "us-east-1",
+    provider: "AWS EC2",
+    createdAt: sshAgoSecs(60 * 24 * 88),
+    lastUsed: sshAgoSecs(42),
+    tunnelCount: 1,
+    inUse: true,
+  },
+  {
+    id: "cpanel-shared",
+    name: "cpanel-shared",
+    sshHost: "premium42.webhostbox.example",
+    sshPort: 2222,
+    sshUser: "acmeco",
+    authKind: "password",
+    keyPath: null,
+    proxyJump: null,
+    identityId: null,
+    proxy: null,
+    tags: ["cpanel", "legacy"],
+    color: null,
+    notes: "Old marketing site on shared cPanel. Password auth only.",
+    detectedOs: "CloudLinux 8.9",
+    environment: "cpanel",
+    stage: "production",
+    region: null,
+    provider: "Shared cPanel",
+    createdAt: sshAgoSecs(60 * 24 * 210),
+    lastUsed: sshAgoSecs(60 * 24 * 6),
+    tunnelCount: 0,
+    inUse: false,
+  },
+  {
+    id: "edge-cache",
+    name: "edge-cache",
+    sshHost: "edge.acme.example",
+    sshPort: 22,
+    sshUser: "root",
+    authKind: "agent",
+    keyPath: null,
+    proxyJump: null,
+    identityId: "id-ops-agent",
+    proxy: null,
+    tags: ["cache", "edge"],
+    color: "#22c55e",
+    notes: null,
+    detectedOs: "Alpine Linux 3.19",
+    environment: "ubuntu",
+    stage: "production",
+    region: "eu-west-1",
+    provider: "Hetzner Cloud",
+    createdAt: sshAgoSecs(60 * 24 * 40),
+    lastUsed: sshAgoSecs(60 * 5),
+    tunnelCount: 1,
+    inUse: false,
+  },
+  {
+    id: "research-box",
+    name: "research-box",
+    sshHost: "gpu.lab.acme.example",
+    sshPort: 22,
+    sshUser: "researcher",
+    authKind: "key",
+    keyPath: "~/.ssh/id_ed25519",
+    proxyJump: null,
+    identityId: "id-personal",
+    proxy: null,
+    tags: ["research", "gpu"],
+    color: "#a855f7",
+    notes: "Ollama host — drives the on-box AI agent demo.",
+    detectedOs: "Ubuntu 22.04.4 LTS (CUDA 12.4)",
+    environment: "ubuntu",
+    stage: "research",
+    region: "us-west-2",
+    provider: "Lambda Labs",
+    createdAt: sshAgoSecs(60 * 24 * 21),
+    lastUsed: sshAgoSecs(60 * 24 * 2),
+    tunnelCount: 0,
+    inUse: false,
+  },
+];
+
+const SSH_IDENTITIES: SshIdentityView[] = [
+  {
+    id: "id-acme-deploy",
+    name: "Acme Deploy Key",
+    sshUser: "deploy",
+    authKind: "key",
+    keyPath: "~/.ssh/acme_deploy_ed25519",
+    connectionCount: 3,
+    inUse: true,
+  },
+  {
+    id: "id-personal",
+    name: "Personal ed25519",
+    sshUser: "researcher",
+    authKind: "key",
+    keyPath: "~/.ssh/id_ed25519",
+    connectionCount: 1,
+    inUse: true,
+  },
+  {
+    id: "id-ops-agent",
+    name: "Ops (ssh-agent)",
+    sshUser: "root",
+    authKind: "agent",
+    keyPath: null,
+    connectionCount: 1,
+    inUse: true,
+  },
+];
+
+const SSH_PROBES: Record<string, ProbeResult> = {
+  "acme-prod-web": {
+    reachable: true,
+    latencyMs: 24,
+    health: "healthy",
+    fingerprint: "SHA256:9q3Rk0m2Xc7pVz1bNf8sQwYtJ4Lh6Ua2Dg5Re0Ki3o",
+    trust: "trusted",
+  },
+  "acme-staging": {
+    reachable: true,
+    latencyMs: 142,
+    health: "degraded",
+    fingerprint: "SHA256:2Hh7Tn5Pq8Lr1Wd4Yf0Zb6Mc3Vx9Ks2Ja5Ge8Ui1No",
+    trust: "trusted",
+  },
+  "acme-db-primary": {
+    reachable: true,
+    latencyMs: 38,
+    health: "healthy",
+    fingerprint: "SHA256:5Kf2Lp9Qr3Wn7Xd1Yb8Zc4Mh6Vs0Ja2Ge5Ui8No1Tp",
+    trust: "trusted",
+  },
+  "cpanel-shared": {
+    reachable: true,
+    latencyMs: 88,
+    health: "healthy",
+    fingerprint: "SHA256:7Np3Qr5Wf9Xd2Yb6Zc1Mh8Vs4Ja0Ge7Ui3No5Tp2Lk",
+    trust: "trusted",
+  },
+  "edge-cache": {
+    reachable: true,
+    latencyMs: 11,
+    health: "healthy",
+    fingerprint: "SHA256:3Vx8Ja2Ge5Ui1No4Tp7Lk0Qr5Wf9Xd2Yb6Zc1Mh8Sa",
+    trust: "trusted",
+  },
+  "research-box": {
+    reachable: false,
+    latencyMs: null,
+    health: "down",
+    fingerprint: null,
+    trust: "trusted",
+  },
+};
+
+const SSH_TUNNELS: SshTunnelRuntimeStatus[] = [
+  {
+    id: "tun-db-mysql",
+    connectionId: "acme-db-primary",
+    name: "Acme DB (MySQL)",
+    sshHost: "db1.internal.acme.example",
+    sshPort: 22,
+    sshUser: "dbadmin",
+    authKind: "key",
+    keyPath: "~/.ssh/acme_deploy_ed25519",
+    localHost: "127.0.0.1",
+    localPort: 3307,
+    remoteHost: "127.0.0.1",
+    remotePort: 3306,
+    forwardKind: "local",
+    proxyJump: "bastion.acme.example",
+    keepAlive: true,
+    autoReconnect: true,
+    state: "live",
+    running: true,
+    startedAtMs: sshAgoMs(42),
+    command:
+      "ssh -N -L 127.0.0.1:3307:127.0.0.1:3306 -J bastion.acme.example dbadmin@db1.internal.acme.example",
+  },
+  {
+    id: "tun-prod-redis",
+    connectionId: "acme-prod-web",
+    name: "Prod Redis",
+    sshHost: "web1.acme.example",
+    sshPort: 22,
+    sshUser: "deploy",
+    authKind: "key",
+    keyPath: "~/.ssh/acme_deploy_ed25519",
+    localHost: "127.0.0.1",
+    localPort: 6380,
+    remoteHost: "127.0.0.1",
+    remotePort: 6379,
+    forwardKind: "local",
+    proxyJump: null,
+    keepAlive: true,
+    autoReconnect: true,
+    state: "live",
+    running: true,
+    startedAtMs: sshAgoMs(18),
+    command: "ssh -N -L 127.0.0.1:6380:127.0.0.1:6379 deploy@web1.acme.example",
+  },
+  {
+    id: "tun-staging-webhook",
+    connectionId: "acme-staging",
+    name: "Staging webhook (reverse)",
+    sshHost: "stage.acme.example",
+    sshPort: 22,
+    sshUser: "deploy",
+    authKind: "key",
+    keyPath: "~/.ssh/acme_deploy_ed25519",
+    localHost: "127.0.0.1",
+    localPort: 3000,
+    remoteHost: "0.0.0.0",
+    remotePort: 9000,
+    forwardKind: "reverse",
+    proxyJump: null,
+    keepAlive: true,
+    autoReconnect: false,
+    state: "live",
+    running: true,
+    startedAtMs: sshAgoMs(180),
+    command: "ssh -N -R 0.0.0.0:9000:127.0.0.1:3000 deploy@stage.acme.example",
+  },
+  {
+    id: "tun-edge-socks",
+    connectionId: "edge-cache",
+    name: "Edge SOCKS proxy",
+    sshHost: "edge.acme.example",
+    sshPort: 22,
+    sshUser: "root",
+    authKind: "agent",
+    keyPath: null,
+    localHost: "127.0.0.1",
+    localPort: 1080,
+    remoteHost: "",
+    remotePort: 0,
+    forwardKind: "socks",
+    proxyJump: null,
+    keepAlive: false,
+    autoReconnect: true,
+    state: "down",
+    running: false,
+    startedAtMs: null,
+    command: "ssh -N -D 127.0.0.1:1080 root@edge.acme.example",
+  },
+];
+
+const PROD_HOME = "/home/deploy";
+const PROD_APP = `${PROD_HOME}/apps/acme-storefront`;
+
+const SSH_HOSTS: Record<string, DemoSshHost> = {
+  "acme-prod-web": {
+    homeDir: PROD_HOME,
+    snapshotStdout: snapshotOut(
+      "deploy",
+      "Linux 6.5.0-27-generic",
+      " 10:25:41 up 41 days,  6:24,  2 users,  load average: 0.31, 0.28, 0.25",
+      15990,
+      6432,
+      "/dev/root        78G   34G   41G  46% /",
+    ),
+    psStdout: [
+      "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND",
+      "deploy   48211  1.8  2.0 712044 65212 ?        Ssl  Mar20  64:21 node /home/deploy/apps/acme-storefront/server.js",
+      "root      1102  0.4  0.6 124800 21044 ?        Ss   Mar20  12:04 nginx: master process /usr/sbin/nginx",
+      "www-data  1140  0.9  0.8 131200 28112 ?        S    Mar20  31:50 nginx: worker process",
+      "redis     8843  0.3  0.5  64200 18004 ?        Ssl  Mar20   9:11 redis-server 127.0.0.1:6379",
+      "deploy   48377  0.2  0.3  98044 12110 ?        S    Mar20   2:41 pm2: God Daemon",
+      "root       922  0.0  0.1  18044  6044 ?        Ss   Mar20   0:31 /usr/sbin/sshd -D",
+    ].join("\n"),
+    portsStdout: [
+      'LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=922,fd=3))',
+      'LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=1102,fd=6))',
+      'LISTEN 0      511          0.0.0.0:443        0.0.0.0:*    users:(("nginx",pid=1102,fd=7))',
+      'LISTEN 0      511        127.0.0.1:3000       0.0.0.0:*    users:(("node",pid=48211,fd=18))',
+      'LISTEN 0      128        127.0.0.1:6379       0.0.0.0:*    users:(("redis-server",pid=8843,fd=6))',
+    ].join("\n"),
+    sftp: {
+      [PROD_HOME]: [
+        sftpDir(PROD_HOME, "apps", 2),
+        sftpDir(PROD_HOME, "logs", 0),
+        sftpDir(PROD_HOME, ".ssh", 90),
+        sftpFile(PROD_HOME, "deploy.sh", 1240, 0o755, 3),
+        sftpFile(PROD_HOME, ".bashrc", 3526, 0o644, 90),
+        sftpFile(PROD_HOME, ".env", 412, 0o600, 12),
+      ],
+      [`${PROD_HOME}/apps`]: [sftpDir(`${PROD_HOME}/apps`, "acme-storefront", 2)],
+      [PROD_APP]: [
+        sftpDir(PROD_APP, "public", 2),
+        sftpDir(PROD_APP, "src", 2),
+        sftpFile(PROD_APP, "package.json", 884, 0o644, 2),
+        sftpFile(PROD_APP, "ecosystem.config.js", 642, 0o644, 9),
+        sftpFile(PROD_APP, "README.md", 1320, 0o644, 14),
+        sftpFile(PROD_APP, ".env.production", 318, 0o600, 9),
+      ],
+      [`${PROD_HOME}/logs`]: [
+        sftpFile(`${PROD_HOME}/logs`, "deploy.log", 84210, 0o644, 0),
+        sftpFile(`${PROD_HOME}/logs`, "access.log", 1284422, 0o644, 0),
+      ],
+    },
+    files: {
+      [`${PROD_HOME}/deploy.sh`]: [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        "cd /home/deploy/apps/acme-storefront",
+        "git pull --ff-only origin main",
+        "pnpm install --frozen-lockfile",
+        "pnpm build",
+        "pm2 reload ecosystem.config.js --update-env",
+        'echo "deployed $(git rev-parse --short HEAD) at $(date -u)"',
+        "",
+      ].join("\n"),
+      [`${PROD_HOME}/.env`]: [
+        "NODE_ENV=production",
+        "PORT=3000",
+        "REDIS_URL=redis://127.0.0.1:6379",
+        "",
+      ].join("\n"),
+      [`${PROD_APP}/package.json`]: [
+        "{",
+        '  "name": "acme-storefront",',
+        '  "version": "2.4.1",',
+        '  "private": true,',
+        '  "scripts": {',
+        '    "build": "next build",',
+        '    "start": "next start -p 3000"',
+        "  },",
+        '  "dependencies": {',
+        '    "next": "14.2.3",',
+        '    "react": "18.3.1",',
+        '    "ioredis": "5.4.1"',
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+      [`${PROD_APP}/ecosystem.config.js`]: [
+        "module.exports = {",
+        "  apps: [",
+        "    {",
+        '      name: "acme-storefront",',
+        '      script: "server.js",',
+        "      instances: 2,",
+        '      exec_mode: "cluster",',
+        '      env: { NODE_ENV: "production", PORT: 3000 },',
+        "    },",
+        "  ],",
+        "};",
+        "",
+      ].join("\n"),
+      [`${PROD_APP}/README.md`]: [
+        "# Acme Storefront",
+        "",
+        "Production Next.js app. Deploys with `~/deploy.sh` (git pull → build →",
+        "`pm2 reload`). Fronted by nginx on :443, app on :3000, Redis on :6379.",
+        "",
+        "Roll back: `pm2 reload ecosystem.config.js` after `git checkout <sha>`.",
+        "",
+      ].join("\n"),
+      [`${PROD_APP}/.env.production`]: [
+        "NODE_ENV=production",
+        "NEXT_PUBLIC_API_BASE=https://api.acme.example",
+        "REDIS_URL=redis://127.0.0.1:6379",
+        "",
+      ].join("\n"),
+      [`${PROD_HOME}/.bashrc`]: [
+        "# ~/.bashrc — Acme prod web",
+        "export PATH=$HOME/.local/bin:$PATH",
+        'alias ll="ls -alF"',
+        'alias logs="pm2 logs acme-storefront"',
+        "",
+      ].join("\n"),
+    },
+    agent: NO_AGENT,
+  },
+  "acme-staging": {
+    homeDir: "/home/deploy",
+    snapshotStdout: snapshotOut(
+      "deploy",
+      "Linux 6.1.0-21-amd64",
+      " 14:02:10 up 9 days,  1:12,  1 user,  load average: 1.84, 1.40, 1.12",
+      7960,
+      6610,
+      "/dev/sda1        40G   31G  6.8G  82% /",
+    ),
+    psStdout: [
+      "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND",
+      "deploy    3120 22.4  6.1 982044 498212 ?       Rsl  May28  41:02 node /home/deploy/apps/acme-storefront/server.js",
+      "deploy    3344 14.0  3.2 412044 261004 ?       Sl   May28  18:50 next-server (v14.2.3)",
+      "root       902  0.1  0.4  18044  6044 ?        Ss   May28   0:12 /usr/sbin/sshd -D",
+    ].join("\n"),
+    portsStdout: [
+      'LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=902,fd=3))',
+      'LISTEN 0      511        127.0.0.1:3000       0.0.0.0:*    users:(("node",pid=3120,fd=18))',
+    ].join("\n"),
+    sftp: {
+      "/home/deploy": [
+        sftpDir("/home/deploy", "apps", 5),
+        sftpFile("/home/deploy", "deploy.sh", 1240, 0o755, 5),
+        sftpFile("/home/deploy", ".env", 388, 0o600, 5),
+      ],
+      "/home/deploy/apps": [sftpDir("/home/deploy/apps", "acme-storefront", 5)],
+    },
+    files: {
+      "/home/deploy/.env": ["NODE_ENV=staging", "PORT=3000", ""].join("\n"),
+      "/home/deploy/deploy.sh": [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "cd ~/apps/acme-storefront && git pull && pnpm install && pnpm build && pm2 reload all",
+        "",
+      ].join("\n"),
+    },
+    agent: NO_AGENT,
+  },
+  "acme-db-primary": {
+    homeDir: "/home/dbadmin",
+    snapshotStdout: snapshotOut(
+      "dbadmin",
+      "Linux 6.5.0-27-generic",
+      " 09:41:55 up 120 days, 14:51,  1 user,  load average: 0.62, 0.55, 0.49",
+      31980,
+      18420,
+      "/dev/nvme0n1p1  500G  214G  286G  43% /",
+    ),
+    psStdout: [
+      "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND",
+      "mysql     2044  6.8 41.0 9820044 6940212 ?     Ssl  Feb02 980:14 /usr/sbin/mysqld",
+      "root       880  0.0  0.0  18044  5044 ?        Ss   Feb02   1:02 /usr/sbin/sshd -D",
+    ].join("\n"),
+    portsStdout: [
+      'LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=880,fd=3))',
+      'LISTEN 0      151          0.0.0.0:3306       0.0.0.0:*    users:(("mysqld",pid=2044,fd=22))',
+    ].join("\n"),
+    sftp: {
+      "/home/dbadmin": [
+        sftpDir("/home/dbadmin", "backups", 0),
+        sftpFile("/home/dbadmin", "restore.sh", 902, 0o750, 30),
+        sftpFile("/home/dbadmin", ".my.cnf", 148, 0o600, 88),
+      ],
+      "/home/dbadmin/backups": [
+        sftpFile("/home/dbadmin/backups", "acme-2026-06-02.sql.gz", 48211244, 0o640, 0),
+        sftpFile("/home/dbadmin/backups", "acme-2026-06-01.sql.gz", 47980022, 0o640, 1),
+      ],
+    },
+    files: {
+      "/home/dbadmin/restore.sh": [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "gunzip -c \"$1\" | mysql acme",
+        'echo "restored $1"',
+        "",
+      ].join("\n"),
+    },
+    agent: NO_AGENT,
+  },
+  "cpanel-shared": {
+    homeDir: "/home/acmeco",
+    snapshotStdout: snapshotOut(
+      "acmeco",
+      "Linux 4.18.0-513.el8.x86_64",
+      " 18:30:02 up 211 days,  4:09,  3 users,  load average: 3.21, 2.98, 2.74",
+      64200,
+      52110,
+      "/dev/sdb1       2.0T  1.6T  410G  80% /",
+    ),
+    psStdout: [
+      "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND",
+      "acmeco   88102  1.1  0.2 244800 18044 ?        S    10:02   0:14 /usr/bin/php-cgi",
+      "acmeco   88110  0.0  0.0  12044  4044 pts/0    Ss   18:29   0:00 -bash",
+    ].join("\n"),
+    portsStdout: [
+      'LISTEN 0      128          0.0.0.0:2222       0.0.0.0:*    users:(("sshd",pid=701,fd=3))',
+    ].join("\n"),
+    sftp: {
+      "/home/acmeco": [
+        sftpDir("/home/acmeco", "public_html", 6),
+        sftpDir("/home/acmeco", "mail", 30),
+        sftpFile("/home/acmeco", ".bash_profile", 244, 0o644, 210),
+      ],
+      "/home/acmeco/public_html": [
+        sftpFile("/home/acmeco/public_html", "index.php", 1820, 0o644, 6),
+        sftpFile("/home/acmeco/public_html", ".htaccess", 420, 0o644, 40),
+      ],
+    },
+    files: {
+      "/home/acmeco/public_html/index.php": [
+        "<?php",
+        "// Acme marketing — legacy shared host",
+        'echo "<h1>Acme</h1>";',
+        "",
+      ].join("\n"),
+    },
+    agent: NO_AGENT,
+  },
+  "edge-cache": {
+    homeDir: "/root",
+    snapshotStdout: snapshotOut(
+      "root",
+      "Linux 6.6.7-0-virt",
+      " 21:14:39 up 40 days, 22:10,  1 user,  load average: 0.05, 0.04, 0.01",
+      1980,
+      612,
+      "/dev/vda1        20G  4.2G   15G  22% /",
+    ),
+    psStdout: [
+      "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND",
+      "root       644  0.2  4.0  68044 80044 ?        Ss   Apr22  12:40 nginx: cache manager process",
+      "root       420  0.0  0.6  10044 12044 ?        Ss   Apr22   0:20 /usr/sbin/sshd -D",
+    ].join("\n"),
+    portsStdout: [
+      'LISTEN 0      511          0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=420,fd=3))',
+      'LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=644,fd=6))',
+    ].join("\n"),
+    sftp: {
+      "/root": [
+        sftpDir("/root", "cache", 0),
+        sftpFile("/root", "nginx.conf", 2210, 0o644, 14),
+      ],
+    },
+    files: {
+      "/root/nginx.conf": [
+        "worker_processes auto;",
+        "events { worker_connections 1024; }",
+        "http {",
+        "  proxy_cache_path /root/cache levels=1:2 keys_zone=edge:50m;",
+        "  server { listen 80; location / { proxy_cache edge; proxy_pass http://web1.acme.example; } }",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    agent: NO_AGENT,
+  },
+  "research-box": {
+    homeDir: "/home/researcher",
+    snapshotStdout: snapshotOut(
+      "researcher",
+      "Linux 6.5.0-27-generic",
+      " 03:02:11 up 2 days,  8:40,  1 user,  load average: 4.10, 3.88, 2.60",
+      128000,
+      41200,
+      "/dev/nvme0n1p1  1.8T  640G  1.1T  37% /",
+    ),
+    psStdout: [
+      "USER        PID %CPU %MEM     VSZ    RSS TTY      STAT START   TIME COMMAND",
+      "researcher 9120 64.0 18.0 48200044 24200044 ?    Rsl  01:10  88:20 ollama runner --model qwen2.5-coder",
+      "researcher 9044  2.0  1.0  812044 132044 ?       Ssl  Jun01   6:02 ollama serve",
+      "root        780  0.0  0.0  18044  6044 ?         Ss   Jun01   0:08 /usr/sbin/sshd -D",
+    ].join("\n"),
+    portsStdout: [
+      'LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=780,fd=3))',
+      'LISTEN 0      4096       127.0.0.1:11434      0.0.0.0:*    users:(("ollama",pid=9044,fd=8))',
+      'LISTEN 0      128        127.0.0.1:8888       0.0.0.0:*    users:(("python3",pid=9320,fd=12))',
+    ].join("\n"),
+    sftp: {
+      "/home/researcher": [
+        sftpDir("/home/researcher", "notebooks", 1),
+        sftpDir("/home/researcher", "models", 2),
+        sftpFile("/home/researcher", "train.py", 2840, 0o644, 1),
+        sftpFile("/home/researcher", "requirements.txt", 210, 0o644, 2),
+      ],
+    },
+    files: {
+      "/home/researcher/requirements.txt": [
+        "torch==2.3.0",
+        "transformers==4.41.0",
+        "accelerate==0.30.1",
+        "datasets==2.19.1",
+        "",
+      ].join("\n"),
+      "/home/researcher/train.py": [
+        "import torch",
+        "from transformers import AutoModelForCausalLM, AutoTokenizer",
+        "",
+        'MODEL = "Qwen/Qwen2.5-Coder-7B"',
+        "",
+        "def main():",
+        "    tok = AutoTokenizer.from_pretrained(MODEL)",
+        "    model = AutoModelForCausalLM.from_pretrained(MODEL, torch_dtype=torch.bfloat16)",
+        '    print("loaded", model.num_parameters(), "params")',
+        "",
+        'if __name__ == "__main__":',
+        "    main()",
+        "",
+      ].join("\n"),
+    },
+    agent: {
+      hasCurl: true,
+      hasWget: true,
+      hasOllama: true,
+      hasLlm: false,
+      ollamaModels: ["llama3.1:8b", "qwen2.5-coder:7b", "nomic-embed-text"],
+      port: 11434,
+    },
+  },
+};
+
+const CF_TUNNELS: TunnelStatus[] = [
+  {
+    projectId: "acme-storefront",
+    upstreamUrl: "https://acme-storefront.test",
+    publicUrl: "https://acme-storefront-demo.trycloudflare.com",
+    running: true,
+    startedAtMs: sshAgoMs(26),
+    custom: false,
+  },
+  {
+    projectId: "marketing-site",
+    upstreamUrl: "https://marketing.test",
+    publicUrl: "https://preview.acme.example",
+    running: true,
+    startedAtMs: sshAgoMs(150),
+    custom: true,
+  },
+];
+
+const CF_NAMED_TUNNELS: DetectedTunnel[] = [
+  {
+    uuid: "b6f1c2d4-7a90-4e3b-9c21-0f8a5e6d4b22",
+    credentialsFile: "~/.cloudflared/b6f1c2d4-7a90-4e3b-9c21-0f8a5e6d4b22.json",
+    suggestedHostname: "preview.acme.example",
+  },
+];
+
 /** The canonical fixture bag. Deep-cloned by the mock before mutation. */
 export const DEMO_FIXTURES: DemoFixtures = {
   projects: PROJECTS,
+  sshConnections: SSH_CONNECTIONS,
+  sshIdentities: SSH_IDENTITIES,
+  sshTunnels: SSH_TUNNELS,
+  sshProbes: SSH_PROBES,
+  sshHosts: SSH_HOSTS,
+  cfTunnels: CF_TUNNELS,
+  cfNamedTunnels: CF_NAMED_TUNNELS,
   groups: GROUPS,
   sidecars: SIDECARS,
   entitlement: ENTITLEMENT,

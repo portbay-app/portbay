@@ -6,7 +6,7 @@ description: Open-source, container-free local dev environment for macOS and Lin
 hero:
   name: PortBay
   text: One Play button per project.
-  tagline: Run Node, PHP, and static sites with real HTTPS hostnames, managed DNS, and a reverse proxy you never touch. No containers, no hand-edited /etc/hosts.
+  tagline: Run Node, PHP, Python, and static sites with real HTTPS hostnames, managed DNS, and a reverse proxy you never touch. No containers, no hand-edited /etc/hosts.
   actions:
     - theme: brand
       text: Get started
@@ -34,6 +34,9 @@ features:
   - title: Bundled databases
     details: PortBay-supervised MySQL, MariaDB, Postgres, and Redis instances with connection details and per-project links.
     link: /guides/databases
+  - title: A full SSH workspace
+    details: Save a remote host, then open an interactive terminal, an SFTP file browser with an inline editor, and port-forward tunnels — without keeping a second app open.
+    link: /guides/ssh-tunnels
   - title: Sandboxed runner (Pro)
     details: Run an untrusted project inside a macOS sandbox profile, inspect it, then promote it to a normal local run.
     link: /guides/sandbox

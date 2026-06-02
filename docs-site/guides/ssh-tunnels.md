@@ -1,16 +1,28 @@
 ---
-title: SSH Tunnels — Forward Remote Services to Localhost
-description: "Use PortBay SSH tunnels to reach remote databases, bastion-only services, VPS hosts, cloud VMs, cPanel servers, and ML cluster dashboards through standard OpenSSH."
+title: SSH Workspace & Tunnels — A Built-in SSH Client for Your Servers
+description: "PortBay includes a full SSH client: save a host once, then open an interactive terminal, an SFTP file browser with an inline editor, port-forward tunnels, host snapshots, and saved deploy steps — all over standard OpenSSH."
 ---
 
-# SSH Tunnels
+# SSH Workspace
 
-PortBay SSH tunnels pull remote services onto your machine. This is the inverse
-of [Cloudflare Tunnels](/guides/tunnels), which share a local project outward to
-the public internet.
+The projects you run locally have to ship somewhere. PortBay gives you a real SSH
+client for the servers on the other end, so you don't keep a second app open just
+to reach them. Save a connection once and open a **workspace** for it:
 
-Use SSH tunnels when a service should stay private on a remote network but you
-need to inspect it locally:
+- an **interactive terminal** — a real PTY on the host, not a command builder;
+- an **SFTP file browser** with an inline code editor: open a remote file, edit
+  it, and save with ⌘S straight back over SFTP;
+- **port-forward tunnels** you start and stop with a click;
+- **snapshot, processes, and listening-ports** panels read straight off the host;
+- a saved **deploy step list** and a one-look **health probe** with latency and
+  host-key trust.
+
+<ThemeImage name="ssh" alt="PortBay's SSH workspace — terminal, SFTP file browser, and tunnels for a remote host" />
+
+Tunnels are one part of that workspace. An SSH tunnel pulls a remote service onto
+your machine — the inverse of [Cloudflare Tunnels](/guides/tunnels), which share a
+local project outward to the public internet. Reach for a tunnel when a service
+should stay private on a remote network but you need to inspect it locally:
 
 | Workflow | Example |
 | --- | --- |
@@ -110,8 +122,10 @@ to a local daemon or an SSH tunnel.
 
 ## Remote Files, Uploads, and Git Deploys
 
-PortBay does not implement a custom SFTP editor. Remote file editing and uploads
-are delegated to tools that already understand SSH edge cases:
+The workspace's SFTP browser has an inline editor for quick changes — open a
+remote file, edit it, and save with ⌘S over SFTP. For heavier or repeatable work,
+PortBay does not try to reimplement full remote-development tooling; it generates
+the exact commands for the tools that already understand every SSH edge case:
 
 | Task | Recommended handoff |
 | --- | --- |
@@ -136,12 +150,13 @@ This keeps the tunnel lifecycle separate from the job lifecycle: the job can kee
 running on the cluster while PortBay restarts or re-points the laptop-side
 tunnel.
 
-## What SSH Tunnels Do Not Do
+## What the SSH workspace does not do
 
-SSH tunnels are not a terminal emulator, a VPN replacement, cloud GPU
-provisioning, or Slurm job submission. PortBay provides safe handoff commands for
-Remote-SSH, `rsync`, `scp`, and remote Git updates, but it does not hide or
-replace those tools.
+The workspace is not a VPN replacement, cloud GPU provisioning, or Slurm job
+submission. It gives you an interactive terminal and an inline SFTP editor for
+quick work, but for heavy remote development it hands off to the right tool rather
+than replacing it — PortBay generates the Remote-SSH, `rsync`, `scp`, and remote
+Git commands instead of reimplementing them.
 
 ## References
 

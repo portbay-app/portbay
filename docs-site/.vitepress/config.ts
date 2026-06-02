@@ -176,7 +176,7 @@ export default defineConfig({
           { text: "Stack Recipes", link: "/guides/recipes" },
           { text: "Mailpit", link: "/guides/mailpit" },
           { text: "Cloudflare Tunnels", link: "/guides/tunnels" },
-          { text: "SSH Tunnels", link: "/guides/ssh-tunnels" },
+          { text: "SSH Workspace", link: "/guides/ssh-tunnels" },
           { text: "Sandboxed Projects", link: "/guides/sandbox" },
         ],
       },

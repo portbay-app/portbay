@@ -16,6 +16,7 @@ Projects are registered from local folders. PortBay records the launch command, 
 | Next | `pnpm dev` | Usually binds to an HTTP port and uses an HTTP readiness probe. |
 | Vite | `pnpm dev --host 127.0.0.1` | Make sure the dev server binds to the port PortBay routes. |
 | PHP | Service-backed | Uses PHP-FPM and an optional document root such as `public`. |
+| Python | Framework dev server | Detects Django, FastAPI, and Flask and runs their dev server on port 8000; bare scripts and research/LLM-eval projects run with no server. Provisions a `.venv` with `uv` (or the stdlib `venv`). |
 | Static | None | Served by Caddy where supported. |
 | Node | `npm run dev` | Use a concrete port and readiness policy. |
 | Custom | Any shell command | Best for frameworks PortBay does not infer yet. |
