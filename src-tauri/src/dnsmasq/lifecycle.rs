@@ -2,15 +2,15 @@
 //!
 //! Parallel structure to `caddy::lifecycle::CaddySidecar`. The dnsmasq
 //! daemon answers DNS queries on a non-privileged loopback port; the
-//! `/etc/resolver/<suffix>` file (written separately by the resolver-
-//! install card) tells macOS to route only `.<suffix>` queries here.
+//! platform resolver wiring (macOS `/etc/resolver`, Linux systemd-resolved)
+//! routes only `.<suffix>` queries here.
 //!
 //! Binary resolution at spawn time mirrors `mkcert`'s pattern:
 //!
-//! 1. Bundled sidecar at `binaries/dnsmasq-<triple>` (production path).
+//! 1. Bundled sidecar at `binaries/dnsmasq-<triple>` (production path, when
+//!    available for the target).
 //! 2. Next to the running executable.
-//! 3. `which::which("dnsmasq")` on PATH (the dev fallback that the
-//!    Homebrew or ServBay install already satisfies).
+//! 3. `which::which("dnsmasq")` on PATH (the Linux v1 path and dev fallback).
 //!
 //! If none of the above resolves, `start` returns `BinaryMissing` and
 //! the GUI surfaces the missing-binary state via the sidecar slot.
@@ -134,8 +134,8 @@ impl Drop for DnsmasqSidecar {
 
 /// Locate PortBay's bundled dnsmasq next to the running executable. Tauri
 /// copies sidecars beside the binary for `cargo run` / `tauri dev` and into
-/// the app bundle's MacOS dir for a packaged build, so this finds our OWN
-/// dnsmasq in both. Returns `None` if it isn't there.
+/// the platform bundle dir for a packaged build, so this finds our OWN dnsmasq
+/// in both. Returns `None` if it isn't there.
 fn bundled_binary_beside_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -143,6 +143,8 @@ fn bundled_binary_beside_exe() -> Option<PathBuf> {
         "dnsmasq",
         "dnsmasq-aarch64-apple-darwin",
         "dnsmasq-x86_64-apple-darwin",
+        "dnsmasq-x86_64-unknown-linux-gnu",
+        "dnsmasq-aarch64-unknown-linux-gnu",
     ] {
         let candidate = dir.join(name);
         if candidate.exists() {

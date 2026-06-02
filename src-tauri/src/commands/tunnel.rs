@@ -18,7 +18,7 @@ use crate::commands::projects::load_registry;
 use crate::error::{AppError, AppResult};
 use crate::registry::ProjectId;
 use crate::state::AppState;
-use crate::tunnel::TunnelStatus;
+use crate::tunnel::{DetectedTunnel, TunnelStatus};
 
 #[tauri::command]
 pub async fn start_tunnel(
@@ -33,6 +33,27 @@ pub async fn start_tunnel(
     let project = registry
         .get_project(&ProjectId::new(&id))
         .ok_or_else(|| AppError::NotFound(id.clone()))?;
+
+    // If the project has a custom named tunnel attached and the user is Pro,
+    // Share routes through it (stable hostname) instead of a quick ephemeral
+    // link. A non-Pro user with a leftover config falls back to quick share, so
+    // sharing always works. The named tunnel goes straight to the dev origin
+    // (preserving the real custom Host for OAuth/webhooks), so — unlike quick —
+    // it doesn't flip the Caddy route's Origin normalisation.
+    if let Some(cfg) = project.tunnel.as_ref().filter(|c| c.is_active()) {
+        if crate::entitlements::is_pro() {
+            let (config_path, upstream_url) =
+                crate::tunnel::write_named_config(project, cfg).map_err(AppError::Tunnel)?;
+            let public_url = format!("https://{}", cfg.hostname);
+            let status = {
+                let mut mgr = state.tunnels.lock().expect("tunnels mutex poisoned");
+                mgr.start_custom(&app, &id, &config_path, &upstream_url, public_url)?
+            };
+            state.persist_tunnel_state();
+            return Ok(status);
+        }
+    }
+
     let hostname = project.hostname.clone();
 
     // Always reach Caddy over plain HTTP on :80. While the tunnel is active the
@@ -132,6 +153,15 @@ pub async fn tunnel_status(
         }
     }
     Ok(status)
+}
+
+/// List the user's named Cloudflare tunnels detected under `~/.cloudflared`
+/// (one per credentials file), for the per-project "attach a custom tunnel"
+/// picker. Read-only; empty when the user has no named tunnels. Not Pro-gated —
+/// detection is harmless; *running* one is gated at attach + share time.
+#[tauri::command]
+pub async fn list_named_tunnels() -> AppResult<Vec<DetectedTunnel>> {
+    Ok(crate::tunnel::detect_named_tunnels())
 }
 
 /// Quick liveness probe of the tunnel's local origin. Any HTTP response — even a

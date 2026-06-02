@@ -42,6 +42,7 @@
       // Nothing to do — silently surface a quiet hint.
       errorBus.push({
         code: "NOTHING_TO_STOP",
+        category: "lifecycle",
         whatHappened: "Nothing to stop.",
         whyItMatters: "No projects are currently running.",
         whoCausedIt: "user",
@@ -84,9 +85,11 @@
     if (report.failed === 0) {
       errorBus.push({
         code: "STOP_ALL_OK",
+        category: "lifecycle",
         whatHappened: `Stopped ${report.stopped} project${report.stopped === 1 ? "" : "s"}.`,
         whyItMatters: "All running projects were brought down cleanly.",
         whoCausedIt: "system",
+        severity: "success",
         actions: [],
       });
       return;
@@ -98,6 +101,7 @@
       .join("\n");
     errorBus.push({
       code: "STOP_ALL_PARTIAL",
+      category: "project-error",
       whatHappened: `Stopped ${report.stopped} of ${total}. ${report.failed} failed.`,
       whyItMatters:
         "Some projects didn't stop cleanly. Their state may not match the table.",

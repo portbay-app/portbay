@@ -81,8 +81,17 @@ impl HostsManager {
     }
 
     /// Default constructor pointing at `/etc/hosts`.
+    ///
+    /// Honours the `PORTBAY_HOSTS_PATH` override so tests (and any sandboxed
+    /// run) can redirect writes off the real system file. `/etc/hosts` is a
+    /// global path that the tempdir-based test harness can't otherwise
+    /// isolate — without this, every `add_project` test would append a real
+    /// line to the developer's machine.
     pub fn system() -> Self {
-        Self::new("/etc/hosts")
+        match std::env::var_os("PORTBAY_HOSTS_PATH") {
+            Some(path) => Self::new(path),
+            None => Self::new("/etc/hosts"),
+        }
     }
 
     pub fn path(&self) -> &Path {

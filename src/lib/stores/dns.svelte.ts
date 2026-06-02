@@ -76,6 +76,7 @@ function createDnsStore() {
       settings = saved;
       errorBus.push({
         code: "DNS_SETTINGS_SAVED",
+        category: "infrastructure",
         whatHappened: "dnsmasq settings saved.",
         whyItMatters:
           "The resolver was restarted with the new cache and TTL configuration.",
@@ -98,6 +99,7 @@ function createDnsStore() {
       await safeInvoke("dnsmasq_install_resolver");
       errorBus.push({
         code: "DNS_INSTALLED",
+        category: "infrastructure",
         whatHappened: `DNS routing for .${status?.suffix ?? "portbay.test"} installed.`,
         whyItMatters:
           "Subdomains of this suffix now resolve to 127.0.0.1 via dnsmasq — /etc/hosts edits are no longer needed for them.",
@@ -120,6 +122,7 @@ function createDnsStore() {
       await safeInvoke("dnsmasq_uninstall_resolver");
       errorBus.push({
         code: "DNS_UNINSTALLED",
+        category: "infrastructure",
         whatHappened: `DNS routing for .${status?.suffix ?? "portbay.test"} removed.`,
         whyItMatters:
           "Hostnames now resolve via /etc/hosts entries managed by PortBay.",
@@ -136,8 +139,8 @@ function createDnsStore() {
   }
 
   /**
-   * One-click first-run setup. Installs PortBay's privileged helper (one
-   * macOS password prompt), which then writes /etc/resolver and restarts
+   * One-click first-run setup. Installs PortBay's privileged helper (one OS
+   * authorization prompt), which then writes resolver config and restarts
    * dnsmasq — after this, *.suffix resolves with no further prompts.
    */
   async function setupLocalDns(): Promise<void> {
@@ -147,6 +150,7 @@ function createDnsStore() {
       await safeInvoke("setup_local_dns");
       errorBus.push({
         code: "DNS_SETUP_DONE",
+        category: "infrastructure",
         whatHappened: "Local DNS is set up.",
         whyItMatters:
           "PortBay's privileged helper is installed and your project hostnames now resolve to this machine.",
@@ -212,6 +216,7 @@ function createDnsStore() {
       await safeInvoke("restart_dnsmasq").catch(() => {});
       errorBus.push({
         code: "DNS_SUFFIX_CHANGED",
+        category: "infrastructure",
         whatHappened: `Domain suffix changed to .${migration.newSuffix}.`,
         whyItMatters:
           migration.changedProjects > 0

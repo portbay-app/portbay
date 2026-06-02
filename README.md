@@ -18,6 +18,8 @@ stack from your editor, your terminal, or your AI agent.
 
 `macOS` · Built with Tauri 2 · Rust · Svelte 5
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-support-FFDD00?style=flat&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/beiruti)
+
 > **Status:** released for macOS (Apple Silicon). Signed, notarized builds ship
 > via DMG and Homebrew — see [Getting started](#getting-started). Linux and
 > Windows are on the [roadmap](#roadmap).
@@ -60,13 +62,37 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 - **Bundled databases** — PortBay-supervised MySQL, MariaDB, Postgres, Redis, MongoDB, and Memcached.
 - **Public sharing** — expose any project over a [Cloudflare](https://www.cloudflare.com/products/tunnel/) tunnel with one click.
 - **A sandboxed runner** — run an untrusted or freshly-cloned project inside a macOS sandbox, inspect it, then promote it to a normal local run.
-- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as agent tools.
+- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 69 agent tools.
+- **A task board your agents work** — every project gets a Kanban board whose cards are Markdown in your repo. Move a card to *To Do* and the coding agent you assigned — Claude Code, Codex, Cursor, Gemini, Aider, and more — picks it up, does the work, and writes a handoff note for the next run.
 - **A declarative registry** — projects live in JSON; the daemon reconciles reality to match.
 - **Live logs, status, and metrics** per project, plus a macOS menu-bar mode.
 - **Already using Herd, ServBay, or MAMP?** Import your existing sites in one step — no re-entering paths, ports, and PHP versions.
 
 Everything is driven by a Rust core with full CLI parity, so the GUI — and your
 AI agent — are clients, not the source of truth.
+
+## A task board your AI agents actually work
+
+Every project in PortBay gets a board. The cards are plain Markdown files inside
+your repo (`.portbay/tasks/`), so they version with your code and stay readable
+with or without PortBay.
+
+Move a card to **To Do** and the agent you assigned picks it up and starts
+working — in your project, on your machine. PortBay launches the coding agent you
+already have installed; it never runs a model of its own. Claude Code, Codex,
+Cursor, Gemini, Aider, Copilot, OpenCode, Amp, Qwen, and Antigravity are
+recognised out of the box, and you can point it at any other CLI.
+
+<div align="center">
+
+<img src="docs-site/public/screenshots/tasks-dark.png" alt="PortBay's per-project task board with AI agents working cards" width="840" />
+
+</div>
+
+- **Assign per card, or set a board default.** Auto-dispatch the moment a card hits *To Do*, or require a click to confirm each run.
+- **A handoff doc that travels with the work.** When a run ends it appends to `.portbay/HANDOFF.md` — a short, newest-first brief the next run (or the next person) reads to continue without re-deriving context.
+- **It stays out of trouble.** A card can be blocked on others until they land, an optional *Review* column holds agent-"done" work for a human to approve, and runs whose process dies are reclaimed automatically.
+- **One board, three front ends.** The GUI, the `portbay` CLI, and the MCP server read and write the same cards — so an agent connected over MCP can claim the next card, record the files it touched, and move it to *Review* or *Done*, all through PortBay's agent tools.
 
 ## A look around
 
@@ -96,10 +122,10 @@ native one.
 
 If you live in PHP on macOS today, Herd is excellent. PortBay's bet is a single
 open, lightweight tool that handles mixed Node/PHP/static stacks without a daemon
-zoo. It's free and open source (AGPL-3.0); an optional, pay-what-you-want
-[Pro tier](https://docs.portbay.app/pro/) — earned with a donation **or** a merged
-pull request — funds the project and unlocks hosted multi-device sync and a few
-power-user features. No subscription, and nothing you can't build yourself.
+zoo. It's free and open source (AGPL-3.0); an optional
+[Pro tier](https://docs.portbay.app/pro/) ($59/yr, or earned by merging a pull
+request) funds the project and unlocks hosted multi-device sync and a few
+power-user features. Nothing you can't build yourself.
 
 For head-to-head breakdowns, see the in-depth comparisons — PortBay vs
 [Laravel Herd](https://docs.portbay.app/comparisons/portbay-vs-laravel-herd),
@@ -185,7 +211,7 @@ follows is already shipped — not planned.
 
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, full CLI. *Shipped.*
 - **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, and one-step import from Herd / ServBay / MAMP. *Shipped.*
-- **AI & automation** — an MCP server (58 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed. *Shipped.*
+- **AI & automation** — an MCP server (69 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed, and a per-project task board hands cards to the coding agent of your choice. *Shipped.*
 - **Release** — signed & notarized DMG, Homebrew cask, and in-app auto-update. *Shipped.*
 
 ### On the roadmap

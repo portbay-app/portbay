@@ -50,42 +50,37 @@ hand-edit `icon.json` for appearance art — let the tool write it.
 Tauri cannot consume a `.icon` document directly. Its bundler only embeds the
 static `icon.icns` listed in `src-tauri/tauri.conf.json` → `bundle.icon`. That
 `.icns` stays as the **macOS 11–15 fallback**. The macOS 26 catalog reaches the
-`.app` via one of two scripts, depending on whether the bundle gets signed.
+`.app` by being **committed and wired statically** — so every build, local and
+CI, bakes it in with no build-time step.
 
-### Release / signed builds — bake in BEFORE signing (`prepare-…`)
+### How it's wired (committed + static)
 
-`tauri build` compiles → signs → notarises → packages the `.dmg` and updater
-`.app.tar.gz`(+`.sig`) in one shot. The catalog must therefore be present
-*before* Tauri signs, or the notarisation staple and updater signature would
-be invalidated and the packaged artifacts would still hold the un-injected
-`.app`. So the release workflow runs the **pre-build** bake immediately before
-`tauri build`:
+The compiled catalog is committed at `compiled/Assets.car` and referenced
+directly from `src-tauri/tauri.conf.json`:
+
+```jsonc
+"bundle": {
+  "resources": { "icons/macos-liquid-glass/compiled/Assets.car": "Assets.car" }
+}
+```
+
+Tauri copies it to `Contents/Resources/Assets.car` during assembly. Alongside
+it, `src-tauri/Info.plist` sets `CFBundleIconName = PortBay`, which Tauri v2
+merges into the generated `Info.plist`. Because `tauri build` compiles → signs
+→ notarises → packages in one shot, having the catalog present as a committed
+build input means it's signed and stapled like any other resource — no re-sign,
+no pre-build script, nothing dirtied in the working tree.
 
 ```yaml
-# .github/workflows/release.yml (macOS job)
-- name: Bake macOS 26 Liquid Glass icon (pre-build)
-  run: bash scripts/prepare-macos-liquid-glass-icon.sh
+# .github/workflows/release.yml (macOS job) — no icon step needed
 - name: Build signed app
   run: pnpm tauri build --target aarch64-apple-darwin
 ```
 
-`prepare-macos-liquid-glass-icon.sh` resolves a compiled `Assets.car`
-(committed `compiled/Assets.car`, else `actool` on Xcode 26), then **bakes it
-into the build inputs** — no re-sign needed:
-- registers it as a Tauri **bundle resource** (`bundle.resources`) so Tauri
-  copies it to `Contents/Resources/Assets.car` during assembly, and
-- writes `CFBundleIconName = PortBay` to `src-tauri/Info.plist`, which Tauri
-  v2 merges into the generated `Info.plist`.
-
-These edits land only in the CI workspace (fresh checkout; the staging dir is
-git-ignored) — the committed config is never mutated. **Non-fatal:** if no
-catalog is available and the runner lacks Xcode 26, it warns and the build
-ships the `.icns` fallback rather than failing.
-
-> The default `macos-14` runner cannot run Xcode 26 (needs macOS 15+), so on
-> that runner the glass icon ships **only if `compiled/Assets.car` is
-> committed**. To compile on the runner instead, move the macOS job to a
-> macOS 15+ image with Xcode 26 selected.
+> This works on **any runner, including the default `macos-14`** (which cannot
+> run Xcode 26), precisely because the catalog is committed rather than compiled
+> in CI. Regenerating the catalog (below) is the only step that needs Xcode 26,
+> and it's a local dev action whose output is committed.
 
 ### Local preview — inject AFTER building (`inject-…`)
 
@@ -99,37 +94,30 @@ pnpm tauri:icon:macos        # scripts/inject-macos-liquid-glass-icon.sh
 
 This copies `Assets.car` into the already-built `PortBay.app`, sets
 `CFBundleIconName`, and re-signs (ad-hoc unless `APPLE_SIGNING_IDENTITY` is
-set). Fine for previewing the icon; **do not ship** a bundle injected this way
-— use the pre-build path for releases.
+set). Fine for previewing the icon without a full rebuild; **do not ship** a
+bundle injected this way — released builds bake the committed catalog in
+directly (see "How it's wired" above).
 
-### Producing `compiled/Assets.car`
+### Regenerating `compiled/Assets.car`
 
-`actool`'s standalone-`.icon` support is new in Xcode 26 and its exact CLI
-flags are still settling — **validate the `actool` call on your build
-machine.** For a deterministic, Xcode-free release (works on any runner),
-compile once and commit the result:
+The catalog is committed, so this is only needed when the icon art changes. Run
+on macOS 15+ with Xcode 26 selected, then commit the result:
 
-1. Add `PortBay.icon` to a throwaway Xcode 26 project and build once.
-2. Copy the produced `Assets.car` to `compiled/Assets.car` here and commit it.
+```bash
+pnpm tauri:icon:macos:build      # scripts/prepare-macos-liquid-glass-icon.sh
+git add src-tauri/icons/macos-liquid-glass/compiled/Assets.car
+```
 
-When `compiled/Assets.car` exists, both scripts use it verbatim and skip
-`actool` entirely.
-
-### Clean static end-state (optional)
-
-Once `compiled/Assets.car` is committed and validated, you can drop the
-scripts entirely and wire the catalog statically: add a permanent
-`src-tauri/Info.plist` with `CFBundleIconName`, and a `bundle.resources` entry
-mapping `icons/macos-liquid-glass/compiled/Assets.car` → `Assets.car` in
-`tauri.conf.json`. We avoid doing this *now* because a `bundle.resources` entry
-pointing at a missing file would break every local `tauri build` until the
-catalog is committed.
+`prepare-macos-liquid-glass-icon.sh` runs `actool` against `PortBay.icon`
+(`--minimum-deployment-target 11.0` so the catalog also carries an `.icns`
+fallback) and writes the result straight to `compiled/Assets.car`. It does not
+touch `tauri.conf.json` or `Info.plist` — those are committed and static.
 
 ## Limitation summary
 
-- Tauri has **no** `.icon` support and emits no asset catalog — tracked
+- Tauri has **no** native `.icon` support and emits no asset catalog — tracked
   upstream (tauri-apps/tauri does not yet bundle Icon Composer documents).
-- Therefore the macOS 26 icon is a **post-build injection**, not part of the
-  normal `tauri build` output.
-- The fallback `.icns` in `bundle.icon` keeps macOS 11–15 (and any build that
-  skips the injection step) showing a correct, if non-glass, icon.
+- We work around it by committing a pre-compiled `Assets.car` and registering it
+  as a `bundle.resources` entry, so `tauri build` bakes, signs and staples it.
+- The fallback `.icns` in `bundle.icon` keeps macOS 11–15 showing a correct, if
+  non-glass, icon.

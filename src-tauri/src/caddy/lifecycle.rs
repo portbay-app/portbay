@@ -7,9 +7,11 @@
 //! config.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tauri::AppHandle;
-use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 use crate::caddy::client::CaddyClient;
@@ -24,6 +26,13 @@ pub const ADMIN_SCAN_RANGE: u16 = 32;
 pub struct CaddySidecar {
     child: Option<CommandChild>,
     admin_port: u16,
+    /// True only while the spawned caddy is actually alive. The Tauri
+    /// `CommandChild` handle exists the instant `.spawn()` returns even if the
+    /// process exits a millisecond later (a rejected config, a bound admin
+    /// port), so `child.is_some()` alone is a liar — and because Caddy is the
+    /// reverse proxy, a false "up" silently breaks all routing. A background
+    /// task watching the event stream flips this to `false` on `Terminated`.
+    alive: Arc<AtomicBool>,
 }
 
 impl Default for CaddySidecar {
@@ -37,11 +46,12 @@ impl CaddySidecar {
         Self {
             child: None,
             admin_port: DEFAULT_ADMIN_PORT,
+            alive: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.child.is_some()
+        self.child.is_some() && self.alive.load(Ordering::Relaxed)
     }
 
     pub fn admin_port(&self) -> u16 {
@@ -73,7 +83,9 @@ impl CaddySidecar {
         config_path: &Path,
         admin_port: u16,
     ) -> Result<CaddyClient> {
-        if self.child.is_some() {
+        // is_running() (not child.is_some()) so a crashed-but-not-reaped caddy
+        // is respawned rather than wrongly treated as still up.
+        if self.is_running() {
             return Ok(CaddyClient::new(self.admin_port));
         }
 
@@ -90,15 +102,44 @@ impl CaddySidecar {
             .map_err(|e| CaddyError::SpawnFailed(e.to_string()))?
             .args(["run", "--config", &config_str]);
 
-        let (_rx, child) = cmd
+        let (mut rx, child) = cmd
             .spawn()
             .map_err(|e| CaddyError::SpawnFailed(e.to_string()))?;
+        self.alive.store(true, Ordering::Relaxed);
         self.child = Some(child);
+
+        // Drain the event stream so caddy's own diagnostics surface, and flip
+        // `alive` the moment the process exits so `is_running` can't keep
+        // claiming a dead reverse proxy is up.
+        let alive = self.alive.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(bytes) => {
+                        let line = String::from_utf8_lossy(&bytes);
+                        let line = line.trim_end();
+                        if !line.is_empty() {
+                            tracing::debug!(target: "caddy", "{line}");
+                        }
+                    }
+                    CommandEvent::Error(err) => {
+                        tracing::warn!(target: "caddy", error = %err, "caddy sidecar error");
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        tracing::warn!(target: "caddy", code = ?payload.code, "caddy sidecar terminated");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            alive.store(false, Ordering::Relaxed);
+        });
 
         Ok(CaddyClient::new(admin_port))
     }
 
     pub fn stop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
         if let Some(child) = self.child.take() {
             let _ = child.kill();
         }

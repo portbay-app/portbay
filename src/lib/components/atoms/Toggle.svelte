@@ -40,7 +40,7 @@
   tabindex={disabled ? -1 : 0}
   onclick={toggle}
   onkeydown={onKey}
-  class="inline-flex items-center w-9 h-5 rounded-full transition-colors
+  class="inline-flex shrink-0 items-center w-9 h-5 rounded-full transition-colors
          disabled:opacity-50 disabled:cursor-not-allowed
          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
          {checked ? 'bg-accent' : 'bg-surface-2 border border-border'}"

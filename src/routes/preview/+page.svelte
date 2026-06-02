@@ -29,6 +29,7 @@
 
   const sampleSystemError: CommandError = {
     code: "SIDECAR_DOWN",
+    category: "infrastructure",
     whatHappened: "process-compose is not running",
     whyItMatters: "Projects can't start until process-compose is running again.",
     whoCausedIt: "system",
@@ -39,6 +40,7 @@
 
   const sampleUserError: CommandError = {
     code: "PROJECT_NOT_FOUND",
+    category: "project-error",
     whatHappened: "project 'marketing-site' not found",
     whyItMatters: "Nothing was changed.",
     whoCausedIt: "user",

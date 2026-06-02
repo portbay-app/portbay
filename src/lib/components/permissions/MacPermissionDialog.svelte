@@ -18,6 +18,7 @@
 -->
 <script lang="ts">
   import { safeInvoke } from "$lib/ipc";
+  import { startDrag } from "@crabnebula/tauri-plugin-drag";
 
   type PermissionKind =
     | "login-items"
@@ -96,6 +97,55 @@
   const config = $derived(CONFIGS[kind]);
   let busy = $state(false);
 
+  // Native drag-to-grant: for the privacy "drag" gestures the app icon below is
+  // a real OS drag source — dragging it out and dropping it into the System
+  // Settings privacy list adds PortBay (the macOS gesture that grants access).
+  // The backend hands us the path to drag (the .app bundle) and a cursor icon;
+  // `tauri-plugin-drag` begins the AppKit dragging session a webview can't.
+  interface DragPayload {
+    bundlePath: string;
+    iconPath: string;
+  }
+  let dragPayload = $state<DragPayload | null>(null);
+  // Set once the user has dropped PortBay into the list. macOS only applies a
+  // newly-granted Accessibility permission after the app relaunches, so instead
+  // of just closing we switch to a "relaunch to finish" step.
+  let dropped = $state(false);
+
+  $effect(() => {
+    if (open && config.gesture === "drag") {
+      dropped = false; // reset each time the sheet opens
+      if (!dragPayload) {
+        safeInvoke<DragPayload>("permission_drag_payload")
+          .then((p) => (dragPayload = p))
+          .catch(() => {});
+      }
+    }
+  });
+
+  async function relaunch() {
+    await safeInvoke("relaunch_app").catch(() => {});
+  }
+
+  // MUST stay synchronous: the native drag session has to begin within the
+  // dragstart event tick. Awaiting anything first (e.g. fetching the payload)
+  // detaches it from the gesture and the OS never receives the file — which is
+  // why an earlier async version "looked" like it dragged but added nothing.
+  // The payload is prefetched by the $effect above when the sheet opens.
+  function onIconDragStart(e: DragEvent) {
+    if (config.gesture !== "drag" || !dragPayload) return;
+    e.preventDefault(); // suppress the webview's own image drag
+    // The onEvent callback reports the drag outcome: once the user drops the
+    // tile onto a target ("Dropped" — i.e. into the Settings list), the gesture
+    // is done, so dismiss the sheet. A "Cancelled" release leaves it open.
+    void startDrag(
+      { item: [dragPayload.bundlePath], icon: dragPayload.iconPath },
+      (payload) => {
+        if (payload.result === "Dropped") dropped = true;
+      },
+    );
+  }
+
   async function openSettings() {
     await safeInvoke("open_privacy_settings", { kind: config.settingsKind });
   }
@@ -110,8 +160,10 @@
         busy = false;
       }
     } else {
+      // Open the privacy pane but KEEP this sheet open: the drag-to-grant flow
+      // needs the user to come back and drag the tile into the list, then retry
+      // — closing here would force them to trigger the whole flow again.
       await openSettings();
-      onClose?.();
     }
   }
 
@@ -139,54 +191,119 @@
       class="perm-card w-[440px] rounded-2xl border border-border bg-surface
              shadow-2xl p-6 flex flex-col items-center gap-5 text-center"
     >
-      <!-- Animated hero: PortBay icon → flow → outcome (toggle or list drop) -->
-      <div class="relative flex w-full items-center justify-center gap-4 py-3">
-        <div class="perm-app relative">
-          <span class="perm-glow"></span>
-          <img
-            src="/icon.png"
-            alt=""
-            aria-hidden="true"
-            class="relative h-16 w-16 rounded-[16px]"
-            draggable={config.gesture === "drag"}
-          />
-        </div>
-
-        <!-- Flowing dots between source and destination -->
-        <div class="perm-flow" aria-hidden="true">
-          <span></span><span></span><span></span>
-        </div>
-
-        {#if config.gesture === "toggle"}
-          <!-- Stylised Login Items row with a toggle that animates ON -->
+      {#if config.gesture === "toggle"}
+        <!-- Toggle gesture (DNS helper / Login Items): icon → flow → switch. -->
+        <div class="relative flex w-full items-center justify-center gap-4 py-3">
+          <div class="perm-app relative">
+            <span class="perm-glow"></span>
+            <img src="/icon.png" alt="" aria-hidden="true" class="relative h-16 w-16 rounded-[16px]" />
+          </div>
+          <div class="perm-flow" aria-hidden="true"><span></span><span></span><span></span></div>
           <div class="perm-settings">
             <img src="/icon.png" alt="" aria-hidden="true" class="h-5 w-5 rounded-[5px]" />
             <span class="perm-settings-label">PortBay</span>
             <span class="perm-toggle"><span class="perm-knob"></span></span>
           </div>
-        {:else}
-          <!-- Stylised privacy list the icon drops into -->
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <h2 class="text-[15px] font-semibold text-fg">{config.title}</h2>
+          <p class="text-[11.5px] uppercase tracking-wide text-accent">{config.subtitle}</p>
+        </div>
+        <p class="text-[12px] text-fg-muted leading-relaxed">{config.description}</p>
+      {:else if dropped}
+        <!-- Dropped into the list. macOS only applies a newly-granted
+             permission after the app relaunches, so guide the user to restart. -->
+        <div class="perm-app relative py-2">
+          <span class="perm-glow"></span>
+          <img src="/icon.png" alt="" aria-hidden="true" class="relative h-16 w-16 rounded-[18px]" />
+        </div>
+        <div class="flex flex-col gap-1">
+          <h2 class="text-[15px] font-semibold text-fg">Almost done — relaunch PortBay</h2>
+          <p class="text-[11.5px] uppercase tracking-wide text-accent">One last step</p>
+        </div>
+        <p class="text-[12px] text-fg-muted leading-relaxed">
+          PortBay was added to {config.settingsName}. macOS only applies a new
+          permission after the app restarts — make sure PortBay is switched
+          <span class="font-medium text-fg">on</span> in the list, then relaunch
+          to start using voice-to-text.
+        </p>
+      {:else}
+        <!-- Drag-to-grant gesture: open the privacy pane, then physically drag
+             the PortBay tile into the list (the macOS gesture that adds it). -->
+        <!-- Animated hero: PortBay logo → flowing dots → the privacy list it
+             drops into (the blinking dashed row is the drop target). -->
+        <div class="relative flex w-full items-center justify-center gap-4 py-3">
+          <div class="perm-app relative">
+            <span class="perm-glow"></span>
+            <img src="/icon.png" alt="" aria-hidden="true" class="relative h-16 w-16 rounded-[16px]" />
+          </div>
+          <div class="perm-flow" aria-hidden="true"><span></span><span></span><span></span></div>
           <div class="perm-list" aria-hidden="true">
             <span class="perm-row perm-row-drop"></span>
             <span class="perm-row"></span>
             <span class="perm-row"></span>
           </div>
-        {/if}
-      </div>
+        </div>
 
-      <!-- Copy -->
-      <div class="flex flex-col gap-1">
-        <h2 class="text-[15px] font-semibold text-fg">{config.title}</h2>
-        <p class="text-[11.5px] uppercase tracking-wide text-accent">
-          {config.subtitle}
-        </p>
-      </div>
-      <p class="text-[12px] text-fg-muted leading-relaxed">
-        {config.description}
-      </p>
+        <div class="flex flex-col gap-1">
+          <h2 class="text-[15px] font-semibold text-fg">{config.title}</h2>
+          <p class="text-[11.5px] uppercase tracking-wide text-accent">{config.subtitle}</p>
+        </div>
+
+        <!-- Numbered steps -->
+        <ol class="w-full space-y-2 text-left">
+          {#each [`Open System Settings → ${config.settingsName}.`, `Drag the PortBay tile below into the ${config.settingsName} list.`, "Switch PortBay on in the list."] as step, i (i)}
+            <li class="flex items-start gap-2.5">
+              <span class="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">{i + 1}</span>
+              <span class="text-[12px] text-fg-muted leading-relaxed">{step}</span>
+            </li>
+          {/each}
+        </ol>
+
+        <!-- The real OS drag source: drag this tile into the privacy list. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="perm-drag-chip group flex w-full cursor-grab items-center gap-3 rounded-xl border border-border bg-surface-2 p-2.5 transition-colors hover:border-accent/60 active:cursor-grabbing"
+          draggable="true"
+          ondragstart={onIconDragStart}
+          title={`Drag into ${config.settingsName}`}
+          aria-label={`Drag PortBay into ${config.settingsName} settings`}
+        >
+          <img src="/icon.png" alt="" aria-hidden="true" draggable="false" class="h-11 w-11 shrink-0 rounded-[12px]" />
+          <div class="flex min-w-0 flex-1 flex-col text-left">
+            <span class="truncate text-[12.5px] font-medium text-fg">Drag PortBay into {config.settingsName}</span>
+            <span class="text-[11px] text-fg-subtle">Drop it onto the list to grant access</span>
+          </div>
+          <span class="perm-grip" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><circle cx="4" cy="3" r="1.3"/><circle cx="10" cy="3" r="1.3"/><circle cx="4" cy="7" r="1.3"/><circle cx="10" cy="7" r="1.3"/><circle cx="4" cy="11" r="1.3"/><circle cx="10" cy="11" r="1.3"/></svg>
+          </span>
+        </div>
+      {/if}
 
       <!-- Actions -->
       <div class="mt-1 flex w-full flex-col gap-2">
+        {#if dropped}
+          <button
+            type="button"
+            onclick={relaunch}
+            class="h-9 w-full rounded-lg text-[12.5px] font-medium text-on-accent
+                   bg-accent hover:bg-accent-hover transition-colors"
+          >
+            Relaunch PortBay
+          </button>
+          <div class="flex items-center justify-center gap-4">
+            {#if onClose}
+              <button
+                type="button"
+                onclick={onClose}
+                class="text-[11.5px] text-fg-subtle hover:text-fg transition-colors"
+              >
+                Later
+              </button>
+            {/if}
+          </div>
+        {:else}
         <button
           type="button"
           disabled={busy}
@@ -216,6 +333,7 @@
             </button>
           {/if}
         </div>
+        {/if}
       </div>
     </div>
   </div>
@@ -293,7 +411,7 @@
     55%, 100% { left: 14px; }
   }
 
-  /* Privacy list with a highlighted drop row (drag kinds). */
+  /* Privacy list (hero destination) with a blinking dashed drop row. */
   .perm-list {
     display: flex; flex-direction: column; gap: 6px;
     padding: 8px; border-radius: 10px; width: 120px;
@@ -310,9 +428,26 @@
     50% { opacity: 1; }
   }
 
+  /* Draggable tile: a soft accent ring breathes to signal it's grabbable, and
+     the grip dots nudge sideways to hint "drag me out". */
+  .perm-drag-chip {
+    box-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
+    animation: perm-chip 2.4s ease-in-out infinite;
+  }
+  .perm-drag-chip:hover { animation-play-state: paused; }
+  @keyframes perm-chip {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 40%, transparent); }
+    50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 0%, transparent); }
+  }
+  .perm-grip { animation: perm-grip-nudge 2.4s ease-in-out infinite; }
+  @keyframes perm-grip-nudge {
+    0%, 100% { transform: translateX(0); opacity: 0.5; }
+    50% { transform: translateX(3px); opacity: 0.9; }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .perm-card, .perm-app, .perm-glow, .perm-flow span,
-    .perm-toggle, .perm-knob, .perm-row-drop { animation: none; }
+    .perm-toggle, .perm-knob, .perm-drag-chip, .perm-grip, .perm-row-drop { animation: none; }
     .perm-toggle { background: var(--color-status-running); }
     .perm-knob { left: 14px; }
   }

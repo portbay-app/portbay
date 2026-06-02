@@ -63,6 +63,8 @@ pub fn seed_if_absent(reg: &mut Registry) -> std::io::Result<bool> {
         services: vec!["caddy".into()],
         env: Default::default(),
         readiness: None,
+        pre_start: Vec::new(),
+        post_start: Vec::new(),
         auto_start: false,
         tags: vec!["portbay".into()],
         document_root: None,
@@ -74,6 +76,8 @@ pub fn seed_if_absent(reg: &mut Registry) -> std::io::Result<bool> {
         cors: None,
         sandbox: None,
         domain: None,
+        tunnel: None,
+        deploy: None,
     };
     // `add_project` only errors on a duplicate id, which we just ruled out.
     let _ = reg.add_project(project);

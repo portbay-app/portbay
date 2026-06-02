@@ -6,20 +6,19 @@
 //! e.g. `address=/.test/127.0.0.1` matches `myapp.test`,
 //! `api.myapp.test`, and so on.
 //!
-//! macOS only routes queries for the specific suffix to this dnsmasq
-//! instance, via a small file in `/etc/resolver/<suffix>` written by a
-//! separate command (the resolver-file install flow is its own card).
-//! Until that file exists, dnsmasq runs but no resolutions actually
-//! flow through it.
+//! The OS resolver must route queries for the specific suffix to this dnsmasq
+//! instance: macOS uses `/etc/resolver/<suffix>`, while Linux uses a
+//! systemd-resolved drop-in. Until that resolver wiring exists, dnsmasq runs
+//! but no normal application resolutions flow through it.
 
 use std::path::PathBuf;
 
 use crate::registry::DnsmasqSettings;
 
 /// Build the dnsmasq config string. `port` is the UDP port the daemon
-/// listens on locally — must be the same port `/etc/resolver/<suffix>`
-/// will eventually reference. `settings` carries the user-tunable cache /
-/// TTL directives; the rest of the config is fixed for safety.
+/// listens on locally — must be the same port the platform resolver file will
+/// eventually reference. `settings` carries the user-tunable cache / TTL
+/// directives; the rest of the config is fixed for safety.
 pub fn build_config(suffix: &str, port: u16, settings: &DnsmasqSettings) -> String {
     // `bind-interfaces` + `listen-address=127.0.0.1` keeps dnsmasq off
     // any non-loopback interface. `no-daemon` keeps the process in the

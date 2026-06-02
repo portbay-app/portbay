@@ -57,6 +57,7 @@
         });
         errorBus.push({
           code: "GROUP_CREATED",
+          category: "lifecycle",
           whatHappened: `Group "${name.trim()}" created with ${selectedIds.length} project${selectedIds.length === 1 ? "" : "s"}.`,
           whyItMatters: "Open it from the sidebar to start the whole group at once.",
           whoCausedIt: "system",
@@ -69,6 +70,7 @@
         });
         errorBus.push({
           code: "GROUP_UPDATED",
+          category: "lifecycle",
           whatHappened: `Group "${name.trim()}" updated.`,
           whyItMatters: "Member changes apply on the next group action.",
           whoCausedIt: "system",

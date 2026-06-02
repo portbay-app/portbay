@@ -44,6 +44,11 @@ pub struct TunnelStatus {
     pub origin_reachable: Option<bool>,
     /// Wall-clock ms when the tunnel started.
     pub started_at_ms: u64,
+    /// `true` for a bring-your-own **named** tunnel (stable custom hostname),
+    /// `false` for a quick ephemeral `*.trycloudflare.com` share. Serde-default
+    /// so an older state file (written before custom tunnels) reads as quick.
+    #[serde(default)]
+    pub custom: bool,
 }
 
 /// One live tunnel. The `child` keeps cloudflared alive for the life
@@ -55,6 +60,7 @@ pub struct Tunnel {
     pub upstream_url: String,
     pub public_url: Arc<Mutex<Option<String>>>,
     pub started_at_ms: u64,
+    custom: bool,
     child: Option<CommandChild>,
 }
 
@@ -79,6 +85,7 @@ impl Tunnel {
             running: self.child.is_some(),
             origin_reachable: None,
             started_at_ms: self.started_at_ms,
+            custom: self.custom,
         }
     }
 }
@@ -113,7 +120,7 @@ impl TunnelManager {
         self.tunnels.get(project_id).map(|t| t.status())
     }
 
-    /// Spawn cloudflared for `project_id`, routing traffic through Caddy so the
+    /// Start a **quick** (ephemeral) tunnel, routing traffic through Caddy so the
     /// per-project Origin/Host normalisation applies.
     ///
     /// `hostname` is the project's Caddy hostname (e.g. `myapp.test`); it is
@@ -134,21 +141,53 @@ impl TunnelManager {
         hostname: &str,
         upstream_url: &str,
     ) -> Result<TunnelStatus> {
+        let cmd = resolve_command(app, upstream_url, hostname)?;
+        self.spawn(project_id, upstream_url, cmd, None, false)
+    }
+
+    /// Start a bring-your-own **named** tunnel from a PortBay-owned config
+    /// (`config_path`). The public URL is the user's stable hostname — known
+    /// up-front, so it's pre-populated rather than parsed from stdout.
+    /// `upstream_url` is the local origin the tunnel's ingress points at (for the
+    /// reachability probe + status display).
+    pub fn start_custom(
+        &mut self,
+        app: &AppHandle,
+        project_id: &str,
+        config_path: &std::path::Path,
+        upstream_url: &str,
+        public_url: String,
+    ) -> Result<TunnelStatus> {
+        let cmd = resolve_custom_command(app, config_path)?;
+        self.spawn(project_id, upstream_url, cmd, Some(public_url), true)
+    }
+
+    /// Shared spawn path for both tunnel kinds: register the cloudflared child,
+    /// tail its output (parsing the quick-share URL when `preset_url` is `None`),
+    /// and record the `Tunnel`. `custom` flags the kind for status/state.
+    fn spawn(
+        &mut self,
+        project_id: &str,
+        upstream_url: &str,
+        cmd: tauri_plugin_shell::process::Command,
+        preset_url: Option<String>,
+        custom: bool,
+    ) -> Result<TunnelStatus> {
         if self.tunnels.contains_key(project_id) {
             return Err(TunnelError::AlreadyRunning(project_id.to_string()));
         }
 
-        let cmd = resolve_command(app, upstream_url, hostname)?;
         let (mut rx, child) = cmd
             .spawn()
             .map_err(|e| TunnelError::SpawnFailed(e.to_string()))?;
 
-        let public_url = Arc::new(Mutex::new(None::<String>));
+        let public_url = Arc::new(Mutex::new(preset_url));
         let public_url_for_task = public_url.clone();
 
-        // Tail the child's output and fill in the public URL once
-        // cloudflared announces it. Closes naturally when the child
-        // exits and the receiver is drained.
+        // Tail the child's output and fill in the public URL once cloudflared
+        // announces it (quick share only — a named tunnel's URL is preset, and
+        // `parse_public_url` won't match a custom domain). Closes naturally when
+        // the child exits and the receiver is drained.
         tauri::async_runtime::spawn(async move {
             use tauri_plugin_shell::process::CommandEvent;
             while let Some(event) = rx.recv().await {
@@ -178,6 +217,7 @@ impl TunnelManager {
             upstream_url: upstream_url.to_string(),
             public_url,
             started_at_ms,
+            custom,
             child: Some(child),
         };
         let status = tunnel.status();
@@ -386,6 +426,29 @@ fn resolve_command(
         "--no-autoupdate",
         "--no-tls-verify",
     ];
+
+    if let Ok(sidecar) = app.shell().sidecar("cloudflared") {
+        return Ok(sidecar.args(args));
+    }
+    let path = which::which("cloudflared").map_err(|_| TunnelError::BinaryMissing)?;
+    Ok(app
+        .shell()
+        .command(path.to_string_lossy().into_owned())
+        .args(args))
+}
+
+/// Build the cloudflared command for a **named** tunnel run from a PortBay-owned
+/// config. Unlike the quick path there is no `--url`: the config's `ingress`
+/// defines routing, and its `tunnel:`/`credentials-file:` select the user's
+/// named tunnel. We pass our generated config (never `~/.cloudflared/config.yml`),
+/// preserving the same isolation invariant — pointed at the user's creds on
+/// purpose this time.
+fn resolve_custom_command(
+    app: &AppHandle,
+    config_path: &std::path::Path,
+) -> Result<tauri_plugin_shell::process::Command> {
+    let config_str = config_path.to_string_lossy().into_owned();
+    let args = ["tunnel", "--config", &config_str, "--no-autoupdate", "run"];
 
     if let Ok(sidecar) = app.shell().sidecar("cloudflared") {
         return Ok(sidecar.args(args));

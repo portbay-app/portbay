@@ -10,8 +10,11 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
+use tauri_plugin_shell::process::CommandEvent;
+use tauri_plugin_shell::ShellExt;
 
 use crate::commands::dto::{
     AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch, WorkspaceAppDto,
@@ -20,8 +23,8 @@ use crate::commands::dto::{
 use crate::error::{AppError, AppResult};
 use crate::process_compose::{Process, ProjectStatus};
 use crate::registry::{
-    store, MobileRunConfig, Project, ProjectId, ProjectType, Readiness, Registry, Runtime,
-    SandboxConfig, SandboxNetworkPolicy, WebServer,
+    store, MobileRunConfig, Project, ProjectDeploy, ProjectId, ProjectType, Readiness, Registry,
+    Runtime, SandboxConfig, SandboxNetworkPolicy, WebServer,
 };
 use crate::state::AppState;
 
@@ -209,6 +212,8 @@ pub async fn add_project(
         services: default_services(input.kind, input.https, has_start_command),
         env: Default::default(),
         readiness,
+        pre_start: Vec::new(),
+        post_start: Vec::new(),
         auto_start: input.auto_start,
         tags: vec![],
         document_root,
@@ -220,6 +225,8 @@ pub async fn add_project(
         cors: None,
         sandbox: input.sandbox,
         domain: None,
+        tunnel: None,
+        deploy: None,
     };
 
     if registry.hostname_conflict(&project.hostname, None) {
@@ -243,12 +250,196 @@ pub async fn add_project(
     }
     save_registry(&state, &registry)?;
 
+    // Pre-stage the project-scoped PortBay MCP registration for the default
+    // board agent (Claude — `.mcp.json`, the broadest convention) so the
+    // `portbay://projects/<id>/…` URLs resolve the first time someone opens
+    // their agent here, not only after the first card dispatch. Best-effort:
+    // the board config doesn't exist yet (Claude is the default), the user can
+    // re-target another agent from the board's "set up MCP" banner, and the
+    // dispatch path re-runs this anyway — so a failure must never block create.
+    #[cfg(feature = "tasks")]
+    {
+        let _ = crate::context::automation::ensure_project_mcp(
+            &project.path,
+            &project.id.to_string(),
+            crate::context::config::AgentKind::Claude,
+            None,
+        );
+    }
+
     // Hand off side-effects (hosts, certs, Caddy routes, PC YAML) to
     // the reconciler. The tick runs in the background; the user's
     // toast returns immediately.
     state.reconciler.mark_dirty();
 
     Ok(ProjectView::from_project(&project, None))
+}
+
+/// Streamed progress events from [`provision_python_env`].
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ProvisionEvent {
+    /// One line of child-process output (stdout or stderr).
+    Log { line: String },
+    /// Provisioning finished successfully.
+    Done,
+}
+
+/// Create a Python virtualenv (`.venv`) for a project and install its declared
+/// dependencies, streaming command output to the frontend over `on_event`.
+///
+/// Idempotent: an existing `.venv` is reused, but dependencies are still
+/// (re)installed so a changed manifest takes effect. Prefers `uv` when present
+/// on PATH (much faster) and otherwise falls back to the stdlib `venv` module
+/// plus the venv's own `pip`. The interpreter is the project's pinned Python
+/// runtime when it resolves to a managed/detected binary, else the system
+/// `python3`. Once the venv exists, `inject_runtime_path` puts `.venv/bin` at
+/// the front of PATH so Play and any task run inside it.
+#[tauri::command]
+pub async fn provision_python_env(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    on_event: Channel<ProvisionEvent>,
+) -> AppResult<()> {
+    let registry = load_registry(&state)?;
+    let project = registry
+        .get_project(&ProjectId::new(id.clone()))
+        .ok_or_else(|| AppError::NotFound(id.clone()))?;
+    if project.kind != ProjectType::Python {
+        return Err(AppError::BadInput(format!(
+            "project {id} is not a Python project"
+        )));
+    }
+    let dir = project.path.clone();
+    if !dir.is_dir() {
+        return Err(AppError::BadInput(format!(
+            "project path is not a directory: {}",
+            dir.display()
+        )));
+    }
+
+    // Resolve a Python interpreter: the project's pinned runtime if it resolves
+    // to a managed/detected binary, else the system `python3` on PATH.
+    let python = project
+        .runtime
+        .as_ref()
+        .filter(|rt| rt.lang == "python")
+        .and_then(|rt| crate::runtimes::resolve_binary(rt, &registry.runtimes))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "python3".into());
+
+    let venv = dir.join(".venv");
+    let venv_bin = venv.join("bin");
+    let venv_pip = venv_bin.join("pip").to_string_lossy().into_owned();
+    let venv_python = venv_bin.join("python").to_string_lossy().into_owned();
+    let use_uv = command_available(&app, "uv").await;
+
+    // 1) Create the venv (skip if one already exists).
+    if venv_bin.is_dir() {
+        let _ = on_event.send(ProvisionEvent::Log {
+            line: ".venv already exists — reusing it".into(),
+        });
+    } else if use_uv {
+        run_streamed(&app, &on_event, "uv", &["venv", ".venv"], &dir).await?;
+    } else {
+        run_streamed(&app, &on_event, &python, &["-m", "venv", ".venv"], &dir).await?;
+    }
+
+    // 2) Install dependencies from whichever manifest is present.
+    if dir.join("requirements.txt").exists() {
+        if use_uv {
+            run_streamed(
+                &app,
+                &on_event,
+                "uv",
+                &["pip", "install", "-r", "requirements.txt", "--python", &venv_python],
+                &dir,
+            )
+            .await?;
+        } else {
+            run_streamed(&app, &on_event, &venv_pip, &["install", "-r", "requirements.txt"], &dir)
+                .await?;
+        }
+    } else if dir.join("pyproject.toml").exists() || dir.join("setup.py").exists() {
+        if use_uv {
+            run_streamed(
+                &app,
+                &on_event,
+                "uv",
+                &["pip", "install", "-e", ".", "--python", &venv_python],
+                &dir,
+            )
+            .await?;
+        } else {
+            run_streamed(&app, &on_event, &venv_pip, &["install", "-e", "."], &dir).await?;
+        }
+    } else {
+        let _ = on_event.send(ProvisionEvent::Log {
+            line: "No requirements.txt or pyproject.toml found — venv created with no extra packages"
+                .into(),
+        });
+    }
+
+    let _ = on_event.send(ProvisionEvent::Done);
+    Ok(())
+}
+
+/// Probe whether `program` is runnable on PATH (via `program --version`).
+/// Used to prefer `uv` for Python provisioning when it's installed.
+async fn command_available(app: &AppHandle, program: &str) -> bool {
+    let Ok((mut rx, _child)) = app.shell().command(program).arg("--version").spawn() else {
+        return false;
+    };
+    let mut ok = false;
+    while let Some(event) = rx.recv().await {
+        if let CommandEvent::Terminated(payload) = event {
+            ok = payload.code == Some(0);
+        }
+    }
+    ok
+}
+
+/// Spawn `program args` in `cwd`, streaming each output line to the frontend.
+/// Returns an error if the process can't spawn or exits non-zero.
+async fn run_streamed(
+    app: &AppHandle,
+    on_event: &Channel<ProvisionEvent>,
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+) -> AppResult<()> {
+    let _ = on_event.send(ProvisionEvent::Log {
+        line: format!("$ {program} {}", args.join(" ")),
+    });
+    let (mut rx, _child) = app
+        .shell()
+        .command(program)
+        .args(args.iter().copied())
+        .current_dir(cwd)
+        .spawn()
+        .map_err(|e| AppError::Internal(format!("failed to spawn {program}: {e}")))?;
+
+    let mut exit_code: Option<i32> = None;
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+                let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if !line.is_empty() {
+                    let _ = on_event.send(ProvisionEvent::Log { line });
+                }
+            }
+            CommandEvent::Terminated(payload) => exit_code = payload.code,
+            _ => {}
+        }
+    }
+
+    match exit_code {
+        Some(0) => Ok(()),
+        other => Err(AppError::Internal(format!(
+            "{program} exited with code {other:?}"
+        ))),
+    }
 }
 
 /// `update_project(id, patch)` — apply a partial update + persist.
@@ -301,6 +492,15 @@ pub async fn update_project(
     if let Some(name) = patch.name {
         project.name = name;
     }
+    // Mutable kind: promote/demote a project — e.g. a board-only `custom`
+    // project (created from the Tasks page with no server) grows into a real
+    // `next`/`php` app. `services` is recomputed from the new kind below
+    // (unless the patch sends its own), so the converted project is actually
+    // runnable instead of keeping the empty service list a board started with.
+    let kind_changed = patch.kind.is_some_and(|k| k != project.kind);
+    if let Some(kind) = patch.kind {
+        project.kind = kind;
+    }
     if let Some(hostname) = patch.hostname {
         project.hostname = hostname;
     }
@@ -322,11 +522,35 @@ pub async fn update_project(
     if let Some(auto) = patch.auto_start {
         project.auto_start = auto;
     }
+    if let Some(readiness) = patch.readiness {
+        project.readiness = Some(readiness);
+    }
+    if let Some(pre) = patch.pre_start {
+        // Replace the whole ordered list; drop blank rows the editor may send.
+        project.pre_start = pre
+            .into_iter()
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
+    }
+    if let Some(post) = patch.post_start {
+        project.post_start = post
+            .into_iter()
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
+    }
     if let Some(tags) = patch.tags {
         project.tags = tags;
     }
     if let Some(services) = patch.services {
         project.services = services;
+    } else if kind_changed {
+        // No explicit service list, but the kind switched — derive the right
+        // services for the new kind (e.g. add `caddy`/`php-fpm`) so a promoted
+        // board can serve. `https`/`start_command` above are already patched.
+        project.services =
+            default_services(project.kind, project.https, project.start_command.is_some());
     }
     if let Some(env) = patch.env {
         project.env = env;
@@ -379,6 +603,18 @@ pub async fn update_project(
         // registry entry and behave identically to before the field existed.
         project.domain = (domain != crate::registry::DomainConfig::default()).then_some(domain);
     }
+    if let Some(tunnel) = patch.tunnel {
+        // Pro gate, mirroring CORS: attaching or changing an *active* custom
+        // tunnel requires Pro; an existing one survives downgrade (we only
+        // reject the change, never strip it). Clearing (blank config) is free.
+        let changed = project.tunnel.as_ref() != Some(&tunnel);
+        if changed && tunnel.is_active() && !crate::entitlements::is_pro() {
+            return Err(AppError::ProRequired {
+                feature: "Custom tunnel",
+            });
+        }
+        project.tunnel = tunnel.is_active().then_some(tunnel);
+    }
 
     let snapshot = project.clone();
     save_registry(&state, &registry)?;
@@ -392,6 +628,103 @@ pub async fn update_project(
             .and_then(|key| m.get(key.as_str()))
     });
     Ok(ProjectView::from_project(&snapshot, proc))
+}
+
+/// Outcome of a one-shot readiness probe fired from the editor's "Probe now"
+/// button. `ok` is whether the check would mark the project ready; `detail` is
+/// a short human-readable line (status code, refusal, timeout) for the UI.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadinessProbeResult {
+    pub ok: bool,
+    pub detail: String,
+    pub elapsed_ms: u64,
+}
+
+/// `probe_readiness(kind, port, path)` — run the configured readiness check
+/// once against the dev server's *local* port (127.0.0.1, pre-Caddy, the same
+/// target the reconciler hands Process Compose) and report the result.
+///
+/// This deliberately doesn't load the project: the editor calls it with the
+/// values currently in the form so the user can test a probe before saving.
+#[tauri::command]
+pub async fn probe_readiness(
+    kind: String,
+    port: Option<u16>,
+    path: Option<String>,
+) -> AppResult<ReadinessProbeResult> {
+    use std::time::{Duration, Instant};
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    let started = Instant::now();
+    let (ok, detail) = match kind.as_str() {
+        "http" => {
+            let port = port
+                .ok_or_else(|| AppError::BadInput("an HTTP readiness probe needs a port".into()))?;
+            let raw = path.unwrap_or_else(|| "/".into());
+            let raw = raw.trim();
+            let path = if raw.is_empty() {
+                "/".to_string()
+            } else if raw.starts_with('/') {
+                raw.to_string()
+            } else {
+                format!("/{raw}")
+            };
+            let url = format!("http://127.0.0.1:{port}{path}");
+            let client = reqwest::Client::builder()
+                .timeout(TIMEOUT)
+                .build()
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            match client.get(&url).send().await {
+                // PC's http_get probe treats a reachable endpoint that doesn't
+                // 5xx/connection-fail as healthy; we mirror that with < 400.
+                Ok(resp) => {
+                    let code = resp.status().as_u16();
+                    (code < 400, format!("{url} → HTTP {code}"))
+                }
+                Err(e) if e.is_timeout() => (false, format!("{url} → timed out after 5s")),
+                Err(e) if e.is_connect() => (
+                    false,
+                    format!("{url} → connection refused (nothing listening?)"),
+                ),
+                Err(e) => (false, format!("{url} → {e}")),
+            }
+        }
+        "tcp" => {
+            let port = port
+                .ok_or_else(|| AppError::BadInput("a TCP readiness probe needs a port".into()))?;
+            // connect_timeout is blocking — keep it off the async worker.
+            let ok = tauri::async_runtime::spawn_blocking(move || {
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                std::net::TcpStream::connect_timeout(&addr, TIMEOUT).is_ok()
+            })
+            .await
+            .unwrap_or(false);
+            let detail = if ok {
+                format!("127.0.0.1:{port} accepted a TCP connection")
+            } else {
+                format!("127.0.0.1:{port} refused the connection or timed out")
+            };
+            (ok, detail)
+        }
+        "process" => (
+            false,
+            "“Trust the process” has no probe to run — readiness is just \
+             “the process is alive”."
+                .to_string(),
+        ),
+        other => {
+            return Err(AppError::BadInput(format!(
+                "unknown readiness kind: {other}"
+            )))
+        }
+    };
+
+    Ok(ReadinessProbeResult {
+        ok,
+        detail,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
 }
 
 /// `detect_project(path)` — quick framework + suggested-defaults probe.
@@ -639,6 +972,8 @@ pub async fn clone_git_project_sandboxed(
             path: "/".into(),
             timeout_seconds: 75,
         }),
+        pre_start: Vec::new(),
+        post_start: Vec::new(),
         auto_start: false,
         tags: vec![],
         document_root: det.document_root,
@@ -650,6 +985,8 @@ pub async fn clone_git_project_sandboxed(
         cors: None,
         sandbox: Some(SandboxConfig::enabled(input.network, input.ephemeral)),
         domain: None,
+        tunnel: None,
+        deploy: None,
     };
     if registry.hostname_conflict(&project.hostname, None) {
         return Err(crate::registry::RegistryError::DuplicateHostname(project.hostname).into());
@@ -835,6 +1172,14 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
         // matches the lockfile instead of always guessing `pnpm dev`.
         let cmd = standalone_dev_command(crate::registry::workspace::detect_package_manager(path));
         // Cheap string match — full JSON parse isn't worth the cycles.
+        // Expo first: an Expo app also lists react/react-native, so it must
+        // win over the generic Node fallback. Play runs `npx expo start`
+        // (Metro); the simulator opens from there. No port/start_command stored
+        // — the reconciler generates the launch from the kind.
+        if body.contains("\"expo\"") {
+            let mobile_run = detect_expo_run(path);
+            return detection_with_mobile(ProjectType::Expo, None, mobile_run);
+        }
         if body.contains("\"next\"") {
             return detection(ProjectType::Next, 3000, Some(cmd));
         }
@@ -846,6 +1191,10 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
 
     if path.join("composer.json").exists() || has_php_index(path) {
         return detect_php_project(path);
+    }
+
+    if is_python_project(path) {
+        return detect_python_project(path);
     }
 
     if is_flutter_project(path) {
@@ -932,6 +1281,67 @@ fn detect_php_project(path: &Path) -> ProjectDetection {
     }
 }
 
+/// Detect a Python project and infer its run command.
+///
+/// A recognised web framework (Django/FastAPI/Flask) gets a default — but
+/// editable — dev command bound to port 8000, which Caddy reverse-proxies just
+/// like PHP. Anything else (a plain script, a research / LLM-eval harness, a
+/// library) gets no port and no command: it runs as a board/process-only
+/// project whose Python runtime is still pinned by the runtime layer. We never
+/// hide an inferred command — it lands in `start_command` for the user to edit.
+fn detect_python_project(path: &Path) -> ProjectDetection {
+    // Django ships a `manage.py`; its dev server is unambiguous.
+    if path.join("manage.py").exists() {
+        return detection(
+            ProjectType::Python,
+            8000,
+            Some("python manage.py runserver 0.0.0.0:8000".into()),
+        );
+    }
+
+    // FastAPI/Flask are libraries, not marker files — sniff the declared deps.
+    // The entrypoint module name varies between projects, so this is a
+    // best-effort default the user is expected to confirm or edit.
+    let deps = python_dependency_text(path);
+    if deps.contains("fastapi") {
+        return detection(
+            ProjectType::Python,
+            8000,
+            Some("uvicorn main:app --reload --port 8000".into()),
+        );
+    }
+    if deps.contains("flask") {
+        return detection(ProjectType::Python, 8000, Some("flask run --port 8000".into()));
+    }
+
+    // No web framework: a script / research / library project. No server, so no
+    // port and no start command — it behaves like a board/process-only project.
+    detection(ProjectType::Python, 0, None)
+}
+
+/// Marker files that identify a Python project.
+fn is_python_project(path: &Path) -> bool {
+    path.join("pyproject.toml").exists()
+        || path.join("requirements.txt").exists()
+        || path.join("setup.py").exists()
+        || path.join("Pipfile").exists()
+        || path.join("manage.py").exists()
+}
+
+/// Concatenated, lower-cased text of a Python project's dependency manifests,
+/// for cheap substring sniffing (mirrors the `package.json` `contains` check
+/// used for JS frameworks).
+fn python_dependency_text(path: &Path) -> String {
+    let mut text = String::new();
+    for name in ["requirements.txt", "pyproject.toml", "Pipfile", "setup.py"] {
+        if let Ok(body) = std::fs::read_to_string(path.join(name)) {
+            text.push_str(&body);
+            text.push('\n');
+        }
+    }
+    text.to_lowercase()
+}
+
 fn detect_flutter_run(_path: &Path) -> Option<MobileRunConfig> {
     Some(MobileRunConfig::default())
 }
@@ -952,52 +1362,19 @@ fn detect_android_run(path: &Path) -> Option<MobileRunConfig> {
     })
 }
 
+/// Expo run config. `device` ("ios"/"android") selects which simulator
+/// `npx expo start` auto-opens; left unset so the user picks i/a in Metro.
+fn detect_expo_run(_path: &Path) -> Option<MobileRunConfig> {
+    Some(MobileRunConfig::default())
+}
+
+/// The Play command for a detected mobile project. Delegates to the single
+/// source of truth in [`crate::mobile`], which generates a complete launch
+/// (boot simulator/emulator → build → install → launch → attach logs) rather
+/// than a bare build/install — so Play actually opens the app in its simulator.
 fn mobile_start_command(kind: ProjectType, cfg: Option<&MobileRunConfig>) -> Option<String> {
-    match kind {
-        ProjectType::Flutter => {
-            let mut args = vec!["flutter".to_string(), "run".to_string()];
-            if let Some(flavor) = cfg.and_then(|c| clean_optional(&c.flavor)) {
-                args.push("--flavor".into());
-                args.push(shell_quote(flavor));
-            }
-            if let Some(device) = cfg.and_then(|c| clean_optional(&c.device)) {
-                args.push("-d".into());
-                args.push(shell_quote(device));
-            }
-            Some(args.join(" "))
-        }
-        ProjectType::Xcode => {
-            let scheme = cfg.and_then(|c| clean_optional(&c.target));
-            let Some(scheme) = scheme else {
-                return Some("xed .".into());
-            };
-            let mut args = vec![
-                "xcodebuild".to_string(),
-                "-scheme".into(),
-                shell_quote(scheme),
-            ];
-            if let Some(destination) = cfg.and_then(|c| clean_optional(&c.device)) {
-                args.push("-destination".into());
-                args.push(shell_quote(destination));
-            }
-            args.push("build".into());
-            Some(args.join(" "))
-        }
-        ProjectType::Android => {
-            let module = cfg.and_then(|c| clean_optional(&c.target)).unwrap_or("app");
-            let variant = cfg
-                .and_then(|c| clean_optional(&c.flavor))
-                .map(capitalize_ascii)
-                .unwrap_or_else(|| "Debug".into());
-            let command = format!("./gradlew :{}:install{}", module, variant);
-            if let Some(device) = cfg.and_then(|c| clean_optional(&c.device)) {
-                Some(format!("ANDROID_SERIAL={} {command}", shell_quote(device)))
-            } else {
-                Some(command)
-            }
-        }
-        _ => None,
-    }
+    let cfg = cfg.cloned().unwrap_or_default();
+    crate::mobile::launch_command_for(kind, &cfg)
 }
 
 fn has_php_index(path: &Path) -> bool {
@@ -1068,18 +1445,6 @@ fn find_android_module(path: &Path) -> Option<String> {
     None
 }
 
-fn clean_optional(value: &Option<String>) -> Option<&str> {
-    value.as_deref().map(str::trim).filter(|s| !s.is_empty())
-}
-
-fn capitalize_ascii(value: &str) -> String {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
-}
-
 fn has_child_with_extension(path: &Path, ext: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(path) else {
         return false;
@@ -1116,21 +1481,13 @@ fn detected_runtime_for(kind: ProjectType) -> Option<Runtime> {
 
 fn default_services(kind: ProjectType, https: bool, has_start_command: bool) -> Vec<String> {
     match kind {
-        ProjectType::Flutter | ProjectType::Xcode | ProjectType::Android => vec![],
+        ProjectType::Flutter | ProjectType::Xcode | ProjectType::Android | ProjectType::Expo => {
+            vec![]
+        }
         ProjectType::Php if has_start_command => vec!["caddy".into()],
         ProjectType::Php => vec!["caddy".into(), "php-fpm".into()],
         _ if https => vec!["caddy".into()],
         _ => vec![],
-    }
-}
-
-fn shell_quote(s: &str) -> String {
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':'))
-    {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
 
@@ -1180,6 +1537,61 @@ pub async fn set_xdebug_mode(
     save_registry(&state, &registry)?;
     state.reconciler.mark_dirty();
 
+    Ok(ProjectView::from_project(&snapshot, None))
+}
+
+/// `project_get_deploy(id)` — the project's saved deploy config, or `None`.
+#[tauri::command]
+pub async fn project_get_deploy(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<Option<ProjectDeploy>> {
+    let registry = load_registry(&state)?;
+    let project = registry
+        .get_project(&ProjectId::new(id.clone()))
+        .ok_or_else(|| AppError::NotFound(id.clone()))?;
+    Ok(project.deploy.clone())
+}
+
+/// `project_set_deploy(id, deploy)` — save (or clear, with `None`) a project's
+/// deploy target. Steps are trimmed and blank rows dropped; a config with no
+/// host + remote path is treated as "clear" so the editor can persist an empty
+/// form without leaving a half-set target behind.
+#[tauri::command]
+pub async fn project_set_deploy(
+    state: State<'_, AppState>,
+    id: String,
+    deploy: Option<ProjectDeploy>,
+) -> AppResult<ProjectView> {
+    let mut registry = load_registry(&state)?;
+    let pid = ProjectId::new(id.clone());
+    let project = registry
+        .get_project_mut(&pid)
+        .ok_or_else(|| AppError::NotFound(id.clone()))?;
+
+    project.deploy = deploy.and_then(|mut d| {
+        d.remote_path = d.remote_path.trim().to_string();
+        d.local_subdir = d
+            .local_subdir
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        d.steps = d
+            .steps
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        d.exclude = d
+            .exclude
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        d.is_active().then_some(d)
+    });
+
+    let snapshot = project.clone();
+    save_registry(&state, &registry)?;
     Ok(ProjectView::from_project(&snapshot, None))
 }
 
@@ -1345,11 +1757,13 @@ mod tests {
         assert_eq!(detected.kind, ProjectType::Flutter);
         assert_eq!(detected.port, None);
         assert_eq!(detected.mobile_run, Some(MobileRunConfig::default()));
-        assert_eq!(detected.start_command.as_deref(), Some("flutter run"));
+        // Launch attaches to the running app (hot-reload host), so it stays a
+        // long-running PC process. See `crate::mobile`.
+        assert_eq!(detected.start_command.as_deref(), Some("exec flutter run"));
     }
 
     #[test]
-    fn detect_kind_xcode_project_opens_workspace() {
+    fn detect_kind_xcode_project_builds_and_launches_simulator() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(
             dir.path()
@@ -1378,14 +1792,17 @@ mod tests {
                 .and_then(|m| m.target.as_deref()),
             Some("TribalHouse")
         );
-        assert_eq!(
-            detected.start_command.as_deref(),
-            Some("xcodebuild -scheme TribalHouse build")
-        );
+        // The launcher boots a simulator, builds the detected scheme, installs,
+        // and launches attached to the console (full launch, not a bare build).
+        let cmd = detected.start_command.unwrap();
+        assert!(cmd.contains("SCHEME='TribalHouse'"));
+        assert!(cmd.contains("xcodebuild"));
+        assert!(cmd.contains("simctl install"));
+        assert!(cmd.contains("simctl launch --console-pty"));
     }
 
     #[test]
-    fn detect_kind_android_project_installs_debug_build() {
+    fn detect_kind_android_project_installs_and_launches() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("gradlew"), "").unwrap();
         std::fs::write(dir.path().join("settings.gradle.kts"), "").unwrap();
@@ -1398,10 +1815,70 @@ mod tests {
         let mobile = detected.mobile_run.as_ref().unwrap();
         assert_eq!(mobile.target.as_deref(), Some("app"));
         assert_eq!(mobile.flavor.as_deref(), Some("debug"));
+        // Launcher installs the debug build then launches + tails logcat. The
+        // "debug" flavor is the build type, so the task is `installDebug` (not
+        // doubled into `installDebugDebug`).
+        let cmd = detected.start_command.unwrap();
+        assert!(cmd.contains(":app:installDebug"));
+        assert!(!cmd.contains("installDebugDebug"));
+        assert!(cmd.contains("adb -s \"$SER\" logcat"));
+    }
+
+    #[test]
+    fn detect_kind_django_project_runs_manage_py() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("manage.py"), "# django\n").unwrap();
+        std::fs::write(dir.path().join("requirements.txt"), "Django>=5.0\n").unwrap();
+
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Python);
+        assert_eq!(detected.port, Some(8000));
         assert_eq!(
             detected.start_command.as_deref(),
-            Some("./gradlew :app:installDebug")
+            Some("python manage.py runserver 0.0.0.0:8000")
         );
+    }
+
+    #[test]
+    fn detect_kind_fastapi_project_runs_uvicorn() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("requirements.txt"), "fastapi\nuvicorn\n").unwrap();
+
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Python);
+        assert_eq!(detected.port, Some(8000));
+        assert!(detected.start_command.as_deref().unwrap().contains("uvicorn"));
+    }
+
+    #[test]
+    fn detect_kind_bare_python_project_has_no_server() {
+        // A research / LLM-eval / library project: a manifest but no web
+        // framework. It gets typed as Python (so the runtime + venv flow apply)
+        // but with no port and no start command — a board/process-only project.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"evals\"\ndependencies = [\"numpy\", \"pytest\"]\n",
+        )
+        .unwrap();
+
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Python);
+        assert_eq!(detected.port, None);
+        assert_eq!(detected.start_command, None);
+    }
+
+    #[test]
+    fn detect_kind_js_wins_over_python_when_both_present() {
+        // A Python backend with a JS frontend at the root resolves to the JS
+        // type today (package.json is checked first). Documented, not ideal —
+        // splitting such a repo is a separate concern.
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(dir.path(), r#"{ "name": "app", "dependencies": {} }"#, None);
+        std::fs::write(dir.path().join("requirements.txt"), "flask\n").unwrap();
+
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Node);
     }
 
     #[test]

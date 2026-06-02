@@ -15,14 +15,24 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { Channel, invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-  import { Icon, ProjectAvatar, StatusDot, StatusPill } from "$lib/components/atoms";
+  import { Icon, StatusPill } from "$lib/components/atoms";
+  import ProjectSelector from "$lib/components/shared/ProjectSelector.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { devTools } from "$lib/stores/devTools.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
-  import { parseLogLine, type LogLevel, type LogLine } from "$lib/components/logs/ansi";
+  import {
+    parseLogLine,
+    eventLogLine,
+    type LogLevel,
+    type LogLine,
+  } from "$lib/components/logs/ansi";
+
+  /** PortBay-authored lifecycle line pushed over `portbay://proc-log`. */
+  type ProcLogEvent = { id: string; level: string; message: string };
 
   /** Cap on rendered lines — keeps the DOM bounded under chatty servers. */
   const MAX_LINES = 5_000;
@@ -44,10 +54,8 @@
   let loading = $state<boolean>(false);
   let autoScroll = $state<boolean>(true);
   let copied = $state<boolean>(false);
-  let pickerOpen = $state<boolean>(false);
 
   let scrollerEl: HTMLDivElement | undefined = $state();
-  let pickerEl: HTMLDivElement | undefined = $state();
   /** Active follow channel — null when not streaming. */
   let followChannel: Channel<string> | null = null;
 
@@ -74,7 +82,9 @@
       case "warn":
         return level === "warn";
       case "info":
-        return level === "info" || level === "debug";
+        // PortBay lifecycle lines ride along with Info so they never vanish
+        // into a tab with no home when the user narrows the filter.
+        return level === "info" || level === "debug" || level === "system";
     }
   }
 
@@ -90,6 +100,12 @@
   // ---- per-level styling (matches the mock) ----------------------------
   // The LEVEL token is always coloured. The message itself only turns red for
   // errors; everything else inherits the muted terminal foreground.
+  // Short label for the fixed-width token column. PortBay lifecycle lines show
+  // a compact "PB" badge rather than the 6-char "SYSTEM", which wouldn't fit.
+  function levelToken(level: LogLevel): string {
+    return level === "system" ? "PB" : level.toUpperCase();
+  }
+
   function tokenClass(level: LogLevel): string {
     switch (level) {
       case "error":
@@ -97,6 +113,8 @@
       case "warn":
         return "text-status-unhealthy";
       case "debug":
+        return "text-accent";
+      case "system":
         return "text-accent";
       default:
         return "text-status-running";
@@ -120,12 +138,34 @@
     }
   }
 
+  // Buffer incoming lines and commit once per animation frame. The backend
+  // delivers each line the instant it's written (FS-event driven), so a
+  // chatty server can land a burst within one frame; coalescing it into a
+  // single array rebuild keeps fast streams smooth. The scroll-to-bottom
+  // effect below reacts to the single per-frame `parsed` change.
+  let pending: LogLine[] = [];
+  let flushHandle: number | null = null;
+
+  function flushPending() {
+    flushHandle = null;
+    if (pending.length === 0) return;
+    let next = parsed.concat(pending);
+    pending = [];
+    // Keep the last (MAX_LINES - TRIM_CHUNK) so a burst can't blow the cap.
+    if (next.length > MAX_LINES) {
+      next = next.slice(next.length - (MAX_LINES - TRIM_CHUNK));
+    }
+    parsed = next;
+  }
+
   function startFollow(id: string) {
     if (followChannel !== null) return;
     const ch = new Channel<string>();
     ch.onmessage = (line) => {
-      parsed = parsed.concat(parseLogLine(line));
-      if (parsed.length > MAX_LINES) parsed = parsed.slice(TRIM_CHUNK);
+      pending.push(parseLogLine(line));
+      if (flushHandle === null) {
+        flushHandle = requestAnimationFrame(flushPending);
+      }
     };
     followChannel = ch;
     // Fire-and-forget: the backend task runs until the channel is dropped by
@@ -142,6 +182,39 @@
       followChannel.onmessage = () => {};
       followChannel = null;
     }
+    // Discard lines buffered for the next frame so a project switch can't
+    // flush the previous stream's tail into the new project's buffer.
+    if (flushHandle !== null) {
+      cancelAnimationFrame(flushHandle);
+      flushHandle = null;
+    }
+    pending = [];
+  }
+
+  // PortBay lifecycle lines (Starting / command echo / port-conflict) arrive
+  // over an app-global event keyed by project id, so pressing Play surfaces
+  // immediate feedback before the file tail has any output.
+  let procUnlisten: UnlistenFn | null = null;
+
+  async function startProcLog(id: string) {
+    stopProcLog();
+    const un = await listen<ProcLogEvent>("portbay://proc-log", (e) => {
+      if (e.payload.id !== id) return;
+      pending.push(eventLogLine(e.payload.message, e.payload.level as LogLevel));
+      if (flushHandle === null) {
+        flushHandle = requestAnimationFrame(flushPending);
+      }
+    });
+    // `listen` can resolve after a project switch; detach if we've moved on.
+    if (untrack(() => selectedId) === id) procUnlisten = un;
+    else un();
+  }
+
+  function stopProcLog() {
+    if (procUnlisten !== null) {
+      procUnlisten();
+      procUnlisten = null;
+    }
   }
 
   function scrollToBottom() {
@@ -153,7 +226,10 @@
   // every status tick, which would otherwise wipe the buffer mid-stream.
   $effect(() => {
     const id = selectedId;
-    untrack(() => stopFollow());
+    untrack(() => {
+      stopFollow();
+      stopProcLog();
+    });
     if (id === null) {
       untrack(() => (parsed = []));
       return;
@@ -163,6 +239,7 @@
       autoScroll = true;
       void reload();
       startFollow(id);
+      void startProcLog(id);
     });
   });
 
@@ -190,9 +267,13 @@
       40;
   }
 
-  function selectProject(id: string) {
-    selectedId = id;
-    pickerOpen = false;
+  // Terminal-style `clear`: wipe the *visible buffer* only. Does not touch the
+  // on-disk `<id>.log`; the live follow keeps streaming new lines afterward and
+  // auto-scroll state is preserved.
+  function clearView() {
+    parsed = [];
+    pending = [];
+    searchQuery = "";
   }
 
   async function copyUrl() {
@@ -211,6 +292,7 @@
     await safeInvoke("open_in_ide", { id: project.id, ide: terminalTool.id });
     errorBus.push({
       code: "OPEN_TERMINAL",
+      category: "lifecycle",
       whatHappened: `Opening ${project.name} in ${terminalTool.label}.`,
       whyItMatters:
         import.meta.env.PUBLIC_SIMULATOR === "true"
@@ -222,23 +304,14 @@
     });
   }
 
-  // Close the picker on outside-click / Escape.
-  function onWindowClick(e: MouseEvent) {
-    if (pickerOpen && pickerEl && !pickerEl.contains(e.target as Node)) {
-      pickerOpen = false;
-    }
-  }
-  function onWindowKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape" && pickerOpen) pickerOpen = false;
-  }
-
   onMount(() => {
     void devTools.start();
-    return () => stopFollow();
+    return () => {
+      stopFollow();
+      stopProcLog();
+    };
   });
 </script>
-
-<svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
 <div class="flex flex-col h-full min-h-0">
   <header class="px-6 pt-6 pb-4 shrink-0 space-y-4">
@@ -253,62 +326,15 @@
     <!-- Toolbar: project picker · level tabs · search -->
     <div class="flex flex-wrap items-center gap-3">
       <!-- Project picker -->
-      <div bind:this={pickerEl} class="relative">
-        <button
-          type="button"
-          onclick={() => (pickerOpen = !pickerOpen)}
-          disabled={projects.value.length === 0}
-          aria-haspopup="listbox"
-          aria-expanded={pickerOpen}
-          class="flex items-center gap-2 h-9 w-56 px-2.5 rounded-lg bg-surface-2
-                 border border-border text-left hover:border-border-strong
-                 disabled:opacity-50 disabled:cursor-not-allowed transition-colors
-                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        >
-          {#if project}
-            <ProjectAvatar
-              id={project.id}
-              name={project.name}
-              type={project.type}
-              size={20}
-            />
-            <span class="flex-1 truncate text-[13px] font-medium text-fg"
-              >{project.name}</span
-            >
-          {:else}
-            <span class="flex-1 truncate text-[13px] text-fg-subtle">
-              {projects.value.length === 0 ? "No projects" : "Select a project"}
-            </span>
-          {/if}
-          <Icon name="chevron-down" size={16} class="text-fg-subtle shrink-0" />
-        </button>
-
-        {#if pickerOpen}
-          <div
-            role="listbox"
-            aria-label="Select a project"
-            class="absolute z-30 mt-1.5 w-64 max-h-72 overflow-y-auto rounded-lg
-                   bg-surface border border-border shadow-2xl p-1"
-          >
-            {#each projects.value as p (p.id)}
-              <button
-                type="button"
-                role="option"
-                aria-selected={p.id === selectedId}
-                onclick={() => selectProject(p.id)}
-                class="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-left
-                       transition-colors {p.id === selectedId
-                  ? 'bg-accent/10'
-                  : 'hover:bg-surface-2'}"
-              >
-                <ProjectAvatar id={p.id} name={p.name} type={p.type} size={20} />
-                <span class="flex-1 truncate text-[13px] text-fg">{p.name}</span>
-                <StatusDot status={p.status} size="md" />
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
+      <ProjectSelector
+        projects={projects.value}
+        {selectedId}
+        disabled={projects.value.length === 0}
+        includeAllOption={false}
+        onselect={(id) => {
+          if (id !== null) selectedId = id;
+        }}
+      />
 
       <!-- Level tabs -->
       <div
@@ -423,7 +449,7 @@
               >
                 <span
                   class="shrink-0 w-12 select-none {tokenClass(pl.level)}"
-                  >{pl.level.toUpperCase()}</span
+                  >{levelToken(pl.level)}</span
                 >
                 <span class="min-w-0 flex-1">{@html pl.html}</span>
               </div>
@@ -435,6 +461,19 @@
         <footer
           class="shrink-0 flex items-center gap-3 px-4 py-2.5 border-t border-border"
         >
+          <!-- Clear — wipes the visible buffer only (terminal `clear`), placed
+               immediately before the auto-scroll control. Does not delete the log. -->
+          <button
+            type="button"
+            onclick={clearView}
+            title="Clear the view (does not delete the log file)"
+            class="inline-flex items-center gap-1.5 h-7 px-2 rounded-md text-[12px]
+                   text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+          >
+            <Icon name="eraser" size={13} />
+            Clear
+          </button>
+
           <label
             class="inline-flex items-center gap-2 text-[12px] text-fg-muted cursor-pointer select-none"
           >

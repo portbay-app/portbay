@@ -1,9 +1,10 @@
 //! Local crash capture and explicit opt-in telemetry.
 
 use std::backtrace::Backtrace;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Once;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +100,6 @@ pub type Result<T> = std::result::Result<T, TelemetryError>;
 pub fn install_panic_hook(app_version: impl Into<String>) {
     let app_version = app_version.into();
     INSTALL_PANIC_HOOK.call_once(move || {
-        let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let message = info
                 .payload()
@@ -118,7 +118,18 @@ pub fn install_panic_hook(app_version: impl Into<String>) {
                 created_at: now_ms(),
             };
             let _ = write_crash_report(&report);
-            default_hook(info);
+            // Do NOT call the default panic hook here: Rust's built-in hook
+            // writes to stderr via `eprintln!`, which panics with
+            // "failed printing to stderr: Broken pipe" when the pipe reader
+            // has gone away (e.g. a closed terminal). That secondary panic is
+            // then itself captured by this hook, looping. Instead we write
+            // the panic location to stderr ourselves using `writeln!` — which
+            // returns an `Err` on EPIPE and we silently discard it.
+            let loc = info
+                .location()
+                .map(|l| format!(" at {}:{}", l.file(), l.line()))
+                .unwrap_or_default();
+            let _ = writeln!(std::io::stderr(), "thread panicked{loc}: {message}");
         }));
     });
 }
@@ -187,10 +198,12 @@ pub fn discard_crash_report(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn send_crash_report(id: &str, prefs: &Preferences) -> Result<()> {
-    if !prefs.telemetry_enabled {
-        return Err(TelemetryError::Disabled);
-    }
+pub async fn send_crash_report(id: &str) -> Result<()> {
+    // No opt-in gate here: a crash report is only ever uploaded in response to
+    // an explicit user click ("Send report" on the crash card, or "Send" in
+    // Settings). That click is the per-incident consent — it lets someone who
+    // keeps automatic diagnostics off still hand us a single crash. Background
+    // usage telemetry (`send_telemetry_event`) stays gated on `telemetryEnabled`.
     let url = endpoint().ok_or(TelemetryError::EndpointMissing)?;
     let report = read_crash_report(id)?;
     post_json(&format!("{url}/crash"), &report).await?;
@@ -204,6 +217,108 @@ pub async fn send_telemetry_event(event: TelemetryEvent, prefs: &Preferences) ->
     }
     let url = endpoint().ok_or(TelemetryError::EndpointMissing)?;
     post_json(&format!("{url}/telemetry"), &event).await
+}
+
+/// Append a usage event to the on-disk outbox (`PortBay/events/*.json`).
+///
+/// Cheap and network-free — this is the hot path for short-lived surfaces like
+/// the CLI, where blocking each command on a round-trip to the cloud would be a
+/// poor, offline-fragile UX. Delivery happens later via [`flush_outbox`] on the
+/// next run, and only when telemetry consent is on. The spooled file carries no
+/// PII beyond the existing [`TelemetryEvent`] shape (command name + ok +
+/// os/arch/version), so persisting it is always safe; the consent gate governs
+/// *delivery*, not capture. Past a cap the event is dropped rather than growing
+/// the queue without bound when we're perpetually offline.
+pub fn spool_telemetry_event(event: &TelemetryEvent) -> Result<()> {
+    const MAX_SPOOLED_EVENTS: usize = 200;
+    let dir = events_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| TelemetryError::io(&dir, e))?;
+    if let Ok(existing) = list_spooled_event_paths() {
+        if existing.len() >= MAX_SPOOLED_EVENTS {
+            return Ok(());
+        }
+    }
+    let id = format!("evt-{}-{}", event.created_at, std::process::id());
+    let path = dir.join(format!("{id}.json"));
+    let body = serde_json::to_vec(event)?;
+    std::fs::write(&path, body).map_err(|e| TelemetryError::io(&path, e))
+}
+
+/// Best-effort delivery of everything queued on disk — pending crash reports
+/// and spooled usage events — gated on standing telemetry consent.
+///
+/// Built for the CLI: it's short-lived and has no UI to surface crash cards, so
+/// the `telemetry_enabled` preference set during `portbay login` (or
+/// `portbay telemetry on`) *is* the consent, and queued items flow without a
+/// per-incident prompt. Bounded so it can never hang a command — each upload has
+/// a timeout and the per-run counts are capped; anything left over is retried on
+/// the next run. Every error is swallowed: telemetry must never change a
+/// command's outcome or exit code. A no-op (two cheap dir stats) on the common
+/// path where consent is off or the queue is empty.
+pub async fn flush_outbox(prefs: &Preferences) {
+    const PER_ITEM_TIMEOUT: Duration = Duration::from_secs(5);
+    const MAX_CRASHES_PER_RUN: usize = 5;
+    const MAX_EVENTS_PER_RUN: usize = 20;
+
+    if !prefs.telemetry_enabled {
+        return;
+    }
+    let Some(url) = endpoint() else {
+        return;
+    };
+
+    // Crash reports first — they're the higher-value signal and the rarer event.
+    // `send_crash_report` deletes the file on success; failures keep it for the
+    // next run.
+    if let Ok(reports) = list_crash_reports() {
+        for summary in reports.into_iter().take(MAX_CRASHES_PER_RUN) {
+            let _ = tokio::time::timeout(PER_ITEM_TIMEOUT, send_crash_report(&summary.id)).await;
+        }
+    }
+
+    // Then queued usage events — post, delete on success.
+    if let Ok(paths) = list_spooled_event_paths() {
+        for path in paths.into_iter().take(MAX_EVENTS_PER_RUN) {
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(event) = serde_json::from_str::<TelemetryEvent>(&body) else {
+                // Corrupt or foreign file — drop it so it can't wedge the queue.
+                let _ = std::fs::remove_file(&path);
+                continue;
+            };
+            let target = format!("{url}/telemetry");
+            let send = post_json(&target, &event);
+            if let Ok(Ok(())) = tokio::time::timeout(PER_ITEM_TIMEOUT, send).await {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+fn list_spooled_event_paths() -> Result<Vec<PathBuf>> {
+    let dir = events_dir()?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| TelemetryError::io(&dir, e))? {
+        let entry = entry.map_err(|e| TelemetryError::io(&dir, e))?;
+        if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
+            paths.push(entry.path());
+        }
+    }
+    // Oldest-first by filename (ids embed a millisecond timestamp), so a capped
+    // flush drains the backlog in arrival order.
+    paths.sort();
+    Ok(paths)
+}
+
+fn events_dir() -> Result<PathBuf> {
+    let mut dir = dirs::data_dir().ok_or(TelemetryError::NoDataDir)?;
+    dir.push("PortBay");
+    dir.push("events");
+    Ok(dir)
 }
 
 async fn post_json<T: Serialize>(url: &str, payload: &T) -> Result<()> {
@@ -307,6 +422,15 @@ mod tests {
         let prefs = Preferences::default();
         let settings = telemetry_settings(&prefs).unwrap();
         assert!(!settings.enabled);
+    }
+
+    #[tokio::test]
+    async fn flush_outbox_is_noop_when_consent_off() {
+        // With telemetry off (the default), flushing must touch no network and
+        // return promptly — the consent gate is the first thing it checks.
+        let prefs = Preferences::default();
+        assert!(!prefs.telemetry_enabled);
+        flush_outbox(&prefs).await;
     }
 
     #[test]

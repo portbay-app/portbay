@@ -111,7 +111,17 @@ pub async fn logout() -> AppResult<EffectiveEntitlement> {
     }
     let _ = auth::clear_session();
     let _ = entitlements::clear_cache();
+    crate::avatar::clear_cache();
     Ok(entitlements::anonymous_fallback())
+}
+
+/// Resolve the signed-in account's avatar as a `data:` URL for the topbar
+/// profile chip, or `null` when there is none (signed out, an email-auth
+/// account, or the fetch failed with no cache). Quiet by design — the UI falls
+/// back to initials, so a failure here is never surfaced as an error.
+#[tauri::command]
+pub async fn get_account_avatar() -> AppResult<Option<String>> {
+    Ok(crate::avatar::account_avatar_data_url().await)
 }
 
 /// Re-verify a stored session on app start. Rotates the (likely-expired) access
@@ -120,14 +130,16 @@ pub async fn logout() -> AppResult<EffectiveEntitlement> {
 /// grace); only a definitive 401 clears the dead session.
 #[tauri::command]
 pub async fn account_resync() -> AppResult<EffectiveEntitlement> {
-    let Some(session) = auth::load_session() else {
+    if auth::load_session().is_none() {
         // Not signed in — whatever the cache says (anonymous, or a leftover).
         return Ok(entitlements::current());
-    };
+    }
 
-    match auth::refresh_session(CLOUD_BASE_URL, &session.refresh_token).await {
+    // Serialized refresh — persists the rotation / clears a dead session inside
+    // the lock, so this can't race the sync path's refresh and double-spend the
+    // single-use refresh token (which would 401 and sign the user out).
+    match auth::refresh_session_locked(CLOUD_BASE_URL).await {
         RefreshOutcome::Rotated(new_session) => {
-            let _ = auth::store_session(&new_session);
             match entitlements::refresh(CLOUD_BASE_URL, &new_session.access_token).await {
                 Ok(eff) => Ok(eff),
                 // Refreshed auth but couldn't fetch the license (transient) —
@@ -136,8 +148,8 @@ pub async fn account_resync() -> AppResult<EffectiveEntitlement> {
             }
         }
         RefreshOutcome::Unauthorized => {
-            // Session is dead — clear it and the cached license, drop to anon.
-            let _ = auth::clear_session();
+            // Session is dead (already cleared inside the lock) — drop the cached
+            // license and fall to anon.
             let _ = entitlements::clear_cache();
             Ok(entitlements::anonymous_fallback())
         }

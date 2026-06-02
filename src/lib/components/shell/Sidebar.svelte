@@ -30,7 +30,9 @@
   import { density } from "$lib/stores/density.svelte";
   import { groups } from "$lib/stores/groups.svelte";
   import { groupEditor } from "$lib/stores/groupEditor.svelte";
+  import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { databases } from "$lib/stores/databases.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { SIDECAR_ORDER } from "$lib/types/sidecars";
   import type { SidecarState } from "$lib/types/sidecars";
@@ -43,6 +45,18 @@
   /** Hide the resize handle in compact density — the layout forces a
    *  fixed sidebar width there, so a drag handle wouldn't do anything. */
   const showHandle = $derived(density.value !== "compact");
+
+  /** Running database instances — surfaced as a badge on the Databases nav
+   *  item (N running). Reflects the databases store, refreshed app-wide on
+   *  boot and whenever the Databases page or its actions run.
+   *
+   *  File-based engines (SQLite) are excluded: they have no daemon and are
+   *  always "running", so counting them would keep a permanent badge that
+   *  isn't really live activity. Only daemon instances that are actually up
+   *  contribute to the count. */
+  const runningDbCount = $derived(
+    databases.value.filter((d) => d.status === "running" && !d.fileBased).length,
+  );
 
   /** Compact density renders the rail as an icon-only strip. Driven by the
    *  same density preference the Settings page toggles, so "compact" means
@@ -215,6 +229,31 @@
            {collapsed ? 'px-1.5 py-1' : 'px-2 py-1'}"
   >
     <SidebarItem href="/" icon="home" label="Projects" {collapsed} />
+    <!-- Tasks + a "New board" affordance (a board is just a project), mirroring
+         the Groups "+" so board creation lives in the nav, not on the board it
+         would seem to belong to. -->
+    <div class="flex items-center {collapsed ? '' : 'gap-0.5'}">
+      <div class="flex-1 min-w-0">
+        <SidebarItem
+          href="/tasks"
+          icon="square-kanban"
+          label="Tasks"
+          matchPrefix
+          {collapsed}
+        />
+      </div>
+      {#if !collapsed}
+        <button
+          type="button"
+          onclick={() => addProjectWizard.requestBoard()}
+          title="New board"
+          aria-label="New board"
+          class="shrink-0 p-1.5 rounded text-fg-subtle hover:text-accent hover:bg-surface-2 transition-colors"
+        >
+          <Icon name="plus" size={13} />
+        </button>
+      {/if}
+    </div>
 
     <!-- Groups submenu — collapsible cluster list. In compact density the
          header is hidden and each group renders as a centered status dot. -->
@@ -333,9 +372,23 @@
         icon="database"
         label="Databases"
         matchPrefix
+        badge={runningDbCount}
         {collapsed}
       />
-      <SidebarItem href="/tunnels" icon="cloud" label="Tunnels" matchPrefix {collapsed} />
+      <SidebarItem
+        href="/ssh"
+        icon="terminal"
+        label="SSH"
+        matchPrefix
+        {collapsed}
+      />
+      <SidebarItem
+        href="/tunnels"
+        icon="cloud"
+        label="Tunnels"
+        matchPrefix
+        {collapsed}
+      />
       <SidebarItem
         href="/settings"
         icon="settings"

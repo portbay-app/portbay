@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 #[derive(thiserror::Error, Debug)]
 pub enum MailpitError {
-    #[error("mailpit binary not found — install via Homebrew or bundle as a sidecar")]
+    #[error(
+        "mailpit binary not found — install with the OS package manager or bundle as a sidecar"
+    )]
     BinaryMissing,
 
     #[error("failed to spawn mailpit: {0}")]

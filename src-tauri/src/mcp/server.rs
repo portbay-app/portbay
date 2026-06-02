@@ -39,8 +39,18 @@ pub enum ToolGroup {
     /// Group CRUD + batch lifecycle: list, create, update, remove,
     /// start, stop, restart.
     Groups,
-    /// Read-only tunnel visibility: list active public tunnels, look up one by id.
+    /// Read-only tunnel visibility: list active public tunnels, look up one by
+    /// id, and list saved SSH connections (hosts). No remote execution lives
+    /// here — that is the deliberately separate [`ToolGroup::SshExec`].
     Tunnels,
+    /// Remote command execution on a saved SSH host (`portbay_ssh_execute`).
+    /// Held apart from every other group and **deliberately excluded from
+    /// [`ToolGroup::all`]** (so it is off even under `--toolsets all`): an
+    /// operator must name `ssh-exec` explicitly to expose it. That explicit
+    /// enablement is the consent gesture — PortBay's in-app "Run is the
+    /// approval" model, expressed at the toolset boundary. Mutating, so
+    /// read-only mode strips it too.
+    SshExec,
     /// Runtime management: list detected versions, set defaults, add/remove manual paths.
     Runtimes,
     /// Database engines + owned instances: list, create, lifecycle, link, auto-start.
@@ -56,9 +66,17 @@ pub enum ToolGroup {
     /// Migration import from other local-dev tools (Herd / ServBay / MAMP):
     /// detect sources, preview their sites, import into the registry.
     Migrate,
+    /// Per-project task board + session hand-off: list/next/create/ack/update
+    /// cards, read/append the rolling hand-off log. The live channel into
+    /// PortBay's canonical task model.
+    Tasks,
 }
 
 impl ToolGroup {
+    /// Every group exposed by default. Note the deliberate omission of
+    /// [`ToolGroup::SshExec`]: remote command execution is never in the default
+    /// surface — not even under `--toolsets all` — and must be named explicitly
+    /// (`ssh-exec`) to turn on. See that variant's doc for the consent rationale.
     pub fn all() -> Vec<ToolGroup> {
         vec![
             ToolGroup::Projects,
@@ -74,12 +92,15 @@ impl ToolGroup {
             ToolGroup::Inspector,
             ToolGroup::Certs,
             ToolGroup::Migrate,
+            ToolGroup::Tasks,
         ]
     }
 
     /// Parse a toolset name (case-insensitive). `all` expands to every group.
     pub fn parse(s: &str) -> Result<Vec<ToolGroup>, String> {
         match s.trim().to_ascii_lowercase().as_str() {
+            // `all` expands to the default surface only — it does NOT include
+            // `ssh-exec` (remote execution), which must always be named.
             "all" => Ok(Self::all()),
             "projects" => Ok(vec![ToolGroup::Projects]),
             "lifecycle" => Ok(vec![ToolGroup::Lifecycle]),
@@ -87,6 +108,8 @@ impl ToolGroup {
             "scaffold" => Ok(vec![ToolGroup::Scaffold]),
             "groups" => Ok(vec![ToolGroup::Groups]),
             "tunnels" => Ok(vec![ToolGroup::Tunnels]),
+            // Remote execution — accept either spelling. Off unless named here.
+            "ssh-exec" | "ssh_exec" => Ok(vec![ToolGroup::SshExec]),
             "runtimes" => Ok(vec![ToolGroup::Runtimes]),
             "databases" => Ok(vec![ToolGroup::Databases]),
             "dns" => Ok(vec![ToolGroup::Dns]),
@@ -94,28 +117,86 @@ impl ToolGroup {
             "inspector" => Ok(vec![ToolGroup::Inspector]),
             "certs" => Ok(vec![ToolGroup::Certs]),
             "migrate" => Ok(vec![ToolGroup::Migrate]),
+            // `Tasks` is a real group on the pro build; on the OSS build it
+            // scopes to an empty set (no task tools are registered) rather than
+            // erroring, so config that names it stays portable across builds.
+            "tasks" => Ok(vec![ToolGroup::Tasks]),
             other => Err(format!(
                 "unknown toolset `{other}` (valid: projects, lifecycle, diagnostics, scaffold, \
-                 groups, tunnels, runtimes, databases, dns, sandbox, inspector, certs, migrate, \
-                 all)"
+                 groups, tunnels, ssh-exec, runtimes, databases, dns, sandbox, inspector, certs, \
+                 migrate, tasks, all)"
             )),
         }
     }
 
     /// Parse a comma-separated list (e.g. `projects,diagnostics`).
+    ///
+    /// Forward-compatible: an unknown entry is skipped with a stderr warning
+    /// rather than aborting the whole list. This matters across version skew —
+    /// a newer host (app/CLI) may launch an older bundled sidecar with a toolset
+    /// name it predates (this is exactly how a stale dev `portbay-mcp` used to
+    /// fail to connect *entirely* when asked for `tasks`). Degrading to "every
+    /// toolset this build knows" keeps the MCP server usable. Errors only when
+    /// nothing in the list is recognised (an empty surface is never useful).
     pub fn parse_list(s: &str) -> Result<Vec<ToolGroup>, String> {
         let mut out: Vec<ToolGroup> = Vec::new();
         for part in s.split(',').filter(|p| !p.trim().is_empty()) {
-            for g in Self::parse(part)? {
-                if !out.contains(&g) {
-                    out.push(g);
+            match Self::parse(part) {
+                Ok(groups) => {
+                    for g in groups {
+                        if !out.contains(&g) {
+                            out.push(g);
+                        }
+                    }
                 }
+                Err(e) => eprintln!("portbay-mcp: ignoring unrecognised toolset — {e}"),
             }
         }
         if out.is_empty() {
-            return Err("no toolsets specified".into());
+            return Err("no valid toolsets specified".into());
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod toolset_tests {
+    use super::ToolGroup;
+
+    #[test]
+    fn parse_list_skips_unknown_but_keeps_known() {
+        // A future/unknown toolset name must not sink the whole connection.
+        let groups = ToolGroup::parse_list("projects,future-thing,diagnostics").unwrap();
+        assert!(groups.contains(&ToolGroup::Projects));
+        assert!(groups.contains(&ToolGroup::Diagnostics));
+    }
+
+    #[test]
+    fn parse_list_errors_only_when_nothing_valid() {
+        assert!(ToolGroup::parse_list("totally-unknown,also-bogus").is_err());
+    }
+
+    #[test]
+    fn parse_list_accepts_tasks() {
+        assert!(ToolGroup::parse_list("tasks,diagnostics,projects").is_ok());
+    }
+
+    #[test]
+    fn ssh_exec_is_excluded_from_the_default_surface() {
+        // Remote execution is off by default — never in `all()`, never via `all`.
+        assert!(!ToolGroup::all().contains(&ToolGroup::SshExec));
+        assert!(!ToolGroup::parse_list("all").unwrap().contains(&ToolGroup::SshExec));
+    }
+
+    #[test]
+    fn ssh_exec_must_be_named_explicitly() {
+        // Both spellings resolve to the SshExec group...
+        assert_eq!(ToolGroup::parse("ssh-exec").unwrap(), vec![ToolGroup::SshExec]);
+        assert_eq!(ToolGroup::parse("ssh_exec").unwrap(), vec![ToolGroup::SshExec]);
+        // ...and composing it with `all` adds it on top of the default surface.
+        let groups = ToolGroup::parse_list("all,ssh-exec").unwrap();
+        assert!(groups.contains(&ToolGroup::SshExec));
+        assert!(groups.contains(&ToolGroup::Tunnels));
     }
 }
 
@@ -172,6 +253,10 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_restart_group", ToolGroup::Groups, true),
     ("portbay_list_tunnels", ToolGroup::Tunnels, false),
     ("portbay_tunnel_status", ToolGroup::Tunnels, false),
+    ("portbay_list_ssh_tunnels", ToolGroup::Tunnels, false),
+    ("portbay_ssh_tunnel_status", ToolGroup::Tunnels, false),
+    ("portbay_list_ssh_connections", ToolGroup::Tunnels, false),
+    ("portbay_ssh_execute", ToolGroup::SshExec, true),
     ("portbay_list_runtimes", ToolGroup::Runtimes, false),
     ("portbay_set_default_runtime", ToolGroup::Runtimes, true),
     ("portbay_add_runtime_path", ToolGroup::Runtimes, true),
@@ -179,6 +264,10 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_list_database_engines", ToolGroup::Databases, false),
     ("portbay_list_databases", ToolGroup::Databases, false),
     ("portbay_database_connection", ToolGroup::Databases, false),
+    ("portbay_db_schema", ToolGroup::Databases, false),
+    ("portbay_db_query", ToolGroup::Databases, false),
+    ("portbay_db_explain", ToolGroup::Databases, false),
+    ("portbay_db_execute", ToolGroup::Databases, true),
     ("portbay_create_database", ToolGroup::Databases, true),
     ("portbay_remove_database", ToolGroup::Databases, true),
     ("portbay_start_database", ToolGroup::Databases, true),
@@ -205,6 +294,32 @@ const TOOL_REGISTRY: &[(&str, ToolGroup, bool)] = &[
     ("portbay_detect_import_sources", ToolGroup::Migrate, false),
     ("portbay_preview_import", ToolGroup::Migrate, false),
     ("portbay_import_projects", ToolGroup::Migrate, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_tasks_list", ToolGroup::Tasks, false),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_next", ToolGroup::Tasks, false),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_get", ToolGroup::Tasks, false),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_create", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_ack", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_update", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_check", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_checklist_add", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_comment", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_handoff_get", ToolGroup::Tasks, false),
+    #[cfg(feature = "tasks")]
+    ("portbay_handoff_update", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_learning_add", ToolGroup::Tasks, true),
+    #[cfg(feature = "tasks")]
+    ("portbay_task_complete", ToolGroup::Tasks, true),
 ];
 
 /// The PortBay MCP server. Holds the operations context and the (possibly
@@ -251,6 +366,13 @@ impl PortbayMcp {
     /// in `tools/list` and can't be called at all.
     pub fn with_config(ctx: McpContext, config: McpConfig) -> Self {
         let mut router = Self::tool_router();
+        // Add the proprietary board tools when built with `tasks`; the public
+        // OSS build has no `board_tool_router`. Merged before filtering so the
+        // gated TOOL_REGISTRY entries can scope / read-only-filter them.
+        #[cfg(feature = "tasks")]
+        {
+            router += Self::board_tool_router();
+        }
         for &(name, group, is_mutating) in TOOL_REGISTRY {
             let group_enabled = config.toolsets.contains(&group);
             let blocked_by_read_only = config.read_only && is_mutating;
@@ -358,7 +480,9 @@ impl PortbayMcp {
             self.ctx
                 .logs(
                     &args.id,
-                    args.lines.unwrap_or(200),
+                    // Cap the tail so a confused/hallucinating agent can't request
+                    // billions of lines and OOM/stall the sidecar.
+                    args.lines.unwrap_or(200).min(5_000),
                     args.offset.unwrap_or(0),
                 )
                 .await,
@@ -367,9 +491,12 @@ impl PortbayMcp {
 
     #[tool(
         name = "portbay_doctor",
-        description = "Run an environment health check: registry readability, whether the daemon \
-                       is reachable, required tooling on PATH, and the current license tier. Use \
-                       when something is broken and you don't yet know what.",
+        description = "Run a grouped environment health check (same data as the CLI `portbay \
+                       doctor`): Core (registry, daemon, /etc/hosts), Web routing & TLS (Caddy, \
+                       mkcert, certs), PHP runtimes, Services (dnsmasq, Mailpit, databases), and \
+                       Account & sharing. Bundled sidecars are reported via PortBay's own probe, \
+                       never off $PATH. Returns categories, each with a verdict and per-check \
+                       rows. Use when something is broken and you don't yet know what.",
         annotations(title = "Doctor", read_only_hint = true, open_world_hint = false)
     )]
     async fn doctor(&self) -> Result<CallToolResult, McpError> {
@@ -549,6 +676,7 @@ impl PortbayMcp {
         annotations(
             title = "Stop all",
             read_only_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = false
         )
@@ -795,6 +923,89 @@ impl PortbayMcp {
         finish(self.ctx.tunnel_status(&args.id))
     }
 
+    #[tool(
+        name = "portbay_list_ssh_tunnels",
+        description = "List saved SSH port-forward tunnels and their live state. Each entry \
+                       includes the tunnel id + name, SSH host/port/user, the local→remote \
+                       forward, forward kind (local/reverse/socks), live state (live / \
+                       reconnecting / down), and the equivalent `ssh` command. Read-only — save, \
+                       start, or stop SSH tunnels from the PortBay app.",
+        annotations(
+            title = "List SSH tunnels",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_ssh_tunnels(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.list_ssh_tunnels())
+    }
+
+    #[tool(
+        name = "portbay_ssh_tunnel_status",
+        description = "Get one SSH tunnel by id: SSH host/user, the local→remote forward, live \
+                       state, and when it started. Returns null when no SSH tunnel has that id. \
+                       Read-only — save, start, or stop SSH tunnels from the PortBay app.",
+        annotations(
+            title = "SSH tunnel status",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ssh_tunnel_status(
+        &self,
+        Parameters(args): Parameters<SshTunnelStatusArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.ssh_tunnel_status(&args.id))
+    }
+
+    #[tool(
+        name = "portbay_list_ssh_connections",
+        description = "List saved SSH connections (hosts) from the registry: id + name, \
+                       host/port/user, auth kind, key path, proxy-jump, any borrowed reusable \
+                       identity, and display metadata (tags, colour, notes, detected OS, \
+                       last-used). Holds no secrets — passwords live in the OS keychain. Use a \
+                       returned id as `connection_id` for portbay_ssh_execute. Read-only — add, \
+                       edit, or delete hosts from the PortBay app.",
+        annotations(
+            title = "List SSH connections",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_ssh_connections(&self) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.list_ssh_connections())
+    }
+
+    #[tool(
+        name = "portbay_ssh_execute",
+        description = "Run ONE shell command on a saved SSH connection's remote host and return \
+                       its stdout, stderr, and exit code. Reuses the exact execution path as the \
+                       PortBay app's Run action. CONSENT MODEL — this mirrors PortBay's \"Run is \
+                       the approval\": the tool is OFF by default and only exists when the \
+                       operator explicitly started the MCP server with the `ssh-exec` toolset \
+                       enabled (it is NOT included even under `--toolsets all`) and not in \
+                       read-only mode. Enabling that toolset is the human's deliberate \
+                       authorization for the agent to execute commands on remote hosts. Pass a \
+                       `connection_id` from portbay_list_ssh_connections; optional `cwd` runs the \
+                       command from that directory.",
+        annotations(
+            title = "SSH execute (operator-enabled)",
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn ssh_execute(
+        &self,
+        Parameters(args): Parameters<SshExecuteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(
+            self.ctx
+                .ssh_execute(&args.connection_id, &args.command, args.cwd.as_deref())
+                .await,
+        )
+    }
+
     // ---- Runtimes -----------------------------------------------------------
 
     #[tool(
@@ -927,6 +1138,99 @@ impl PortbayMcp {
         Parameters(args): Parameters<DatabaseIdArgs>,
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.database_connection(&args.id))
+    }
+
+    #[tool(
+        name = "portbay_db_schema",
+        description = "Inspect a database instance's structure: every table with its columns \
+                       (name, type, nullability, primary key) and foreign-key relationships. \
+                       Use this to learn an unfamiliar schema before writing a query. Read-only; \
+                       the instance must be running (SQLite just needs its file to exist).",
+        annotations(
+            title = "Inspect database schema",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn db_schema(
+        &self,
+        Parameters(args): Parameters<DatabaseSchemaArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.db_schema(&args.id).await)
+    }
+
+    #[tool(
+        name = "portbay_db_query",
+        description = "Run a single READ-ONLY SQL statement against a database instance and return \
+                       the rows. Only inspection queries are allowed (SELECT/WITH/SHOW/DESCRIBE/\
+                       EXPLAIN/PRAGMA/VALUES); any write, DDL, multiple statements, CTE-wrapped \
+                       write, or `SELECT … INTO` is rejected. Results are capped (default 100, max \
+                       500 rows); `truncated` indicates more rows existed. To CHANGE data you must \
+                       use the approval-gated execute path, not this tool.",
+        annotations(
+            title = "Run read-only query",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn db_query(
+        &self,
+        Parameters(args): Parameters<DatabaseQueryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(
+            self.ctx
+                .db_query(&args.id, &args.sql, args.schema.as_deref(), args.limit)
+                .await,
+        )
+    }
+
+    #[tool(
+        name = "portbay_db_explain",
+        description = "Return the query plan (EXPLAIN) for a read-only statement as a node tree — \
+                       how the engine will execute it, to diagnose why a query is slow. Read-only; \
+                       the statement itself is not allowed to be a write.",
+        annotations(
+            title = "Explain query plan",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn db_explain(
+        &self,
+        Parameters(args): Parameters<DatabaseExplainArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(
+            self.ctx
+                .db_explain(&args.id, &args.sql, args.schema.as_deref(), args.analyze)
+                .await,
+        )
+    }
+
+    #[tool(
+        name = "portbay_db_execute",
+        description = "Run a WRITE or DDL statement (INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/…) \
+                       against a database instance — but ONLY after the user approves the exact \
+                       statement in the PortBay app. The call BLOCKS until the user approves or \
+                       denies (it times out after ~2 minutes and is treated as denied). Read-only \
+                       statements are rejected here (use portbay_db_query). Use this to apply a \
+                       migration or fix data: propose the statement, then the human decides. \
+                       Returns the affected-row count on approval.",
+        annotations(
+            title = "Execute write (human-approved)",
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn db_execute(
+        &self,
+        Parameters(args): Parameters<DatabaseExecuteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(
+            self.ctx
+                .db_execute(&args.id, &args.sql, args.schema.as_deref())
+                .await,
+        )
     }
 
     #[tool(
@@ -1085,7 +1389,7 @@ impl PortbayMcp {
     #[tool(
         name = "portbay_dns_status",
         description = "Report local DNS state: the active domain suffix, whether the \
-                       /etc/resolver/<suffix> file routes wildcard `*.suffix` to PortBay's dnsmasq \
+                       platform resolver file routes wildcard `*.suffix` to PortBay's dnsmasq \
                        (and on which port), whether the privileged helper is installed, and the \
                        persisted dnsmasq tuning. Read-only — starting/restarting dnsmasq and \
                        first-run resolver install are done from the PortBay app.",
@@ -1342,6 +1646,7 @@ impl PortbayMcp {
         annotations(
             title = "Import projects",
             read_only_hint = false,
+            destructive_hint = true,
             open_world_hint = false
         )
     )]
@@ -1350,6 +1655,229 @@ impl PortbayMcp {
         Parameters(args): Parameters<ImportProjectsArgs>,
     ) -> Result<CallToolResult, McpError> {
         finish(self.ctx.import_projects(args))
+    }
+}
+
+// ---- Task board + hand-off (proprietary `tasks` surface) ------------------
+// A SEPARATE #[tool_router] so the public OSS build (crates/mcp = `mcp` only,
+// no `tasks`) compiles without these — rmcp's router macro can't cfg-gate
+// individual #[tool] methods, so the whole impl is gated instead. `with_config`
+// merges `board_tool_router` into the live router when `tasks` is on. The board
+// logic lives in the overlay's `crate::context`; mirrors the CLI/GUI gating.
+#[cfg(feature = "tasks")]
+#[tool_router(router = board_tool_router)]
+impl PortbayMcp {
+    #[tool(
+        name = "portbay_tasks_list",
+        description = "List a project's task board cards (the live board PortBay also shows the \
+                       human). Optionally filter by column. Read this to see the plan before \
+                       acting; the board — not your memory — is the source of truth.",
+        annotations(title = "List tasks", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn tasks_list(
+        &self,
+        Parameters(args): Parameters<TasksListArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.tasks_list(args))
+    }
+
+    #[tool(
+        name = "portbay_task_next",
+        description = "Return the next actionable card — the top of the To Do column — or null \
+                       when there's nothing ready to work.",
+        annotations(title = "Next task", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn task_next(
+        &self,
+        Parameters(args): Parameters<TaskNextArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_next(args))
+    }
+
+    #[tool(
+        name = "portbay_task_get",
+        description = "Read one card in full by id — its title, description (body), acceptance \
+                       criteria, touchpoints, checklist, labels, status, and claim. Use this to \
+                       re-read the card you were dispatched to work when you need its details.",
+        annotations(title = "Get task", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn task_get(
+        &self,
+        Parameters(args): Parameters<TaskGetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_get(args))
+    }
+
+    #[tool(
+        name = "portbay_task_create",
+        description = "Add a card to the project's PortBay board (PortBay is this project's to-do \
+                       board). Use it BOTH when the user asks you to add a task or build a to-do \
+                       list — one call per item — and to capture work you discover mid-task rather \
+                       than burying it in chat. Lands in Backlog by default; pass `status` and \
+                       `priority` to place it.",
+        annotations(title = "Create task", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_create(
+        &self,
+        Parameters(args): Parameters<TaskCreateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_create(args))
+    }
+
+    #[tool(
+        name = "portbay_task_ack",
+        description = "Acknowledge a dispatched card with the run id from your prompt — proves you \
+                       engaged with it (distinct from the process merely launching).",
+        annotations(
+            title = "Acknowledge task",
+            read_only_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn task_ack(
+        &self,
+        Parameters(args): Parameters<TaskAckArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_ack(args))
+    }
+
+    #[tool(
+        name = "portbay_task_update",
+        description = "Advance a card and/or post a progress note. Set `status` to InProgress / \
+                       Done / Blocked / Review / Todo. Optionally pass `touchpoints` to record the \
+                       files you actually touched. Pass your `run_id` so a stale session can't \
+                       clobber a re-dispatched card. You may NOT set Rejected — that's human-only. \
+                       The response carries reminders (e.g. update the hand-off before finishing).",
+        annotations(title = "Update task", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_update(
+        &self,
+        Parameters(args): Parameters<TaskUpdateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_update(args))
+    }
+
+    #[tool(
+        name = "portbay_task_check",
+        description = "Tick (or, with done=false, reopen) a checklist item on a card by its index. \
+                       Use this to report sub-step progress as you work, so the human sees real \
+                       movement.",
+        annotations(title = "Check item", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_check(
+        &self,
+        Parameters(args): Parameters<TaskCheckArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_check(args))
+    }
+
+    #[tool(
+        name = "portbay_task_checklist_add",
+        description = "Append sub-task items to a card's checklist — your own breakdown / tracking \
+                       points (e.g. P0, P1, P2 steps). Then tick them with portbay_task_check as you \
+                       finish each, so the human watches real progress.",
+        annotations(
+            title = "Add checklist items",
+            read_only_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn task_checklist_add(
+        &self,
+        Parameters(args): Parameters<TaskChecklistAddArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_checklist_add(args))
+    }
+
+    #[tool(
+        name = "portbay_task_comment",
+        description = "Post a comment on a card. Shows in the card's activity thread alongside \
+                       your progress notes — use it to record decisions or ask the human something.",
+        annotations(title = "Comment", read_only_hint = false, open_world_hint = false)
+    )]
+    async fn task_comment(
+        &self,
+        Parameters(args): Parameters<TaskCommentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_comment(args))
+    }
+
+    #[tool(
+        name = "portbay_handoff_get",
+        description = "Read the project's continuation brief — the minimal 'where we left off' \
+                       note. Read this FIRST when picking up work; trust it over your own memory.",
+        annotations(title = "Get hand-off", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn handoff_get(
+        &self,
+        Parameters(args): Parameters<HandoffGetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.handoff_get(args))
+    }
+
+    #[tool(
+        name = "portbay_handoff_update",
+        description = "Append a MINIMAL entry to the rolling hand-off log (what changed, the next \
+                       concrete step, open items, pointers). It's prepended as the newest entry; \
+                       older entries are kept until the log hits its size cap, then the oldest are \
+                       pruned. Sign it with `author` (your agent name). Call this before you finish \
+                       a card or end a session.",
+        annotations(
+            title = "Update hand-off",
+            read_only_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn handoff_update(
+        &self,
+        Parameters(args): Parameters<HandoffUpdateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.handoff_update(args))
+    }
+
+    #[tool(
+        name = "portbay_learning_add",
+        description = "Record a project LEARNING — a validated approach or a correction that makes \
+                       the next run here go better. This is the project's durable 'what works here' \
+                       memory (distinct from the hand-off, which is 'where we left off'): capture a \
+                       lesson once and every future dispatch inherits it. Pass `text` (the rule, \
+                       concise + actionable) and `why` (the reasoning that makes it trustworthy); \
+                       optional `how` adds concrete guidance. Appended newest-first and size-capped; \
+                       an identical rule already present is a no-op (won't duplicate). Use it when \
+                       you discover a non-obvious convention, a command that must be run a certain \
+                       way, or a mistake worth not repeating.",
+        annotations(
+            title = "Add learning",
+            read_only_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn learning_add(
+        &self,
+        Parameters(args): Parameters<LearningAddArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.learning_add(args))
+    }
+
+    #[tool(
+        name = "portbay_task_complete",
+        description = "Finish a dispatched card in ONE call: acknowledge it, optionally post a \
+                       comment and update the hand-off, then set the terminal status (`Done` by \
+                       default; `Blocked` or `Review` if you pass `status`). Prefer this over \
+                       calling ack / comment / handoff_update / update separately. Idempotent — \
+                       re-calling once the card already sits in that status is a no-op, so a retry \
+                       won't double-post. You may NOT set Rejected (human-only).",
+        annotations(
+            title = "Complete task",
+            read_only_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn task_complete(
+        &self,
+        Parameters(args): Parameters<TaskCompleteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        finish(self.ctx.task_complete(args))
     }
 }
 
@@ -1409,6 +1937,133 @@ Key facts:
   installed and how many sites each has. portbay_preview_import shows a source's sites with id/path \
   collision flags; portbay_import_projects imports the chosen ids (or all) into the registry, and the \
   app provisions them on its next reconcile. (Importing a committed .portbay.json is portbay_import_config.)";
+
+// Board (tasks-feature) resource resolution, split out so the ungated
+// `read_resource` body below carries no `crate::context` calls. The public
+// OSS MCP build compiles the `None` stub; the overlay build (`--features
+// tasks`) resolves the project context / tasks / hand-off URIs.
+/// A board resource addressable under EITHER the canonical plural `projects/`
+/// or the legacy singular `project/` prefix. Pure (no ctx) so the prefix/suffix
+/// routing — the exact thing that regressed when only the singular prefix was
+/// accepted (`projects/<id>/context` fell through to a bare-id lookup and 404'd
+/// as `project '<id>/context' not found`) — is unit-testable.
+#[cfg(feature = "tasks")]
+#[derive(Debug, PartialEq, Eq)]
+enum BoardResource<'a> {
+    Context(&'a str),
+    Tasks(&'a str),
+    Handoff(&'a str),
+    Learnings(&'a str),
+}
+
+#[cfg(feature = "tasks")]
+fn parse_board_resource_uri(uri: &str) -> Option<BoardResource<'_>> {
+    let rest = uri
+        .strip_prefix("portbay://projects/")
+        .or_else(|| uri.strip_prefix("portbay://project/"))?;
+    if let Some(id) = rest.strip_suffix("/context") {
+        return Some(BoardResource::Context(id));
+    }
+    if let Some(id) = rest.strip_suffix("/tasks") {
+        return Some(BoardResource::Tasks(id));
+    }
+    if let Some(id) = rest.strip_suffix("/handoff") {
+        return Some(BoardResource::Handoff(id));
+    }
+    if let Some(id) = rest.strip_suffix("/learnings") {
+        return Some(BoardResource::Learnings(id));
+    }
+    None
+}
+
+#[cfg(feature = "tasks")]
+impl PortbayMcp {
+    fn read_board_resource(&self, uri: &str) -> Option<AppResult<String>> {
+        match parse_board_resource_uri(uri)? {
+            BoardResource::Context(id) => {
+                Some(self.ctx.project_context_value(id).and_then(|v| to_json(&v)))
+            }
+            BoardResource::Tasks(id) => Some(
+                self.ctx
+                    .tasks_list(TasksListArgs {
+                        project: id.to_string(),
+                        status: None,
+                    })
+                    .and_then(|v| to_json(&v)),
+            ),
+            BoardResource::Handoff(id) => Some(
+                self.ctx
+                    .handoff_get(HandoffGetArgs {
+                        project: id.to_string(),
+                    })
+                    .and_then(|v| to_json(&v)),
+            ),
+            BoardResource::Learnings(id) => Some(
+                self.ctx
+                    .learnings_get(LearningsGetArgs {
+                        project: id.to_string(),
+                    })
+                    .and_then(|v| to_json(&v)),
+            ),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "tasks"))]
+mod board_resource_uri_tests {
+    use super::{parse_board_resource_uri, BoardResource};
+
+    #[test]
+    fn both_prefixes_and_all_suffixes_route_identically() {
+        for prefix in ["portbay://projects/", "portbay://project/"] {
+            assert_eq!(
+                parse_board_resource_uri(&format!("{prefix}blog/context")),
+                Some(BoardResource::Context("blog"))
+            );
+            assert_eq!(
+                parse_board_resource_uri(&format!("{prefix}blog/tasks")),
+                Some(BoardResource::Tasks("blog"))
+            );
+            assert_eq!(
+                parse_board_resource_uri(&format!("{prefix}blog/handoff")),
+                Some(BoardResource::Handoff("blog"))
+            );
+            assert_eq!(
+                parse_board_resource_uri(&format!("{prefix}blog/learnings")),
+                Some(BoardResource::Learnings("blog"))
+            );
+        }
+    }
+
+    #[test]
+    fn regression_plural_prefix_context_is_not_swallowed_into_the_id() {
+        // The original incident: `projects/bookslash/context` must parse as the
+        // `bookslash` project's context, NOT a project literally named
+        // `bookslash/context`.
+        assert_eq!(
+            parse_board_resource_uri("portbay://projects/bookslash/context"),
+            Some(BoardResource::Context("bookslash"))
+        );
+    }
+
+    #[test]
+    fn non_board_and_bare_project_uris_do_not_match() {
+        assert_eq!(parse_board_resource_uri("portbay://registry"), None);
+        assert_eq!(parse_board_resource_uri("portbay://projects/blog"), None);
+        assert_eq!(
+            parse_board_resource_uri("portbay://projects/blog/logs"),
+            None
+        );
+    }
+}
+
+#[cfg(not(feature = "tasks"))]
+impl PortbayMcp {
+    /// Public OSS build: no board resources.
+    fn read_board_resource(&self, _uri: &str) -> Option<AppResult<String>> {
+        None
+    }
+}
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PortbayMcp {
@@ -1479,8 +2134,44 @@ impl ServerHandler for PortbayMcp {
         logs.description = Some("Recent log tail for a project, by id.".to_string());
         let mut detail = RawResourceTemplate::new("portbay://projects/{id}", "project");
         detail.description = Some("Live status + config for a single project, by id.".to_string());
+        // `mut` is used only when the gated board block below pushes more.
+        #[cfg_attr(not(feature = "tasks"), allow(unused_mut))]
+        let mut templates = vec![logs.no_annotation(), detail.no_annotation()];
+        // Board resources (context/tasks/hand-off) are the proprietary `tasks`
+        // surface. The public OSS MCP build advertises only the project/logs
+        // resources above; the overlay build adds these.
+        #[cfg(feature = "tasks")]
+        {
+            let mut context =
+                RawResourceTemplate::new("portbay://projects/{id}/context", "project context");
+            context.description = Some(
+                "Derived, authoritative environment for a project: URL, ports, runtime, web server, \
+                 DB env-var references, services."
+                    .to_string(),
+            );
+            let mut board =
+                RawResourceTemplate::new("portbay://projects/{id}/tasks", "project tasks");
+            board.description = Some("The live task board (all cards) for a project.".to_string());
+            let mut handoff =
+                RawResourceTemplate::new("portbay://projects/{id}/handoff", "project hand-off");
+            handoff.description = Some(
+                "The continuation brief — read first to resume where the last session left off."
+                    .to_string(),
+            );
+            let mut learnings =
+                RawResourceTemplate::new("portbay://projects/{id}/learnings", "project learnings");
+            learnings.description = Some(
+                "The project's learnings memory — validated approaches + corrections (what works \
+                 here). Read it before acting; append to it with portbay_learning_add."
+                    .to_string(),
+            );
+            templates.push(context.no_annotation());
+            templates.push(board.no_annotation());
+            templates.push(handoff.no_annotation());
+            templates.push(learnings.no_annotation());
+        }
         Ok(ListResourceTemplatesResult {
-            resource_templates: vec![logs.no_annotation(), detail.no_annotation()],
+            resource_templates: templates,
             next_cursor: None,
             meta: None,
         })
@@ -1498,7 +2189,9 @@ impl ServerHandler for PortbayMcp {
             "portbay://sidecars" => self.ctx.sidecar_status().await.and_then(|s| to_json(&s)),
             "portbay://recipes" => to_json(&self.ctx.list_recipes()),
             other => {
-                if let Some(id) = other
+                if let Some(r) = self.read_board_resource(other) {
+                    r
+                } else if let Some(id) = other
                     .strip_prefix("portbay://projects/")
                     .and_then(|rest| rest.strip_suffix("/logs"))
                 {
@@ -1507,8 +2200,25 @@ impl ServerHandler for PortbayMcp {
                     self.ctx.status(Some(id)).await.and_then(|s| to_json(&s))
                 } else {
                     return Err(McpError::resource_not_found(
-                        "unknown resource",
-                        Some(json!({ "uri": uri })),
+                        "unknown resource — valid forms: portbay://registry, portbay://doctor, \
+                         portbay://sidecars, portbay://recipes, and \
+                         portbay://projects/{id} with optional /context, /tasks, /handoff, \
+                         /learnings, or /logs (note the plural `projects`)",
+                        Some(json!({
+                            "uri": uri,
+                            "valid": [
+                                "portbay://registry",
+                                "portbay://doctor",
+                                "portbay://sidecars",
+                                "portbay://recipes",
+                                "portbay://projects/{id}",
+                                "portbay://projects/{id}/context",
+                                "portbay://projects/{id}/tasks",
+                                "portbay://projects/{id}/handoff",
+                                "portbay://projects/{id}/learnings",
+                                "portbay://projects/{id}/logs"
+                            ]
+                        })),
                     ));
                 }
             }
@@ -1529,5 +2239,7 @@ impl ServerHandler for PortbayMcp {
 }
 
 fn to_json<T: Serialize>(v: &T) -> AppResult<String> {
-    serde_json::to_string_pretty(v).map_err(|e| AppError::Internal(format!("serialise: {e}")))
+    // Compact (not pretty) — resource bodies are read by the model, so the
+    // indentation whitespace is pure token cost with no reader benefit.
+    serde_json::to_string(v).map_err(|e| AppError::Internal(format!("serialise: {e}")))
 }

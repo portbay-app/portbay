@@ -38,6 +38,7 @@ const OPTIMISTIC_TTL_MS = 12_000;
 function syntheticEnvelope(message: string): CommandError {
   return {
     code: "PROCESS_ERROR",
+    category: "project-error",
     whatHappened: message,
     whyItMatters: "The project is not running as expected.",
     whoCausedIt: "system",

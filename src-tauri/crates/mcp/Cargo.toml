@@ -19,6 +19,15 @@ edition = "2021"
 name = "portbay-mcp"
 path = "src/main.rs"
 
+[features]
+# Forwards the app crate's proprietary task-board feature so the sidecar exposes
+# the `portbay_task_*` / `portbay_handoff_*` tools and the
+# `portbay://project/<id>/{context,tasks,handoff}` resources. OFF by default —
+# the public OSS sidecar has no board surface. scripts/build-mcp.sh turns this
+# on automatically when the desktop-pro board overlay is present in the checkout,
+# matching how the GUI/CLI gate the same `tasks` feature.
+tasks = ["portbay/tasks"]
+
 [dependencies]
 portbay = { path = "../..", features = ["mcp"] }
 clap = { version = "4", features = ["derive"] }

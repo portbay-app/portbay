@@ -111,7 +111,7 @@ impl PcClient {
                 url: url.clone(),
                 source: e,
             })?;
-        check_status(&url, res.status(), &res).await?;
+        let res = check_status(res).await?;
         res.json::<serde_json::Value>()
             .await
             .map_err(PcError::BodyDecode)
@@ -144,8 +144,7 @@ impl PcClient {
                 url: url.to_owned(),
                 source: e,
             })?;
-        check_status(url, res.status(), &res).await?;
-        Ok(res)
+        check_status(res).await
     }
 
     async fn send_mutating(&self, method: reqwest::Method, url: &str) -> Result<reqwest::Response> {
@@ -158,27 +157,45 @@ impl PcClient {
                     url: url.to_owned(),
                     source: e,
                 })?;
-        check_status(url, res.status(), &res).await?;
-        Ok(res)
+        check_status(res).await
     }
 }
 
-async fn check_status(
-    _url: &str,
-    status: reqwest::StatusCode,
-    _res: &reqwest::Response,
-) -> Result<()> {
-    // We can't consume the body here without taking ownership, so we accept
-    // any 2xx and let downstream parsers surface decode errors. Real HTTP
-    // errors (4xx/5xx) are mapped to PcError::HttpStatus by the caller via
-    // a separate `bytes()` path when needed.
+/// Pass a 2xx response through untouched; on a 4xx/5xx, consume the body and
+/// surface Process Compose's own error message. PC replies to a failed
+/// `/process/start/{name}` with `{"error":"no such process: X"}` or
+/// `{"error":"process X is already running"}` — reading that turns the old
+/// opaque "HTTP 400 (body unread)" into something the user can act on. Taking
+/// ownership of the `Response` is what lets us read the body and still hand it
+/// back to the caller on success.
+async fn check_status(res: reqwest::Response) -> Result<reqwest::Response> {
+    let status = res.status();
     if status.is_success() {
-        return Ok(());
+        return Ok(res);
     }
+    let raw = res.text().await.unwrap_or_default();
+    let body = pc_error_message(&raw).unwrap_or_else(|| {
+        if raw.trim().is_empty() {
+            format!("HTTP {status}")
+        } else {
+            raw.trim().to_string()
+        }
+    });
     Err(PcError::HttpStatus {
         status: status.as_u16(),
-        body: format!("HTTP {} (body unread)", status),
+        body,
     })
+}
+
+/// Pull the human message out of Process Compose's `{"error":"…"}` envelope.
+/// Returns `None` when the body isn't that shape so the caller can fall back to
+/// the raw text.
+fn pc_error_message(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()?
+        .get("error")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -209,5 +226,26 @@ mod tests {
     fn client_builds_with_custom_base_url() {
         let c = PcClient::with_base_url("http://127.0.0.1:9999");
         assert!(c.url("/live").ends_with("/live"));
+    }
+
+    #[test]
+    fn pc_error_message_extracts_the_error_field() {
+        // The two real 400 bodies PC returns from /process/start/{name}.
+        assert_eq!(
+            pc_error_message(r#"{"error":"no such process: web"}"#).as_deref(),
+            Some("no such process: web")
+        );
+        assert_eq!(
+            pc_error_message(r#"{"error":"process web is already running"}"#).as_deref(),
+            Some("process web is already running")
+        );
+    }
+
+    #[test]
+    fn pc_error_message_is_none_for_non_envelope_bodies() {
+        // Plain text or unrelated JSON → caller falls back to the raw text.
+        assert_eq!(pc_error_message("Bad Request"), None);
+        assert_eq!(pc_error_message(r#"{"name":"web"}"#), None);
+        assert_eq!(pc_error_message(""), None);
     }
 }

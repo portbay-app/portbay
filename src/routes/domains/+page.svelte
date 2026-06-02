@@ -16,6 +16,7 @@
 
   import { safeInvoke } from "$lib/ipc";
   import { projects } from "$lib/stores/projects.svelte";
+  import { groups } from "$lib/stores/groups.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
@@ -23,12 +24,16 @@
   import { statusLabel } from "$lib/types/status";
   import {
     defaultDomainConfig,
+    defaultAcmeConfig,
     typeLabel,
     type ProjectView,
     type ResolverMode,
+    type SslMode,
+    type AcmeIssuer,
+    type AcmeEnvironment,
+    type AcmeDnsProvider,
+    type AcmeKeyType,
   } from "$lib/types/projects";
-
-  const PAGE_SIZE = 8;
 
   // The single system-wide domain suffix (e.g. "portbay.test"), surfaced from
   // the DNS resolver status. The Hostname field is a Cloudflare-style split
@@ -72,7 +77,7 @@
 
   let selectedId = $state<string | null>(null);
   let query = $state<string>("");
-  let page = $state<number>(1);
+  let collapsed = $state<Set<string>>(new Set());
   let saving = $state<boolean>(false);
   let busy = $state<boolean>(false);
   let deleteArmed = $state<boolean>(false);
@@ -89,7 +94,7 @@
     projects.value.filter((p) => p.domain?.includeWildcardSubdomains).length,
   );
 
-  // ── List + filter + pagination ─────────────────────────────────────────────
+  // ── List + filter ──────────────────────────────────────────────────────────
   const filtered = $derived.by<ProjectView[]>(() => {
     const q = query.trim().toLowerCase();
     const list = [...projects.value].sort((a, b) =>
@@ -103,20 +108,44 @@
     );
   });
 
-  const pageCount = $derived(Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)));
-  const pageItems = $derived(
-    filtered.slice((page - 1) * PAGE_SIZE, (page - 1) * PAGE_SIZE + PAGE_SIZE),
-  );
+  // ── Grouping ────────────────────────────────────────────────────────────────
+  // Domains that belong to a project group are listed under that group's name
+  // (a project in two groups shows under both). Everything else stays a plain,
+  // header-less list below the groups — exactly like the rail with no groups.
+  interface DomainSection {
+    id: string;
+    name: string;
+    items: ProjectView[];
+  }
 
-  // Reset to the first page whenever the filter changes.
-  $effect(() => {
-    query;
-    untrack(() => (page = 1));
+  const groupSections = $derived.by<DomainSection[]>(() => {
+    const list = filtered;
+    const out: DomainSection[] = [];
+    const grps = [...groups.value].sort((a, b) => a.name.localeCompare(b.name));
+    for (const g of grps) {
+      const ids = new Set(g.projectIds);
+      const items = list.filter((p) => ids.has(p.id));
+      if (items.length === 0) continue;
+      out.push({ id: `group:${g.id}`, name: g.name, items });
+    }
+    return out;
   });
-  // Keep the page in range if the list shrinks (e.g. after a delete).
-  $effect(() => {
-    if (page > pageCount) untrack(() => (page = pageCount));
+
+  // Domains not in any group — rendered as a regular list with no header.
+  const ungroupedItems = $derived.by<ProjectView[]>(() => {
+    const claimed = new Set<string>();
+    for (const g of groups.value) for (const id of g.projectIds) claimed.add(id);
+    return filtered.filter((p) => !claimed.has(p.id));
   });
+
+  const grouped = $derived(groupSections.length > 0);
+
+  function toggleSection(id: string) {
+    const next = new Set(collapsed);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    collapsed = next;
+  }
 
   const selected = $derived<ProjectView | null>(
     projects.value.find((p) => p.id === selectedId) ?? null,
@@ -124,6 +153,7 @@
 
   onMount(() => {
     void projects.start();
+    void groups.refresh();
     // Load the domain suffix for the split hostname input if not already cached.
     if (!dns.status) void dns.refresh();
   });
@@ -147,6 +177,20 @@
     pathPrefix: string;
     resolverMode: ResolverMode;
     autoManageCert: boolean;
+    sslMode: SslMode;
+    customCertPath: string;
+    customKeyPath: string;
+    acmeIssuer: AcmeIssuer;
+    acmeEnvironment: AcmeEnvironment;
+    acmeEmail: string;
+    acmeKeyType: AcmeKeyType;
+    acmeEabKeyId: string;
+    acmeEabHmacKey: string;
+    acmeZerosslApiKey: string;
+    acmeDnsProvider: AcmeDnsProvider;
+    acmeDnsApiToken: string;
+    acmeForceRequest: boolean;
+    acmeDebug: boolean;
     includeWildcardSubdomains: boolean;
     exposeWhenRunning: boolean;
   }
@@ -157,6 +201,7 @@
 
   function loadDraft(p: ProjectView) {
     const d = p.domain ?? defaultDomainConfig();
+    const acme = d.acme ?? defaultAcmeConfig();
     const { subPrefix, suffix } = splitHostname(p.hostname, systemSuffix);
     draft = {
       subPrefix,
@@ -168,6 +213,20 @@
       pathPrefix: d.pathPrefix ?? "",
       resolverMode: d.resolverMode ?? "auto",
       autoManageCert: d.autoManageCert ?? true,
+      sslMode: d.sslMode ?? "automatic_local",
+      customCertPath: d.customCertPath ?? "",
+      customKeyPath: d.customKeyPath ?? "",
+      acmeIssuer: acme.issuer ?? "lets_encrypt",
+      acmeEnvironment: acme.environment ?? "production",
+      acmeEmail: acme.email ?? "",
+      acmeKeyType: acme.keyType ?? "p384",
+      acmeEabKeyId: acme.eabKeyId ?? "",
+      acmeEabHmacKey: acme.eabHmacKey ?? "",
+      acmeZerosslApiKey: acme.zerosslApiKey ?? "",
+      acmeDnsProvider: acme.dnsProvider ?? "none",
+      acmeDnsApiToken: acme.dnsApiToken ?? "",
+      acmeForceRequest: acme.forceRequest ?? false,
+      acmeDebug: acme.debug ?? false,
       includeWildcardSubdomains: d.includeWildcardSubdomains ?? false,
       exposeWhenRunning: d.exposeWhenRunning ?? false,
     };
@@ -257,7 +316,39 @@
         notes: draft.notes.trim() ? draft.notes.trim() : null,
         pathPrefix: draft.pathPrefix.trim() ? draft.pathPrefix.trim() : null,
         resolverMode: draft.resolverMode,
-        autoManageCert: draft.autoManageCert,
+        autoManageCert:
+          draft.sslMode === "automatic_local" ? draft.autoManageCert : false,
+        sslMode: draft.sslMode,
+        customCertPath: draft.customCertPath.trim()
+          ? draft.customCertPath.trim()
+          : null,
+        customKeyPath: draft.customKeyPath.trim()
+          ? draft.customKeyPath.trim()
+          : null,
+        acme:
+          draft.sslMode === "public_acme"
+            ? {
+                issuer: draft.acmeIssuer,
+                environment: draft.acmeEnvironment,
+                email: draft.acmeEmail.trim() ? draft.acmeEmail.trim() : null,
+                keyType: draft.acmeKeyType,
+                eabKeyId: draft.acmeEabKeyId.trim()
+                  ? draft.acmeEabKeyId.trim()
+                  : null,
+                eabHmacKey: draft.acmeEabHmacKey.trim()
+                  ? draft.acmeEabHmacKey.trim()
+                  : null,
+                zerosslApiKey: draft.acmeZerosslApiKey.trim()
+                  ? draft.acmeZerosslApiKey.trim()
+                  : null,
+                dnsProvider: draft.acmeDnsProvider,
+                dnsApiToken: draft.acmeDnsApiToken.trim()
+                  ? draft.acmeDnsApiToken.trim()
+                  : null,
+                forceRequest: draft.acmeForceRequest,
+                debug: draft.acmeDebug,
+              }
+            : null,
         includeWildcardSubdomains: draft.includeWildcardSubdomains,
         exposeWhenRunning: draft.exposeWhenRunning,
       };
@@ -290,6 +381,7 @@
       }
       errorBus.push({
         code: "DOMAIN_SAVED",
+        category: "infrastructure",
         whatHappened: `${patch.hostname} saved.`,
         whyItMatters: "Caddy reloaded with the updated routing.",
         whoCausedIt: "system",
@@ -324,6 +416,7 @@
       deleteArmed = false;
       errorBus.push({
         code: "DOMAIN_REMOVED",
+        category: "infrastructure",
         whatHappened: `${name} removed.`,
         whyItMatters: "Its hostname, route, and certificate were cleaned up.",
         whoCausedIt: "system",
@@ -345,6 +438,34 @@
     { value: "auto", label: "Automatic" },
     { value: "hosts", label: "Hosts file" },
     { value: "dnsmasq", label: "dnsmasq wildcard" },
+  ];
+
+  const sslModeOptions: { value: SslMode; label: string; disabled?: boolean }[] =
+    [
+      { value: "automatic_local", label: "Automatic local HTTPS" },
+      { value: "custom_certificate", label: "Custom certificate" },
+      { value: "self_signed", label: "Self-signed fallback" },
+      { value: "public_acme", label: "Public ACME / AutoSSL" },
+    ];
+
+  const acmeIssuerOptions: { value: AcmeIssuer; label: string }[] = [
+    { value: "lets_encrypt", label: "Let's Encrypt" },
+    { value: "zero_ssl", label: "ZeroSSL" },
+    { value: "google_trust_services", label: "Google Trust Services" },
+  ];
+  const acmeEnvironmentOptions: { value: AcmeEnvironment; label: string }[] = [
+    { value: "production", label: "Production" },
+    { value: "staging", label: "Staging" },
+  ];
+  const acmeKeyTypeOptions: { value: AcmeKeyType; label: string }[] = [
+    { value: "p384", label: "ECC P-384" },
+    { value: "p256", label: "ECC P-256" },
+    { value: "rsa2048", label: "RSA 2048" },
+    { value: "rsa4096", label: "RSA 4096" },
+  ];
+  const dnsProviderOptions: { value: AcmeDnsProvider; label: string }[] = [
+    { value: "none", label: "HTTP/TLS challenge" },
+    { value: "cloudflare", label: "Cloudflare" },
   ];
 </script>
 
@@ -385,6 +506,49 @@
     </div>
     {@render toggle(on, flip, label)}
   </div>
+{/snippet}
+
+{#snippet domainRow(p: ProjectView)}
+  {@const isActive = selectedId === p.id}
+  <button
+    type="button"
+    onclick={() => select(p.id)}
+    aria-current={isActive ? "true" : undefined}
+    class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left
+           transition-colors cursor-pointer focus-visible:outline-none
+           focus-visible:ring-2 focus-visible:ring-accent/40
+           {isActive
+      ? 'bg-accent/10 ring-1 ring-inset ring-accent/40'
+      : 'hover:bg-surface-2/60'}"
+  >
+    <Icon
+      name="lock"
+      size={14}
+      class={p.https ? "text-status-running shrink-0" : "text-fg-subtle shrink-0"}
+    />
+    <span class="min-w-0 flex-1 leading-tight">
+      <span class="block text-[12.5px] font-mono text-fg truncate">
+        {p.hostname}
+      </span>
+      <span class="block text-[11px] text-fg-subtle truncate">
+        {p.name}
+      </span>
+    </span>
+    <span class="shrink-0 text-right leading-tight">
+      {#if p.port != null}
+        <span class="block text-[12px] font-mono tabular-nums text-fg-muted">
+          {p.port}
+        </span>
+      {/if}
+      <span class="flex items-center justify-end gap-1">
+        <StatusDot status={p.status} size="sm" />
+        <span class="text-[10.5px] text-fg-subtle">
+          {statusLabel[p.status]}
+        </span>
+      </span>
+    </span>
+    <Icon name="chevron-right" size={13} class="text-fg-subtle shrink-0" />
+  </button>
 {/snippet}
 
 <div class="h-full flex flex-col">
@@ -470,102 +634,51 @@
             {/if}
           </p>
         {:else}
-          {#each pageItems as p (p.id)}
-            {@const isActive = selectedId === p.id}
+          {#each groupSections as section (section.id)}
+            {@const isCollapsed = collapsed.has(section.id)}
             <button
               type="button"
-              onclick={() => select(p.id)}
-              aria-current={isActive ? "true" : undefined}
-              class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left
-                     transition-colors cursor-pointer focus-visible:outline-none
-                     focus-visible:ring-2 focus-visible:ring-accent/40
-                     {isActive
-                ? 'bg-accent/10 ring-1 ring-inset ring-accent/40'
-                : 'hover:bg-surface-2/60'}"
+              onclick={() => toggleSection(section.id)}
+              aria-expanded={!isCollapsed}
+              class="w-full flex items-center gap-1.5 px-2 pt-2 pb-1 text-left
+                     text-[11px] uppercase tracking-wide text-fg-subtle
+                     hover:text-fg transition-colors"
             >
               <Icon
-                name="lock"
-                size={14}
-                class={p.https ? "text-status-running shrink-0" : "text-fg-subtle shrink-0"}
+                name="chevron-right"
+                size={12}
+                class="shrink-0 transition-transform {isCollapsed ? '' : 'rotate-90'}"
               />
-              <span class="min-w-0 flex-1 leading-tight">
-                <span class="block text-[12.5px] font-mono text-fg truncate">
-                  {p.hostname}
-                </span>
-                <span class="block text-[11px] text-fg-subtle truncate">
-                  {p.name}
-                </span>
-              </span>
-              <span class="shrink-0 text-right leading-tight">
-                {#if p.port != null}
-                  <span class="block text-[12px] font-mono tabular-nums text-fg-muted">
-                    {p.port}
-                  </span>
-                {/if}
-                <span class="flex items-center justify-end gap-1">
-                  <StatusDot status={p.status} size="sm" />
-                  <span class="text-[10.5px] text-fg-subtle">
-                    {statusLabel[p.status]}
-                  </span>
-                </span>
-              </span>
-              <Icon name="chevron-right" size={13} class="text-fg-subtle shrink-0" />
+              <span class="min-w-0 flex-1 truncate font-medium">{section.name}</span>
+              <span class="shrink-0 font-mono">{section.items.length}</span>
             </button>
+            {#if !isCollapsed}
+              <div class="space-y-1 pb-1">
+                {#each section.items as p (p.id)}
+                  {@render domainRow(p)}
+                {/each}
+              </div>
+            {/if}
+          {/each}
+          {#if grouped && ungroupedItems.length > 0}
+            <div class="pt-1 mt-1 border-t border-border/40"></div>
+          {/if}
+          {#each ungroupedItems as p (p.id)}
+            {@render domainRow(p)}
           {/each}
         {/if}
       </div>
 
       {#if filtered.length > 0}
         <div
-          class="shrink-0 flex items-center justify-between gap-2 px-3 py-2.5
-                 border-t border-border/60"
+          class="shrink-0 flex items-center gap-2 px-3 py-2.5 border-t border-border/60"
         >
           <span class="text-[11px] text-fg-subtle">
-            Showing {pageItems.length} of {filtered.length} domain{filtered.length ===
-            1
-              ? ""
-              : "s"}
+            {filtered.length} domain{filtered.length === 1 ? "" : "s"}
+            {#if grouped}
+              · {groupSections.length} group{groupSections.length === 1 ? "" : "s"}
+            {/if}
           </span>
-          {#if pageCount > 1}
-            <div class="flex items-center gap-1">
-              <button
-                type="button"
-                onclick={() => (page = Math.max(1, page - 1))}
-                disabled={page === 1}
-                aria-label="Previous page"
-                class="grid place-items-center w-6 h-6 rounded-md text-fg-subtle
-                       hover:bg-surface-2 hover:text-fg disabled:opacity-40
-                       disabled:cursor-not-allowed transition-colors"
-              >
-                <Icon name="chevron-right" size={13} class="rotate-180" />
-              </button>
-              {#each Array(pageCount) as _, i (i)}
-                <button
-                  type="button"
-                  onclick={() => (page = i + 1)}
-                  aria-current={page === i + 1 ? "page" : undefined}
-                  class="grid place-items-center min-w-6 h-6 px-1.5 rounded-md text-[11.5px]
-                         tabular-nums transition-colors
-                         {page === i + 1
-                    ? 'bg-accent text-on-accent'
-                    : 'text-fg-muted hover:bg-surface-2 hover:text-fg'}"
-                >
-                  {i + 1}
-                </button>
-              {/each}
-              <button
-                type="button"
-                onclick={() => (page = Math.min(pageCount, page + 1))}
-                disabled={page === pageCount}
-                aria-label="Next page"
-                class="grid place-items-center w-6 h-6 rounded-md text-fg-subtle
-                       hover:bg-surface-2 hover:text-fg disabled:opacity-40
-                       disabled:cursor-not-allowed transition-colors"
-              >
-                <Icon name="chevron-right" size={13} />
-              </button>
-            </div>
-          {/if}
         </div>
       {/if}
     </aside>
@@ -782,6 +895,216 @@
                 {/if}
               </p>
             </div>
+
+            <div class="space-y-1.5">
+              <label for="dom-ssl-mode" class="text-[12px] font-medium text-fg-muted">
+                SSL mode
+              </label>
+              <select
+                id="dom-ssl-mode"
+                bind:value={d.sslMode}
+                class="w-full h-9 px-3 rounded-lg bg-bg border border-border text-[13px]
+                       text-fg focus:outline-none focus:ring-2 focus:ring-accent/40"
+              >
+                {#each sslModeOptions as o (o.value)}
+                  <option value={o.value} disabled={o.disabled}>{o.label}</option>
+                {/each}
+              </select>
+              <p class="text-[11px] text-fg-subtle leading-relaxed">
+                {#if d.sslMode === "automatic_local"}
+                  PortBay issues a locally trusted mkcert certificate and keeps
+                  its SANs aligned with this hostname.
+                {:else if d.sslMode === "custom_certificate"}
+                  Use a company or hand-issued certificate. The cert and key must
+                  match and cover this hostname.
+                {:else if d.sslMode === "self_signed"}
+                  Intended only as a fallback. Browsers will show warnings until
+                  you switch back to a trusted mode.
+                {:else}
+                  Reserved for public domains only; local <code class="font-mono">.test</code>
+                  names are not eligible for public ACME.
+                {/if}
+              </p>
+            </div>
+
+            {#if d.sslMode === "custom_certificate"}
+              <div class="grid grid-cols-1 gap-3">
+                <div class="space-y-1.5">
+                  <label for="dom-custom-cert" class="text-[12px] font-medium text-fg-muted">
+                    Certificate path
+                  </label>
+                  <input
+                    id="dom-custom-cert"
+                    bind:value={d.customCertPath}
+                    placeholder="/absolute/path/cert.pem"
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border
+                           text-[13px] text-fg font-mono placeholder:text-fg-subtle
+                           focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  />
+                </div>
+                <div class="space-y-1.5">
+                  <label for="dom-custom-key" class="text-[12px] font-medium text-fg-muted">
+                    Private key path
+                  </label>
+                  <input
+                    id="dom-custom-key"
+                    bind:value={d.customKeyPath}
+                    placeholder="/absolute/path/key.pem"
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border
+                           text-[13px] text-fg font-mono placeholder:text-fg-subtle
+                           focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  />
+                </div>
+              </div>
+            {/if}
+
+            {#if d.sslMode === "public_acme"}
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div class="space-y-1.5">
+                  <label for="dom-acme-issuer" class="text-[12px] font-medium text-fg-muted">
+                    Issuer
+                  </label>
+                  <select
+                    id="dom-acme-issuer"
+                    bind:value={d.acmeIssuer}
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border text-[13px]
+                           text-fg focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  >
+                    {#each acmeIssuerOptions as o (o.value)}
+                      <option value={o.value}>{o.label}</option>
+                    {/each}
+                  </select>
+                </div>
+                <div class="space-y-1.5">
+                  <label for="dom-acme-env" class="text-[12px] font-medium text-fg-muted">
+                    Environment
+                  </label>
+                  <select
+                    id="dom-acme-env"
+                    bind:value={d.acmeEnvironment}
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border text-[13px]
+                           text-fg focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  >
+                    {#each acmeEnvironmentOptions as o (o.value)}
+                      <option value={o.value}>{o.label}</option>
+                    {/each}
+                  </select>
+                </div>
+                <div class="space-y-1.5">
+                  <label for="dom-acme-email" class="text-[12px] font-medium text-fg-muted">
+                    Account email
+                  </label>
+                  <input
+                    id="dom-acme-email"
+                    type="email"
+                    bind:value={d.acmeEmail}
+                    placeholder="admin@example.com"
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border
+                           text-[13px] text-fg placeholder:text-fg-subtle
+                           focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  />
+                </div>
+                <div class="space-y-1.5">
+                  <label for="dom-acme-key" class="text-[12px] font-medium text-fg-muted">
+                    Algorithm
+                  </label>
+                  <select
+                    id="dom-acme-key"
+                    bind:value={d.acmeKeyType}
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border text-[13px]
+                           text-fg focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  >
+                    {#each acmeKeyTypeOptions as o (o.value)}
+                      <option value={o.value}>{o.label}</option>
+                    {/each}
+                  </select>
+                </div>
+                <div class="space-y-1.5">
+                  <label for="dom-acme-dns-provider" class="text-[12px] font-medium text-fg-muted">
+                    DNS API provider
+                  </label>
+                  <select
+                    id="dom-acme-dns-provider"
+                    bind:value={d.acmeDnsProvider}
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border text-[13px]
+                           text-fg focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  >
+                    {#each dnsProviderOptions as o (o.value)}
+                      <option value={o.value}>{o.label}</option>
+                    {/each}
+                  </select>
+                </div>
+                <div class="flex items-end gap-4 pb-1">
+                  {@render toggleRow(
+                    "Enable debug",
+                    "Emit extra ACME diagnostics from Caddy.",
+                    d.acmeDebug,
+                    () => (d.acmeDebug = !d.acmeDebug),
+                  )}
+                  {@render toggleRow(
+                    "Force request",
+                    "Force Caddy to attempt issuance again on the next reload.",
+                    d.acmeForceRequest,
+                    () => (d.acmeForceRequest = !d.acmeForceRequest),
+                  )}
+                </div>
+              </div>
+
+              {#if d.acmeIssuer === "zero_ssl"}
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <input
+                    aria-label="ZeroSSL API key"
+                    bind:value={d.acmeZerosslApiKey}
+                    placeholder="ZeroSSL API key"
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border
+                           text-[13px] text-fg font-mono placeholder:text-fg-subtle
+                           focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  />
+                  <p class="text-[11px] text-fg-subtle leading-relaxed">
+                    ZeroSSL can use its Caddy issuer API key, or EAB key id and
+                    HMAC below.
+                  </p>
+                </div>
+              {/if}
+
+              {#if d.acmeIssuer === "zero_ssl" || d.acmeIssuer === "google_trust_services"}
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <input
+                    aria-label="ACME EAB key id"
+                    bind:value={d.acmeEabKeyId}
+                    placeholder="EAB key id"
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border
+                           text-[13px] text-fg font-mono placeholder:text-fg-subtle
+                           focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  />
+                  <input
+                    aria-label="ACME EAB HMAC key"
+                    type="password"
+                    bind:value={d.acmeEabHmacKey}
+                    placeholder="EAB HMAC key"
+                    class="w-full h-9 px-3 rounded-lg bg-bg border border-border
+                           text-[13px] text-fg font-mono placeholder:text-fg-subtle
+                           focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  />
+                </div>
+              {/if}
+
+              {#if d.acmeDnsProvider === "cloudflare"}
+                <textarea
+                  aria-label="Cloudflare DNS API token"
+                  bind:value={d.acmeDnsApiToken}
+                  rows="3"
+                  placeholder="Cloudflare API token with Zone:DNS:Edit for this domain"
+                  class="w-full px-3 py-2 rounded-lg bg-bg border border-border
+                         text-[13px] text-fg font-mono placeholder:text-fg-subtle
+                         focus:outline-none focus:ring-2 focus:ring-accent/40"
+                ></textarea>
+                <p class="text-[11px] text-fg-subtle leading-relaxed -mt-2">
+                  Use a scoped token with Zone:Zone:Read and Zone:DNS:Edit for
+                  this zone. Wildcard public certificates use Cloudflare DNS-01.
+                </p>
+              {/if}
+            {/if}
 
             <!-- Toggles -->
             <div class="rounded-xl border border-border divide-y divide-border/60 px-4">

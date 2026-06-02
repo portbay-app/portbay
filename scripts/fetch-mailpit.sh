@@ -46,6 +46,24 @@ trap 'rm -rf "$tmp"' EXIT
 echo "fetch-mailpit: downloading ${url}"
 curl -fL --retry 3 -o "${tmp}/${asset}" "$url"
 
+# Supply-chain: verify against a SHA-256 pinned in-repo before bundling. Fail
+# closed on mismatch. Recompute on a MAILPIT_VERSION bump with:
+# shasum -a 256 "${tmp}/${asset}". Linux unpinned (not shipped) → fails closed.
+case "$triple" in
+  aarch64-apple-darwin) want_sha="dbebbf3e95e82e111dd08fbec106cc09c026b207a9f105e45f212db4c63824a5" ;;
+  x86_64-apple-darwin)  want_sha="066d4e8e9bcb0a9a6ce1a298991064eb4986010909e3b6460648ab8724b543f5" ;;
+  x86_64-unknown-linux-gnu) want_sha="33c00f7633da7fc2f9c4ee490c7162fbb3586e97cfce6b2a66203168adb74b11" ;;
+  *) echo "fetch-mailpit: no pinned sha256 for $triple (mailpit $MAILPIT_VERSION); add one before building this arch" >&2; exit 1 ;;
+esac
+got_sha="$(shasum -a 256 "${tmp}/${asset}" | cut -d' ' -f1)"
+if [ "$got_sha" != "$want_sha" ]; then
+  echo "fetch-mailpit: SHA-256 mismatch for ${asset} ($triple)" >&2
+  echo "  expected ${want_sha}" >&2
+  echo "  got      ${got_sha}" >&2
+  exit 1
+fi
+echo "fetch-mailpit: ✓ sha256 verified"
+
 echo "fetch-mailpit: extracting"
 tar -xzf "${tmp}/${asset}" -C "$tmp" mailpit
 

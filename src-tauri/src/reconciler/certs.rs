@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use crate::caddy::CertPaths;
 use crate::mkcert::Mkcert;
 use crate::reconciler::report::StepOutcome;
-use crate::registry::Registry;
+use crate::registry::{AcmeDnsProvider, Registry, SslMode};
 
 #[derive(Debug, Default)]
 pub(super) struct CertsCache {
@@ -44,25 +44,7 @@ pub(super) fn reconcile(
     auto_renew: bool,
     cache: &mut CertsCache,
 ) -> CertsTickResult {
-    let Some(mkcert) = mkcert else {
-        // No binary resolved at boot — Caddy will continue, projects with
-        // HTTPS just won't have certs. Surface as Failed so doctor can
-        // see it; the user's existing mkcert sidebar slot already shows
-        // the underlying installation state.
-        return CertsTickResult {
-            outcome: StepOutcome::failed("mkcert binary not available; skipping cert issuance"),
-            lookup: HashMap::new(),
-        };
-    };
-
-    if !mkcert.is_ca_installed() {
-        return CertsTickResult {
-            outcome: StepOutcome::failed(
-                "mkcert CA not installed; run the cert-lifecycle install flow",
-            ),
-            lookup: lookup_only(reg, mkcert),
-        };
-    }
+    let mkcert_ready = mkcert.is_some_and(|m| m.is_ca_installed());
 
     // Only HTTPS projects PortBay is asked to manage get a minted cert.
     // `auto_manage_cert()` defaults true, so this matches the historical
@@ -82,15 +64,29 @@ pub(super) fn reconcile(
     let mut issued: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for p in &https_projects {
-        let wildcard = format!("*.{}", p.hostname);
-        let desired: Vec<&str> = if p.include_wildcard_subdomains() {
-            vec![p.hostname.as_str(), wildcard.as_str()]
-        } else {
-            vec![p.hostname.as_str()]
+        if p.ssl_mode() != SslMode::AutomaticLocal {
+            continue;
+        }
+        let Some(mkcert) = mkcert else {
+            errors.push(format!(
+                "{}: mkcert binary not available; skipping local cert issuance",
+                p.id.as_str()
+            ));
+            continue;
         };
+        if !mkcert_ready {
+            errors.push(format!(
+                "{}: mkcert CA not installed or not trusted",
+                p.id.as_str()
+            ));
+            continue;
+        }
+        let desired_owned =
+            desired_cert_names(p.hostname.as_str(), p.include_wildcard_subdomains());
+        let desired: Vec<&str> = desired_owned.iter().map(String::as_str).collect();
         if let Some(paths) = mkcert.cert_paths(p.id.as_str()) {
-            let have = crate::commands::certs::cert_dns_sans(&paths.certificate);
-            if cert_covers(&have, &desired) {
+            let have = crate::commands::certs::cert_all_sans(&paths.certificate);
+            if crate::commands::certs::cert_covers_names(&have, &desired) {
                 // SANs already cover this project. Reissue only when auto-renew
                 // is enabled AND the cert is within the renewal window — so the
                 // `auto_renew_certificates` setting is actually load-bearing
@@ -109,6 +105,45 @@ pub(super) fn reconcile(
         }
     }
 
+    for p in reg.list_projects().iter().filter(|p| p.https) {
+        match p.ssl_mode() {
+            SslMode::AutomaticLocal => {}
+            SslMode::CustomCertificate => {
+                let Some((cert, key)) = p.custom_cert_paths() else {
+                    errors.push(format!(
+                        "{}: custom certificate mode requires certificate and key paths",
+                        p.id.as_str()
+                    ));
+                    continue;
+                };
+                let desired_owned =
+                    desired_cert_names(p.hostname.as_str(), p.include_wildcard_subdomains());
+                let desired: Vec<&str> = desired_owned.iter().map(String::as_str).collect();
+                if let Err(e) = crate::commands::certs::validate_custom_cert_pair(
+                    &std::path::PathBuf::from(cert),
+                    &std::path::PathBuf::from(key),
+                    &desired,
+                ) {
+                    errors.push(format!(
+                        "{}: custom certificate invalid: {e}",
+                        p.id.as_str()
+                    ));
+                }
+            }
+            SslMode::SelfSigned => {
+                errors.push(format!(
+                    "{}: self-signed certificate mode is not implemented yet",
+                    p.id.as_str()
+                ));
+            }
+            SslMode::PublicAcme => {
+                if let Err(e) = validate_public_acme_project(p) {
+                    errors.push(format!("{}: {e}", p.id.as_str()));
+                }
+            }
+        }
+    }
+
     // 2) Reap cert dirs for project ids no longer in the registry.
     let active: HashSet<String> = reg
         .list_projects()
@@ -116,16 +151,18 @@ pub(super) fn reconcile(
         .map(|p| p.id.to_string())
         .collect();
     let mut reaped: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(mkcert.certs_root()) {
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
-                continue;
-            };
-            if !active.contains(&name) {
-                if let Err(e) = mkcert.remove_cert(&name) {
-                    errors.push(format!("reap {name}: {e}"));
-                } else {
-                    reaped.push(name);
+    if let Some(mkcert) = mkcert {
+        if let Ok(entries) = std::fs::read_dir(mkcert.certs_root()) {
+            for entry in entries.flatten() {
+                let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                    continue;
+                };
+                if !active.contains(&name) {
+                    if let Err(e) = mkcert.remove_cert(&name) {
+                        errors.push(format!("reap {name}: {e}"));
+                    } else {
+                        reaped.push(name);
+                    }
                 }
             }
         }
@@ -159,17 +196,115 @@ pub(super) fn reconcile(
     CertsTickResult { outcome, lookup }
 }
 
-fn lookup_only(reg: &Registry, mkcert: &Mkcert) -> HashMap<String, CertPaths> {
+fn lookup_only(reg: &Registry, mkcert: Option<&Mkcert>) -> HashMap<String, CertPaths> {
     let mut out = HashMap::new();
     for p in reg.list_projects() {
         if !p.https {
             continue;
         }
-        if let Some(paths) = mkcert.cert_paths(p.id.as_str()) {
-            out.insert(p.id.to_string(), paths);
+        match p.ssl_mode() {
+            SslMode::AutomaticLocal => {
+                if let Some(paths) = mkcert.and_then(|m| m.cert_paths(p.id.as_str())) {
+                    out.insert(p.id.to_string(), paths);
+                }
+            }
+            SslMode::CustomCertificate => {
+                let Some((cert, key)) = p.custom_cert_paths() else {
+                    continue;
+                };
+                let desired_owned =
+                    desired_cert_names(p.hostname.as_str(), p.include_wildcard_subdomains());
+                let desired: Vec<&str> = desired_owned.iter().map(String::as_str).collect();
+                let paths = CertPaths {
+                    certificate: std::path::PathBuf::from(cert),
+                    key: std::path::PathBuf::from(key),
+                };
+                if crate::commands::certs::validate_custom_cert_pair(
+                    &paths.certificate,
+                    &paths.key,
+                    &desired,
+                )
+                .is_ok()
+                {
+                    out.insert(p.id.to_string(), paths);
+                }
+            }
+            SslMode::SelfSigned | SslMode::PublicAcme => {}
         }
     }
     out
+}
+
+fn validate_public_acme_project(p: &crate::registry::Project) -> Result<(), String> {
+    if is_local_only_name(&p.hostname) {
+        return Err(
+            "public ACME requires a publicly resolvable domain, not a local-only hostname".into(),
+        );
+    }
+    let acme = p
+        .domain
+        .as_ref()
+        .and_then(|d| d.acme.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    match acme.issuer {
+        crate::registry::AcmeIssuer::LetsEncrypt => {}
+        crate::registry::AcmeIssuer::ZeroSsl => {
+            let has_api_key = acme
+                .zerossl_api_key
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty());
+            let has_eab = acme
+                .eab_key_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+                && acme
+                    .eab_hmac_key
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty());
+            if !has_api_key && !has_eab {
+                return Err(
+                    "ZeroSSL ACME requires a ZeroSSL API key or EAB key id + HMAC key".into(),
+                );
+            }
+        }
+        crate::registry::AcmeIssuer::GoogleTrustServices => {
+            let has_eab = acme
+                .eab_key_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+                && acme
+                    .eab_hmac_key
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty());
+            if !has_eab {
+                return Err("Google Trust Services ACME requires EAB key id + HMAC key".into());
+            }
+        }
+    }
+    if p.include_wildcard_subdomains() && acme.dns_provider == AcmeDnsProvider::None {
+        return Err("wildcard public ACME requires DNS-01; select a DNS API provider".into());
+    }
+    if acme.dns_provider == AcmeDnsProvider::Cloudflare
+        && !acme
+            .dns_api_token
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Err("Cloudflare DNS-01 requires a Cloudflare API token".into());
+    }
+    Ok(())
+}
+
+fn is_local_only_name(hostname: &str) -> bool {
+    let host = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "test"
+        || host.ends_with(".test")
+        || host == "local"
+        || host.ends_with(".local")
+        || host.parse::<std::net::IpAddr>().is_ok()
 }
 
 fn lookup_set_hash(lookup: &HashMap<String, CertPaths>) -> u64 {
@@ -184,11 +319,19 @@ fn lookup_set_hash(lookup: &HashMap<String, CertPaths>) -> u64 {
     crate::util::stable_hash(joined.as_bytes())
 }
 
-/// Whether an existing cert's DNS SANs (`have`) cover every name a project
-/// needs (`desired`). An empty `have` (cert missing or unparseable) covers
-/// nothing, so the caller reissues.
-fn cert_covers(have: &[String], desired: &[&str]) -> bool {
-    desired.iter().all(|d| have.iter().any(|h| h == d))
+fn desired_cert_names(hostname: &str, include_wildcard: bool) -> Vec<String> {
+    let mut names = vec![
+        hostname.to_string(),
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    if include_wildcard {
+        names.push(format!("*.{hostname}"));
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 #[cfg(test)]
@@ -203,14 +346,39 @@ mod tests {
         let single = vec!["app.test".to_string()];
         let both = vec!["app.test".to_string(), "*.app.test".to_string()];
         // A plain cert covers the bare host but not a newly-requested wildcard.
-        assert!(cert_covers(&single, &["app.test"]));
-        assert!(!cert_covers(&single, &["app.test", "*.app.test"]));
+        assert!(crate::commands::certs::cert_covers_names(
+            &single,
+            &["app.test"]
+        ));
+        assert!(!crate::commands::certs::cert_covers_names(
+            &single,
+            &["app.test", "*.app.test"]
+        ));
         // A wildcard cert covers both.
-        assert!(cert_covers(&both, &["app.test", "*.app.test"]));
+        assert!(crate::commands::certs::cert_covers_names(
+            &both,
+            &["app.test", "*.app.test"]
+        ));
         // Missing / unparseable cert (empty SANs) covers nothing → reissue.
-        assert!(!cert_covers(&[], &["app.test"]));
+        assert!(!crate::commands::certs::cert_covers_names(
+            &[],
+            &["app.test"]
+        ));
         // A stale cert for a renamed host doesn't cover the new hostname.
-        assert!(!cert_covers(&single, &["renamed.test"]));
+        assert!(!crate::commands::certs::cert_covers_names(
+            &single,
+            &["renamed.test"]
+        ));
+    }
+
+    #[test]
+    fn desired_cert_names_include_local_loopback_sans() {
+        let names = desired_cert_names("app.test", true);
+        assert!(names.contains(&"app.test".to_string()));
+        assert!(names.contains(&"*.app.test".to_string()));
+        assert!(names.contains(&"localhost".to_string()));
+        assert!(names.contains(&"127.0.0.1".to_string()));
+        assert!(names.contains(&"::1".to_string()));
     }
 
     fn https_project(id: &str) -> Project {
@@ -230,6 +398,8 @@ mod tests {
             env: BTreeMap::new(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: None,
             php_version: None,
@@ -238,6 +408,8 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 
@@ -250,7 +422,8 @@ mod tests {
 
     #[test]
     fn no_mkcert_binary_returns_failed_and_empty_lookup() {
-        let reg = Registry::new("test");
+        let mut reg = Registry::new("test");
+        reg.add_project(https_project("a")).unwrap();
         let mut cache = CertsCache::default();
         let r = reconcile(&reg, None, false, &mut cache);
         assert!(matches!(r.outcome, StepOutcome::Failed { .. }));
@@ -271,7 +444,7 @@ mod tests {
         std::fs::write(dir.join("cert.pem"), b"x").unwrap();
         std::fs::write(dir.join("key.pem"), b"x").unwrap();
 
-        let lookup = lookup_only(&reg, &m);
+        let lookup = lookup_only(&reg, Some(&m));
         assert_eq!(lookup.len(), 1);
         assert!(lookup.contains_key("a"));
         assert!(!lookup.contains_key("b"));
@@ -288,14 +461,14 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("cert.pem"), b"x").unwrap();
         std::fs::write(dir.join("key.pem"), b"x").unwrap();
-        let h1 = lookup_set_hash(&lookup_only(&reg, &m));
+        let h1 = lookup_set_hash(&lookup_only(&reg, Some(&m)));
 
         reg.add_project(https_project("b")).unwrap();
         let dir = tmp.path().join("b");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("cert.pem"), b"x").unwrap();
         std::fs::write(dir.join("key.pem"), b"x").unwrap();
-        let h2 = lookup_set_hash(&lookup_only(&reg, &m));
+        let h2 = lookup_set_hash(&lookup_only(&reg, Some(&m)));
 
         assert_ne!(h1, h2);
     }

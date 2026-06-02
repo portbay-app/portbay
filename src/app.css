@@ -1,6 +1,10 @@
 @import "tailwindcss";
 
 @source "./**/*.{svelte,ts,js}";
+/* layerchart (result charts) renders with Tailwind utility classes from its own
+   package, which Tailwind v4 does not scan by default — register it so axes,
+   gridlines, tooltip and legend styles are generated. */
+@source "../node_modules/layerchart/dist/**/*.{svelte,js}";
 
 /* Class-based theme variants. PortBay defaults to dark; the theme store
    toggles <html> classes and <body data-theme="…"> at runtime. */
@@ -78,6 +82,18 @@
     color: var(--color-fg);
   }
 
+  body[data-platform="linux"] {
+    background: var(--color-app);
+  }
+
+  body[data-platform="linux"] .bg-sidebar {
+    background: var(--color-surface);
+  }
+
+  body[data-platform="linux"] aside [data-tauri-drag-region].pt-9 {
+    padding-top: 1rem;
+  }
+
   body[data-theme="light"] {
     color-scheme: light;
 
@@ -127,6 +143,77 @@
     --color-fg-subtle: oklch(0.48 0 0);
   }
 
+  body[data-a11y-transparency="reduced"] {
+    --color-bg: oklch(0.2046 0 0);
+    --color-surface: oklch(0.2686 0 0);
+    --color-surface-2: oklch(0.3098 0 0);
+    --color-sidebar: oklch(0.2686 0 0);
+  }
+
+  body[data-theme="light"][data-a11y-transparency="reduced"] {
+    --color-bg: oklch(0.9846 0.0017 247.84);
+    --color-surface: oklch(1 0 0);
+    --color-surface-2: oklch(0.9665 0.0045 258.32);
+    --color-sidebar: oklch(1 0 0);
+  }
+
+  body[data-a11y-contrast="high"] {
+    --color-bg: oklch(0.12 0 0);
+    --color-surface: oklch(0.18 0 0);
+    --color-surface-2: oklch(0.24 0 0);
+    --color-app: oklch(0.12 0 0);
+    --color-sidebar: oklch(0.16 0 0);
+    --color-border: oklch(0.58 0 0);
+    --color-border-strong: oklch(0.74 0 0);
+    --color-fg: oklch(0.98 0 0);
+    --color-fg-muted: oklch(0.86 0 0);
+    --color-fg-subtle: oklch(0.75 0 0);
+    --color-accent: oklch(0.74 0.18 255);
+    --color-accent-hover: oklch(0.82 0.14 255);
+  }
+
+  body[data-theme="light"][data-a11y-contrast="high"] {
+    --color-bg: oklch(1 0 0);
+    --color-surface: oklch(1 0 0);
+    --color-surface-2: oklch(0.94 0 0);
+    --color-app: oklch(1 0 0);
+    --color-sidebar: oklch(1 0 0);
+    --color-border: oklch(0.42 0 0);
+    --color-border-strong: oklch(0.28 0 0);
+    --color-fg: oklch(0.12 0 0);
+    --color-fg-muted: oklch(0.28 0 0);
+    --color-fg-subtle: oklch(0.38 0 0);
+    --color-accent: oklch(0.44 0.2 255);
+    --color-accent-hover: oklch(0.36 0.2 255);
+  }
+
+  body[data-a11y-focus="strong"] :focus-visible {
+    outline: 3px solid var(--color-accent);
+    outline-offset: 3px;
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--color-accent) 22%, transparent);
+  }
+
+  body[data-a11y-links="underlined"] a {
+    text-decoration-line: underline;
+    text-decoration-thickness: 0.08em;
+    text-underline-offset: 0.18em;
+  }
+
+  body[data-a11y-status="shapes"] [class*="bg-status-"] {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, currentColor 55%, transparent),
+      0 0 0 1px color-mix(in srgb, var(--color-bg) 80%, transparent);
+  }
+
+  body[data-a11y-motion="reduced"] *,
+  body[data-a11y-motion="reduced"] ::before,
+  body[data-a11y-motion="reduced"] ::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+
   /* Default border-color is currentColor in Tailwind 4. Use our token. */
   *,
   ::before,
@@ -139,12 +226,58 @@
     font-family: inherit;
   }
 
+  /* Suppress the macOS WebView's native element drag. WebKit makes images,
+     inline SVGs and links draggable by default; inside a Tauri window that
+     native drag hijacks the pointer (it reads as a "catching" resize arrow)
+     and, on drop, asks the OS to `shell.open` the dragged item — a command we
+     don't grant, so it only ever logs a permission error. Nothing in the app
+     relies on dragging these elements; the one intentional gesture
+     (drag-to-grant in the macOS permission sheet) drags a `<div
+     draggable="true">`, which the `:not([draggable="true"])` guard leaves
+     alone. */
+  img:not([draggable="true"]),
+  svg:not([draggable="true"]),
+  a:not([draggable="true"]) {
+    -webkit-user-drag: none;
+  }
+
   /* Tabular numerals for any class that opts in (status counts, ports,
      CPU/RAM stats). */
   .tabular-nums {
     font-variant-numeric: tabular-nums;
   }
 }
+
+/* Accessibility text scaling. These rules are intentionally *unlayered*: they
+   override the `text-[Npx]` arbitrary-size utilities, which Tailwind emits into
+   `@layer utilities`. A rule sitting in `@layer base` would lose to utilities
+   regardless of selector specificity (layer order beats specificity), so the
+   scale silently did nothing. Unlayered styles outrank every layer, so this
+   wins. Each Tailwind size tier is bumped independently. */
+body[data-a11y-text="large"] {
+  --a11y-type-note: "large";
+}
+body[data-a11y-text="larger"] {
+  --a11y-type-note: "larger";
+}
+
+body[data-a11y-text="large"] [class~="text-[10px]"],
+body[data-a11y-text="large"] [class~="text-[10.5px]"] { font-size: 11.5px; }
+body[data-a11y-text="large"] [class~="text-[11px]"],
+body[data-a11y-text="large"] [class~="text-[11.5px]"] { font-size: 12.5px; }
+body[data-a11y-text="large"] [class~="text-[12px]"],
+body[data-a11y-text="large"] [class~="text-[12.5px]"] { font-size: 13.5px; }
+body[data-a11y-text="large"] [class~="text-[13px]"] { font-size: 14.5px; }
+body[data-a11y-text="large"] [class~="text-[14px]"] { font-size: 15.5px; }
+
+body[data-a11y-text="larger"] [class~="text-[10px]"],
+body[data-a11y-text="larger"] [class~="text-[10.5px]"] { font-size: 12px; }
+body[data-a11y-text="larger"] [class~="text-[11px]"],
+body[data-a11y-text="larger"] [class~="text-[11.5px]"] { font-size: 13px; }
+body[data-a11y-text="larger"] [class~="text-[12px]"],
+body[data-a11y-text="larger"] [class~="text-[12.5px]"] { font-size: 14.5px; }
+body[data-a11y-text="larger"] [class~="text-[13px]"] { font-size: 15.5px; }
+body[data-a11y-text="larger"] [class~="text-[14px]"] { font-size: 16.5px; }
 
 @layer base {
   ::-webkit-scrollbar {
@@ -206,4 +339,15 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .shimmer::before { animation: none; opacity: 0; }
+}
+
+/* Floating rail-panel overlay (narrow windows): the scrim fades in and the
+   panel slides from the right. */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes slide-in-right {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
 }

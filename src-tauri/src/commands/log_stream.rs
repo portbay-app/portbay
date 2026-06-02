@@ -3,8 +3,18 @@
 //! Tails the per-project log file the PC sub-reconciler tells Process
 //! Compose to write at `<data_dir>/PortBay/logs/<id>.log`. Each new line
 //! is forwarded to the frontend's `Channel<string>` so the log viewer's
-//! Follow mode renders within ~100 ms of write — replacing the 1.5 s
-//! polling stub from card #10.
+//! Follow mode surfaces lines essentially as fast as a native `tail -f`.
+//!
+//! Why event-driven instead of a fixed poll: a native terminal `tail -f`
+//! blocks on a kernel filesystem notification (kqueue/FSEvents) and wakes
+//! the instant the file is appended. The old loop slept a flat 100 ms
+//! between reads, so every line carried 0–100 ms of dead latency on top of
+//! the actual write — perceptible, and the reason PortBay's logs lagged
+//! behind a terminal side-by-side. We now register a `notify` watcher on
+//! the file and block on its events, so steady-state latency is the FS
+//! event delivery time (a few ms), not a poll period. A short timeout is
+//! retained purely as a safety net if an event is ever coalesced or the
+//! watcher fails to register.
 //!
 //! Why file-tail instead of PC's WebSocket endpoint:
 //! - PC's REST API exposes a streaming endpoint, but its framing format
@@ -19,25 +29,36 @@
 //!
 //! Lifecycle:
 //! - The command spawns a blocking-pool task and returns immediately.
-//! - The task polls the file at 100 ms and emits each new line via the
-//!   channel.
+//! - The task registers an FS watcher on the file and blocks on its
+//!   events, draining and emitting each new line as it's written.
 //! - The frontend dropping the `Channel<string>` causes `send` to error;
-//!   the task exits cleanly and the pool thread is released.
+//!   the task exits cleanly, the watcher is unregistered, and the pool
+//!   thread is released.
 
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
+use notify::{RecursiveMode, Watcher};
 use tauri::ipc::Channel;
 use tauri::State;
 
 use crate::error::AppResult;
 use crate::state::AppState;
 
-/// Poll interval for new bytes once the file exists. 100 ms keeps the
-/// perceived latency well under the 200 ms DoD target without burning
-/// CPU on idle log files.
-const TAIL_POLL: Duration = Duration::from_millis(100);
+/// Safety-net wake interval while following an idle file. The primary wake
+/// signal is a `notify` filesystem event, which fires within a few ms of
+/// the writer appending — so this is *not* the steady-state latency. It
+/// only bounds the worst case if an FS event is coalesced or dropped, and
+/// it becomes the effective poll period only in the rare case the watcher
+/// fails to register at all (see `FALLBACK_POLL`).
+const IDLE_FALLBACK: Duration = Duration::from_millis(500);
+
+/// Effective poll period if the FS watcher could not be created. Mirrors
+/// the previous always-polling behaviour so following still works — just
+/// without the native-feeling latency — rather than degrading to 500 ms.
+const FALLBACK_POLL: Duration = Duration::from_millis(100);
 
 /// How long to wait for the log file to materialise before giving up.
 /// PC creates the file lazily; on a freshly-added project, the file
@@ -106,6 +127,19 @@ fn tail_into(path: &PathBuf, on_line: &Channel<String>) {
         return;
     }
 
+    // Register the FS watcher *before* the first read so we can never miss
+    // an append that lands between reading to EOF and starting to wait.
+    // `_watcher` is bound for the lifetime of the loop; dropping it on
+    // return unregisters the watch. When `None`, the file couldn't be
+    // watched and we fall back to a fixed poll (`FALLBACK_POLL`).
+    let (tx, rx) = channel::<()>();
+    let _watcher = make_watcher(path, tx);
+    let idle_wait = if _watcher.is_some() {
+        IDLE_FALLBACK
+    } else {
+        FALLBACK_POLL
+    };
+
     let mut reader = match open_at_end(path) {
         Ok(r) => r,
         Err(_) => return,
@@ -118,7 +152,8 @@ fn tail_into(path: &PathBuf, on_line: &Channel<String>) {
         match reader.read_line(&mut line) {
             Ok(0) => {
                 // EOF — check for truncation (project restart rewrites
-                // the file to zero length), then sleep before retry.
+                // the file to zero length), then block until the watcher
+                // signals a change or the safety timeout elapses.
                 let cur_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
                 if cur_len < last_len {
                     // File truncated; reopen from the start so the user
@@ -139,7 +174,7 @@ fn tail_into(path: &PathBuf, on_line: &Channel<String>) {
                     continue;
                 }
                 last_len = cur_len;
-                std::thread::sleep(TAIL_POLL);
+                wait_for_change(&rx, idle_wait);
             }
             Ok(_) => {
                 let trimmed = line.trim_end_matches('\n').to_string();
@@ -152,10 +187,49 @@ fn tail_into(path: &PathBuf, on_line: &Channel<String>) {
             Err(_) => {
                 // Any other read error: pause briefly and retry. Avoids
                 // tight-looping on transient FS issues.
-                std::thread::sleep(TAIL_POLL);
+                std::thread::sleep(idle_wait);
             }
         }
     }
+}
+
+/// Block until the watcher reports a change to the log file or `timeout`
+/// elapses, whichever comes first — the event-driven equivalent of a poll
+/// sleep. A burst of writes is collapsed into a single wakeup by draining
+/// any queued ticks, so the caller does one read pass per quiet period
+/// rather than once per FS event.
+fn wait_for_change(rx: &Receiver<()>, timeout: Duration) {
+    match rx.recv_timeout(timeout) {
+        Ok(()) => {
+            // Drain coalesced events so we don't spin one read per tick.
+            while rx.try_recv().is_ok() {}
+        }
+        // No event in the window: re-read anyway (safety net) or, when the
+        // watcher never registered, this is the steady-state poll tick.
+        Err(RecvTimeoutError::Timeout) => {}
+        // Watcher thread gone (sender dropped): degrade to a timed wait so
+        // following keeps working at poll latency instead of busy-looping.
+        Err(RecvTimeoutError::Disconnected) => std::thread::sleep(timeout),
+    }
+}
+
+/// Build a `notify` watcher that forwards a unit tick through `tx` on each
+/// filesystem event for `path`. Returns `None` if the watcher can't be
+/// created or the watch can't be registered — the caller then falls back
+/// to fixed-interval polling. The file is watched directly (non-recursive);
+/// FSEvents tracks it by path across the truncate-and-rewrite a project
+/// restart performs.
+fn make_watcher(path: &Path, tx: Sender<()>) -> Option<notify::RecommendedWatcher> {
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        // Any successful event means "something changed, read again". A
+        // send error just means the tail loop has already exited; ignore.
+        if res.is_ok() {
+            let _ = tx.send(());
+        }
+    })
+    .ok()?;
+    watcher.watch(path, RecursiveMode::NonRecursive).ok()?;
+    Some(watcher)
 }
 
 /// Block until the log file appears or `FILE_WAIT_TIMEOUT` elapses.

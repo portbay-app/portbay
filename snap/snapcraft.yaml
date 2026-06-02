@@ -1,0 +1,61 @@
+name: portbay
+base: core22
+version: "0.1.2"
+summary: Container-free local development environment manager
+website: https://portbay.app
+issues: https://github.com/portbay-app/portbay/issues
+source-code: https://github.com/portbay-app/portbay
+title: PortBay
+contact: maintainers@portbay.app
+description: |
+  PortBay manages local development projects, HTTPS .test domains, DNS,
+  databases, Mailpit, public tunnels, SSH forwards, logs, and task context from
+  a native Tauri desktop app.
+
+  This snap is built from the same release deb as the Debian/Ubuntu package.
+  It uses classic confinement because PortBay intentionally controls host
+  processes, registers a privileged hosts/DNS helper, and integrates with
+  systemd-resolved, polkit, dnsmasq, Secret Service, and desktop notification
+  services.
+
+grade: stable
+confinement: classic
+license: AGPL-3.0-only
+
+platforms:
+  amd64:
+    build-on: [amd64]
+    build-for: [amd64]
+
+parts:
+  portbay:
+    plugin: dump
+    source: portbay.deb
+    source-type: deb
+    stage-packages:
+      - dbus
+      - dnsmasq
+      - libayatana-appindicator3-1
+      - libgtk-3-0
+      - libnotify-bin
+      - libsecret-1-0
+      - libwebkit2gtk-4.1-0
+      - policykit-1
+      - systemd
+
+apps:
+  portbay:
+    command: usr/bin/portbay-app
+    environment:
+      GDK_BACKEND: wayland,x11
+      WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+    plugs:
+      - desktop
+      - desktop-legacy
+      - home
+      - network
+      - network-bind
+      - opengl
+      - password-manager-service
+      - wayland
+      - x11

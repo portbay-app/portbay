@@ -290,9 +290,74 @@ impl McpContext {
             .find(|t| t.project_id == id))
     }
 
+    /// Return every SSH tunnel the app is currently tracking (live state mirror).
+    /// Empty when the state file is absent (app not running or none started).
+    pub fn list_ssh_tunnels(&self) -> AppResult<Vec<crate::ssh::SshTunnelRuntimeStatus>> {
+        Ok(crate::ssh::read_state(self.data_dir()))
+    }
+
+    /// Find a specific SSH tunnel by `id`. `None` when not found or the state
+    /// file is absent.
+    pub fn ssh_tunnel_status(
+        &self,
+        id: &str,
+    ) -> AppResult<Option<crate::ssh::SshTunnelRuntimeStatus>> {
+        Ok(self.list_ssh_tunnels()?.into_iter().find(|t| t.id == id))
+    }
+
+    /// List saved SSH connections (hosts) from the registry. Secret-free by
+    /// design — hostnames, ports, usernames, key paths, and display metadata
+    /// only; passwords live in the OS keychain. Mirrors the in-app dashboard
+    /// and `portbay ssh connections`.
+    pub fn list_ssh_connections(&self) -> AppResult<Vec<crate::registry::SshConnection>> {
+        let reg = self.load_registry()?;
+        Ok(reg.list_ssh_connections().to_vec())
+    }
+
     // -------------------------------------------------------------------------
     // Mutations
     // -------------------------------------------------------------------------
+
+    /// Run one command on a saved SSH connection's remote host, reusing the same
+    /// exec backend as the in-app Run action (key/agent/password auth, identity
+    /// folding, keychain password lookup). The consent gate lives at the
+    /// protocol layer: this is only reachable when the operator enabled the
+    /// `ssh-exec` toolset (off by default, see [`super::server::ToolGroup`]).
+    pub async fn ssh_execute(
+        &self,
+        connection_id: &str,
+        command: &str,
+        cwd: Option<&str>,
+    ) -> AppResult<crate::ssh::exec::ExecResult> {
+        let command = command.trim();
+        if command.is_empty() {
+            return Err(AppError::BadInput("a command is required".into()));
+        }
+        let registry = self.load_registry()?;
+        let raw = registry
+            .get_ssh_connection(&crate::registry::SshConnectionId::new(connection_id))
+            .ok_or_else(|| {
+                AppError::BadInput(format!("SSH connection `{connection_id}` not found"))
+            })?;
+        // Fold in a borrowed identity (user / key / auth) before connecting,
+        // exactly as the Tauri `ssh_exec_run` command does.
+        let conn = registry.effective_ssh_connection(raw);
+        let password = crate::commands::ssh_tunnels::load_stored_password(&conn.id)?;
+        let proxy_password = crate::commands::ssh_tunnels::load_stored_proxy_password(&conn.id)?;
+        let passphrase = crate::commands::ssh_tunnels::load_stored_key_passphrase(&conn.id)?;
+        crate::ssh::exec::run_command(
+            &conn,
+            password.as_deref(),
+            proxy_password.as_deref(),
+            passphrase.as_deref(),
+            command,
+            cwd,
+            // Headless (MCP) — no window to prompt; keep silent TOFU.
+            None,
+        )
+        .await
+        .map_err(AppError::Ssh)
+    }
 
     pub async fn add_project(&self, args: AddProjectArgs) -> AppResult<OpResult> {
         let project = self.build_project(&args)?;
@@ -820,66 +885,17 @@ impl McpContext {
     // Diagnostics
     // -------------------------------------------------------------------------
 
-    pub async fn doctor(&self) -> AppResult<DoctorResult> {
-        let mut findings: Vec<DoctorFinding> = Vec::new();
-
-        match self.load_registry() {
-            Ok(reg) => findings.push(DoctorFinding {
-                check: "registry".into(),
-                verdict: "ok".into(),
-                detail: format!(
-                    "{} project(s), v{} schema, suffix .{}",
-                    reg.list_projects().len(),
-                    reg.version,
-                    reg.domain_suffix
-                ),
-            }),
-            Err(e) => findings.push(DoctorFinding {
-                check: "registry".into(),
-                verdict: "fail".into(),
-                detail: e.to_string(),
-            }),
-        }
-
-        match self.pc().live().await {
-            Ok(true) => findings.push(DoctorFinding {
-                check: format!("process-compose :{}", self.pc_port),
-                verdict: "ok".into(),
-                detail: "alive".into(),
-            }),
-            _ => findings.push(DoctorFinding {
-                check: format!("process-compose :{}", self.pc_port),
-                verdict: "warn".into(),
-                detail: "not reachable — open PortBay.app to start the daemon".into(),
-            }),
-        }
-
-        for tool in ["mkcert", "caddy", "process-compose"] {
-            match which::which(tool) {
-                Ok(p) => findings.push(DoctorFinding {
-                    check: format!("tool: {tool}"),
-                    verdict: "ok".into(),
-                    detail: p.display().to_string(),
-                }),
-                Err(_) => findings.push(DoctorFinding {
-                    check: format!("tool: {tool}"),
-                    verdict: "warn".into(),
-                    detail: "not found on PATH (bundled with PortBay.app; only matters for standalone CLI use)".into(),
-                }),
-            }
-        }
-
-        let tier = entitlements::current().tier;
-        findings.push(DoctorFinding {
-            check: "entitlement".into(),
-            verdict: "ok".into(),
-            detail: format!("{tier} tier"),
-        });
-
-        Ok(DoctorResult {
-            ok: !findings.iter().any(|f| f.verdict == "fail"),
-            findings,
-        })
+    /// Environment health report. Delegates to the shared [`crate::doctor`]
+    /// core — the exact same grouped, sidecar-honest data the CLI `portbay
+    /// doctor` renders — so the two surfaces can never drift.
+    pub async fn doctor(&self) -> AppResult<crate::doctor::DoctorReport> {
+        let reg = self.load_registry().map_err(|e| e.to_string());
+        Ok(crate::doctor::report(
+            reg.as_ref().map_err(|e| e.as_str()),
+            self.pc_port,
+            self.data_dir(),
+        )
+        .await)
     }
 
     pub async fn sidecar_status(&self) -> AppResult<SidecarStatusResult> {
@@ -1085,6 +1101,112 @@ impl McpContext {
         })
     }
 
+    /// Inspect the schema (tables, columns, foreign keys) of one instance.
+    /// Read-only; the instance must be running (or, for SQLite, the file must
+    /// exist).
+    pub async fn db_schema(&self, id: &str) -> AppResult<crate::db_client::DbClientSchema> {
+        let reg = self.load_registry()?;
+        let inst = reg
+            .get_database(&DatabaseInstanceId::new(id))
+            .ok_or_else(|| AppError::NotFound(format!("database:{id}")))?;
+        crate::db_client::schema(inst).await
+    }
+
+    /// Run a single read-only statement against one instance. Writes, DDL,
+    /// multi-statement, and CTE-wrapped writes are rejected by
+    /// `db_client`'s guard.
+    pub async fn db_query(
+        &self,
+        id: &str,
+        sql: &str,
+        schema: Option<&str>,
+        limit: Option<u32>,
+    ) -> AppResult<crate::db_client::DbClientRows> {
+        let reg = self.load_registry()?;
+        let inst = reg
+            .get_database(&DatabaseInstanceId::new(id))
+            .ok_or_else(|| AppError::NotFound(format!("database:{id}")))?;
+        crate::db_client::query(inst, schema, sql, limit).await
+    }
+
+    /// Query plan (`EXPLAIN`) for a read-only statement.
+    ///
+    /// When `analyze` is `true` and the engine supports it (PostgreSQL), the
+    /// statement is actually executed and actual timing/buffer data is collected.
+    pub async fn db_explain(
+        &self,
+        id: &str,
+        sql: &str,
+        schema: Option<&str>,
+        analyze: bool,
+    ) -> AppResult<crate::db_client::DbExplainPlan> {
+        let reg = self.load_registry()?;
+        let inst = reg
+            .get_database(&DatabaseInstanceId::new(id))
+            .ok_or_else(|| AppError::NotFound(format!("database:{id}")))?;
+        crate::db_client::explain(inst, schema, sql, analyze).await
+    }
+
+    /// Run an agent-issued WRITE/DDL statement, but only after the user approves
+    /// it in the PortBay app. Enqueues the statement, blocks until the human
+    /// approves/denies (or it times out after 2 minutes), then executes it.
+    /// This is PortBay's safety rail: an agent can propose a destructive query,
+    /// but a person has to say yes first.
+    pub async fn db_execute(
+        &self,
+        id: &str,
+        sql: &str,
+        schema: Option<&str>,
+    ) -> AppResult<crate::db_client::DbExecResult> {
+        // Reads don't need approval and shouldn't go through this path.
+        if crate::db_client::is_read_only_sql(sql) {
+            return Err(AppError::BadInput(
+                "this is a read-only query — use portbay_db_query instead".into(),
+            ));
+        }
+
+        // Resolve to an owned instance so we don't hold the registry across the
+        // (potentially long) wait for human approval.
+        let inst = {
+            let reg = self.load_registry()?;
+            reg.get_database(&DatabaseInstanceId::new(id))
+                .ok_or_else(|| AppError::NotFound(format!("database:{id}")))?
+                .clone()
+        };
+
+        let dir = crate::db_approval::approvals_dir(self.data_dir());
+        let pending = crate::db_approval::PendingWrite {
+            id: crate::db_approval::new_id(),
+            instance_id: id.to_string(),
+            engine: inst.engine.id().to_string(),
+            schema: schema.map(str::to_string),
+            sql: sql.to_string(),
+            origin: "mcp-agent".to_string(),
+            created_at_ms: crate::db_approval::now_ms(),
+        };
+        crate::db_approval::enqueue(&dir, &pending)?;
+
+        let decision = crate::db_approval::await_decision(
+            &dir,
+            &pending.id,
+            std::time::Duration::from_secs(120),
+        )
+        .await?;
+
+        if !decision.approved {
+            let why = decision
+                .reason
+                .filter(|r| !r.trim().is_empty())
+                .map(|r| format!(": {r}"))
+                .unwrap_or_default();
+            return Err(AppError::BadInput(format!(
+                "the database write was denied in PortBay{why}"
+            )));
+        }
+
+        crate::db_client::execute(&inst, schema, sql).await
+    }
+
     /// Provision + register a new instance. The daemon binary must already be
     /// installed (engine installation via brew is app-only). The `db-<id>`
     /// process appears in Process Compose after the app's next reconcile.
@@ -1095,17 +1217,68 @@ impl McpContext {
         if name.is_empty() {
             return Err(AppError::BadInput("a database name is required".into()));
         }
-        let daemon = crate::databases::daemon_binary(eng).ok_or_else(|| {
-            AppError::BadInput(format!(
-                "{} isn't installed ({}). Install the engine binary from the PortBay app, then retry.",
-                eng.label(),
-                db_install_hint(eng)
-            ))
-        })?;
 
         let mut reg = self.load_registry()?;
         let id = db_unique_instance_id(&reg, name);
         let app_data = self.data_dir().to_path_buf();
+
+        // File-based engines (SQLite): no daemon, no port. Create a fresh
+        // managed file. (Adoption of an existing file is an app/CLI flow.)
+        if eng.is_file_based() {
+            // Prefer a PortBay-managed engine install for version detection,
+            // matching the CLI `portbay db create`.
+            let managed_bin = reg
+                .managed_engine(eng)
+                .map(|m| crate::databases::managed_bin_dir(&m.dir));
+            crate::databases::provision(eng, std::path::Path::new(""), &app_data, &id, 0, None)
+                .map_err(AppError::Internal)?;
+            let instance = DatabaseInstance {
+                id: DatabaseInstanceId::new(id.clone()),
+                name: name.to_string(),
+                engine: eng,
+                version: crate::databases::detect_resolved(eng, managed_bin.as_deref()).version,
+                port: 0,
+                data_dir: crate::databases::data_dir(&app_data, &id),
+                config_path: None,
+                socket_path: None,
+                file_path: Some(crate::databases::sqlite_file(&app_data, &id)),
+                auto_start: false,
+                linked_projects: vec![],
+            };
+            reg.add_database(instance.clone())?;
+            self.save_registry(&reg)?;
+            let detail = format!(
+                "Provisioned {} ({} at {}). File-based — no daemon to start; link it to a project.",
+                instance.id,
+                eng.label(),
+                instance
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            );
+            let summary = db_instance_summary(&instance, "running".into(), &app_data);
+            return Ok(DatabaseOpResult {
+                ok: true,
+                detail,
+                instance: Some(summary),
+                warnings: vec![],
+            });
+        }
+
+        // Prefer a PortBay-managed engine install, falling back to Homebrew/system —
+        // matching the CLI `portbay db create` so both surfaces provision identically.
+        let managed_bin = reg
+            .managed_engine(eng)
+            .map(|m| crate::databases::managed_bin_dir(&m.dir));
+        let daemon = crate::databases::daemon_binary_resolved(eng, managed_bin.as_deref())
+            .ok_or_else(|| {
+                AppError::BadInput(format!(
+                    "{} isn't installed ({}). Install the engine binary from the PortBay app, then retry.",
+                    eng.label(),
+                    db_install_hint(eng)
+                ))
+            })?;
 
         let port = match args.port {
             Some(p) => {
@@ -1119,8 +1292,8 @@ impl McpContext {
             None => db_allocate_port(&reg, eng),
         };
 
-        let detection = crate::databases::detect(eng);
-        crate::databases::provision(eng, &daemon, &app_data, &id, port)
+        let detection = crate::databases::detect_resolved(eng, managed_bin.as_deref());
+        crate::databases::provision(eng, &daemon, &app_data, &id, port, managed_bin.as_deref())
             .map_err(AppError::Internal)?;
 
         let instance = DatabaseInstance {
@@ -1132,6 +1305,7 @@ impl McpContext {
             data_dir: crate::databases::data_dir(&app_data, &id),
             config_path: crate::databases::config_path(eng, &app_data, &id),
             socket_path: crate::databases::socket_path(eng, &app_data, &id),
+            file_path: None,
             auto_start: args.auto_start.unwrap_or(false),
             linked_projects: vec![],
         };
@@ -1295,17 +1469,15 @@ impl McpContext {
     // port + sidecar lifecycle are app-only and intentionally not exposed.)
     // -------------------------------------------------------------------------
 
-    /// Domain suffix, resolver-file state (parsed from `/etc/resolver/<suffix>`,
-    /// since the live sidecar port isn't reachable cross-process), helper
-    /// availability, and the persisted dnsmasq tuning.
+    /// Domain suffix, resolver-file state (parsed from the platform resolver
+    /// file, since the live sidecar port isn't reachable cross-process),
+    /// helper availability, and the persisted dnsmasq tuning.
     pub fn dns_status(&self) -> AppResult<DnsStatusResult> {
         let reg = self.load_registry()?;
         let suffix = reg.domain_suffix.clone();
         let path = crate::dnsmasq::resolver::resolver_file_path(&suffix);
         let contents = crate::dnsmasq::resolver::read_installed(&suffix);
-        let resolver_installed = contents
-            .as_deref()
-            .is_some_and(|c| c.contains("nameserver 127.0.0.1"));
+        let resolver_installed = contents.as_deref().is_some_and(resolver_points_to_portbay);
         let resolver_port = contents.as_deref().and_then(parse_resolver_port);
         Ok(DnsStatusResult {
             suffix,
@@ -1759,7 +1931,10 @@ impl McpContext {
                 });
                 continue;
             }
-            let process_id = process_id.expect("checked above");
+            // Guarded by the `is_none()` early-continue above; bind without panicking.
+            let Some(process_id) = process_id else {
+                continue;
+            };
             // Note: mark_stop_requested is app-only state; OMIT here (cross-process).
             let res = match op {
                 GroupOp::Start => client.start(&process_id).await,
@@ -1865,6 +2040,8 @@ impl McpContext {
             services,
             env: Default::default(),
             readiness,
+            pre_start: vec![],
+            post_start: vec![],
             auto_start,
             tags: vec![],
             document_root,
@@ -1876,6 +2053,8 @@ impl McpContext {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         })
     }
 }
@@ -2003,6 +2182,7 @@ fn db_install_hint(e: DatabaseEngine) -> &'static str {
         DatabaseEngine::Redis => "brew install redis",
         DatabaseEngine::Mongo => "brew install mongodb-community",
         DatabaseEngine::Memcached => "brew install memcached",
+        DatabaseEngine::Sqlite => "ships with macOS (brew install sqlite)",
     }
 }
 
@@ -2111,7 +2291,7 @@ pub struct DnsmasqSettingsView {
 pub struct DnsStatusResult {
     /// The active domain suffix (e.g. `portbay.test`).
     pub suffix: String,
-    /// Whether `/etc/resolver/<suffix>` points wildcard `*.suffix` at PortBay's
+    /// Whether the platform resolver points wildcard `*.suffix` at PortBay's
     /// dnsmasq. When false, projects resolve via `/etc/hosts` instead.
     pub resolver_installed: bool,
     pub resolver_path: String,
@@ -2150,12 +2330,18 @@ pub struct SetDomainSuffixResult {
     pub cert_dirs_removed: usize,
 }
 
-/// Parse the `port <n>` line out of an `/etc/resolver/<suffix>` file body.
+fn resolver_points_to_portbay(contents: &str) -> bool {
+    contents.contains("nameserver 127.0.0.1") || contents.contains("DNS=127.0.0.1:")
+}
+
+/// Parse the target port out of the platform resolver file body.
 fn parse_resolver_port(contents: &str) -> Option<u16> {
     contents.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("port ")
-            .and_then(|n| n.trim().parse().ok())
+        let line = line.trim();
+        line.strip_prefix("port ")
+            .map(str::trim)
+            .or_else(|| line.strip_prefix("DNS=127.0.0.1:").map(str::trim))
+            .and_then(|n| n.split_whitespace().next()?.parse().ok())
     })
 }
 
@@ -2430,17 +2616,38 @@ impl From<McpTemplate> for ScaffoldKind {
 // degrade), so they run fully offline against a tempfile registry.
 // =============================================================================
 
+// This test module sits mid-file (substantial production code — the McpContext
+// impl, card_json, parse_priority_str — follows it), which is a long-standing
+// layout here; keeping it in place rather than relocating ~1000 lines.
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     fn ctx_in(dir: &std::path::Path) -> McpContext {
+        sandbox_hosts();
         McpContext {
             registry_path: dir.join("registry.json"),
             // A port nothing is listening on, so the daemon always reads as down.
             pc_port: 1,
         }
+    }
+
+    /// Redirect `/etc/hosts` writes to a throwaway file for the whole test
+    /// process. Several ops (`add_project`, `remove_project`, …) call
+    /// `best_effort_add_host`, which would otherwise append real lines to the
+    /// developer's `/etc/hosts` via the privileged helper. A single shared
+    /// path is fine: these tests assert on the registry, never on hosts
+    /// contents, so concurrent writes are harmless.
+    fn sandbox_hosts() {
+        use std::sync::OnceLock;
+        static HOSTS_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let dir = HOSTS_DIR.get_or_init(|| tempdir().unwrap());
+        // SAFETY: `set_var` is technically unsafe under threads, but every
+        // caller sets the same value, so a concurrent set is benign. Same
+        // pattern is used in `runtimes::env`.
+        std::env::set_var("PORTBAY_HOSTS_PATH", dir.path().join("hosts"));
     }
 
     #[tokio::test]
@@ -2923,6 +3130,7 @@ mod tests {
             running: true,
             origin_reachable: Some(true),
             started_at_ms: 1_000_000,
+            custom: false,
         };
         write_state(data_dir, std::slice::from_ref(&entry)).expect("write_state should succeed");
 
@@ -3082,6 +3290,7 @@ mod tests {
             data_dir: crate::databases::data_dir(ctx.data_dir(), id),
             config_path: None,
             socket_path: None,
+            file_path: None,
             auto_start: false,
             linked_projects: vec![],
         })
@@ -3310,5 +3519,808 @@ mod tests {
         let reg = ctx.load_registry().unwrap();
         assert_eq!(reg.domain_suffix, "dev.test");
         assert_eq!(reg.list_projects()[0].hostname, "web.dev.test");
+    }
+
+    // Task board over MCP — create → get (full body + touchpoints) → record
+    // discovered touchpoints via update → get reflects them.
+    #[tokio::test]
+    async fn task_get_and_touchpoints_writeback_roundtrip() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let id = ctx
+            .add_project(AddProjectArgs {
+                path: proj.path().to_string_lossy().to_string(),
+                name: Some("Blog".into()),
+                hostname: Some("blog.test".into()),
+                kind: Some(McpProjectKind::Static),
+                port: None,
+                start_command: None,
+                https: Some(true),
+                auto_start: Some(false),
+                php_version: None,
+                document_root: None,
+            })
+            .await
+            .unwrap()
+            .project
+            .unwrap()
+            .id;
+
+        let created = ctx
+            .task_create(TaskCreateArgs {
+                project: id.clone(),
+                title: "Add RSS feed".into(),
+                body: Some("Generate an Atom feed.".into()),
+                status: None,
+                priority: None,
+                acceptance: Some("/feed.xml validates".into()),
+                touchpoints: Some(vec!["src/feed.rs".into()]),
+                labels: None,
+                estimate: None,
+                template: None,
+            })
+            .unwrap();
+        let card_id = created["id"].as_str().unwrap().to_string();
+
+        // task_get returns the full card (body + touchpoints included).
+        let got = ctx
+            .task_get(TaskGetArgs {
+                project: id.clone(),
+                id: card_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(got["body"], "Generate an Atom feed.");
+        assert_eq!(got["touchpoints"][0], "src/feed.rs");
+
+        // An unclaimed card accepts a touchpoints writeback (run_id optional).
+        ctx.task_update(TaskUpdateArgs {
+            project: id.clone(),
+            id: card_id.clone(),
+            run_id: None,
+            status: None,
+            note: None,
+            reason: None,
+            touchpoints: Some(vec!["src/feed.rs".into(), "templates/atom.xml".into()]),
+        })
+        .unwrap();
+
+        let after = ctx
+            .task_get(TaskGetArgs {
+                project: id,
+                id: card_id,
+            })
+            .unwrap();
+        let tp: Vec<String> = after["touchpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(tp, vec!["src/feed.rs", "templates/atom.xml"]);
+    }
+
+    // task_complete runs the whole finish pipeline in one call and is idempotent:
+    // the first call advances the card and reports noop=false; an identical retry
+    // once it's already Done is a no-op (noop=true), so a retry never double-posts.
+    #[tokio::test]
+    async fn task_complete_finishes_then_is_idempotent_on_retry() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let id = ctx
+            .add_project(AddProjectArgs {
+                path: proj.path().to_string_lossy().to_string(),
+                name: Some("Blog".into()),
+                hostname: Some("blog.test".into()),
+                kind: Some(McpProjectKind::Static),
+                port: None,
+                start_command: None,
+                https: Some(true),
+                auto_start: Some(false),
+                php_version: None,
+                document_root: None,
+            })
+            .await
+            .unwrap()
+            .project
+            .unwrap()
+            .id;
+
+        let created = ctx
+            .task_create(TaskCreateArgs {
+                project: id.clone(),
+                title: "Ship the feed".into(),
+                body: None,
+                // Start in Todo (a dispatchable column); task_complete stages it
+                // into InProgress before reporting Done.
+                status: Some("Todo".into()),
+                priority: None,
+                acceptance: None,
+                touchpoints: None,
+                labels: None,
+                estimate: None,
+                template: None,
+            })
+            .unwrap();
+        let card_id = created["id"].as_str().unwrap().to_string();
+
+        let args = TaskCompleteArgs {
+            project: id.clone(),
+            id: card_id.clone(),
+            run_id: "r_1".into(),
+            status: Some("Done".into()),
+            comment: Some("acceptance met".into()),
+            handoff: Some("shipped the feed; next: announce".into()),
+            author: Some("claude".into()),
+            touchpoints: Some(vec!["src/feed.rs".into()]),
+        };
+
+        // First call finishes the card.
+        let first = ctx.task_complete(args.clone()).unwrap();
+        assert_eq!(first["ok"], true);
+        assert_eq!(first["noop"], false);
+
+        let after = ctx
+            .task_get(TaskGetArgs {
+                project: id.clone(),
+                id: card_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(after["status"], "Done");
+
+        // The hand-off picked up our note.
+        let h = ctx
+            .handoff_get(HandoffGetArgs {
+                project: id.clone(),
+            })
+            .unwrap();
+        assert_eq!(h["exists"], true);
+        assert!(h["body"].as_str().unwrap().contains("shipped the feed"));
+
+        // An identical retry is a no-op — no second comment / hand-off entry.
+        let second = ctx.task_complete(args).unwrap();
+        assert_eq!(second["noop"], true);
+        assert_eq!(second["status"], "Done");
+    }
+
+    // learning_add writes a structured, capped, deduped entry that learnings_get
+    // (the read backing the `…/learnings` MCP resource) then returns live.
+    #[tokio::test]
+    async fn learning_add_then_get_round_trips_and_dedupes() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let id = ctx
+            .add_project(AddProjectArgs {
+                path: proj.path().to_string_lossy().to_string(),
+                name: Some("Blog".into()),
+                hostname: Some("blog.test".into()),
+                kind: Some(McpProjectKind::Static),
+                port: None,
+                start_command: None,
+                https: Some(true),
+                auto_start: Some(false),
+                php_version: None,
+                document_root: None,
+            })
+            .await
+            .unwrap()
+            .project
+            .unwrap()
+            .id;
+
+        // No learnings yet.
+        let empty = ctx
+            .learnings_get(LearningsGetArgs {
+                project: id.clone(),
+            })
+            .unwrap();
+        assert_eq!(empty["exists"], false);
+
+        // Add one — it lands with its rule + Why.
+        let added = ctx
+            .learning_add(LearningAddArgs {
+                project: id.clone(),
+                text: "Run `composer test`, not `phpunit` directly".into(),
+                why: Some("the project wraps phpunit with an env bootstrap".into()),
+                how: None,
+            })
+            .unwrap();
+        assert_eq!(added["skipped"], false);
+
+        let got = ctx
+            .learnings_get(LearningsGetArgs {
+                project: id.clone(),
+            })
+            .unwrap();
+        assert_eq!(got["exists"], true);
+        let body = got["body"].as_str().unwrap();
+        assert!(body.contains("## Run `composer test`"));
+        assert!(body.contains("**Why:** the project wraps phpunit"));
+
+        // The same rule again is a no-op — the resource won't bloat on a re-assert.
+        let dup = ctx
+            .learning_add(LearningAddArgs {
+                project: id.clone(),
+                text: "Run `composer test`, not `phpunit` directly".into(),
+                why: Some("a different reason".into()),
+                how: None,
+            })
+            .unwrap();
+        assert_eq!(dup["skipped"], true);
+    }
+}
+
+// ===========================================================================
+// Per-project task board — the live MCP channel into the canonical model.
+//
+// These reuse `crate::context` (the same shared layer the GUI and CLI call),
+// so the board the agent reads/writes over MCP is byte-for-byte the board the
+// human sees. PortBay never runs an LLM; the agent drives these tools.
+// ===========================================================================
+
+#[cfg(feature = "tasks")]
+use crate::context::audit::{Actor, AuditEntry};
+#[cfg(feature = "tasks")]
+use crate::context::board::{self, BoardStatus, ParsedCard};
+#[cfg(feature = "tasks")]
+use crate::context::{clock, config, handoff, learnings, model, ops as board_ops, sync};
+
+/// One card as JSON the agent consumes (frontmatter + body).
+#[cfg(feature = "tasks")]
+fn card_json(pc: &ParsedCard) -> serde_json::Value {
+    let mut v = serde_json::to_value(&pc.card).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("body".into(), serde_json::Value::String(pc.body.clone()));
+    }
+    v
+}
+
+#[cfg(feature = "tasks")]
+impl McpContext {
+    fn board_project_path(&self, id: &str) -> AppResult<PathBuf> {
+        let reg = self.load_registry()?;
+        reg.get_project(&ProjectId::new(id))
+            .map(|p| p.path.clone())
+            .ok_or_else(|| AppError::NotFound(id.to_string()))
+    }
+
+    /// The derived `ProjectContext` as JSON (backs the `…/context` resource).
+    pub fn project_context_value(&self, id: &str) -> AppResult<serde_json::Value> {
+        let reg = self.load_registry()?;
+        let p = reg
+            .get_project(&ProjectId::new(id))
+            .ok_or_else(|| AppError::NotFound(id.to_string()))?;
+        Ok(serde_json::to_value(model::ProjectContext::derive(&reg, p))
+            .unwrap_or_else(|_| serde_json::json!({})))
+    }
+
+    pub fn tasks_list(&self, args: TasksListArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let filter = match &args.status {
+            Some(s) => Some(BoardStatus::parse(s)?),
+            None => None,
+        };
+        let cards = board::list_cards(&path)?;
+        let out: Vec<serde_json::Value> = cards
+            .iter()
+            .filter(|c| filter.is_none_or(|f| c.card.status == f))
+            .map(card_json)
+            .collect();
+        Ok(serde_json::json!({ "project": args.project, "tasks": out }))
+    }
+
+    pub fn task_next(&self, args: TaskNextArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let cards = board::list_cards(&path)?;
+        // Don't hand the agent a card whose dependencies aren't finished — its
+        // `blocked_by` cards must all be terminal first.
+        let next = cards
+            .iter()
+            .filter(|c| c.card.status == BoardStatus::Todo && !c.card.draft)
+            .filter(|c| board::unmet_dependencies(&cards, &c.card).is_empty())
+            .min_by_key(|c| c.card.order);
+        Ok(serde_json::json!({ "next": next.map(card_json) }))
+    }
+
+    pub fn task_get(&self, args: TaskGetArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let pc = board::read_card(&path, &args.id)?;
+        Ok(card_json(&pc))
+    }
+
+    pub fn task_create(&self, args: TaskCreateArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let status = match &args.status {
+            Some(s) => Some(BoardStatus::parse(s)?),
+            None => None,
+        };
+        let priority = parse_priority_str(args.priority.as_deref())?;
+        let mut create = board_ops::CreateInput {
+            title: args.title,
+            body: args.body.unwrap_or_default(),
+            status,
+            priority,
+            due: None,
+            acceptance: args.acceptance,
+            touchpoints: args.touchpoints.unwrap_or_default(),
+            automation: None,
+            agent: None,
+            labels: args.labels.unwrap_or_default(),
+            estimate: args.estimate,
+            color: None,
+            url: None,
+            links: Vec::new(),
+            checklist: None,
+        };
+        if let Some(name) = args.template.as_deref() {
+            if let Some(tpl) = crate::context::templates::get(name) {
+                tpl.seed(&mut create);
+            }
+        }
+        let pc = board_ops::create_card(
+            &path,
+            create,
+            Actor::agent("mcp", mcp_agent_label()),
+            &clock::now_iso8601(),
+        )?;
+        Ok(card_json(&pc))
+    }
+
+    pub fn task_ack(&self, args: TaskAckArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let pc = board::read_card(&path, &args.id)?;
+        validate_run(&pc, Some(&args.run_id))?;
+        crate::context::audit::record(
+            &path,
+            &AuditEntry {
+                at: clock::now_iso8601(),
+                card_id: args.id.clone(),
+                action: "ack".into(),
+                from: None,
+                to: Some(pc.card.status),
+                actor: Actor::agent(args.run_id.clone(), agent_for_run(&path, &args.run_id)),
+                note: None,
+            },
+        )?;
+        // Acknowledging is a liveness signal — refresh the lease heartbeat.
+        let _ = crate::context::automation::touch_heartbeat(&path, &args.id);
+        Ok(serde_json::json!({ "ok": true, "id": args.id, "status": pc.card.status }))
+    }
+
+    pub fn task_check(&self, args: TaskCheckArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let pc = board::read_card(&path, &args.id)?;
+        validate_run(&pc, args.run_id.as_deref())?;
+        let run_id = args.run_id.unwrap_or_else(|| "mcp".into());
+        let actor = Actor::agent(run_id.clone(), agent_for_run(&path, &run_id));
+        let updated = board_ops::check_item(
+            &path,
+            &args.id,
+            args.idx,
+            args.done.unwrap_or(true),
+            actor,
+            &clock::now_iso8601(),
+        )?;
+        let _ = crate::context::automation::touch_heartbeat(&path, &args.id);
+        Ok(card_json(&updated))
+    }
+
+    pub fn task_checklist_add(&self, args: TaskChecklistAddArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let pc = board::read_card(&path, &args.id)?;
+        validate_run(&pc, args.run_id.as_deref())?;
+        let run_id = args.run_id.unwrap_or_else(|| "mcp".into());
+        let actor = Actor::agent(run_id.clone(), agent_for_run(&path, &run_id));
+        let updated = board_ops::add_checklist_items(
+            &path,
+            &args.id,
+            args.items,
+            args.label,
+            actor,
+            &clock::now_iso8601(),
+        )?;
+        let _ = crate::context::automation::touch_heartbeat(&path, &args.id);
+        Ok(card_json(&updated))
+    }
+
+    pub fn task_comment(&self, args: TaskCommentArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let pc = board::read_card(&path, &args.id)?;
+        validate_run(&pc, args.run_id.as_deref())?;
+        let run_id = args.run_id.unwrap_or_else(|| "mcp".into());
+        let actor = Actor::agent(run_id.clone(), agent_for_run(&path, &run_id));
+        board_ops::comment(&path, &args.id, &args.text, actor, &clock::now_iso8601())?;
+        let _ = crate::context::automation::touch_heartbeat(&path, &args.id);
+        Ok(serde_json::json!({ "ok": true, "id": args.id }))
+    }
+
+    pub fn task_update(&self, args: TaskUpdateArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let pc = board::read_card(&path, &args.id)?;
+        validate_run(&pc, args.run_id.as_deref())?;
+
+        let now = clock::now_iso8601();
+        let run_id = args.run_id.clone().unwrap_or_else(|| "mcp".into());
+        let actor = Actor::agent(run_id.clone(), agent_for_run(&path, &run_id));
+        let mut reminders: Vec<String> = Vec::new();
+        let mut card = pc.card.clone();
+        // Any update is a model-side heartbeat for the lease.
+        let _ = crate::context::automation::touch_heartbeat(&path, &args.id);
+
+        // The agent may record the touchpoints it actually touched / discovered
+        // (a working artifact that helps the next run and the human's review);
+        // all other card content stays human-owned and is not editable here.
+        if let Some(tp) = args.touchpoints.clone() {
+            board_ops::update_card(
+                &path,
+                &args.id,
+                board_ops::UpdatePatch {
+                    touchpoints: Some(tp),
+                    ..Default::default()
+                },
+                actor.clone(),
+                &now,
+            )?;
+            card = board::read_card(&path, &args.id)?.card;
+        }
+
+        // A progress note (or block reason) is recorded as an audit entry and
+        // doubles as a model-side heartbeat.
+        let note = args.note.clone().or_else(|| args.reason.clone());
+        if let Some(n) = &note {
+            crate::context::audit::record(
+                &path,
+                &AuditEntry {
+                    at: now.clone(),
+                    card_id: args.id.clone(),
+                    action: "note".into(),
+                    from: None,
+                    to: Some(card.status),
+                    actor: actor.clone(),
+                    note: Some(n.clone()),
+                },
+            )?;
+        }
+
+        if let Some(s) = &args.status {
+            let to = BoardStatus::parse(s)?;
+            if matches!(
+                to,
+                BoardStatus::Done | BoardStatus::Blocked | BoardStatus::Review
+            ) {
+                // Terminal report → apply policy (requireReview / acceptanceCheck
+                // / autoDeriveHandoff / autoChain), free the lease, then reflect
+                // the *resolved* status (which may differ from `to`).
+                let reg = self.load_registry()?;
+                let project = reg
+                    .get_project(&ProjectId::new(&args.project))
+                    .ok_or_else(|| AppError::NotFound(args.project.clone()))?;
+                let resolved = crate::context::automation::report_terminal(
+                    &reg,
+                    project,
+                    &args.id,
+                    to,
+                    actor.clone(),
+                    &now,
+                )?;
+                card = board::read_card(&path, &args.id)?.card;
+                if matches!(resolved, BoardStatus::Done | BoardStatus::Review) {
+                    let cfg = config::load(&path)?;
+                    if cfg.automation.require_handoff_on_done {
+                        reminders.push(
+                            "Before finishing, call portbay_handoff_update with a minimal brief (what changed, the next step, open items)."
+                                .into(),
+                        );
+                    }
+                }
+                if resolved == BoardStatus::Blocked && to == BoardStatus::Done {
+                    reminders.push(
+                        "Your acceptance check failed — the card is Blocked. Fix it and report Done again."
+                            .into(),
+                    );
+                }
+            } else {
+                let moved =
+                    board_ops::move_card(&path, &args.id, to, true, None, actor.clone(), &now)?;
+                card = moved.card;
+            }
+        }
+
+        let card = ParsedCard {
+            card,
+            body: pc.body.clone(),
+        };
+        Ok(serde_json::json!({ "card": card_json(&card), "reminders": reminders }))
+    }
+
+    pub fn handoff_get(&self, args: HandoffGetArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        Ok(match handoff::read(&path)? {
+            Some(h) => serde_json::json!({
+                "exists": true,
+                "updated": h.meta.updated,
+                "tokenBudget": h.meta.token_budget,
+                "tokens": handoff::estimate_tokens(&h.body),
+                "autoGenerated": h.meta.auto_generated,
+                "body": h.body,
+            }),
+            None => serde_json::json!({ "exists": false, "body": "" }),
+        })
+    }
+
+    pub fn handoff_update(&self, args: HandoffUpdateArgs) -> AppResult<serde_json::Value> {
+        let reg = self.load_registry()?;
+        let project = reg
+            .get_project(&ProjectId::new(&args.project))
+            .ok_or_else(|| AppError::NotFound(args.project.clone()))?;
+        let path = project.path.clone();
+        let cfg = config::load(&path)?;
+        let ctx = model::ProjectContext::derive(&reg, project);
+        let cards = board::list_cards(&path)?;
+        // Attribution: an explicit `author` wins; otherwise fall back to the
+        // agent PortBay stamped into the MCP server env at dispatch
+        // (`PORTBAY_AGENT`), then a generic "agent".
+        let env_agent = std::env::var("PORTBAY_AGENT").ok();
+        let author = args
+            .author
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                env_agent
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or("agent");
+        let up = handoff::update(
+            &path,
+            Some(&args.narrative),
+            author,
+            &ctx,
+            &cards,
+            cfg.handoff.max_chars,
+            &clock::now_iso8601(),
+            false,
+        )?;
+        let _ = sync::sync_project(&reg, project, false);
+        Ok(serde_json::json!({
+            "updated": up.handoff.meta.updated,
+            "chars": up.chars,
+            "maxChars": up.handoff.meta.max_chars,
+            "trimmed": up.trimmed,
+        }))
+    }
+
+    pub fn learnings_get(&self, args: LearningsGetArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        Ok(match learnings::read(&path)? {
+            Some(l) => serde_json::json!({
+                "exists": true,
+                "updated": l.meta.updated,
+                "tokens": learnings::estimate_tokens(&l.body),
+                "maxChars": l.meta.max_chars,
+                "body": l.body,
+            }),
+            None => serde_json::json!({ "exists": false, "body": "" }),
+        })
+    }
+
+    pub fn learning_add(&self, args: LearningAddArgs) -> AppResult<serde_json::Value> {
+        let reg = self.load_registry()?;
+        let project = reg
+            .get_project(&ProjectId::new(&args.project))
+            .ok_or_else(|| AppError::NotFound(args.project.clone()))?;
+        let path = project.path.clone();
+        let cfg = config::load(&path)?;
+        let now = clock::now_iso8601();
+        let up = learnings::add(
+            &path,
+            &args.text,
+            args.why.as_deref(),
+            args.how.as_deref(),
+            cfg.learnings.max_chars,
+            &now,
+        )?;
+        // Record an audit entry so the notification scanner can surface "an agent
+        // recorded a learning" in the bell (and deep-link to the project's
+        // Learnings panel). A learning has no card, so `card_id` is empty; the
+        // rule text rides in `note` for the bell preview. A *skipped* (duplicate)
+        // add changes nothing, so it raises no notification.
+        if !up.skipped {
+            let _ = crate::context::audit::record(
+                &path,
+                &AuditEntry {
+                    at: now.clone(),
+                    card_id: String::new(),
+                    action: "learning".into(),
+                    from: None,
+                    to: None,
+                    actor: Actor::agent("mcp", mcp_agent_label()),
+                    note: Some(args.text.trim().to_string()),
+                },
+            );
+        }
+        let _ = sync::sync_project(&reg, project, false);
+        Ok(serde_json::json!({
+            "updated": up.learnings.meta.updated,
+            "chars": up.chars,
+            "maxChars": up.learnings.meta.max_chars,
+            "trimmed": up.trimmed,
+            "skipped": up.skipped,
+        }))
+    }
+
+    /// Finish (or block) a card in one call: ack → optional comment → optional
+    /// hand-off → terminal status. Collapses the 4–5 fine-grained calls a
+    /// dispatched agent otherwise makes into one round-trip.
+    ///
+    /// Idempotent at the completion boundary: if the card already sits in the
+    /// requested status (a retried completion), it's a no-op — no second comment
+    /// or hand-off entry. (A *partial* prior failure — acked but status not yet
+    /// set — re-runs from ack on retry, which is the safe direction.) Each step
+    /// still validates `run_id`, so a stale session can't clobber a re-dispatched
+    /// card.
+    pub fn task_complete(&self, args: TaskCompleteArgs) -> AppResult<serde_json::Value> {
+        let path = self.board_project_path(&args.project)?;
+        let pc = board::read_card(&path, &args.id)?;
+        validate_run(&pc, Some(&args.run_id))?;
+
+        let status_str = args.status.clone().unwrap_or_else(|| "Done".into());
+        let target = BoardStatus::parse(&status_str)?;
+        if pc.card.status == target {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "noop": true,
+                "id": args.id,
+                "status": target,
+                "card": card_json(&pc),
+            }));
+        }
+
+        // 1. Acknowledge (liveness + audit; re-ack is harmless).
+        self.task_ack(TaskAckArgs {
+            project: args.project.clone(),
+            id: args.id.clone(),
+            run_id: args.run_id.clone(),
+        })?;
+
+        // 1b. A terminal report is only legal from InProgress (or Review). A
+        // dispatched card is normally already InProgress; if it's still Todo,
+        // stage it so "finish in one call" doesn't trip the Todo→Done rule. A
+        // Backlog card was never dispatched and stays un-completable by design —
+        // the transition check below will surface that rather than guessing.
+        if matches!(
+            target,
+            BoardStatus::Done | BoardStatus::Review | BoardStatus::Blocked
+        ) && pc.card.status == BoardStatus::Todo
+        {
+            self.task_update(TaskUpdateArgs {
+                project: args.project.clone(),
+                id: args.id.clone(),
+                run_id: Some(args.run_id.clone()),
+                status: Some("InProgress".into()),
+                note: None,
+                reason: None,
+                touchpoints: None,
+            })?;
+        }
+
+        // 2. Optional acceptance/confirmation comment.
+        if let Some(text) = args
+            .comment
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.task_comment(TaskCommentArgs {
+                project: args.project.clone(),
+                id: args.id.clone(),
+                text: text.to_string(),
+                run_id: Some(args.run_id.clone()),
+            })?;
+        }
+
+        // 3. Optional hand-off note (newest continuation-brief entry).
+        if let Some(narrative) = args
+            .handoff
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.handoff_update(HandoffUpdateArgs {
+                project: args.project.clone(),
+                narrative: narrative.to_string(),
+                author: args.author.clone(),
+            })?;
+        }
+
+        // 4. Terminal status (applies acceptance/handoff policy, frees the lease).
+        let update = self.task_update(TaskUpdateArgs {
+            project: args.project.clone(),
+            id: args.id.clone(),
+            run_id: Some(args.run_id.clone()),
+            status: Some(status_str),
+            note: None,
+            reason: None,
+            touchpoints: args.touchpoints.clone(),
+        })?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "noop": false,
+            "id": args.id,
+            "card": update.get("card").cloned().unwrap_or(serde_json::Value::Null),
+            "reminders": update.get("reminders").cloned().unwrap_or_else(|| serde_json::json!([])),
+        }))
+    }
+}
+
+/// The agent label to attribute board mutations to in the audit log + activity
+/// view. PortBay stamps the dispatched agent's name into the MCP server env
+/// (`PORTBAY_AGENT`) at launch; fall back to "external" for a manually-run
+/// server with no dispatch context. Previously every board op hardcoded
+/// "external", so the audit trail couldn't tell `claude` from `codex`.
+#[cfg(feature = "tasks")]
+fn mcp_agent_label() -> String {
+    std::env::var("PORTBAY_AGENT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "external".to_string())
+}
+
+/// Resolve the dispatched agent for a run. The intended source is the
+/// `PORTBAY_AGENT` env stamp, but an MCP server the agent launched from a
+/// cached/global config won't have it (reports "external"). In that case recover
+/// the agent from the audit trail: the dispatcher records the run's transitions
+/// with the real agent kind, keyed by `run_id`.
+#[cfg(feature = "tasks")]
+fn agent_for_run(project_path: &std::path::Path, run_id: &str) -> String {
+    let env = mcp_agent_label();
+    if env != "external" {
+        return env;
+    }
+    if let Ok(entries) = crate::context::audit::read(project_path) {
+        for e in entries.iter().rev() {
+            if let crate::context::audit::Actor::Agent { run_id: rid, agent } = &e.actor {
+                if rid == run_id && agent != "external" && agent != "mcp" {
+                    return agent.clone();
+                }
+            }
+        }
+    }
+    env
+}
+
+/// Reject a stale/zombie run: if the card carries a soft cross-machine claim
+/// and the caller supplies a different `run_id`, its update is refused.
+#[cfg(feature = "tasks")]
+fn validate_run(pc: &ParsedCard, run_id: Option<&str>) -> AppResult<()> {
+    if let (Some(claim), Some(rid)) = (&pc.card.claim, run_id) {
+        if claim.run_id != rid {
+            return Err(AppError::Context(crate::context::ContextError::StaleRun {
+                card_id: pc.card.id.clone(),
+                run_id: rid.to_string(),
+            }));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "tasks")]
+fn parse_priority_str(s: Option<&str>) -> AppResult<Option<crate::context::board::Priority>> {
+    use crate::context::board::Priority;
+    match s {
+        None => Ok(None),
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "critical" | "crit" => Ok(Some(Priority::Critical)),
+            "high" => Ok(Some(Priority::High)),
+            "medium" | "med" => Ok(Some(Priority::Medium)),
+            "low" => Ok(Some(Priority::Low)),
+            other => Err(AppError::BadInput(format!("unknown priority '{other}'"))),
+        },
     }
 }

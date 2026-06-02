@@ -7,7 +7,6 @@
   Edit, Remove).
 -->
 <script lang="ts">
-  import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { safeInvoke } from "$lib/ipc";
@@ -87,9 +86,9 @@
     e.stopPropagation();
     close();
     try {
-      await revealItemInDir(project.path);
+      await safeInvoke("reveal_in_finder", { path: project.path });
     } catch {
-      /* opener pushes its own toast */
+      /* safeInvoke already pushed the toast */
     }
   }
 
@@ -123,6 +122,7 @@
       await projects.refresh();
       errorBus.push({
         code: "REMOVE_OK",
+        category: "lifecycle",
         whatHappened: `${project.name} removed.`,
         whyItMatters: "Registry entry, cert, and hosts entry were cleaned up.",
         whoCausedIt: "system",

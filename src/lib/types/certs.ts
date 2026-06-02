@@ -10,4 +10,13 @@ export interface CertInfo {
   expiresAt: string | null;
   daysUntilExpiry: number | null;
   sans: string[];
+  status:
+    | "ready"
+    | "missingCa"
+    | "expired"
+    | "untrusted"
+    | "regenerateNeeded"
+    | "error";
+  trustStoreVerified: boolean | null;
+  errors: string[];
 }

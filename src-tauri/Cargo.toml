@@ -33,6 +33,12 @@ members = ["crates/mcp", "crates/hosts-helper"]
 # Enables `portbay_lib::mcp` + its protocol stack (rmcp). Off by default for
 # GUI/CLI builds; turned on by the crates/mcp dependency on this package.
 mcp = ["dep:rmcp"]
+# Enables the proprietary per-project task board (`crate::context`,
+# `commands::tasks`, the notification scanner, and the board surfaces in the
+# CLI + MCP server). OFF in the public OSS build — the board source is injected
+# from `portbay-cloud/desktop-pro` by the official release overlay, which builds
+# with this feature on. Without it the app simply has no `/tasks` surface.
+tasks = ["dep:ulid"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -42,15 +48,32 @@ tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-ap
 tauri-plugin-shell = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 # Auto-update: checks the GitHub-hosted latest.json, verifies the minisign
 # signature against the pubkey in tauri.conf.json, downloads + installs.
 # tauri-plugin-process backs the relaunch-after-install call.
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Single-instance guard: a second launch hands its argv to the running instance
+# (which focuses its window) and exits, so two app processes never each spawn a
+# full sidecar stack. Desktop-only — registered first in the builder.
+tauri-plugin-single-instance = "2"
+# Native OS file-drag-out: lets the user physically drag PortBay's own .app
+# bundle from the in-app permission sheet and drop it into the System Settings
+# Accessibility list (the macOS gesture that grants the permission). A webview
+# HTML5 drag can't hand a file to an external app — this plugin begins a real
+# AppKit dragging session from the current mouse-down. Used by the accessibility
+# permission sheet (public SetupRequirements + the task board's dictation flow).
+tauri-plugin-drag = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "signal", "process"] }
+async-trait = "0.1"
+russh = "0.43"
+russh-keys = "0.43"
+russh-sftp = "2.0.0-beta.2"
 reqwest = { version = "0.12", features = ["json"] }
 once_cell = "1"
 dirs = "5"
@@ -68,6 +91,10 @@ x509-parser = "0.18"
 libc = "0.2"
 ed25519-dalek = "2"
 base64 = "0.22"
+# HMAC-SHA1 to match OpenSSH hashed (|1|salt|hash) known_hosts entries when
+# resetting a host's trust. Both already in the tree transitively; pinned here.
+hmac = "0.12"
+sha1 = "0.10"
 # Verify the signed managed-runtime manifest with the *same* minisign key as the
 # app updater. Already in the tree transitively via tauri-plugin-updater; pinned
 # here so the on-demand runtime download path is as trusted as an app update.
@@ -79,8 +106,19 @@ zstd = "0.13"
 tar = "0.4"
 sha2 = "0.10"
 hex = "0.4"
-keyring = { version = "3", features = ["apple-native"] }
 aes-gcm = "0.10"
+# Per-project task board ("Project Context & Task Authority"): stable, sortable
+# card IDs (ULID). Optional — pulled in only by the `tasks` feature; the public
+# OSS build links it not.
+ulid = { version = "1", optional = true }
+# Filesystem-event watcher (FSEvents on macOS, inotify on Linux). Two consumers:
+# the live log tail (`commands::log_stream`) wakes on file append so Follow mode
+# surfaces lines as fast as a native `tail -f`, and the task board watches
+# `<project>/.portbay/tasks/`. The log tail is in the default build, so this is
+# a non-optional dependency.
+notify = { version = "6" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "mysql", "sqlite", "chrono", "json"] }
 
 # Official Rust MCP SDK. Optional — gated behind the `mcp` feature and only
 # compiled when the crates/mcp workspace member (which enables that feature)
@@ -100,9 +138,16 @@ rmcp = { version = "1.7", features = [
 # are already in the dependency tree transitively (via Tauri); pinned here so
 # the AppKit call site is explicit. macOS-only.
 [target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSData", "NSArray", "NSString", "NSProcessInfo"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSAppearance"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "linux")))'.dependencies]
+keyring = "3"
 
 [dev-dependencies]
 tempfile = "3"

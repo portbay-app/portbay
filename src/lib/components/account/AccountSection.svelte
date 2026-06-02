@@ -1,10 +1,12 @@
 <!--
   AccountSection — the account + plan surface for Settings. Shows the current
-  tier, signed-in identity, a project-usage meter, and the right next step
-  (sign in, upgrade, or sign out). Mirrors the other Settings <section> cards.
+  tier, signed-in identity, a project-usage meter, the right next step (sign in,
+  upgrade, or sign out), and — when signed in — the profile (avatar + display
+  name) as a section of this same card. Mirrors the other Settings <section> cards.
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import UserAvatar from "$lib/components/shell/UserAvatar.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { account } from "$lib/stores/account.svelte";
   import { licenseDialog } from "$lib/stores/licenseDialog.svelte";
@@ -24,6 +26,69 @@
   const usagePct = $derived(cap === null ? 100 : Math.min(100, Math.round((projectCount / cap) * 100)));
   const nearCap = $derived(cap !== null && projectCount >= cap);
 
+  // ── Profile (avatar + display name) — folded into this card; the markup below
+  //    only renders it when signed in. ──
+  const acct = $derived(entitlements.account);
+  // Only a custom upload routes through the issuer's /avatar/ endpoint; a GitHub
+  // photo is a github CDN URL. Only offer "Remove" for a custom one.
+  const hasCustomAvatar = $derived(!!acct?.avatar_url?.includes("/avatar/"));
+  let nameDraft = $state("");
+  let seededFor = $state<string | null>(null);
+  let profileBusy = $state(false);
+
+  // Seed the name field when the signed-in identity changes (sign in/out/switch)
+  // — not on every entitlement resync — so it shows the current display name
+  // without clobbering an in-progress edit. (ProfileSection got this for free by
+  // only mounting while signed in; this card is always mounted.)
+  $effect(() => {
+    const login = acct?.login ?? null;
+    if (login !== seededFor) {
+      seededFor = login;
+      nameDraft = acct?.display_name ?? "";
+    }
+  });
+
+  async function saveName() {
+    const next = nameDraft.trim();
+    if (next === (acct?.display_name ?? "")) return;
+    profileBusy = true;
+    try {
+      await entitlements.updateDisplayName(next || null);
+    } finally {
+      profileBusy = false;
+    }
+  }
+
+  async function pickAvatar() {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const result = await open({
+        multiple: false,
+        directory: false,
+        title: "Choose a profile picture",
+        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }],
+      });
+      if (typeof result !== "string") return;
+      profileBusy = true;
+      try {
+        await entitlements.uploadAvatar(result);
+      } finally {
+        profileBusy = false;
+      }
+    } catch {
+      /* dialog plugin already toasted */
+    }
+  }
+
+  async function clearAvatar() {
+    profileBusy = true;
+    try {
+      await entitlements.removeAvatar();
+    } finally {
+      profileBusy = false;
+    }
+  }
+
   async function signOut() {
     const ok = await confirmDialog.open({
       title: "Sign out of PortBay?",
@@ -35,45 +100,97 @@
   }
 </script>
 
-<section
-  class="bg-surface border border-border rounded-2xl p-5
-         grid grid-cols-[180px,1fr] gap-x-6"
->
-  <div class="flex items-start gap-2.5">
-    <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-fg-muted/10 text-fg-muted">
-      <Icon name="users" size={15} />
+<section class="bg-surface border border-border rounded-2xl p-5">
+  {#snippet tierBadge()}
+    <span
+      class="shrink-0 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full text-[11.5px] font-semibold
+             {tier === 'pro'
+        ? 'bg-accent/15 text-accent'
+        : tier === 'free'
+          ? 'bg-status-running/15 text-status-running'
+          : 'bg-fg-muted/15 text-fg-muted'}"
+    >
+      {#if tier === "pro"}<Icon name="sparkles" size={12} />{/if}
+      {tierLabel}
     </span>
-    <span class="text-[14px] font-semibold text-fg pt-1">Account</span>
-  </div>
+  {/snippet}
 
   <div class="space-y-4">
-    <!-- identity + tier -->
-    <div class="flex items-center justify-between gap-3">
-      <div class="min-w-0">
-        {#if entitlements.isSignedIn}
-          <div class="text-[13.5px] font-medium text-fg truncate">
-            {entitlements.account?.login}
+    {#if entitlements.isSignedIn}
+      <!-- Profile first: avatar + display name + tier, then the avatar controls.
+           The editable display-name field follows directly below. -->
+      <div class="flex items-start gap-4">
+        <UserAvatar size={56} />
+        <div class="min-w-0 flex-1 space-y-2">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-[14px] font-semibold text-fg truncate">
+                {acct?.display_name || acct?.login}
+              </div>
+              <div class="text-[12px] text-fg-muted truncate">
+                {tier === "pro" ? "Thanks for supporting PortBay." : "Free account"}
+              </div>
+            </div>
+            {@render tierBadge()}
           </div>
-          <div class="text-[12px] text-fg-muted">
-            {tier === "pro" ? "Thanks for supporting PortBay." : "Free account"}
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <button
+              type="button"
+              onclick={pickAvatar}
+              disabled={profileBusy}
+              class="h-8 px-3 rounded-md border border-border text-[12px] text-fg-muted
+                     hover:text-fg hover:bg-surface-2 transition-colors disabled:opacity-50"
+            >
+              Upload picture
+            </button>
+            {#if hasCustomAvatar}
+              <button
+                type="button"
+                onclick={clearAvatar}
+                disabled={profileBusy}
+                class="h-8 px-3 rounded-md text-[12px] text-fg-subtle
+                       hover:text-status-crashed transition-colors disabled:opacity-50"
+              >
+                Remove
+              </button>
+            {/if}
+            <span class="text-[11px] text-fg-subtle">PNG, JPEG, or WebP — up to 256 KB.</span>
           </div>
-        {:else}
+        </div>
+      </div>
+
+      <!-- display name -->
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <span class="text-[13px] text-fg">Display name</span>
+          <p class="text-[11px] text-fg-subtle mt-0.5">
+            Shown in the app and used for your initials when there's no picture.
+          </p>
+        </div>
+        <input
+          type="text"
+          bind:value={nameDraft}
+          onblur={saveName}
+          onkeydown={(e) => {
+            if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+          }}
+          disabled={profileBusy}
+          maxlength="60"
+          placeholder={acct?.login ?? "Your name"}
+          class="h-8 w-56 rounded-md bg-bg border border-border px-2.5 text-[12px] text-fg
+                 focus:outline-none focus:border-accent/60 disabled:opacity-50"
+        />
+      </div>
+    {:else}
+      <!-- anonymous identity + tier -->
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
           <div class="text-[13.5px] font-medium text-fg">Using PortBay anonymously</div>
           <div class="text-[12px] text-fg-muted">No account — up to 3 projects on this Mac.</div>
-        {/if}
+        </div>
+        {@render tierBadge()}
       </div>
-      <span
-        class="shrink-0 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full text-[11.5px] font-semibold
-               {tier === 'pro'
-          ? 'bg-accent/15 text-accent'
-          : tier === 'free'
-            ? 'bg-status-running/15 text-status-running'
-            : 'bg-fg-muted/15 text-fg-muted'}"
-      >
-        {#if tier === "pro"}<Icon name="sparkles" size={12} />{/if}
-        {tierLabel}
-      </span>
-    </div>
+    {/if}
 
     {#if isGrace}
       <p class="text-[12px] leading-relaxed text-status-unhealthy flex items-start gap-1.5">
@@ -149,15 +266,10 @@
 
     <!-- about the license -->
     <div class="border-t border-border/60 pt-3">
-      <p class="text-[11.5px] leading-relaxed text-fg-subtle">
-        PortBay Pro is perpetual and pay-what-you-want — earned with a donation or a merged pull request, never a
-        subscription. Your projects and data are always yours; a lapsed or revoked license only blocks new gated
-        actions, never your existing work.
-      </p>
       <button
         type="button"
         onclick={() => licenseDialog.open()}
-        class="mt-2 inline-flex items-center gap-1 text-[11.5px] font-medium text-accent hover:underline"
+        class="inline-flex items-center gap-1 text-[11.5px] font-medium text-accent hover:underline"
       >
         <Icon name="info" size={12} /> What's in Pro &amp; how licensing works
       </button>

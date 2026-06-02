@@ -6,9 +6,11 @@
 //! store at `<data_dir>/PortBay/mailpit.db`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tauri::AppHandle;
-use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 use crate::mailpit::error::{MailpitError, Result};
@@ -28,6 +30,12 @@ pub struct MailpitSidecar {
     child: Option<CommandChild>,
     smtp_port: u16,
     ui_port: u16,
+    /// True only while the spawned Mailpit is actually alive. `.spawn()`
+    /// returns a handle even if Mailpit exits immediately (e.g. a port already
+    /// bound), so `child.is_some()` alone is a liar. A background task watching
+    /// the event stream flips this to `false` on `Terminated` — and also lets
+    /// Mailpit's own stderr surface instead of being dropped on the floor.
+    alive: Arc<AtomicBool>,
 }
 
 impl Default for MailpitSidecar {
@@ -42,11 +50,12 @@ impl MailpitSidecar {
             child: None,
             smtp_port: DEFAULT_SMTP_PORT,
             ui_port: DEFAULT_UI_PORT,
+            alive: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.child.is_some()
+        self.child.is_some() && self.alive.load(Ordering::Relaxed)
     }
 
     pub fn smtp_port(&self) -> u16 {
@@ -67,7 +76,9 @@ impl MailpitSidecar {
         ui_port: u16,
         db_path: &Path,
     ) -> Result<()> {
-        if self.child.is_some() {
+        // is_running() (not child.is_some()) so a crashed Mailpit is respawned
+        // rather than wrongly treated as still up.
+        if self.is_running() {
             return Ok(());
         }
         self.smtp_port = smtp_port;
@@ -79,14 +90,43 @@ impl MailpitSidecar {
 
         let cmd = resolve_command(app, &smtp, &ui, &db)?;
 
-        let (_rx, child) = cmd
+        let (mut rx, child) = cmd
             .spawn()
             .map_err(|e| MailpitError::SpawnFailed(e.to_string()))?;
+        self.alive.store(true, Ordering::Relaxed);
         self.child = Some(child);
+
+        // Drain the event stream so Mailpit's diagnostics surface, and flip
+        // `alive` the moment it exits so `is_running` can't keep claiming a
+        // dead mailer is up.
+        let alive = self.alive.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(bytes) => {
+                        let line = String::from_utf8_lossy(&bytes);
+                        let line = line.trim_end();
+                        if !line.is_empty() {
+                            tracing::debug!(target: "mailpit", "{line}");
+                        }
+                    }
+                    CommandEvent::Error(err) => {
+                        tracing::warn!(target: "mailpit", error = %err, "mailpit sidecar error");
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        tracing::warn!(target: "mailpit", code = ?payload.code, "mailpit sidecar terminated");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            alive.store(false, Ordering::Relaxed);
+        });
         Ok(())
     }
 
     pub fn stop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
         if let Some(child) = self.child.take() {
             let _ = child.kill();
         }

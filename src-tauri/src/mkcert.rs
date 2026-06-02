@@ -54,6 +54,19 @@ impl MkcertError {
 
 pub type Result<T> = std::result::Result<T, MkcertError>;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CaTrustState {
+    Missing,
+    Untrusted,
+    Trusted,
+}
+
+#[derive(Debug, Clone)]
+pub struct CaStatus {
+    pub root_path: PathBuf,
+    pub state: CaTrustState,
+}
+
 /// Wrapper over the mkcert binary and a directory where per-project certs
 /// live.
 ///
@@ -115,21 +128,34 @@ impl Mkcert {
         Ok(PathBuf::from(path))
     }
 
-    /// Cheap heuristic for "has the user already run `mkcert -install`?".
+    /// Current root CA file + trust-store state.
     ///
-    /// We check whether `<CAROOT>/rootCA.pem` exists. This doesn't *guarantee*
-    /// the CA is in the system trust store — only that mkcert has issued
-    /// itself a root. Good enough for the first-run gate; the worst case is
-    /// we re-prompt for sudo, and `mkcert -install` is idempotent.
+    /// `rootCA.pem` existing is not enough on macOS: the user may have removed
+    /// the mkcert CA from Keychain after issuing certs. In that state existing
+    /// certificates still parse, but browsers warn. Verify the trust store so
+    /// the UI can distinguish Missing CA from Untrusted CA.
+    pub fn ca_status(&self) -> Result<CaStatus> {
+        let root_path = self.ca_root()?.join("rootCA.pem");
+        let state = if !root_path.exists() {
+            CaTrustState::Missing
+        } else if ca_root_is_trusted(&root_path) {
+            CaTrustState::Trusted
+        } else {
+            CaTrustState::Untrusted
+        };
+        Ok(CaStatus { root_path, state })
+    }
+
+    /// True when the CA exists and is trusted by the OS trust store.
     pub fn is_ca_installed(&self) -> bool {
-        match self.ca_root() {
-            Ok(p) => p.join("rootCA.pem").exists(),
+        match self.ca_status() {
+            Ok(status) => status.state == CaTrustState::Trusted,
             Err(_) => false,
         }
     }
 
-    /// Run `mkcert -install`. Triggers the macOS keychain sudo prompt; on
-    /// Firefox-enabled systems may also surface an NSS prompt.
+    /// Run `mkcert -install`. Triggers the OS trust-store authorization prompt;
+    /// on Firefox-enabled systems may also surface an NSS prompt.
     pub fn install_ca(&self) -> Result<()> {
         // Capture output (not just status): mkcert writes the real reason to
         // stderr. The previous `.status()` discarded it, leaving `stderr: ""`,
@@ -199,6 +225,17 @@ impl Mkcert {
             });
         }
 
+        // The TLS private key must not be world-readable: on a shared/multi-user
+        // Mac any local user could otherwise read it and MITM the developer's
+        // own HTTPS sessions to *.test. mkcert writes it with the process umask
+        // (typically 0644), so tighten it to 0600 (key) and 0700 (dir) here.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+
         Ok(CertPaths {
             certificate: cert_path,
             key: key_path,
@@ -220,6 +257,28 @@ impl Mkcert {
     fn command(&self) -> Command {
         Command::new(&self.binary)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn ca_root_is_trusted(root_path: &Path) -> bool {
+    let Ok(out) = Command::new("/usr/bin/security")
+        .arg("verify-cert")
+        .arg("-c")
+        .arg(root_path)
+        .arg("-l")
+        .output()
+    else {
+        return false;
+    };
+    out.status.success()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ca_root_is_trusted(root_path: &Path) -> bool {
+    // mkcert manages platform/browser stores itself. Outside macOS we keep the
+    // historical behavior: a generated root is treated as usable and `mkcert
+    // -install` remains the user-facing repair path if browsers disagree.
+    root_path.exists()
 }
 
 /// Per-project cert/key paths under a certs root, or `None` unless both files

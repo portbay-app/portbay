@@ -111,6 +111,7 @@
       await projects.refresh();
       errorBus.push({
         code: "IMPORT_OK",
+        category: "lifecycle",
         whatHappened: `Imported ${result.imported.length} ${result.imported.length === 1 ? "project" : "projects"} from ${labelFor(source)}.`,
         whyItMatters:
           result.skipped.length > 0

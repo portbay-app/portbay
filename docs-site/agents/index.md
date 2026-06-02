@@ -5,7 +5,7 @@ description: Connect Claude Code, Cursor, Zed, or any MCP-aware agent to PortBay
 
 # Drive PortBay from an AI Agent (MCP)
 
-PortBay ships an [Model Context Protocol](https://modelcontextprotocol.io) server, `portbay-mcp`. Any MCP-aware agent — Claude Code, Cursor, Codex, Continue, Zed, Windsurf, and others — can drive PortBay directly: register projects, start and stop them, read logs, and diagnose failures, without clicking through the GUI or remembering CLI flags.
+PortBay ships an [Model Context Protocol](https://modelcontextprotocol.io) server, `portbay-mcp`. Any MCP-aware agent — Claude Code, Cursor, Codex, Continue, Zed, Windsurf, and others — can drive PortBay directly: register projects, start and stop them, read logs, diagnose failures, and work a project's task board, without clicking through the GUI or remembering CLI flags.
 
 The agent spawns `portbay-mcp` as a subprocess over stdio. The process boundary **is** the trust boundary — there is no port to open and no extra auth layer.
 
@@ -216,13 +216,28 @@ Current catalog (browse live with `portbay_list_recipes` or the `portbay://recip
 
 Recipes with `composes_fully: false` (Laravel, Symfony) also recommend a database or mail service. The project is still registered with everything PortBay can wire today; the recommended service surfaces as a warning to add from the app.
 
+## Drive the task board {#tasks}
+
+When a project has a [task board](/guides/task-board), an agent can work it directly over MCP. The board is the shared queue between you and the human: cards are Markdown in the repo (`.portbay/tasks/`), and the GUI, the `portbay` CLI, and these tools all read and write the same files — there is no separate database to drift out of sync.
+
+A dispatched run follows a simple loop:
+
+1. **Pick up context.** `portbay_handoff_get` reads the continuation brief; `portbay_task_next` returns the top `Todo` card (or `portbay_task_get` re-reads the one you were dispatched to).
+2. **Claim it.** `portbay_task_ack` with the `run_id` from your prompt proves you engaged — distinct from the process merely launching — and refreshes the run's lease.
+3. **Work and report.** Post progress with `portbay_task_update` (status + `touchpoints`), tick checklist items with `portbay_task_check`, and record decisions with `portbay_task_comment`.
+4. **Hand off.** `portbay_handoff_update` appends a minimal "where we left off" entry, then move the card to `Done` — or `Review` if the board requires human approval — with `portbay_task_update`.
+
+The board enforces its rules even when an agent gets them wrong: an agent can't set `Rejected` (human-only), a card blocked on others won't dispatch until they land, and a run whose process dies is reclaimed so the card returns to the queue. The full tool list is in the [Tasks toolset](./tools#tasks-toolset); the human-facing setup is in the [Task Board guide](/guides/task-board).
+
+Three resources expose board state for the agent to read without tool calls: `portbay://projects/{id}/context` (the derived environment), `portbay://projects/{id}/tasks` (the whole board), and `portbay://projects/{id}/handoff` (the rolling brief).
+
 ## Governance: read-only and toolsets {#governance}
 
 Two flags scope what an agent can do. Both have flag and environment-variable forms; the env var wins over the flag (matching the GitHub MCP server convention). Set them in the `args` / `env` block of your agent config.
 
 ### Read-only mode
 
-Removes every mutating tool (add / update / remove, start / stop / restart, import / export, scaffolding, group mutations, runtime mutations, database mutations, DNS suffix change, cert reissue, sandbox enable/disable, request log clear). The agent can inspect but never change anything.
+Removes every mutating tool (add / update / remove, start / stop / restart, import / export, scaffolding, group mutations, runtime mutations, database mutations, DNS suffix change, cert reissue, sandbox enable/disable, task-board writes, request log clear). The agent can inspect but never change anything.
 
 ```json
 {
@@ -241,7 +256,7 @@ In read-only mode the server appends a note to its system instructions telling t
 
 ### Toolsets
 
-Expose only the tool groups you want. Comma-separated list; valid values are `projects`, `lifecycle`, `diagnostics`, `scaffold`, `groups`, `tunnels`, `runtimes`, `databases`, `dns`, `sandbox`, `inspector`, `certs`, `migrate`, and `all` (the default).
+Expose only the tool groups you want. Comma-separated list; valid values are `projects`, `lifecycle`, `diagnostics`, `scaffold`, `groups`, `tunnels`, `runtimes`, `databases`, `dns`, `sandbox`, `inspector`, `certs`, `migrate`, `tasks`, and `all` (the default).
 
 | Toolset | Tools included |
 | --- | --- |
@@ -258,6 +273,7 @@ Expose only the tool groups you want. Comma-separated list; valid values are `pr
 | `inspector` | recent\_requests, clear\_requests |
 | `certs` | cert\_info, reissue\_cert |
 | `migrate` | detect\_import\_sources, preview\_import, import\_projects |
+| `tasks` | tasks\_list, task\_next, task\_get, task\_create, task\_ack, task\_update, task\_check, task\_checklist\_add, task\_comment, handoff\_get, handoff\_update (the per-project board) |
 
 ```json
 {

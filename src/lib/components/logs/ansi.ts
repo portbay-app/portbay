@@ -24,8 +24,12 @@ const converter = new Convert({
   },
 });
 
-/** Severity used for per-line color coding. `info` is the uncoloured default. */
-export type LogLevel = "error" | "warn" | "debug" | "info";
+/**
+ * Severity used for per-line color coding. `info` is the uncoloured default.
+ * `system` is reserved for PortBay-authored lifecycle lines (Starting, the
+ * command echo, etc.) so they read as distinct from the process's own output.
+ */
+export type LogLevel = "error" | "warn" | "debug" | "info" | "system";
 
 export interface LogLine {
   /** Severity for color coding. */
@@ -103,6 +107,21 @@ export function parseLogLine(raw: string): LogLine {
   };
 }
 
+/**
+ * Build a displayable line from a PortBay-authored message (not Process
+ * Compose output), bypassing the JSON-envelope unwrap. `level` defaults to
+ * `system`; lifecycle errors/warnings pass their own level so they colour and
+ * filter like real log severities. ANSI is stripped from the plain projection
+ * and rendered to HTML so an emoji/marker prefix shows correctly.
+ */
+export function eventLogLine(message: string, level: LogLevel = "system"): LogLine {
+  return {
+    level,
+    text: message.replace(ANSI_RE, ""),
+    html: converter.toHtml(message || " "),
+  };
+}
+
 /** Tailwind text-colour class for a level. `info` returns "" (inherits). */
 export function levelClass(level: LogLevel): string {
   switch (level) {
@@ -112,6 +131,8 @@ export function levelClass(level: LogLevel): string {
       return "text-status-unhealthy";
     case "debug":
       return "text-fg-subtle";
+    case "system":
+      return "text-accent";
     default:
       return "";
   }

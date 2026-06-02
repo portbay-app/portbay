@@ -24,12 +24,70 @@ use crate::tray;
 
 pub const STATUS_CHANNEL: &str = "portbay://status";
 
+/// Channel for PortBay-authored lifecycle log lines (see [`emit_proc_log`]).
+/// Separate from `STATUS_CHANNEL` (machine-readable status transitions) so the
+/// log viewer can merge these human-facing lines inline with the file tail.
+pub const PROC_LOG_CHANNEL: &str = "portbay://proc-log";
+
+/// One PortBay-authored log line for a project, surfaced inline in the log
+/// viewer. `level` is one of `system` | `info` | `warn` | `error`; `system`
+/// renders as a distinct PortBay marker, the rest match real log severities.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcLogEvent {
+    pub id: String,
+    pub level: String,
+    pub message: String,
+}
+
+/// Emit a PortBay lifecycle log line for project `id`, shown inline in the
+/// log viewer so a developer gets immediate, terminal-style feedback
+/// (e.g. "▶ Starting myapp", "$ pnpm dev") the instant they press Play —
+/// rather than a blank panel while the child process boots and buffers its
+/// first output. These lines are live-only narration; they are not written
+/// to the on-disk log file, which Process Compose owns. Best-effort: a send
+/// failure (no window listening) is ignored.
+pub fn emit_proc_log(app: &AppHandle, id: &str, level: &str, message: impl Into<String>) {
+    let _ = app.emit(
+        PROC_LOG_CHANNEL,
+        ProcLogEvent {
+            id: id.to_string(),
+            level: level.to_string(),
+            message: message.into(),
+        },
+    );
+}
+
 /// Cadence at which the poller wakes to check PC. Diffs are computed every
 /// tick; events are emitted only on transitions, not every tick. 750 ms
 /// keeps the perceived UI lag against tools like ServBay (which polls
 /// roughly every second) competitive without saturating PC's REST API
 /// (each tick costs one /processes round-trip, sub-100 ms).
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
+
+/// Which side of the main process a hook runs on.
+#[derive(Debug, Clone, Copy)]
+enum HookPhase {
+    Pre,
+    Post,
+}
+
+/// Parse a hook process name into `(parent_project_id, phase)`.
+///
+/// The reconciler names hook processes `"{id}::pre::{n}"` and
+/// `"{id}::post::{n}"` (see `process_compose::config::project_to_pc_processes`).
+/// Project ids are slugs (`[a-z0-9-]`) so the `::` delimiter can never appear
+/// in a real project or infrastructure process name — a match here is
+/// unambiguous.
+fn parse_hook_name(name: &str) -> Option<(&str, HookPhase)> {
+    if let Some((parent, _)) = name.split_once("::pre::") {
+        Some((parent, HookPhase::Pre))
+    } else if let Some((parent, _)) = name.split_once("::post::") {
+        Some((parent, HookPhase::Post))
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 struct ObservedState {
@@ -125,10 +183,67 @@ pub fn spawn_status_poller(app: AppHandle) {
             // Emit on transition; track for the next pass.
             let mut next: HashMap<String, ObservedState> = HashMap::with_capacity(processes.len());
             for p in &processes {
-                let event_id = process_to_project
-                    .get(&p.name)
-                    .cloned()
-                    .unwrap_or_else(|| p.name.clone());
+                // Hook processes (`id::pre::N` / `id::post::N`) are internal
+                // chain steps, not user projects. Keep their routine
+                // transitions out of the status stream, but surface a *failure*
+                // as a project-scoped warning: a pre-start failure is why the
+                // project never started; a post-start failure is a heads-up
+                // that the project is running but a check didn't pass.
+                if let Some((parent, phase)) = parse_hook_name(&p.name) {
+                    if process_to_project.contains_key(parent) {
+                        let observed = ObservedState::from_process(p, parent.to_string());
+                        let changed = last.get(&p.name) != Some(&observed);
+                        if changed
+                            && observed.status == ProjectStatus::Crashed
+                            && !state.recently_stop_requested(parent)
+                            && !state.recently_stop_requested(&p.name)
+                        {
+                            let (head, line) = match phase {
+                                HookPhase::Pre => (
+                                    "Pre-start step failed",
+                                    format!(
+                                        "✗ pre-start command exited {} — {parent} did not start.",
+                                        p.exit_code
+                                    ),
+                                ),
+                                HookPhase::Post => (
+                                    "Post-start check failed",
+                                    format!(
+                                        "✗ post-start command exited {} — {parent} is still running.",
+                                        p.exit_code
+                                    ),
+                                ),
+                            };
+                            // Inline line in the project's own log viewer.
+                            emit_proc_log(&app, parent, "error", line);
+                            // Desktop banner, gated on the same pref as crashes.
+                            if state.preferences_snapshot().desktop_notifications {
+                                crate::notifications::desktop_banner(
+                                    head,
+                                    &format!("{parent} ({:?} hook)", phase),
+                                );
+                            }
+                            tracing::warn!(
+                                process = %p.name,
+                                exit_code = p.exit_code,
+                                phase = ?phase,
+                                "project start hook failed"
+                            );
+                        }
+                        next.insert(p.name.clone(), observed);
+                        continue;
+                    }
+                }
+
+                // A PC process maps to a user project only when the registry
+                // knows it. Infrastructure processes (php-fpm pools, future
+                // shared daemons) have no mapping, so `event_id` falls back to
+                // the raw PC name (e.g. "php-fpm-8-4-21") — fine for the status
+                // event the UI keys on, but it must never be the body of a
+                // desktop crash toast (users shouldn't see internal process ids).
+                let mapped_project = process_to_project.get(&p.name).cloned();
+                let is_project = mapped_project.is_some();
+                let event_id = mapped_project.unwrap_or_else(|| p.name.clone());
                 let mut observed = ObservedState::from_process(p, event_id);
 
                 // If the user just asked PortBay to stop this project,
@@ -162,11 +277,21 @@ pub fn spawn_status_poller(app: AppHandle) {
                     };
                     // Fire a native desktop notification on a fresh crash, if the
                     // user enabled it. Gated on Crashed first so we only touch the
-                    // prefs lock for the rare failure case.
-                    if observed.status == ProjectStatus::Crashed
-                        && state.preferences_snapshot().desktop_notifications
-                    {
-                        notify_crash(&observed.event_id);
+                    // prefs lock for the rare failure case. Only user projects get
+                    // a toast: an infrastructure process (php-fpm, …) crashing is
+                    // surfaced in-app via the status event above and logged here,
+                    // but a desktop notification carrying a raw PC id like
+                    // "php-fpm-8-4-21 crashed" is never shown.
+                    if observed.status == ProjectStatus::Crashed {
+                        if is_project && state.preferences_snapshot().desktop_notifications {
+                            notify_crash(&observed.event_id);
+                        } else if !is_project {
+                            tracing::warn!(
+                                process = %p.name,
+                                exit_code = p.exit_code,
+                                "infrastructure process reported crashed"
+                            );
+                        }
                     }
                     let event = ProjectStatusEvent {
                         id: observed.event_id.clone(),
@@ -264,20 +389,9 @@ pub fn spawn_status_poller(app: AppHandle) {
 /// is already in use" tells them exactly what to fix.
 ///
 /// Best-effort: any I/O failure falls back to the bare exit-code line.
-/// Fire a native macOS "project crashed" notification, fire-and-forget. Quotes
-/// are stripped from the project name so they can't break the AppleScript string
-/// (slugs never contain them anyway). No-op on non-macOS.
+/// Fire a native "project crashed" notification, fire-and-forget.
 fn notify_crash(project: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let body = format!("{project} crashed").replace(['"', '\\'], "");
-        let script = format!("display notification \"{body}\" with title \"PortBay\"");
-        let _ = std::process::Command::new("/usr/bin/osascript")
-            .args(["-e", &script])
-            .spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = project;
+    crate::notifications::desktop_banner("PortBay", &format!("{project} crashed"));
 }
 
 fn crashed_summary(state: &AppState, project_id: &str, exit_code: i32) -> String {

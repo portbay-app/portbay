@@ -11,6 +11,7 @@
   import { onMount } from "svelte";
 
   import { Icon } from "$lib/components/atoms";
+  import ProjectSelector from "$lib/components/shared/ProjectSelector.svelte";
   import { httpInspector } from "$lib/stores/httpInspector.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { RequestEntry } from "$lib/types/inspector";
@@ -102,16 +103,15 @@
 
     <!-- Filters -->
     <div class="flex flex-wrap items-center gap-2 mt-3">
-      <select
-        bind:value={projectFilter}
-        class="text-[12px] bg-surface-2 border border-border rounded-md px-2 py-1
-               text-fg focus:outline-none focus:ring-1 focus:ring-accent/40"
-      >
-        <option value="">All projects</option>
-        {#each projects.value as p (p.id)}
-          <option value={p.id}>{p.name}</option>
-        {/each}
-      </select>
+      <ProjectSelector
+        projects={projects.value}
+        selectedId={projectFilter === "" ? null : projectFilter}
+        includeAllOption={true}
+        allOptionLabel="All projects"
+        onselect={(id) => {
+          projectFilter = id ?? "";
+        }}
+      />
 
       <label
         class="inline-flex items-center gap-1.5 text-[12px] text-fg-muted

@@ -181,37 +181,10 @@ pub async fn install_runtime(
         )));
     }
 
-    let manifest_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_URL")
-        .unwrap_or_else(|_| RUNTIME_MANIFEST_URL.to_string());
-    let signature_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_SIGNATURE_URL")
-        .unwrap_or_else(|_| RUNTIME_MANIFEST_SIGNATURE_URL.to_string());
-
     let _ = on_event.send(InstallEvent::Log {
         line: "Fetching signed PortBay runtime manifest…".into(),
     });
-    let manifest_bytes = reqwest::get(&manifest_url)
-        .await
-        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
-        .error_for_status()
-        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("runtime manifest read failed: {e}")))?;
-    let signature = reqwest::get(&signature_url)
-        .await
-        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
-        .error_for_status()
-        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
-        .text()
-        .await
-        .map_err(|e| AppError::Internal(format!("runtime manifest signature read failed: {e}")))?;
-
-    let manifest = crate::runtimes::download::manifest::verify_and_parse(
-        &manifest_bytes,
-        &signature,
-        UPDATER_PUBKEY,
-    )
-    .map_err(|e| AppError::Internal(format!("runtime manifest verification failed: {e}")))?;
+    let manifest = fetch_signed_manifest().await?;
     let arch = crate::runtimes::download::manifest::current_arch();
     let requested = version.as_deref().unwrap_or("");
     let entry = if requested.is_empty() {
@@ -286,7 +259,42 @@ pub async fn install_runtime(
     Ok(())
 }
 
-fn newest_entry(
+/// Fetch the signed PortBay runtimes manifest and verify it. Shared by the
+/// runtime and database-engine installers — both pull builds from the same
+/// signed manifest published by the portbay-runtimes repo.
+pub(crate) async fn fetch_signed_manifest(
+) -> AppResult<crate::runtimes::download::manifest::RuntimeManifest> {
+    let manifest_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_URL")
+        .unwrap_or_else(|_| RUNTIME_MANIFEST_URL.to_string());
+    let signature_url = std::env::var("PORTBAY_RUNTIME_MANIFEST_SIGNATURE_URL")
+        .unwrap_or_else(|_| RUNTIME_MANIFEST_SIGNATURE_URL.to_string());
+    let manifest_bytes = reqwest::get(&manifest_url)
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
+        .error_for_status()
+        .map_err(|e| AppError::Internal(format!("runtime manifest fetch failed: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest read failed: {e}")))?;
+    let signature = reqwest::get(&signature_url)
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
+        .error_for_status()
+        .map_err(|e| AppError::Internal(format!("runtime manifest signature fetch failed: {e}")))?
+        .text()
+        .await
+        .map_err(|e| AppError::Internal(format!("runtime manifest signature read failed: {e}")))?;
+    crate::runtimes::download::manifest::verify_and_parse(
+        &manifest_bytes,
+        &signature,
+        UPDATER_PUBKEY,
+    )
+    .map_err(|e| AppError::Internal(format!("runtime manifest verification failed: {e}")))
+}
+
+/// Newest manifest entry for a `lang`/`arch`, by descending version. Shared
+/// with the database-engine installer (engine id is used as the `lang`).
+pub(crate) fn newest_entry(
     manifest: &crate::runtimes::download::manifest::RuntimeManifest,
     lang: &str,
     arch: &str,
@@ -322,6 +330,7 @@ fn is_installable_runtime(lang: &str) -> bool {
 fn expected_binary_rel(lang: &str) -> AppResult<&'static Path> {
     match lang {
         "php" => Ok(Path::new("bin/php")),
+        "node" => Ok(Path::new("bin/node")),
         "nginx" => Ok(Path::new("sbin/nginx")),
         "apache" => Ok(Path::new("bin/httpd")),
         _ => Err(AppError::BadInput(format!(
@@ -332,6 +341,17 @@ fn expected_binary_rel(lang: &str) -> AppResult<&'static Path> {
 
 fn probe_runtime(lang: &str, version: &str, bin: &Path) -> bool {
     match lang {
+        "node" => Command::new(bin)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| {
+                let text = String::from_utf8_lossy(&out.stdout);
+                // `node --version` prints `v22.14.0`; check the major.minor prefix.
+                text.contains(&major_minor(version))
+            })
+            .unwrap_or(false),
         "php" => {
             let Some(install_dir) = bin.parent().and_then(Path::parent) else {
                 return false;
@@ -437,4 +457,59 @@ pub async fn update_runtime_config(
     }
 
     Ok(runtimes::list_all(&reg.runtimes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_binary_rel_node_is_bin_node() {
+        let rel = expected_binary_rel("node").unwrap();
+        assert_eq!(rel, Path::new("bin/node"));
+    }
+
+    #[test]
+    fn expected_binary_rel_php_is_bin_php() {
+        let rel = expected_binary_rel("php").unwrap();
+        assert_eq!(rel, Path::new("bin/php"));
+    }
+
+    #[test]
+    fn expected_binary_rel_unknown_is_error() {
+        assert!(expected_binary_rel("ruby").is_err());
+    }
+
+    #[test]
+    fn probe_runtime_node_accepts_valid_version_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("node");
+        // Write a shell script that mimics `node --version` → `v22.14.0`.
+        std::fs::write(&bin, b"#!/bin/sh\necho v22.14.0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            probe_runtime("node", "22.14.0", &bin),
+            "probe should accept a binary echoing the right version"
+        );
+    }
+
+    #[test]
+    fn probe_runtime_node_rejects_wrong_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("node");
+        std::fs::write(&bin, b"#!/bin/sh\necho v18.20.0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            !probe_runtime("node", "22.14.0", &bin),
+            "probe must reject a binary reporting the wrong major.minor"
+        );
+    }
 }

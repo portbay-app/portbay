@@ -18,7 +18,9 @@ pub fn detect() -> DetectedSource {
     let path = PathBuf::from(DEFAULT_VHOSTS_PATH);
     let present = path.exists();
     let site_count = if present {
-        read_sites().map(|v| v.len()).unwrap_or(0)
+        read_sites()
+            .map(|v| crate::import::dedupe_sites(v).len())
+            .unwrap_or(0)
     } else {
         0
     };

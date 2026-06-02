@@ -23,8 +23,10 @@ use crate::caddy::CaddyError;
 use crate::dnsmasq::DnsmasqError;
 use crate::hosts::HostsError;
 use crate::mailpit::MailpitError;
+use crate::preferences::NotificationCategory;
 use crate::process_compose::PcError;
 use crate::registry::RegistryError;
+use crate::ssh::backend::SshError;
 use crate::tunnel::TunnelError;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -65,6 +67,9 @@ pub enum AppError {
 
     #[error("{0}")]
     Tunnel(#[from] TunnelError),
+
+    #[error("{0}")]
+    Ssh(#[from] SshError),
 
     #[error("{0}")]
     Hosts(#[from] HostsError),
@@ -121,9 +126,22 @@ pub enum AppError {
         reason: &'static str,
     },
 
+    /// This Pro license is already active on its device cap (2 devices). The GUI
+    /// catches this code to point the user at Settings → Sync to deactivate a
+    /// device before adding this one. The server is authoritative for the count.
+    #[error("This Pro license is active on its limit of {max} devices")]
+    DeviceLimitReached { max: u32 },
+
     /// A failure that doesn't fit the other variants. Kept narrow on purpose.
     #[error("{0}")]
     Internal(String),
+
+    /// The per-project task board / agent-context layer (`crate::context`)
+    /// failed — parsing a card's frontmatter, an atomic write, a dispatch, etc.
+    /// Board-only; absent from the public OSS build (no `tasks` feature).
+    #[cfg(feature = "tasks")]
+    #[error("{0}")]
+    Context(#[from] crate::context::ContextError),
 }
 
 impl AppError {
@@ -135,6 +153,9 @@ impl AppError {
             Self::Dnsmasq(_) => "DNSMASQ_FAILURE",
             Self::Mailpit(_) => "MAILPIT_FAILURE",
             Self::Tunnel(_) => "TUNNEL_FAILURE",
+            Self::Ssh(SshError::NeedsKeyPassphrase { .. }) => "SSH_NEEDS_PASSPHRASE",
+            Self::Ssh(SshError::MissingPassword { .. }) => "SSH_NEEDS_PASSWORD",
+            Self::Ssh(_) => "SSH_TUNNEL_FAILURE",
             Self::Hosts(_) => "HOSTS_FAILURE",
             Self::Io(_) => "IO_FAILURE",
             Self::SidecarDown(_) => "SIDECAR_DOWN",
@@ -145,7 +166,10 @@ impl AppError {
             Self::SandboxCapReached { .. } => "SANDBOX_CAP_REACHED",
             Self::ProRequired { .. } => "PRO_REQUIRED",
             Self::Unsupported { .. } => "UNSUPPORTED",
+            Self::DeviceLimitReached { .. } => "DEVICE_LIMIT_REACHED",
             Self::Internal(_) => "INTERNAL",
+            #[cfg(feature = "tasks")]
+            Self::Context(_) => "CONTEXT_FAILURE",
         }
     }
 
@@ -171,6 +195,23 @@ impl AppError {
             Self::Tunnel(_) => {
                 "The Cloudflare tunnel didn't come up — the project isn't reachable from the public URL.".into()
             }
+            // Credential gaps are normally intercepted by the inline prompt; if
+            // one surfaces, guide rather than talk about forwarding.
+            Self::Ssh(SshError::MissingPassword { .. }) => {
+                "Enter the host password to connect.".into()
+            }
+            Self::Ssh(SshError::NeedsKeyPassphrase { .. }) => {
+                "Enter the SSH key's passphrase to connect.".into()
+            }
+            // Genuine port-forward failures: localhost reachability is the point.
+            Self::Ssh(
+                SshError::ReadinessTimeout(_)
+                | SshError::ExitedEarly
+                | SshError::PasswordForwardUnsupported,
+            ) => "The remote service wasn't forwarded to localhost, so local tools cannot reach it yet.".into(),
+            // Everything else (auth rejected, transport/connect failure, …) is a
+            // plain connection problem — not necessarily a tunnel.
+            Self::Ssh(_) => "PortBay couldn't establish the SSH connection.".into(),
             Self::PortConflict { holder, .. } => {
                 format!("Stop {holder} (or change this project's port in its detail panel) and try again.")
             }
@@ -187,6 +228,13 @@ impl AppError {
             Self::Unsupported { .. } => {
                 "This feature isn't available on your operating system.".into()
             }
+            Self::DeviceLimitReached { .. } => {
+                "Deactivate another device under Settings → Sync to use Pro on this one.".into()
+            }
+            #[cfg(feature = "tasks")]
+            Self::Context(_) => {
+                "The project's task board or agent-context files weren't updated.".into()
+            }
             Self::Hosts(_) | Self::Io(_) | Self::Internal(_) => {
                 "The action did not complete.".into()
             }
@@ -202,7 +250,8 @@ impl AppError {
             | Self::PortConflict { .. }
             | Self::ProjectCapReached { .. }
             | Self::SandboxCapReached { .. }
-            | Self::ProRequired { .. } => "user",
+            | Self::ProRequired { .. }
+            | Self::DeviceLimitReached { .. } => "user",
             _ => "system",
         }
     }
@@ -224,16 +273,29 @@ impl AppError {
             _ => vec![],
         }
     }
+
+    fn category(&self) -> NotificationCategory {
+        match self {
+            Self::Dnsmasq(_) | Self::Hosts(_) => NotificationCategory::Infrastructure,
+            Self::Tunnel(_) | Self::Ssh(_) => NotificationCategory::Infrastructure,
+            Self::DeviceLimitReached { .. } => NotificationCategory::AccountSync,
+            Self::Io(_) | Self::Internal(_) => NotificationCategory::Crash,
+            #[cfg(feature = "tasks")]
+            Self::Context(_) => NotificationCategory::AgentBoard,
+            _ => NotificationCategory::ProjectError,
+        }
+    }
 }
 
 impl Serialize for AppError {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let actions = self.actions();
-        let mut st = s.serialize_struct("CommandError", 5)?;
+        let mut st = s.serialize_struct("CommandError", 6)?;
         st.serialize_field("code", self.code())?;
         st.serialize_field("whatHappened", &self.to_string())?;
         st.serialize_field("whyItMatters", &self.why_it_matters())?;
         st.serialize_field("whoCausedIt", self.who())?;
+        st.serialize_field("category", &self.category())?;
         st.serialize_field("actions", &actions)?;
         st.end()
     }
@@ -257,6 +319,7 @@ mod tests {
         assert!(v.get("whatHappened").is_some());
         assert!(v.get("whyItMatters").is_some());
         assert!(v.get("whoCausedIt").is_some());
+        assert!(v.get("category").is_some());
         assert!(v.get("actions").is_some());
     }
 
@@ -280,6 +343,7 @@ mod tests {
     fn bad_input_is_blamed_on_user_not_system() {
         let v = parse(&AppError::BadInput("nope".into()));
         assert_eq!(v["whoCausedIt"], "user");
+        assert_eq!(v["category"], "project-error");
     }
 
     #[test]

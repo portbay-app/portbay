@@ -10,6 +10,11 @@
 import { browser } from "$app/environment";
 
 import { safeInvoke } from "$lib/ipc";
+import {
+  DEFAULT_NOTIFICATION_PREFS,
+  normaliseNotificationPrefs,
+  type NotificationPrefs,
+} from "$lib/notifications/prefs";
 import type { WebServer } from "$lib/types/projects";
 
 export type AccentColor =
@@ -24,6 +29,18 @@ export type AccentColor =
 export type DefaultSort = "name-asc" | "name-desc" | "status" | "port";
 export type StartBehavior = "manual" | "auto";
 export type AutoCleanSchedule = "off" | "weekly" | "monthly";
+export type AccessibilityTextScale = "normal" | "large" | "larger";
+export type AccessibilityFocusMode = "standard" | "strong";
+
+export interface AccessibilityPrefs {
+  reduceMotion: boolean;
+  reduceTransparency: boolean;
+  highContrast: boolean;
+  textScale: AccessibilityTextScale;
+  focusMode: AccessibilityFocusMode;
+  underlineLinks: boolean;
+  colorIndependentStatus: boolean;
+}
 
 export interface Preferences {
   /** Install the menu-bar tray icon at launch. */
@@ -37,6 +54,10 @@ export interface Preferences {
   closeToMenuBarToastSeen: boolean;
   /** Explicit opt-in for usage telemetry and crash-report upload. */
   telemetryEnabled: boolean;
+  /** Internal: the one-time diagnostics consent prompt (shown after the
+   * first `portbay login`) has been answered. Set by the CLI; the GUI only
+   * carries it through so neither surface re-asks. */
+  telemetryConsentPrompted: boolean;
   /** Opt into early-access (experimental) features. Pro-gated in Settings. */
   earlyAccessOptIn: boolean;
 
@@ -45,6 +66,8 @@ export interface Preferences {
   reopenPreviousProjects: boolean;
   confirmBeforeStopAll: boolean;
   desktopNotifications: boolean;
+  notifications: NotificationPrefs;
+  accessibility: AccessibilityPrefs;
 
   // Appearance
   accentColor: AccentColor;
@@ -56,6 +79,13 @@ export interface Preferences {
   defaultStartBehavior: StartBehavior;
   /** Web server pre-selected for new PHP projects. null → Caddy. */
   defaultWebServer: WebServer | null;
+  /** Terminal that hosts interactive agent dispatches (id from `installed_dev_tools`,
+   * e.g. "warp" | "iterm" | "ghostty" | "terminal"). null → first detected. */
+  preferredTerminal: string | null;
+  /** Global default dispatch agent (kind id) for boards without their own config. null → Claude. */
+  preferredAgent: string | null;
+  /** Per-agent absolute binary path overrides, keyed by agent id (external drive / custom prefix). */
+  agentPaths: Record<string, string>;
 
   // Domains & HTTPS
   manageHostsAutomatically: boolean;
@@ -81,17 +111,31 @@ const DEFAULTS: Preferences = {
   closeToMenuBar: true,
   closeToMenuBarToastSeen: false,
   telemetryEnabled: false,
+  telemetryConsentPrompted: false,
   earlyAccessOptIn: false,
   launchAtLogin: false,
   reopenPreviousProjects: false,
   confirmBeforeStopAll: true,
   desktopNotifications: false,
+  notifications: normaliseNotificationPrefs(DEFAULT_NOTIFICATION_PREFS),
+  accessibility: {
+    reduceMotion: false,
+    reduceTransparency: false,
+    highContrast: false,
+    textScale: "normal",
+    focusMode: "standard",
+    underlineLinks: false,
+    colorIndependentStatus: false,
+  },
   accentColor: "blue",
   defaultWorkspaceFolder: "",
   autoDetectProjects: false,
   defaultSort: "name-asc",
   defaultStartBehavior: "manual",
   defaultWebServer: null,
+  preferredTerminal: null,
+  preferredAgent: null,
+  agentPaths: {},
   manageHostsAutomatically: true,
   autoRenewCertificates: true,
   storeLogsLocally: true,
@@ -122,15 +166,40 @@ function applyAccent(color: AccentColor): void {
   document.documentElement.style.setProperty("--color-accent-hover", preset.hover);
 }
 
+function applyAccessibility(prefs: AccessibilityPrefs): void {
+  if (!browser) return;
+  document.body.setAttribute("data-a11y-motion", prefs.reduceMotion ? "reduced" : "standard");
+  document.body.setAttribute(
+    "data-a11y-transparency",
+    prefs.reduceTransparency ? "reduced" : "standard",
+  );
+  document.body.setAttribute("data-a11y-contrast", prefs.highContrast ? "high" : "standard");
+  document.body.setAttribute("data-a11y-text", prefs.textScale);
+  document.body.setAttribute("data-a11y-focus", prefs.focusMode);
+  document.body.setAttribute("data-a11y-links", prefs.underlineLinks ? "underlined" : "standard");
+  document.body.setAttribute(
+    "data-a11y-status",
+    prefs.colorIndependentStatus ? "shapes" : "color",
+  );
+}
+
 function createPreferencesStore() {
   let value = $state<Preferences>({ ...DEFAULTS });
   let loaded = $state<boolean>(false);
+  let saveSeq = 0;
+  let inFlightSaves = 0;
+  let saveChain: Promise<void> = Promise.resolve();
 
   async function load(): Promise<void> {
     if (!browser) return;
+    const seq = saveSeq;
     try {
-      value = await safeInvoke<Preferences>("get_preferences");
-      applyAccent(value.accentColor);
+      const loadedPrefs = normalisePreferences(await safeInvoke<Preferences>("get_preferences"));
+      if (seq === saveSeq && inFlightSaves === 0) {
+        value = loadedPrefs;
+        applyAccent(value.accentColor);
+        applyAccessibility(value.accessibility);
+      }
     } catch {
       // safeInvoke already showed the toast; keep defaults so the UI
       // stays interactive rather than blocked behind an opaque error.
@@ -140,16 +209,42 @@ function createPreferencesStore() {
   }
 
   async function update(patch: Partial<Preferences>): Promise<void> {
+    const previous = value;
     const next: Preferences = { ...value, ...patch };
-    try {
-      // The backend returns the persisted snapshot; trust it over the
-      // optimistic patch in case server-side normalisation kicks in.
-      value = await safeInvoke<Preferences>("set_preferences", { prefs: next });
-      applyAccent(value.accentColor);
-    } catch {
-      // safeInvoke already showed the toast; leave `value` untouched
-      // so the UI rolls back automatically.
-    }
+    const seq = ++saveSeq;
+    value = normalisePreferences(next);
+    applyAccent(value.accentColor);
+    applyAccessibility(value.accessibility);
+    const snapshot = clonePreferences(value);
+    inFlightSaves += 1;
+
+    const run = async () => {
+      try {
+        // The backend returns the persisted snapshot; trust it over the
+        // optimistic patch in case server-side normalisation kicks in.
+        const saved = normalisePreferences(
+          await safeInvoke<Preferences>("set_preferences", { prefs: snapshot }),
+        );
+        if (seq === saveSeq) {
+          value = saved;
+          applyAccent(value.accentColor);
+          applyAccessibility(value.accessibility);
+        }
+      } catch {
+        // safeInvoke already showed the toast; roll back the optimistic patch.
+        if (seq === saveSeq) {
+          value = previous;
+          applyAccent(value.accentColor);
+          applyAccessibility(value.accessibility);
+        }
+      } finally {
+        inFlightSaves = Math.max(0, inFlightSaves - 1);
+      }
+    };
+
+    const queued = saveChain.then(run, run);
+    saveChain = queued.catch(() => {});
+    await queued;
   }
 
   async function markCloseToastSeen(): Promise<void> {
@@ -175,3 +270,15 @@ function createPreferencesStore() {
 }
 
 export const preferences = createPreferencesStore();
+
+function normalisePreferences(prefs: Preferences): Preferences {
+  return {
+    ...prefs,
+    notifications: normaliseNotificationPrefs(prefs.notifications ?? DEFAULT_NOTIFICATION_PREFS),
+    accessibility: { ...DEFAULTS.accessibility, ...(prefs.accessibility ?? {}) },
+  };
+}
+
+function clonePreferences(prefs: Preferences): Preferences {
+  return normalisePreferences(JSON.parse(JSON.stringify(prefs)) as Preferences);
+}

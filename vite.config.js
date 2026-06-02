@@ -30,6 +30,15 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: host || false,
+    // Tauri's WKWebView will happily replay a previously-fetched ES module
+    // from its own HTTP cache, so a code change can keep crashing against a
+    // stale compiled module even after Vite serves the fresh one (it bit us
+    // with the SSH page's old `host.tags.length` after a refactor). Force the
+    // webview to revalidate every dev asset so a reload always runs current
+    // code. Cheap on localhost; only applies to `vite dev`.
+    headers: {
+      "Cache-Control": "no-store",
+    },
     hmr: host
       ? {
           protocol: "ws",

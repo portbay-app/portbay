@@ -27,6 +27,7 @@
   import { ConfirmDialog } from "$lib/components/atoms";
   import { SignInSheet, AboutLicenseDialog } from "$lib/components/account";
   import FeedbackPrompt from "$lib/components/lifecycle/FeedbackPrompt.svelte";
+  import CrashReportCard from "$lib/components/lifecycle/CrashReportCard.svelte";
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
   import { onMount, untrack } from "svelte";
@@ -39,6 +40,7 @@
   import { setupRequirements } from "$lib/stores/setup";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
+  import { notificationPrefs } from "$lib/stores/notificationPrefs.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
@@ -47,7 +49,13 @@
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { installCrashReporter } from "$lib/stores/crashReporter.svelte";
+  import { crashSurface } from "$lib/stores/crashSurface.svelte";
   import { updater } from "$lib/stores/updater.svelte";
+  import { dbApprovals } from "$lib/stores/dbApprovals.svelte";
+  import WriteApprovalModal from "$lib/components/databases/WriteApprovalModal.svelte";
+  import SshCredentialPrompt from "$lib/components/connections/SshCredentialPrompt.svelte";
+  import SshHostKeyPrompt from "$lib/components/connections/SshHostKeyPrompt.svelte";
+  import SshKbiPrompt from "$lib/components/connections/SshKbiPrompt.svelte";
 
   /** Compact byte label for the auto-clean "freed N" toast. */
   function formatBytes(n: number): string {
@@ -59,6 +67,12 @@
   }
 
   onMount(() => {
+    document.body.dataset.platform = navigator.userAgent.includes("Linux")
+      ? "linux"
+      : navigator.userAgent.includes("Mac")
+        ? "macos"
+        : "other";
+
     // The tray popover renders in its own webview — it must not start
     // tunnels, listen for nav, or redirect to onboarding. Those side
     // effects belong to the main window's instance of this layout.
@@ -86,7 +100,12 @@
     }
 
     installCrashReporter();
+    // Surface any crash left over from a previous session (e.g. a panic that
+    // took the app down) as a one-click "send report" card — but only after the
+    // launch has settled, so it never fights the window reveal / onboarding.
+    const crashTimer = setTimeout(() => void crashSurface.presentLatestPending(), 2500);
     tunnels.start();
+    dbApprovals.start();
     // The projects store has page-spanning lifetime — it's read by
     // /domains, /services, /logs, /languages, the right rail, the
     // sidebar, and the command palette. Starting it in the root
@@ -101,7 +120,12 @@
     // deep-linking to a page that doesn't start the poll leaves the store on its
     // "loading…" placeholder, which falsely reads as "mkcert CA needs setup".
     sidecars.start();
+    // Populate the databases store once at boot so the sidebar "Databases"
+    // nav badge shows the running-instance count app-wide (the /databases page
+    // refreshes it live when open).
+    void databases.refresh();
     void preferences.load();
+    void notificationPrefs.load();
     // Load the cached entitlement immediately (no network), then re-verify a
     // stored session in the background (rotates tokens, refetches the license).
     void entitlements.load().then(() => entitlements.resync());
@@ -133,6 +157,7 @@
           if (freed <= 0) return;
           errorBus.push({
             code: "ARTIFACTS_AUTO_CLEANED",
+            category: "lifecycle",
             whatHappened: `Freed ${formatBytes(freed)} of build artifacts.`,
             whyItMatters:
               "The scheduled auto-clean removed stale build output across your projects.",
@@ -150,6 +175,7 @@
         if (preferences.value.closeToMenuBarToastSeen) return;
         errorBus.push({
           code: "TRAY_HINT",
+          category: "lifecycle",
           whatHappened:
             "PortBay is still running in the menu bar.",
           whyItMatters:
@@ -176,7 +202,9 @@
       }
     })();
     return () => {
+      clearTimeout(crashTimer);
       tunnels.stop();
+      dbApprovals.stop();
       unlistenNav?.();
       unlistenToast?.();
       unlistenClean?.();
@@ -231,7 +259,19 @@
   const sidebarCol = $derived(
     density.value === "compact" ? "60px" : `${sidebar.width}px`,
   );
-  const railCol = $derived(
+
+  // Any right-side panel currently occupying the rail slot.
+  const anyPanel = $derived(
+    showAddProject ||
+      showAddDatabase ||
+      showGroupEditor ||
+      showDetailPanel ||
+      showRail,
+  );
+
+  // The panel's natural width — used both as the pushed grid column (wide
+  // windows) and as the floating overlay's width (narrow windows).
+  const panelWidth = $derived(
     showAddProject
       ? "clamp(380px, 42vw, 600px)"
       : showAddDatabase
@@ -244,6 +284,24 @@
               ? "clamp(280px, 23vw, 340px)"
               : "0px",
   );
+
+  // Live window width (bound via <svelte:window>). 0 until the first measure.
+  let winWidth = $state(0);
+
+  // Below this width a pushed panel would squash the main content (sidebar +
+  // a ~380px rail leaves too little room), so the panel floats over the content
+  // instead of pushing it. Above it, the original push behaviour is kept.
+  const OVERLAY_BELOW = 1180;
+
+  // Overlay only matters while a panel is open; 0 width = not yet measured, so
+  // default to the push layout until we know the real width.
+  const overlayRail = $derived(
+    anyPanel && winWidth > 0 && winWidth < OVERLAY_BELOW,
+  );
+
+  // In overlay mode the rail column collapses to 0 so main content keeps its
+  // full width; the panel is rendered absolutely on top instead.
+  const railCol = $derived(overlayRail ? "0px" : panelWidth);
   const gridCols = $derived(`${sidebarCol} 1fr ${railCol}`);
   const currentTheme = $derived(theme.value);
 
@@ -305,42 +363,36 @@
 
 <svelte:head>
   {#if isSimulator}
+    <!--
+      Title / description / canonical / Open Graph / Twitter tags for
+      try.portbay.app are stamped per-route into the static HTML at build time
+      by scripts/stamp-og-meta.mjs (run from `pnpm build:web`). That is the only
+      thing link unfurlers see, since the app is a client-rendered SPA
+      (ssr=false) and crawlers don't execute JavaScript. Tags injected here at
+      runtime would be invisible to them and would duplicate the stamped ones in
+      the live DOM, so the meta lives entirely in the build step now.
+    -->
     <title>PortBay — Local development environment manager</title>
-    <meta
-      name="description"
-      content="Manage every local dev project behind clean .test domains with automatic HTTPS and one-click start/stop — no Docker, no config files. Try the live interactive demo of PortBay for macOS."
-    />
-    <link rel="canonical" href="https://try.portbay.app/" />
-
-    <!-- Open Graph -->
-    <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="PortBay" />
-    <meta property="og:url" content="https://try.portbay.app/" />
-    <meta
-      property="og:title"
-      content="PortBay — Local development environment manager"
-    />
-    <meta
-      property="og:description"
-      content="Local dev projects behind clean .test domains with automatic HTTPS and one-click start/stop. Try the live interactive demo for macOS."
-    />
-    <meta property="og:image" content="https://try.portbay.app/og-image.png" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-
-    <!-- Twitter -->
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta
-      name="twitter:title"
-      content="PortBay — Local development environment manager"
-    />
-    <meta
-      name="twitter:description"
-      content="Local dev projects behind clean .test domains with automatic HTTPS and one-click start/stop. Try the live interactive demo for macOS."
-    />
-    <meta name="twitter:image" content="https://try.portbay.app/og-image.png" />
   {/if}
 </svelte:head>
+
+<svelte:window bind:innerWidth={winWidth} />
+
+<!-- The active right-side panel. Rendered either as the pushed grid column
+     (wide windows) or inside a floating overlay (narrow windows). -->
+{#snippet railPanel()}
+  {#if showAddProject}
+    <AddProjectWizard />
+  {:else if showAddDatabase}
+    <AddDatabaseWizard />
+  {:else if showGroupEditor}
+    <GroupEditorModal />
+  {:else if showDetailPanel}
+    <ProjectDetailPanel />
+  {:else if showRail}
+    <RightRail />
+  {/if}
+{/snippet}
 
 {#if isTrayPanel}
   <!--
@@ -364,7 +416,7 @@
   </div>
 {:else}
   <div
-    class="h-screen w-screen grid grid-rows-[minmax(0,1fr)] overflow-hidden
+    class="relative h-screen w-screen grid grid-rows-[minmax(0,1fr)] overflow-hidden
            transition-[grid-template-columns] duration-200 ease-out motion-reduce:transition-none"
     style:grid-template-columns={gridCols}
     data-theme-current={currentTheme}
@@ -396,16 +448,27 @@
       </main>
     </div>
 
-    {#if showAddProject}
-      <AddProjectWizard />
-    {:else if showAddDatabase}
-      <AddDatabaseWizard />
-    {:else if showGroupEditor}
-      <GroupEditorModal />
-    {:else if showDetailPanel}
-      <ProjectDetailPanel />
-    {:else if showRail}
-      <RightRail />
+    {#if anyPanel && !overlayRail}
+      <!-- Wide window: the panel pushes — it's the grid's third column. -->
+      {@render railPanel()}
+    {/if}
+
+    {#if anyPanel && overlayRail}
+      <!-- Narrow window: the panel floats over the content so the layout never
+           squashes. A scrim behind it dismisses every rail panel on click. -->
+      <button
+        type="button"
+        aria-label="Close panel"
+        onclick={closeRailPanels}
+        class="absolute inset-0 z-40 bg-black/40 motion-safe:animate-[fade-in_120ms_ease-out]"
+      ></button>
+      <div
+        class="absolute right-0 top-0 bottom-0 z-50 max-w-[92vw] shadow-2xl
+               motion-safe:animate-[slide-in-right_180ms_cubic-bezier(0.22,1,0.36,1)]"
+        style:width={panelWidth}
+      >
+        {@render railPanel()}
+      </div>
     {/if}
   </div>
 {/if}
@@ -414,8 +477,13 @@
   <LogViewer />
   <CommandPalette />
   <ConfirmDialog />
+  <SshCredentialPrompt />
+  <SshHostKeyPrompt />
+  <SshKbiPrompt />
+  <WriteApprovalModal />
   <SignInSheet />
   <AboutLicenseDialog />
   <FeedbackPrompt />
+  <CrashReportCard />
   <ToastHost />
 {/if}

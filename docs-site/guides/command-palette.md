@@ -81,6 +81,9 @@ Operations on PortBay's background daemons:
 
 **Manage public tunnels** — navigates to the Tunnels page.
 
+**Manage SSH tunnels** — navigates to the SSH page for remote database,
+bastion, VPS, cloud VM, and ML cluster port forwards.
+
 ## Recent Commands
 
 Executed commands are recorded by id. When the query is empty the most recently used commands appear at the top under a "Recent" header, letting you re-run common actions without typing.

@@ -48,6 +48,7 @@ interface Shot {
 
 const SHOTS: Shot[] = [
   { name: "projects", route: "/", title: "PortBay — Projects" },
+  { name: "tasks", route: "/tasks", title: "PortBay — Task Board" },
   { name: "inspector", route: "/inspector", title: "PortBay — HTTP Inspector" },
   { name: "languages", route: "/languages", title: "PortBay — Languages" },
   { name: "databases", route: "/databases", title: "PortBay — Databases" },
@@ -101,16 +102,30 @@ async function capture(
   // (singleton) sidecars store is healthy before we capture. Then SPA-navigate
   // to the target route — client-side nav preserves store state, so every
   // route shows "All Systems Operational" instead of the cold-start setup nag.
-  await page.goto(`${baseURL}/`, { waitUntil: "networkidle" });
+  // Settle to network-idle when possible, but never block on it: some routes
+  // (e.g. the task board) keep a request in flight, so networkidle never fires.
+  // The config sets no navigationTimeout, so an unbounded wait would hang until
+  // the 10-minute test cap — bound it and fall back to the fixed settle below.
+  await page.goto(`${baseURL}/`, { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => {});
   await page.waitForTimeout(300);
   // Let the singleton sidecar poll settle to healthy on the dashboard before
   // navigating — the store persists across client-side nav, so clearing the
   // cold-start banner here keeps every captured route clean.
   await dismissSetupBanner(page);
   if (route !== "/") {
-    await page.locator(`a[href="${route}"]`).first().click();
-    await page.waitForURL(`**${route}`);
-    await page.waitForLoadState("networkidle");
+    // Prefer client-side nav (it preserves the warmed sidecar store, so the
+    // cold-start "needs setup" banner stays cleared). Fall back to a direct
+    // load when the sidebar link isn't present in this build/context — e.g.
+    // the task board, whose nav entry isn't rendered in the static sim build.
+    const link = page.locator(`a[href="${route}"]`).first();
+    if ((await link.count()) > 0) {
+      await link.click();
+      await page.waitForURL(`**${route}`);
+    } else {
+      await page.goto(`${baseURL}${route}`, { waitUntil: "domcontentloaded" });
+    }
+    await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => {});
   }
   await dismissSetupBanner(page);
   await page.addStyleTag({ content: FREEZE_CSS });

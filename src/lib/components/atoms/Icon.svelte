@@ -18,6 +18,8 @@
     | "stop-circle"
     | "square"
     | "rotate-cw"
+    | "rotate-ccw"
+    | "key"
     | "external-link"
     | "folder"
     | "pencil"
@@ -30,6 +32,9 @@
     | "check"
     | "chevron-right"
     | "chevron-down"
+    | "chevron-left"
+    | "command"
+    | "inbox"
     | "home"
     | "server"
     | "link"
@@ -45,13 +50,16 @@
     | "file-code"
     | "rocket"
     | "sparkles"
+    | "lightbulb"
     | "arrow-right"
     | "bell"
     | "sun"
     | "moon"
     | "more-horizontal"
+    | "share"
     | "lock"
     | "users"
+    | "user"
     | "activity"
     | "layers"
     | "list"
@@ -68,7 +76,30 @@
     | "sliders-horizontal"
     | "power"
     | "panel-left-close"
-    | "panel-left-open";
+    | "panel-left-open"
+    | "square-kanban"
+    | "trash-2"
+    | "eraser"
+    | "calendar"
+    | "flag"
+    | "bot"
+    | "circle-dot"
+    | "play-circle"
+    | "message-square"
+    | "reply"
+    | "arrow-up"
+    | "paperclip"
+    | "image"
+    | "mic"
+    | "accessibility"
+    | "save"
+    | "archive"
+    | "file-plus"
+    | "folder-plus"
+    | "folder-open"
+    | "shield-check"
+    | "shield-off"
+    | "alert-triangle";
 </script>
 
 <script lang="ts">
@@ -77,6 +108,8 @@
     StopCircle,
     Square,
     RotateCw,
+    RotateCcw,
+    Key,
     ExternalLink,
     Folder,
     Pencil,
@@ -89,6 +122,9 @@
     Check,
     ChevronRight,
     ChevronDown,
+    ChevronLeft,
+    Command,
+    Inbox,
     Home,
     Server,
     Link as LinkIcon,
@@ -104,13 +140,16 @@
     FileCode,
     Rocket,
     Sparkles,
+    Lightbulb,
     ArrowRight,
     Bell,
     Sun,
     Moon,
     MoreHorizontal,
+    Share2,
     Lock,
     Users,
+    User,
     Activity,
     Layers,
     List,
@@ -128,6 +167,29 @@
     Power,
     PanelLeftClose,
     PanelLeftOpen,
+    SquareKanban,
+    Trash2,
+    Eraser,
+    Calendar,
+    Flag,
+    Bot,
+    CircleDot,
+    PlayCircle,
+    MessageSquare,
+    Reply,
+    ArrowUp,
+    Paperclip,
+    Image as ImageIcon,
+    Mic,
+    Accessibility,
+    Save,
+    Archive,
+    FilePlus,
+    FolderPlus,
+    FolderOpen,
+    ShieldCheck,
+    ShieldOff,
+    AlertTriangle,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -151,6 +213,8 @@
     "stop-circle": StopCircle,
     square: Square,
     "rotate-cw": RotateCw,
+    "rotate-ccw": RotateCcw,
+    key: Key,
     "external-link": ExternalLink,
     folder: Folder,
     pencil: Pencil,
@@ -163,6 +227,9 @@
     check: Check,
     "chevron-right": ChevronRight,
     "chevron-down": ChevronDown,
+    "chevron-left": ChevronLeft,
+    command: Command,
+    inbox: Inbox,
     home: Home,
     server: Server,
     link: LinkIcon,
@@ -178,13 +245,16 @@
     "file-code": FileCode,
     rocket: Rocket,
     sparkles: Sparkles,
+    lightbulb: Lightbulb,
     "arrow-right": ArrowRight,
     bell: Bell,
     sun: Sun,
     moon: Moon,
     "more-horizontal": MoreHorizontal,
+    share: Share2,
     lock: Lock,
     users: Users,
+    user: User,
     activity: Activity,
     layers: Layers,
     list: List,
@@ -202,6 +272,29 @@
     power: Power,
     "panel-left-close": PanelLeftClose,
     "panel-left-open": PanelLeftOpen,
+    "square-kanban": SquareKanban,
+    "trash-2": Trash2,
+    eraser: Eraser,
+    calendar: Calendar,
+    flag: Flag,
+    bot: Bot,
+    "circle-dot": CircleDot,
+    "play-circle": PlayCircle,
+    "message-square": MessageSquare,
+    reply: Reply,
+    "arrow-up": ArrowUp,
+    paperclip: Paperclip,
+    image: ImageIcon,
+    mic: Mic,
+    accessibility: Accessibility,
+    save: Save,
+    archive: Archive,
+    "file-plus": FilePlus,
+    "folder-plus": FolderPlus,
+    "folder-open": FolderOpen,
+    "shield-check": ShieldCheck,
+    "shield-off": ShieldOff,
+    "alert-triangle": AlertTriangle,
   };
 
   const Component = $derived(iconMap[name]);

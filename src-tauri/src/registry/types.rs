@@ -52,11 +52,19 @@ pub enum ProjectType {
     Next,
     Vite,
     Php,
+    /// Python project. Detected from `pyproject.toml`/`requirements.txt`/
+    /// `manage.py`/etc. A web framework (Django/FastAPI/Flask) gets an
+    /// inferred dev command + port; a bare script/research project gets
+    /// neither and runs as a board/process-only project.
+    Python,
     Static,
     Node,
     Flutter,
     Xcode,
     Android,
+    /// Expo / React Native managed app. Play runs the Metro dev server
+    /// (`npx expo start`); the iOS/Android simulator opens from there.
+    Expo,
     Custom,
 }
 
@@ -164,6 +172,25 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<Readiness>,
 
+    /// Shell commands run *before* the dev server on every start (install
+    /// deps, migrate the DB, codegen). The reconciler emits each as a
+    /// one-shot Process Compose process chained ahead of the main process
+    /// via `depends_on: { condition: process_completed_successfully }`, so a
+    /// non-zero exit blocks the dev server from starting at all. Additive —
+    /// absent on registries written before hooks landed (deserialises to an
+    /// empty vec), so it needs no schema-version bump.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_start: Vec<String>,
+
+    /// Shell commands run *after* the dev server reports ready (smoke checks,
+    /// cache warm-up, opening a watcher). Emitted as one-shot processes that
+    /// depend on the main process reaching `process_healthy` — or
+    /// `process_started` when the project has no readiness probe to gate on. A
+    /// non-zero exit is surfaced as a warning but never tears the running
+    /// project down. Additive, same migration story as `pre_start`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_start: Vec<String>,
+
     /// If true, PortBay starts this project automatically when the daemon
     /// comes up. If false, the user must press Play.
     #[serde(default)]
@@ -240,6 +267,22 @@ pub struct Project {
     /// reproduces PortBay's behaviour from before these knobs existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<DomainConfig>,
+
+    /// Bring-your-own named Cloudflare tunnel for a stable public hostname
+    /// (Pro). `None` = only the free zero-config Quick Share is offered. Stores
+    /// the user's tunnel UUID, credentials-file path, and chosen hostname — no
+    /// secrets (the credentials file stays in `~/.cloudflared`, owned by the
+    /// user; PortBay only references it). Additive; absent registries → `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<CustomTunnelConfig>,
+
+    /// One-click deploy target: push this project's files to a saved SSH host
+    /// and run an ordered list of remote build/release steps. `None` means the
+    /// project has no deploy configured (the default). Additive — absent on
+    /// projects and registries written before deploy landed (deserialises to
+    /// `None`), so it needs no schema bump, matching `tunnel`/`cors`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy: Option<ProjectDeploy>,
 }
 
 impl Project {
@@ -269,7 +312,29 @@ impl Project {
     /// Defaults `true` so HTTPS projects predating [`DomainConfig`] keep their
     /// managed cert.
     pub fn auto_manage_cert(&self) -> bool {
-        self.domain.as_ref().is_none_or(|d| d.auto_manage_cert)
+        self.domain
+            .as_ref()
+            .is_none_or(|d| d.auto_manage_cert && d.ssl_mode == SslMode::AutomaticLocal)
+    }
+
+    pub fn ssl_mode(&self) -> SslMode {
+        self.domain
+            .as_ref()
+            .map(|d| {
+                if d.auto_manage_cert {
+                    d.ssl_mode
+                } else {
+                    SslMode::CustomCertificate
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn custom_cert_paths(&self) -> Option<(&str, &str)> {
+        let domain = self.domain.as_ref()?;
+        let cert = domain.custom_cert_path.as_deref()?.trim();
+        let key = domain.custom_key_path.as_deref()?.trim();
+        (!cert.is_empty() && !key.is_empty()).then_some((cert, key))
     }
 
     /// Effective resolver mode for this project's hostname.
@@ -428,6 +493,133 @@ pub enum ResolverMode {
     Dnsmasq,
 }
 
+/// Certificate source for a project's HTTPS edge.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SslMode {
+    /// PortBay issues and renews a locally trusted mkcert certificate.
+    #[default]
+    AutomaticLocal,
+    /// User-provided certificate and private key paths.
+    CustomCertificate,
+    /// Explicit fallback for local testing where browser warnings are expected.
+    SelfSigned,
+    /// Placeholder for future public-domain automation. Not enabled for `.test`.
+    PublicAcme,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AcmeIssuer {
+    #[default]
+    LetsEncrypt,
+    ZeroSsl,
+    GoogleTrustServices,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AcmeEnvironment {
+    #[default]
+    Production,
+    Staging,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AcmeDnsProvider {
+    #[default]
+    None,
+    Cloudflare,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AcmeKeyType {
+    Rsa2048,
+    Rsa4096,
+    P256,
+    #[default]
+    P384,
+}
+
+impl AcmeKeyType {
+    pub fn caddy_key_type(self) -> &'static str {
+        match self {
+            Self::Rsa2048 => "rsa2048",
+            Self::Rsa4096 => "rsa4096",
+            Self::P256 => "p256",
+            Self::P384 => "p384",
+        }
+    }
+}
+
+/// Public ACME certificate request settings.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcmeConfig {
+    #[serde(default)]
+    pub issuer: AcmeIssuer,
+    #[serde(default)]
+    pub environment: AcmeEnvironment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub key_type: AcmeKeyType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eab_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eab_hmac_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zerossl_api_key: Option<String>,
+    #[serde(default)]
+    pub dns_provider: AcmeDnsProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_api_token: Option<String>,
+    #[serde(default)]
+    pub force_request: bool,
+    #[serde(default)]
+    pub debug: bool,
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            issuer: AcmeIssuer::LetsEncrypt,
+            environment: AcmeEnvironment::Production,
+            email: None,
+            key_type: AcmeKeyType::P384,
+            eab_key_id: None,
+            eab_hmac_key: None,
+            zerossl_api_key: None,
+            dns_provider: AcmeDnsProvider::None,
+            dns_api_token: None,
+            force_request: false,
+            debug: false,
+        }
+    }
+}
+
+impl AcmeConfig {
+    pub fn directory_url(&self) -> &'static str {
+        match (self.issuer, self.environment) {
+            (AcmeIssuer::LetsEncrypt, AcmeEnvironment::Production) => {
+                "https://acme-v02.api.letsencrypt.org/directory"
+            }
+            (AcmeIssuer::LetsEncrypt, AcmeEnvironment::Staging) => {
+                "https://acme-staging-v02.api.letsencrypt.org/directory"
+            }
+            (AcmeIssuer::ZeroSsl, _) => "https://acme.zerossl.com/v2/DV90",
+            (AcmeIssuer::GoogleTrustServices, AcmeEnvironment::Production) => {
+                "https://dv.acme-v02.api.pki.goog/directory"
+            }
+            (AcmeIssuer::GoogleTrustServices, AcmeEnvironment::Staging) => {
+                "https://dv.acme-v02.test-api.pki.goog/directory"
+            }
+        }
+    }
+}
+
 /// Per-project routing / domain settings surfaced on the Domains page.
 ///
 /// Additive — absent on projects and registries written before it landed
@@ -457,6 +649,22 @@ pub struct DomainConfig {
     #[serde(default = "default_true")]
     pub auto_manage_cert: bool,
 
+    /// Which certificate source this hostname uses.
+    #[serde(default)]
+    pub ssl_mode: SslMode,
+
+    /// Certificate path for [`SslMode::CustomCertificate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_cert_path: Option<String>,
+
+    /// Private key path for [`SslMode::CustomCertificate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_key_path: Option<String>,
+
+    /// Public ACME issuer and challenge settings for [`SslMode::PublicAcme`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme: Option<AcmeConfig>,
+
     /// Also route and certify `*.hostname`. The subdomains only resolve under
     /// the dnsmasq wildcard resolver — an `/etc/hosts` row can't express a
     /// wildcard.
@@ -475,6 +683,10 @@ impl Default for DomainConfig {
             path_prefix: None,
             resolver_mode: ResolverMode::Auto,
             auto_manage_cert: true,
+            ssl_mode: SslMode::AutomaticLocal,
+            custom_cert_path: None,
+            custom_key_path: None,
+            acme: None,
             include_wildcard_subdomains: false,
             expose_when_running: false,
         }
@@ -485,6 +697,66 @@ impl CorsConfig {
     /// Whether this policy actually does anything (has ≥1 allowed origin).
     pub fn is_active(&self) -> bool {
         !self.allowed_origins.is_empty()
+    }
+}
+
+/// A bring-your-own named Cloudflare tunnel attached to a project (Pro). PortBay
+/// generates its **own** ingress config from these fields and runs the user's
+/// tunnel; it never reads or edits `~/.cloudflared/config.yml`. Holds no secret
+/// — `credentials_file` is a path into the user-owned `~/.cloudflared`.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTunnelConfig {
+    /// Cloudflare tunnel UUID (matches a `~/.cloudflared/<uuid>.json` creds file).
+    pub tunnel_id: String,
+    /// Absolute path to the tunnel's credentials JSON in `~/.cloudflared`.
+    pub credentials_file: String,
+    /// Stable public hostname the user has already `route dns`-ed to this tunnel.
+    pub hostname: String,
+}
+
+impl CustomTunnelConfig {
+    /// Whether this config is complete enough to run a tunnel.
+    pub fn is_active(&self) -> bool {
+        !self.tunnel_id.is_empty() && !self.credentials_file.is_empty() && !self.hostname.is_empty()
+    }
+}
+
+/// One-click deploy configuration attached to a project: sync local files to a
+/// saved SSH host over SFTP, then run an ordered list of remote commands. The
+/// connection's credentials live with the [`SshConnection`]; this stores only
+/// the target host id, paths, build steps, and upload excludes — no secrets.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDeploy {
+    /// Saved SSH connection to deploy to.
+    pub connection_id: SshConnectionId,
+    /// Absolute remote directory the files are synced into (e.g. `/var/www/app`).
+    pub remote_path: String,
+    /// Sub-directory of the project to upload (e.g. `dist` / `build`). `None` or
+    /// blank uploads the whole project folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_subdir: Option<String>,
+    /// Ordered remote commands run (from `remote_path`) after the sync; stops at
+    /// the first non-zero exit, like an ad-hoc deploy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<String>,
+    /// Path components skipped during the upload walk (matched against any
+    /// segment of a file's relative path). Defaults to `node_modules` + `.git`
+    /// on a fresh config; an explicit empty list round-trips as "exclude
+    /// nothing" rather than re-defaulting.
+    #[serde(default = "default_deploy_exclude")]
+    pub exclude: Vec<String>,
+}
+
+fn default_deploy_exclude() -> Vec<String> {
+    vec!["node_modules".into(), ".git".into()]
+}
+
+impl ProjectDeploy {
+    /// Whether this config names a host + remote path to actually deploy to.
+    pub fn is_active(&self) -> bool {
+        !self.connection_id.as_str().is_empty() && !self.remote_path.trim().is_empty()
     }
 }
 
@@ -595,6 +867,281 @@ impl From<String> for DatabaseInstanceId {
     }
 }
 
+/// Stable identifier for a saved SSH tunnel profile.
+///
+/// Kept separate from Cloudflare tunnel ids because this models the inverse
+/// flow: a remote service forwarded onto localhost.
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SshTunnelId(String);
+
+impl SshTunnelId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SshTunnelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for SshTunnelId {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl From<String> for SshTunnelId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+/// Stable identifier for a saved SSH connection (a host + its credentials).
+///
+/// A connection is the anchor every SSH capability hangs on — port-forwards
+/// today, file transfer / deploy / shell as they land. Tunnels reference a
+/// connection by this id rather than re-stating host + auth.
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SshConnectionId(String);
+
+impl SshConnectionId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SshConnectionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for SshConnectionId {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl From<String> for SshConnectionId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthKind {
+    #[default]
+    Key,
+    Password,
+    /// Authenticate via the running SSH agent (`SSH_AUTH_SOCK`). Lets a user
+    /// pick "use my agent" explicitly; the connect pipeline also falls back to
+    /// the agent automatically, so agent-only hosts work without selecting this.
+    Agent,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshForwardKind {
+    #[default]
+    Local,
+    Reverse,
+    Socks,
+}
+
+/// Which forward-proxy protocol fronts a connection's first transport hop.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshProxyKind {
+    /// SOCKS5 (RFC 1928), optionally with RFC 1929 username/password auth.
+    Socks5,
+    /// HTTP CONNECT, optionally with a Basic `Proxy-Authorization` header.
+    Http,
+}
+
+/// A forward proxy the in-process russh path dials before reaching the SSH
+/// target (or the first jump host). Registry-safe: it carries the proxy
+/// address and an optional username, but **never** the proxy password — that
+/// lives in the OS keychain keyed `proxy:<connection-id>`, mirroring how the
+/// host password is stored. An open proxy has no `username` and no keychain
+/// entry. Only the first transport hop is proxied; jump hosts beyond it are
+/// reached by tunnelling through the SSH chain.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshProxyConfig {
+    pub kind: SshProxyKind,
+    pub host: String,
+    pub port: u16,
+    /// Proxy auth username. `None` = open proxy (no auth). When set, the
+    /// password is loaded from the keychain at connect time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+}
+
+/// A saved SSH connection: where to connect and how to authenticate.
+/// Registry-safe by design — hostnames, ports, usernames, and optional key
+/// paths only; a password, passphrase, or private-key material is never stored
+/// here (passwords live in the OS keychain, keyed by this connection id).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshConnection {
+    pub id: SshConnectionId,
+    pub name: String,
+    pub ssh_host: String,
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    pub ssh_user: String,
+    #[serde(default)]
+    pub auth_kind: SshAuthKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_jump: Option<String>,
+    /// Optional reusable [`SshIdentity`] this connection borrows its user / key /
+    /// auth from. When set and present, the identity supplies those fields
+    /// (the connection's own non-empty user / key_path still override). Absent
+    /// on every pre-identities registry, so old files load unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_id: Option<SshIdentityId>,
+    /// Optional forward proxy (SOCKS5 / HTTP CONNECT) dialled before the first
+    /// transport hop. `None` = connect directly. Additive — absent on every
+    /// pre-proxy registry, so old files load unchanged (no schema bump).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<SshProxyConfig>,
+    /// Display/UX-only metadata (tags, colour, notes, detected OS, last-used).
+    /// `#[serde(flatten)]` keeps these at the JSON top level for the frontend,
+    /// while grouping them in Rust so struct literals don't restate five
+    /// defaults. All inner fields default, so old registries load unchanged.
+    #[serde(flatten)]
+    pub metadata: SshConnectionMeta,
+}
+
+/// Stable identifier for a saved [`SshIdentity`].
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SshIdentityId(String);
+
+impl SshIdentityId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SshIdentityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A reusable credential — a username + key/agent/password method — shareable
+/// across many connections so the same login isn't restated per host. Like
+/// [`SshConnection`] it is secret-free; a password lives in the OS keychain
+/// (keyed by the borrowing connection, unchanged from the per-connection path).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshIdentity {
+    pub id: SshIdentityId,
+    pub name: String,
+    #[serde(default)]
+    pub ssh_user: String,
+    #[serde(default)]
+    pub auth_kind: SshAuthKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
+}
+
+/// Optional, presentation-only metadata for an [`SshConnection`]. Never holds
+/// secrets — only labels and a cached `detected_os` / `last_used` stamp.
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshConnectionMeta {
+    /// Free-form labels for grouping/filtering on the dashboard.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// A CSS colour (hex or token) for the host's dot, when the user picks one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// User notes shown on the host detail view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Cached `uname`/os-release result, refreshed on demand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_os: Option<String>,
+    /// Environment id driving the host's brand mark (e.g. `cpanel`, `ubuntu`,
+    /// `aws`, `generic`). Set automatically by detection and overridable from
+    /// the host form. Presentation-only; absent on pre-environment registries.
+    ///
+    /// Note: this is the **provider/OS** mark, distinct from [`Self::stage`]
+    /// (the deployment tier shown in the dashboard's "Environment" column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// Deployment tier shown in the dashboard's "Environment" column
+    /// (`production` / `staging` / `research` / `sandbox`). Free-form; the UI
+    /// offers a known set. Absent on pre-stage registries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    /// Provider region label (`us-east-1`, `nyc3`, …), shown next to the
+    /// provider mark. Auto-detected from cloud metadata (or set in the form);
+    /// presentation-only; absent on pre-region registries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// Detected cloud **provider** (`aws`, `digitalocean`, `gcp`, `azure`,
+    /// `hetzner`, …), distinct from [`Self::environment`] (which may be a control
+    /// panel or distro). Captured from DMI vendor during OS detection so a
+    /// cPanel box on, say, AWS still shows its real host provider + region.
+    /// Presentation-only; absent on pre-provider registries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Epoch seconds when the host was first saved, for the detail "Created"
+    /// row. Stamped once on first save; absent on pre-created_at registries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+    /// Epoch seconds of the last successful use, for dashboard ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<u64>,
+}
+
+/// A saved SSH port-forward, layered on an [`SshConnection`]. Holds only the
+/// forward coordinates; the host + auth come from the referenced connection
+/// (resolved into an `EffectiveSshTunnel` before use).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshTunnelConnection {
+    pub id: SshTunnelId,
+    pub name: String,
+    pub connection_id: SshConnectionId,
+    pub local_host: String,
+    pub local_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
+    #[serde(default)]
+    pub forward_kind: SshForwardKind,
+    #[serde(default)]
+    pub keep_alive: bool,
+    #[serde(default)]
+    pub auto_reconnect: bool,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
 /// The database engines PortBay can provision and supervise.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -605,6 +1152,11 @@ pub enum DatabaseEngine {
     Redis,
     Mongo,
     Memcached,
+    /// SQLite — a *file-based* engine. Unlike the others it has no daemon,
+    /// no listening port, and no socket: a "database" is a single `.sqlite`
+    /// file on disk. It is therefore never supervised by Process Compose;
+    /// see [`DatabaseEngine::is_file_based`].
+    Sqlite,
 }
 
 impl DatabaseEngine {
@@ -618,6 +1170,22 @@ impl DatabaseEngine {
             DatabaseEngine::Redis => "redis",
             DatabaseEngine::Mongo => "mongo",
             DatabaseEngine::Memcached => "memcached",
+            DatabaseEngine::Sqlite => "sqlite",
+        }
+    }
+
+    /// The driver key a Laravel `.env` expects in `DB_CONNECTION` — which is
+    /// *not* always [`id`]. Laravel uses `pgsql` for PostgreSQL (not
+    /// `postgres`), and MariaDB connects through the `mysql` driver on every
+    /// Laravel version (the dedicated `mariadb` driver only exists on Laravel
+    /// 11+), so we map it to `mysql` for maximum compatibility. Non-SQL engines
+    /// have no Laravel driver; they fall back to [`id`].
+    pub fn laravel_driver_id(&self) -> &'static str {
+        match self {
+            DatabaseEngine::Mysql | DatabaseEngine::Mariadb => "mysql",
+            DatabaseEngine::Postgres => "pgsql",
+            DatabaseEngine::Sqlite => "sqlite",
+            _ => self.id(),
         }
     }
 
@@ -630,10 +1198,12 @@ impl DatabaseEngine {
             DatabaseEngine::Redis => "Redis",
             DatabaseEngine::Mongo => "MongoDB",
             DatabaseEngine::Memcached => "Memcached",
+            DatabaseEngine::Sqlite => "SQLite",
         }
     }
 
-    /// Canonical default listening port for the engine.
+    /// Canonical default listening port for the engine. File-based engines
+    /// ([`Self::is_file_based`]) have no port and return 0.
     pub fn default_port(&self) -> u16 {
         match self {
             DatabaseEngine::Mysql | DatabaseEngine::Mariadb => 3306,
@@ -641,6 +1211,7 @@ impl DatabaseEngine {
             DatabaseEngine::Redis => 6379,
             DatabaseEngine::Mongo => 27017,
             DatabaseEngine::Memcached => 11211,
+            DatabaseEngine::Sqlite => 0,
         }
     }
 
@@ -653,8 +1224,17 @@ impl DatabaseEngine {
             "redis" => Some(DatabaseEngine::Redis),
             "mongo" => Some(DatabaseEngine::Mongo),
             "memcached" => Some(DatabaseEngine::Memcached),
+            "sqlite" => Some(DatabaseEngine::Sqlite),
             _ => None,
         }
+    }
+
+    /// File-based engines store each database as a single file on disk and run
+    /// no daemon. PortBay never allocates a port, renders a config, or
+    /// supervises a Process Compose process for them; their lifecycle is a
+    /// no-op (always "available"). Currently only SQLite.
+    pub fn is_file_based(&self) -> bool {
+        matches!(self, DatabaseEngine::Sqlite)
     }
 }
 
@@ -689,6 +1269,14 @@ pub struct DatabaseInstance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket_path: Option<PathBuf>,
 
+    /// Absolute path to the database file, for file-based engines (SQLite).
+    /// `None` for daemon engines, which locate their storage via `data_dir`.
+    /// This is the file injected as `DB_DATABASE` into linked projects, so it
+    /// can point either at a PortBay-managed file under `data_dir` or — when an
+    /// existing project `.sqlite` is *adopted* — at the file in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<PathBuf>,
+
     /// Whether the daemon auto-starts when PortBay boots.
     #[serde(default)]
     pub auto_start: bool,
@@ -711,8 +1299,12 @@ impl DatabaseInstance {
         match self.engine {
             DatabaseEngine::Postgres => "postgres",
             DatabaseEngine::Mysql | DatabaseEngine::Mariadb => "root",
-            // Redis/Mongo have no user by default in a fresh local instance.
-            DatabaseEngine::Redis | DatabaseEngine::Mongo | DatabaseEngine::Memcached => "",
+            // Redis/Mongo/Memcached have no user by default in a fresh local
+            // instance; SQLite is a bare file with no auth at all.
+            DatabaseEngine::Redis
+            | DatabaseEngine::Mongo
+            | DatabaseEngine::Memcached
+            | DatabaseEngine::Sqlite => "",
         }
     }
 
@@ -729,6 +1321,15 @@ impl DatabaseInstance {
             DatabaseEngine::Redis => format!("redis://127.0.0.1:{port}"),
             DatabaseEngine::Mongo => format!("mongodb://127.0.0.1:{port}"),
             DatabaseEngine::Memcached => format!("memcached://127.0.0.1:{port}"),
+            // SQLite has no host/port — the "URL" is the file path. The triple
+            // slash is the standard `sqlite:///absolute/path` form.
+            DatabaseEngine::Sqlite => {
+                let p = self.file_path.as_ref().map(|p| p.display().to_string());
+                match p {
+                    Some(path) => format!("sqlite://{path}"),
+                    None => "sqlite://".to_string(),
+                }
+            }
         }
     }
 
@@ -739,7 +1340,23 @@ impl DatabaseInstance {
     pub fn connection_env(&self) -> std::collections::BTreeMap<String, String> {
         let mut env = std::collections::BTreeMap::new();
         env.insert("DATABASE_URL".into(), self.connection_url());
-        env.insert("DB_CONNECTION".into(), self.engine.id().into());
+        // `DB_CONNECTION` is a Laravel-ism; emit the Laravel driver key so a
+        // Laravel project reads the right driver (`pgsql`, not `postgres`).
+        // Non-Laravel stacks ignore this var and read `DATABASE_URL` instead.
+        env.insert(
+            "DB_CONNECTION".into(),
+            self.engine.laravel_driver_id().into(),
+        );
+
+        // File-based engines (SQLite) carry no host/port/account — the only
+        // connection coordinate is the file path, surfaced as DB_DATABASE.
+        if self.engine.is_file_based() {
+            if let Some(path) = &self.file_path {
+                env.insert("DB_DATABASE".into(), path.display().to_string());
+            }
+            return env;
+        }
+
         env.insert("DB_HOST".into(), "127.0.0.1".into());
         env.insert("DB_PORT".into(), self.port.to_string());
         let account = self.default_account();
@@ -749,6 +1366,26 @@ impl DatabaseInstance {
         }
         env
     }
+}
+
+/// A PortBay-managed database engine — our own signed build of an engine
+/// (MySQL/PostgreSQL/Redis/…) fetched on demand into
+/// `Application Support/PortBay/database-engines/<engine>/<version>/`, mirroring
+/// the managed-runtime ([`ManagedRuntime`]) model. When present, it is preferred
+/// over any Homebrew/system install when resolving the engine's binaries, so an
+/// engine installed through PortBay lives entirely inside the PortBay environment
+/// without bundling it into the app installer.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedDatabaseEngine {
+    pub engine: DatabaseEngine,
+    /// Full version installed (e.g. "8.4.0").
+    pub version: String,
+    /// The install root: `<app-data>/database-engines/<engine>/<version>/`.
+    /// Binaries live under `<dir>/bin/`.
+    pub dir: PathBuf,
+    /// "aarch64" or "x86_64".
+    pub arch: String,
 }
 
 /// Largest `cache-size` we'll write. dnsmasq itself warns past ~10k, and a
@@ -855,10 +1492,12 @@ impl RuntimeSettings {
         let lang = match kind {
             ProjectType::Next | ProjectType::Vite | ProjectType::Node => "node",
             ProjectType::Php => "php",
+            ProjectType::Python => "python",
             ProjectType::Flutter => "flutter",
             ProjectType::Static
             | ProjectType::Xcode
             | ProjectType::Android
+            | ProjectType::Expo
             | ProjectType::Custom => return None,
         };
         self.defaults.get(lang).map(|version| Runtime {
@@ -1027,6 +1666,52 @@ mod tests {
     }
 
     #[test]
+    fn project_deploy_round_trips_and_defaults_exclude() {
+        let d = ProjectDeploy {
+            connection_id: SshConnectionId::new("web"),
+            remote_path: "/var/www/app".into(),
+            local_subdir: Some("dist".into()),
+            steps: vec!["npm ci".into(), "npm run build".into()],
+            exclude: vec!["node_modules".into(), ".git".into()],
+        };
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["connectionId"], "web");
+        assert_eq!(json["remotePath"], "/var/www/app");
+        assert_eq!(json["localSubdir"], "dist");
+        let back: ProjectDeploy = serde_json::from_value(json).unwrap();
+        assert_eq!(back, d);
+
+        // A config with no `exclude` key falls back to the node_modules/.git
+        // default; an explicit empty list round-trips as "exclude nothing".
+        let defaulted: ProjectDeploy =
+            serde_json::from_str(r#"{ "connectionId": "web", "remotePath": "/srv" }"#).unwrap();
+        assert_eq!(defaulted.exclude, vec!["node_modules", ".git"]);
+        assert!(defaulted.local_subdir.is_none());
+        let emptied: ProjectDeploy = serde_json::from_str(
+            r#"{ "connectionId": "web", "remotePath": "/srv", "exclude": [] }"#,
+        )
+        .unwrap();
+        assert!(emptied.exclude.is_empty());
+    }
+
+    #[test]
+    fn project_without_deploy_loads_and_omits_field() {
+        // A project JSON written before deploy existed deserialises with
+        // `deploy: None`, and a project with no deploy doesn't emit the key.
+        let older = serde_json::json!({
+            "id": "app",
+            "name": "App",
+            "path": "/tmp/app",
+            "type": "next",
+            "hostname": "app.test"
+        });
+        let loaded: Project = serde_json::from_value(older).unwrap();
+        assert!(loaded.deploy.is_none());
+        let json = serde_json::to_value(&loaded).unwrap();
+        assert!(json.get("deploy").is_none());
+    }
+
+    #[test]
     fn readiness_http_uses_tagged_form() {
         let r = Readiness::Http {
             path: "/".into(),
@@ -1061,6 +1746,8 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
             id: ProjectId::new("marketing-site"),
             name: "Marketing Site".into(),
             path: PathBuf::from("/Volumes/DEVSSD/Projects/Clients/Marketing Site"),
@@ -1077,6 +1764,8 @@ mod tests {
                 timeout_seconds: 75,
             }),
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec!["client".into(), "nextjs".into()],
             document_root: None,
             php_version: None,
@@ -1100,6 +1789,8 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
             id: ProjectId::new("legacy-php"),
             name: "Legacy PHP".into(),
             path: PathBuf::from("/tmp/legacy-php"),
@@ -1113,6 +1804,8 @@ mod tests {
             env: BTreeMap::new(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: None,
             php_version: None,
@@ -1361,5 +2054,59 @@ mod tests {
         assert_eq!(s.cache_size, MAX_DNS_CACHE_SIZE);
         assert_eq!(s.local_ttl, MAX_DNS_LOCAL_TTL);
         assert!(s.disable_negative_cache);
+    }
+
+    #[test]
+    fn ssh_connection_loads_without_stage_region_created_at() {
+        // A pre-redesign registry has none of the new metadata keys. It must
+        // still deserialise, with the new fields falling back to None.
+        let older = serde_json::json!({
+            "id": "old-host",
+            "name": "Legacy box",
+            "sshHost": "1.2.3.4",
+            "sshUser": "deploy",
+            "tags": ["client"],
+            "environment": "aws",
+            "lastUsed": 1_700_000_000_u64,
+        });
+        let conn: SshConnection = serde_json::from_value(older).unwrap();
+        assert_eq!(conn.ssh_port, 22, "port default applies");
+        assert_eq!(conn.metadata.environment.as_deref(), Some("aws"));
+        assert_eq!(conn.metadata.stage, None);
+        assert_eq!(conn.metadata.region, None);
+        assert_eq!(conn.metadata.created_at, None);
+    }
+
+    #[test]
+    fn ssh_connection_meta_round_trips_new_fields() {
+        let conn = SshConnection {
+            id: SshConnectionId::new("h1"),
+            name: "Staging API".into(),
+            ssh_host: "api-staging.example.net".into(),
+            ssh_port: 22,
+            ssh_user: "ubuntu".into(),
+            auth_kind: SshAuthKind::Key,
+            key_path: None,
+            proxy_jump: None,
+            identity_id: None,
+            proxy: None,
+            metadata: SshConnectionMeta {
+                stage: Some("staging".into()),
+                region: Some("nyc3".into()),
+                created_at: Some(1_712_000_000),
+                environment: Some("digitalocean".into()),
+                ..Default::default()
+            },
+        };
+        let round: SshConnection =
+            serde_json::from_value(serde_json::to_value(&conn).unwrap()).unwrap();
+        assert_eq!(round.metadata.stage.as_deref(), Some("staging"));
+        assert_eq!(round.metadata.region.as_deref(), Some("nyc3"));
+        assert_eq!(round.metadata.created_at, Some(1_712_000_000));
+        // camelCase at the JSON top level (the `#[serde(flatten)]` contract).
+        let json = serde_json::to_value(&conn).unwrap();
+        assert!(json.get("createdAt").is_some());
+        assert!(json.get("stage").is_some());
+        assert!(json.get("region").is_some());
     }
 }

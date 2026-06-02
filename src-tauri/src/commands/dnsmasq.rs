@@ -25,7 +25,7 @@ pub struct ResolverStatus {
     /// The domain suffix this status reflects (matches
     /// `AppState::domain_suffix`).
     pub suffix: String,
-    /// True iff `/etc/resolver/<suffix>` exists *and* references the
+    /// True iff the platform resolver file exists *and* references the
     /// current dnsmasq port. A stale file from an older boot (port
     /// mismatch) reads as `false`.
     pub installed: bool,
@@ -60,7 +60,7 @@ pub async fn dnsmasq_install_resolver(state: State<'_, AppState>) -> AppResult<(
     let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
 
     // Prefer PortBay's privileged helper (silent — no prompt). Only fall back
-    // to the per-action osascript prompt when the helper isn't installed.
+    // to the per-action OS authorization prompt when the helper isn't installed.
     let helper = HostsHelperClient::system();
     if helper.is_available() {
         return tokio::task::spawn_blocking(move || helper.install_resolver(&suffix, port))
@@ -231,10 +231,10 @@ pub struct DnsPreflight {
     /// Every project hostname is present in PortBay's `/etc/hosts` block —
     /// the primary resolution path. Vacuously true when there are no projects.
     pub hosts_active: bool,
-    /// `/etc/resolver/<suffix>` points at the running dnsmasq (wildcard
+    /// The platform resolver points at the running dnsmasq (wildcard
     /// enhancement; not required for the critical path).
     pub resolver_installed: bool,
-    /// The bundled dnsmasq sidecar is running (wildcard enhancement).
+    /// The dnsmasq sidecar is running (wildcard enhancement).
     pub dnsmasq_running: bool,
     /// Something is already listening on :80 / :443 (likely another local web
     /// server such as ServBay) — PortBay can't serve clean URLs until it's freed.
@@ -337,7 +337,7 @@ async fn ensure_helper_installed() -> AppResult<()> {
     ))
 }
 
-/// Install PortBay's privileged helper LaunchDaemon. One macOS auth prompt;
+/// Install PortBay's privileged helper. One OS authorization prompt;
 /// afterwards the helper performs hosts + resolver writes with no further
 /// prompts. Polls for the helper socket so the caller knows it's live.
 #[tauri::command]
@@ -346,7 +346,7 @@ pub async fn install_privileged_helper(_app: AppHandle) -> AppResult<()> {
 }
 
 /// One-click first-run setup. Guarantees that every project hostname resolves
-/// the instant this returns, with at most one macOS password prompt:
+/// the instant this returns, with at most one OS authorization prompt:
 ///
 /// 1. Ensure the privileged helper is installed (the only step that can
 ///    prompt; silent if already installed).
@@ -355,7 +355,7 @@ pub async fn install_privileged_helper(_app: AppHandle) -> AppResult<()> {
 ///    needs no port, no daemon, and no resolver file, and the system resolver
 ///    consults `/etc/hosts` before DNS. Callers (Play) await this, so the line
 ///    exists before the dev server starts.
-/// 3. **Optional enhancement** — best-effort dnsmasq + `/etc/resolver` at its
+/// 3. **Optional enhancement** — best-effort dnsmasq + platform resolver at its
 ///    live port so `dig` and arbitrary `*.suffix` subdomains resolve too. A
 ///    failure here never fails setup; `/etc/hosts` already did the job.
 #[tauri::command]
@@ -381,7 +381,7 @@ pub async fn setup_local_dns(app: AppHandle, state: State<'_, AppState>) -> AppR
         .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
-    // 3. Optional enhancement: bring dnsmasq up and point /etc/resolver at the
+    // 3. Optional enhancement: bring dnsmasq up and point the resolver at the
     //    port it actually bound. No trailing restart — boot_dnsmasq already
     //    reads the current suffix from the registry, and a restart would
     //    re-pick a free port and strand the resolver file we just wrote.
@@ -427,6 +427,8 @@ mod tests {
             env: BTreeMap::new(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: None,
             php_version: None,
@@ -435,6 +437,8 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 

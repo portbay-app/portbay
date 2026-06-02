@@ -65,6 +65,7 @@
       });
       errorBus.push({
         code: `GROUP_${op.toUpperCase()}_REPORT`,
+        category: "lifecycle",
         whatHappened: `${op}: ${report.succeeded} succeeded, ${report.failed} failed.`,
         whyItMatters:
           report.failed > 0
@@ -242,7 +243,14 @@
       {#if memberRows.length === 0}
         <EmptyState variant="registry-empty" />
       {:else}
-        <table class="w-full">
+        <!--
+          Scroll horizontally on narrow windows instead of crushing the
+          columns. A `position: fixed` row menu escapes this overflow box, so
+          it isn't clipped. `min-w` keeps the columns legible until the scroll
+          kicks in.
+        -->
+        <div class="overflow-x-auto">
+        <table class="w-full min-w-[640px]">
           <thead>
             <tr class="text-xs text-fg-muted text-left border-b border-border">
               <th class="py-2 px-4 font-medium">Name</th>
@@ -260,6 +268,7 @@
             {/each}
           </tbody>
         </table>
+        </div>
       {/if}
     </DashboardCard>
   {/if}

@@ -28,7 +28,8 @@
   type ProviderId = "cloudflare";
 
   // The tunnel providers PortBay can route through. One today; the rail is
-  // built as a list so adding the next provider is a one-line change here.
+  // built as a list so adding the next provider (ngrok, Tailscale Funnel, …)
+  // is a one-line change here.
   const PROVIDERS: {
     id: ProviderId;
     name: string;
@@ -65,6 +66,7 @@
       }, 1500);
       errorBus.push({
         code: "COPIED",
+        category: "infrastructure",
         whatHappened: "Public URL copied.",
         whyItMatters: "Paste it anywhere — a phone, a colleague, a webhook.",
         whoCausedIt: "system",
@@ -78,15 +80,15 @@
 </script>
 
 <div class="h-full flex">
-  <!-- Left rail — tunnel providers -->
+  <!-- Left rail — tunnel providers. Cloudflare today; the list is the seam
+       other providers slot into later. -->
   <aside
     class="w-[260px] shrink-0 border-r border-border bg-surface/40
            overflow-y-auto flex flex-col"
     aria-label="Tunnel providers"
   >
     <header
-      class="sticky top-0 z-10 px-4 pt-4 pb-3 bg-surface/95
-             border-b border-border/40"
+      class="sticky top-0 z-10 px-4 pt-4 pb-3 bg-surface/95 border-b border-border/40"
     >
       <h2 class="text-[13px] font-semibold text-fg">Tunnels</h2>
       <p class="mt-1 text-[11px] text-fg-subtle leading-relaxed">
@@ -138,7 +140,7 @@
     </nav>
   </aside>
 
-  <!-- Right pane — selected provider -->
+  <!-- Right pane — selected provider's management surface. -->
   <section class="flex-1 min-w-0 overflow-y-auto">
     <header class="px-8 pt-8 pb-5 border-b border-border/60">
       <div class="flex items-center gap-2.5">
@@ -273,6 +275,21 @@
                   "waking up" page until you start it.
                 </p>
               {/if}
+            {/if}
+
+            {#if !sharing && project.tunnel?.hostname}
+              <!-- A custom tunnel is attached in the project's settings, so Share
+                   routes through it (stable hostname) instead of an ephemeral
+                   quick link. Attach/detach lives in project settings, not here. -->
+              <div
+                class="mt-3 flex items-center gap-2 px-3 py-2 rounded-md bg-bg/40 border border-border/60"
+              >
+                <Icon name="globe" size={13} class="text-fg-muted shrink-0" />
+                <span class="min-w-0 text-[11.5px] text-fg-muted">
+                  Shares via your custom domain
+                  <code class="font-mono text-fg">{project.tunnel.hostname}</code>
+                </span>
+              </div>
             {/if}
           </article>
         {/each}

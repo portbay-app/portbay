@@ -12,13 +12,23 @@
   import { onMount, untrack } from "svelte";
   import { trapFocus } from "$lib/actions/trapFocus";
   import { Channel, invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
   import { Icon, StatusPill } from "$lib/components/atoms";
   import { safeInvoke } from "$lib/ipc";
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
-  import { parseLogLine, levelClass, type LogLevel, type LogLine } from "./ansi";
+  import {
+    parseLogLine,
+    eventLogLine,
+    levelClass,
+    type LogLevel,
+    type LogLine,
+  } from "./ansi";
+
+  /** PortBay-authored lifecycle line pushed over `portbay://proc-log`. */
+  type ProcLogEvent = { id: string; level: string; message: string };
 
   /** Cap on rendered lines. Keeps DOM size bounded under chatty servers. */
   const MAX_LINES = 5_000;
@@ -66,7 +76,9 @@
       case "warn":
         return level === "warn";
       case "info":
-        return level === "info" || level === "debug";
+        // PortBay lifecycle lines ride along with Info so they never vanish
+        // into a tab with no home when the user narrows the filter.
+        return level === "info" || level === "debug" || level === "system";
     }
   }
 
@@ -96,17 +108,39 @@
     scrollerEl.scrollTop = scrollerEl.scrollHeight;
   }
 
+  // Incoming lines are buffered and committed once per animation frame
+  // rather than one reactive update per line. The backend now delivers
+  // lines the instant they're written (FS-event driven), so a chatty
+  // server can fire a burst in a single frame; coalescing keeps that to
+  // one array rebuild + one render + one scroll instead of N, which is
+  // what keeps fast streams smooth instead of janky.
+  let pending: LogLine[] = [];
+  let flushHandle: number | null = null;
+
+  function flushPending() {
+    flushHandle = null;
+    if (pending.length === 0) return;
+    let next = parsed.concat(pending);
+    pending = [];
+    // Trim the head when over cap so the DOM stays bounded. Keep the last
+    // (MAX_LINES - TRIM_CHUNK) so a big burst can't blow past the cap and
+    // we don't re-slice every frame.
+    if (next.length > MAX_LINES) {
+      next = next.slice(next.length - (MAX_LINES - TRIM_CHUNK));
+    }
+    parsed = next;
+    if (autoScroll) scrollToBottom();
+  }
+
   function startFollow() {
     if (followChannel !== null || !project) return;
     const id = project.id;
     const ch = new Channel<string>();
     ch.onmessage = (line) => {
-      parsed = parsed.concat(parseLogLine(line));
-      // Trim the head when over cap so the DOM stays bounded.
-      if (parsed.length > MAX_LINES) {
-        parsed = parsed.slice(TRIM_CHUNK);
+      pending.push(parseLogLine(line));
+      if (flushHandle === null) {
+        flushHandle = requestAnimationFrame(flushPending);
       }
-      if (autoScroll) requestAnimationFrame(scrollToBottom);
     };
     followChannel = ch;
     // Fire-and-forget; the backend task runs until the channel is
@@ -128,6 +162,41 @@
       followChannel.onmessage = () => {};
       followChannel = null;
     }
+    // Drop any lines buffered for the next frame so a re-follow / project
+    // switch can't flush a previous stream's tail into the new buffer.
+    if (flushHandle !== null) {
+      cancelAnimationFrame(flushHandle);
+      flushHandle = null;
+    }
+    pending = [];
+  }
+
+  // PortBay lifecycle lines (Starting / command echo / port-conflict) arrive
+  // over an app-global event keyed by project id — independent of the Follow
+  // toggle, so pressing Play always shows immediate feedback even before the
+  // file tail has any output. Tied to which project the viewer is open on.
+  let procUnlisten: UnlistenFn | null = null;
+
+  async function startProcLog(id: string) {
+    stopProcLog();
+    const un = await listen<ProcLogEvent>("portbay://proc-log", (e) => {
+      if (e.payload.id !== id) return;
+      pending.push(eventLogLine(e.payload.message, e.payload.level as LogLevel));
+      if (flushHandle === null) {
+        flushHandle = requestAnimationFrame(flushPending);
+      }
+    });
+    // The await above can resolve after the user switched projects; if so,
+    // detach immediately instead of leaking a stale listener.
+    if (untrack(() => openedId) === id) procUnlisten = un;
+    else un();
+  }
+
+  function stopProcLog() {
+    if (procUnlisten !== null) {
+      procUnlisten();
+      procUnlisten = null;
+    }
   }
 
   // Re-init only when the viewer opens for a *different* project.
@@ -140,6 +209,7 @@
     const id = openedId;
     if (id === null) {
       stopFollow();
+      stopProcLog();
       return;
     }
     untrack(() => {
@@ -150,6 +220,7 @@
       autoScroll = true;
       follow = false;
       void reload();
+      void startProcLog(id);
     });
   });
 
@@ -187,6 +258,16 @@
     }
   }
 
+  // Terminal-style `clear`: wipe the *visible buffer* only. Like a real
+  // terminal's `clear`, it does not touch the on-disk `<id>.log` — new lines
+  // keep streaming in afterward, and Follow / auto-scroll state is preserved.
+  function clearView() {
+    parsed = [];
+    pending = [];
+    searchQuery = "";
+    matchIndex = 0;
+  }
+
   async function copyAll() {
     // No notification — copying is self-evident. Quietly ignore a missing perm.
     try {
@@ -216,7 +297,10 @@
     else if (e.key === "N") jumpToMatch(-1);
   }
 
-  onMount(() => () => stopFollow());
+  onMount(() => () => {
+    stopFollow();
+    stopProcLog();
+  });
 
   // Detect manual scroll-up; turn off autoScroll when not at bottom.
   function onScroll() {
@@ -291,9 +375,22 @@
           {/each}
         </div>
 
+        <!-- Clear — wipes the visible buffer only (terminal `clear`), placed
+             immediately before the Follow control. Does not delete the log. -->
+        <button
+          type="button"
+          onclick={clearView}
+          title="Clear the view (does not delete the log file)"
+          class="ml-auto flex items-center gap-1.5 px-2 h-6 rounded-md text-xs text-fg-muted
+                 hover:text-fg hover:bg-surface-2 transition-colors"
+        >
+          <Icon name="eraser" size={12} />
+          Clear
+        </button>
+
         <!-- Follow toggle -->
         <label
-          class="ml-auto flex items-center gap-1.5 text-xs text-fg-muted cursor-pointer"
+          class="flex items-center gap-1.5 text-xs text-fg-muted cursor-pointer"
           title="Live tail — new log lines stream in as the project writes them. Like `tail -f`."
         >
           <input

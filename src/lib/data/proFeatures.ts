@@ -23,7 +23,20 @@ export interface ProFeature {
   perk: string;
 }
 
+export const PRO_PRICE = { amount: 59, currency: "USD", interval: "year", label: "$59/yr" };
+export const PRO_DEVICES = 2;
+/** Pro marketing / pricing page — the "Learn more about Pro" link target. */
+export const PRICING_URL = "https://portbay.app/pro";
+
 export const PRO_FEATURES: ProFeature[] = [
+  {
+    key: "devices",
+    icon: "users",
+    label: "Devices",
+    community: "1",
+    pro: "Up to 2",
+    perk: "Use Pro on 2 devices",
+  },
   {
     key: "projects",
     icon: "layers",
@@ -78,7 +91,7 @@ export const PRO_FEATURES: ProFeature[] = [
 export const PRO_PERKS = PRO_FEATURES.map((f) => ({ icon: f.icon, label: f.perk }));
 
 /** Where to send the two honest acquisition paths. */
-export const DONATE_URL = "https://opencollective.com/portbay";
+export const DONATE_URL = "https://buymeacoffee.com/beiruti";
 export const CONTRIBUTE_URL = "https://github.com/portbay-app/portbay/contribute";
 
 /** Published legal docs (linked from the About-License view). */

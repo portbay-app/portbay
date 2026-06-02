@@ -44,6 +44,7 @@ function createUpdaterStore() {
   function notifyAvailable(info: UpdateInfo): void {
     errorBus.push({
       code: "UPDATE_AVAILABLE",
+      category: "updates",
       whatHappened: `PortBay ${info.version} is ready.`,
       whyItMatters: "Update to get the latest fixes and features.",
       whoCausedIt: "system",

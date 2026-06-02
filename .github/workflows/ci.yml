@@ -6,8 +6,7 @@
 #   3. Bundle smoke: `cargo tauri build --debug` so we catch packaging
 #      regressions before they reach a release tag.
 #
-# Targets macos-14 (Apple Silicon) only. Intel + Linux matrix arrives
-# when those targets are officially supported by PortBay.
+# Targets macos-14 (Apple Silicon) and Ubuntu for Linux desktop support.
 #
 # Sidecar binaries are fetched at the top of every job so the build
 # doesn't depend on cached state from outside the repo. The fetch
@@ -97,6 +96,67 @@ jobs:
         # `--no-default-features` mirrors the Tauri default-dev flag the
         # Tauri CLI passes so test runs see the same feature set as
         # `pnpm tauri dev`.
+        run: cargo test --no-default-features
+
+  rust-linux:
+    name: rust · linux compile + test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            libsecret-1-dev \
+            dnsmasq \
+            libnotify-bin \
+            policykit-1 \
+            rpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: linux-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            linux-cargo-
+
+      - name: Fetch Linux sidecar binaries
+        run: |
+          ./scripts/fetch-process-compose.sh
+          ./scripts/fetch-caddy.sh
+          ./scripts/fetch-mkcert.sh
+          ./scripts/fetch-mailpit.sh
+          ./scripts/fetch-cloudflared.sh
+          ./scripts/fetch-dnsmasq.sh
+
+      - name: Build Linux hosts helper + MCP sidecars
+        run: |
+          ./scripts/build-hosts-helper.sh
+          ./scripts/build-mcp.sh
+
+      - name: cargo clippy -- -D warnings
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+      - name: cargo test --no-default-features
+        working-directory: src-tauri
         run: cargo test --no-default-features
 
   frontend:
@@ -244,3 +304,83 @@ jobs:
         # still valid. Catches missing capabilities entries, broken
         # externalBin paths, etc., before a release tag does.
         run: pnpm tauri build --debug --no-bundle
+
+  bundle-smoke-linux:
+    name: bundle · linux debug build
+    needs: [rust-linux, frontend]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            libsecret-1-dev \
+            dnsmasq \
+            libnotify-bin \
+            policykit-1 \
+            rpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: linux-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            linux-cargo-
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch Linux sidecar binaries
+        run: |
+          ./scripts/fetch-process-compose.sh
+          ./scripts/fetch-caddy.sh
+          ./scripts/fetch-mkcert.sh
+          ./scripts/fetch-mailpit.sh
+          ./scripts/fetch-cloudflared.sh
+          ./scripts/fetch-dnsmasq.sh
+
+      - name: Build Linux hosts helper + MCP sidecars
+        run: |
+          ./scripts/build-hosts-helper.sh
+          ./scripts/build-mcp.sh
+
+      - name: cargo tauri build --debug
+        run: pnpm tauri build --debug --no-bundle
+
+  linux-package-metadata:
+    name: package · Linux metadata
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate Linux package targets
+        run: bash scripts/check-linux-packaging.sh

@@ -1,0 +1,41 @@
+# Maintainer: PortBay Maintainers <maintainers@portbay.app>
+pkgname=portbay-bin
+pkgver=0.1.2
+pkgrel=1
+pkgdesc="Container-free local development environment manager"
+arch=('x86_64')
+url="https://github.com/portbay-app/portbay"
+license=('AGPL-3.0-only')
+provides=('portbay')
+conflicts=('portbay')
+depends=(
+  'cairo'
+  'dbus'
+  'desktop-file-utils'
+  'dnsmasq'
+  'gdk-pixbuf2'
+  'glib2'
+  'gtk3'
+  'hicolor-icon-theme'
+  'libayatana-appindicator'
+  'libnotify'
+  'libsecret'
+  'libsoup3'
+  'librsvg'
+  'pango'
+  'polkit'
+  'systemd'
+  'webkit2gtk-4.1'
+)
+optdepends=(
+  'gnome-keyring: Secret Service credential storage'
+  'seahorse: GUI for Secret Service credentials'
+  'xdotool: X11 single-instance focus handoff'
+)
+options=('!strip' '!debug')
+source_x86_64=("${pkgname}-${pkgver}.deb::${url}/releases/download/v${pkgver}/portbay_${pkgver}_amd64.deb")
+sha256sums_x86_64=('REPLACE_WITH_DEB_SHA256')
+
+package() {
+  bsdtar -xf data.tar.* -C "${pkgdir}"
+}

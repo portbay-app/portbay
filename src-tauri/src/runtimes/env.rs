@@ -218,8 +218,9 @@ pub fn bootstrap_user_env() {
 ///      regardless of where they put it (Intel default, Apple Silicon
 ///      default, custom volume, Linuxbrew).
 ///   2. As a safety net, probe the two default macOS prefixes
-///      (`/opt/homebrew`, `/usr/local`) — handles the case where brew
-///      isn't on PATH but its install layout is still on disk.
+///      (`/opt/homebrew`, `/home/linuxbrew/.linuxbrew`, `/usr/local`) —
+///      handles the case where brew isn't on PATH but its install layout is
+///      still on disk.
 ///   3. Dedupe and return only directories that actually exist.
 ///
 /// Output paths point at the `<prefix>/opt/` directory — that's
@@ -236,7 +237,7 @@ pub fn brew_opt_prefixes() -> Vec<PathBuf> {
     }
 
     // Last-ditch defaults — only honoured when actually present.
-    for fallback in ["/opt/homebrew", "/usr/local"] {
+    for fallback in ["/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/usr/local"] {
         let opt = PathBuf::from(fallback).join("opt");
         if opt.is_dir() && seen.insert(opt.clone()) {
             prefixes.push(opt);

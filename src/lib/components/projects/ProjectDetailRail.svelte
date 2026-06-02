@@ -22,7 +22,6 @@
 -->
 <script lang="ts">
   import { untrack } from "svelte";
-  import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import OpenInButton from "./OpenInButton.svelte";
@@ -96,9 +95,9 @@
   async function revealInFinder() {
     if (!project) return;
     try {
-      await revealItemInDir(project.path);
+      await safeInvoke("reveal_in_finder", { path: project.path });
     } catch {
-      /* opener pushes its own toast */
+      /* safeInvoke already pushed the toast */
     }
   }
 
@@ -133,12 +132,21 @@
     return [
       {
         label: "HTTPS certificate",
-        ok: !project.https || (certInfo !== null && certError === null),
+        ok:
+          !project.https ||
+          (certInfo !== null &&
+            certError === null &&
+            (certInfo.status === "ready" ||
+              certInfo.status === "regenerateNeeded")),
         detail:
           !project.https
             ? "Not used"
             : certInfo
-              ? "Trusted"
+              ? certInfo.status === "ready"
+                ? "Ready"
+                : certInfo.status === "regenerateNeeded"
+                  ? "Renew soon"
+                  : "Needs attention"
               : certError ?? "Pending",
       },
       {

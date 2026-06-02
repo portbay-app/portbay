@@ -10,7 +10,7 @@ import { browser } from "$app/environment";
 
 import { safeInvoke } from "$lib/ipc";
 import { errorBus } from "$lib/stores/errors.svelte";
-import type { TunnelStatus } from "$lib/types/tunnel";
+import type { DetectedTunnel, TunnelStatus } from "$lib/types/tunnel";
 
 const POLL_INTERVAL_MS = 5_000;
 
@@ -70,6 +70,7 @@ function createTunnelsStore() {
       const url = statusFor(projectId)?.publicUrl;
       errorBus.push({
         code: "TUNNEL_STARTED",
+        category: "infrastructure",
         whatHappened: "Public tunnel is live.",
         whyItMatters: url
           ? `Anyone with the URL can reach this project at ${url}.`
@@ -82,6 +83,18 @@ function createTunnelsStore() {
       /* safeInvoke pushed the error toast */
     } finally {
       setBusy(projectId, false);
+    }
+  }
+
+  /**
+   * Detected named tunnels under `~/.cloudflared`, for the per-project
+   * "attach a custom tunnel" picker. Read-only; `[]` when the user has none.
+   */
+  async function listNamedTunnels(): Promise<DetectedTunnel[]> {
+    try {
+      return await safeInvoke<DetectedTunnel[]>("list_named_tunnels");
+    } catch {
+      return [];
     }
   }
 
@@ -113,6 +126,7 @@ function createTunnelsStore() {
     stop,
     share,
     stopSharing,
+    listNamedTunnels,
   };
 }
 

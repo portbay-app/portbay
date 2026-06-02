@@ -254,8 +254,18 @@ pub async fn open_main_window(app: AppHandle, path: Option<String>) -> AppResult
 /// stopped projects and never errors.
 ///
 /// For live streaming, see `subscribe_logs` (Channel<T> follow mode).
+///
+/// Deliberately a **synchronous** command. Tauri runs sync commands on the
+/// blocking thread pool, whereas `async` commands share the async-worker pool —
+/// and that worker pool gets congested by the reconciler's synchronous work
+/// (mkcert, `ps` sweeps, the PC stop grace-sleep) running on it. As an `async`
+/// command this snapshot would queue behind that congestion and the log viewer
+/// would sit blank for many seconds before "old logs" appeared, while the HTTP
+/// inspector — whose `recent_requests` backfill is sync — stayed instant. Sync
+/// puts the file read on its own pool so the snapshot returns immediately. The
+/// read itself is bounded and cheap, so it never starves that pool.
 #[tauri::command]
-pub async fn tail_logs(
+pub fn tail_logs(
     state: State<'_, AppState>,
     id: String,
     #[allow(non_snake_case)] limit: Option<u32>,
@@ -269,23 +279,46 @@ pub async fn tail_logs(
     Ok(tail_file_lines(&path, limit))
 }
 
+/// Read at most this many bytes from the end of a log file for the snapshot.
+/// Per-project logs don't rotate, so without this a long-lived project's log
+/// would grow unbounded and a full-file scan would re-introduce the open lag.
+/// Mirrors the request inspector's `TAIL_READ_BYTES` (which is why it's instant).
+const TAIL_READ_BYTES: u64 = 512 * 1024;
+
 /// Return the last `limit` lines of a log file, oldest-first.
 ///
 /// Robust to the realities of live log files:
 /// - missing file (project never started) → empty vec, not an error;
 /// - invalid UTF-8 (stray bytes mid-stream) → decoded lossily so a single
 ///   bad byte never blanks the viewer;
-/// - bounded memory: a ring buffer keeps at most `limit` lines regardless of
-///   how large the file has grown.
+/// - bounded read: for a large file we `seek` to the last [`TAIL_READ_BYTES`]
+///   and drop the first (partial) line, so the snapshot stays O(tail) — instant
+///   even at hundreds of MB — instead of scanning the whole file;
+/// - bounded memory: a ring buffer keeps at most `limit` lines.
 fn tail_file_lines(path: &std::path::Path, limit: usize) -> Vec<String> {
     use std::collections::VecDeque;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-    let file = match std::fs::File::open(path) {
+    let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
+    // For a large file, jump to the tail window; the first line we then read is
+    // almost certainly a fragment, so skip it once we're past the start.
+    let mut skip_partial = false;
+    if let Ok(meta) = file.metadata() {
+        if meta.len() > TAIL_READ_BYTES {
+            let start = meta.len() - TAIL_READ_BYTES;
+            if file.seek(SeekFrom::Start(start)).is_ok() {
+                skip_partial = true;
+            }
+        }
+    }
     let mut reader = BufReader::new(file);
+    if skip_partial {
+        let mut discard: Vec<u8> = Vec::new();
+        let _ = reader.read_until(b'\n', &mut discard);
+    }
     let mut ring: VecDeque<String> = VecDeque::with_capacity(limit.min(4096) + 1);
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -309,7 +342,43 @@ fn tail_file_lines(path: &std::path::Path, limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_dotenv;
+    use super::{parse_dotenv, tail_file_lines, TAIL_READ_BYTES};
+
+    #[test]
+    fn tail_returns_last_lines_small_file() {
+        let dir = std::env::temp_dir().join(format!("portbay_tail_small_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("s.log");
+        std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
+        assert_eq!(tail_file_lines(&path, 3), vec!["c", "d", "e"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_seeks_past_huge_file_and_keeps_correct_tail() {
+        // Write well over TAIL_READ_BYTES of numbered lines, then confirm the
+        // bounded (seek-to-end) read still returns the true last lines intact —
+        // i.e. the partial-first-line skip didn't corrupt or drop the real tail.
+        let dir = std::env::temp_dir().join(format!("portbay_tail_big_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("big.log");
+
+        let mut content = String::new();
+        let mut n = 0u32;
+        while (content.len() as u64) < TAIL_READ_BYTES + 256 * 1024 {
+            content.push_str(&format!("line-{n}\n"));
+            n += 1;
+        }
+        std::fs::write(&path, &content).unwrap();
+
+        let last = tail_file_lines(&path, 4);
+        assert_eq!(last.len(), 4);
+        assert_eq!(last[3], format!("line-{}", n - 1));
+        assert_eq!(last[0], format!("line-{}", n - 4));
+        // Every returned line is a clean, whole record (no fragment leaked in).
+        assert!(last.iter().all(|l| l.starts_with("line-")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parses_keys_strips_comments_and_blanks() {

@@ -37,6 +37,7 @@ use crate::preferences::Preferences;
 use crate::process_compose::{PcClient, SidecarManager};
 use crate::reconciler::Reconciler;
 use crate::registry::store;
+use crate::ssh::SshManager;
 use crate::tray::TrayState;
 use crate::tunnel::TunnelManager;
 
@@ -93,6 +94,31 @@ pub struct AppState {
     /// kills any leaked children via `Drop`.
     pub tunnels: Mutex<TunnelManager>,
 
+    /// Per-app SSH tunnel manager. Holds one system `ssh` child per active
+    /// saved profile; replacing the manager on shutdown kills all children.
+    pub ssh_tunnels: Mutex<SshManager>,
+
+    /// Cached SFTP sessions (one multiplexed subsystem per connection) backing
+    /// the file manager. Async-locked because SFTP ops are async; sessions are
+    /// `Arc`-shared so concurrent ops don't serialise on the lock.
+    pub sftp: tokio::sync::Mutex<crate::ssh::SftpManager>,
+
+    /// Cached authenticated SSH sessions backing remote exec/deploy (Logs,
+    /// Processes, Deploy, host snapshot). Reused across host-workspace
+    /// navigation so a host authenticates once, not once per tab; idle sessions
+    /// are reaped on a timer. Async-locked like the SFTP manager.
+    pub exec: tokio::sync::Mutex<crate::ssh::ExecManager>,
+
+    /// Live interactive PTY shells, keyed by pty id. Async-locked to match the
+    /// SFTP manager; holds the control-channel sender for each running shell so
+    /// input / resize / close commands can reach its I/O task.
+    pub pty: tokio::sync::Mutex<crate::ssh::PtyManager>,
+
+    /// Cached sessions backing the server-side AI agent (one warm session per
+    /// connection for model chat + approved-command exec). Async-locked like
+    /// the SFTP manager.
+    pub agent: tokio::sync::Mutex<crate::ssh::AgentManager>,
+
     /// Convergence engine — owns hash caches for the four sub-steps and
     /// the dirty-notify primitive the background loop awaits.
     pub reconciler: Reconciler,
@@ -140,6 +166,11 @@ pub struct AppState {
     /// on every avatar render). Cleared per project on remove. See
     /// [`crate::project_icon`] and `commands::projects::project_icon`.
     pub icon_cache: Mutex<HashMap<String, Option<String>>>,
+
+    /// Cross-project agent-activity notifications (the topbar bell). A
+    /// background scan ([`crate::notifications`]) fills this from each
+    /// project's audit log; the `notifications_*` commands read/mutate it.
+    pub notifications: Mutex<crate::notifications::NotificationCenter>,
 }
 
 /// How long after a Stop request a non-zero exit is still considered
@@ -168,6 +199,11 @@ impl AppState {
             dnsmasq: Mutex::new(DnsmasqSidecar::new()),
             mailpit: Mutex::new(MailpitSidecar::new()),
             tunnels: Mutex::new(TunnelManager::new()),
+            ssh_tunnels: Mutex::new(SshManager::new()),
+            sftp: tokio::sync::Mutex::new(crate::ssh::SftpManager::new()),
+            exec: tokio::sync::Mutex::new(crate::ssh::ExecManager::new()),
+            pty: tokio::sync::Mutex::new(crate::ssh::PtyManager::new()),
+            agent: tokio::sync::Mutex::new(crate::ssh::AgentManager::new()),
             reconciler,
             preferences: Mutex::new(Preferences::load()),
             tray: Mutex::new(Default::default()),
@@ -176,6 +212,7 @@ impl AppState {
             shutdown_done: AtomicBool::new(false),
             pending_login: Mutex::new(None),
             icon_cache: Mutex::new(HashMap::new()),
+            notifications: Mutex::new(crate::notifications::NotificationCenter::load()),
         }
     }
 
@@ -362,15 +399,24 @@ impl AppState {
             return Ok(());
         }
         let avoid = self.registered_project_ports();
-        let port = dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE, &avoid)
-            .ok_or(crate::dnsmasq::DnsmasqError::NoFreePort {
-            start: DNSMASQ_DEFAULT_PORT,
-        })?;
         // The registry is the source of truth for both the wildcard suffix
         // and the tunable dnsmasq settings; `self.domain_suffix` is only the
         // first-run fallback. Reading it here means a suffix migration or a
         // settings change is picked up on the next boot/restart.
         let reg = store::load_or_default(&self.registry_path, &self.domain_suffix)?;
+        // Prefer re-binding the port the resolver file already points at, so
+        // wildcard DNS survives a restart with no re-point needed (the drift
+        // root cause). `find_free_port` returns this exact port when it's free,
+        // else scans upward from it; first run falls back to the default.
+        let scan_start = crate::dnsmasq::resolver::read_installed_port(&reg.domain_suffix)
+            .unwrap_or(DNSMASQ_DEFAULT_PORT);
+        let port = dnsmasq::find_free_port(scan_start, DNSMASQ_PORT_SCAN_RANGE, &avoid)
+            .or_else(|| {
+                dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE, &avoid)
+            })
+            .ok_or(crate::dnsmasq::DnsmasqError::NoFreePort {
+                start: DNSMASQ_DEFAULT_PORT,
+            })?;
         let config_path = dnsmasq::write_config(&reg.domain_suffix, port, &reg.dnsmasq)?;
         self.dnsmasq
             .lock()
@@ -462,9 +508,33 @@ impl AppState {
         // child — nothing PortBay spawned should outlive the app.
         *self.tunnels.lock().unwrap_or_else(|e| e.into_inner()) =
             crate::tunnel::TunnelManager::new();
+        *self.ssh_tunnels.lock().unwrap_or_else(|e| e.into_inner()) = crate::ssh::SshManager::new();
         // Empty the cross-process state mirror: with the app going down there
         // are no live tunnels for the CLI / MCP server to report.
         self.persist_tunnel_state();
+        self.persist_ssh_tunnel_state();
+
+        // Defence-in-depth backstop: reap any of OUR sidecars already orphaned
+        // to launchd by an *earlier* crashed run that the boot sweep somehow
+        // missed. `OrphansOnly` (PPID 1) guarantees we never touch a sidecar
+        // still parented to a live PortBay — the children we just killed above
+        // were our own and are already reaped, so this only catches genuine
+        // leftovers. The boot-time `All` sweep is the real fix; this keeps
+        // orphans from accumulating across crash/quit cycles.
+        for kind in [
+            crate::sidecar_reclaim::SidecarKind::Caddy,
+            crate::sidecar_reclaim::SidecarKind::Dnsmasq,
+            crate::sidecar_reclaim::SidecarKind::Mailpit,
+            crate::sidecar_reclaim::SidecarKind::PhpFpm,
+        ] {
+            crate::sidecar_reclaim::reclaim_stale(
+                kind,
+                crate::sidecar_reclaim::SweepMode::OrphansOnly,
+            );
+        }
+
+        // Drop the advisory pidfile — the app is no longer live.
+        crate::sidecar_reclaim::remove_pidfile();
     }
 
     /// Mirror the current tunnel list to the cross-process state file
@@ -488,6 +558,25 @@ impl AppState {
         let data_dir = self.logs_dir.parent().unwrap_or(&self.logs_dir);
         if let Err(e) = crate::tunnel::write_state(data_dir, tunnels) {
             tracing::warn!(error = %e, "failed to mirror tunnel state to disk");
+        }
+    }
+
+    pub fn persist_ssh_tunnel_state(&self) {
+        let effectives = store::load_or_default(&self.registry_path, &self.domain_suffix)
+            .map(|reg| crate::ssh::resolve_tunnels(&reg))
+            .unwrap_or_default();
+        let tunnels = self
+            .ssh_tunnels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list(&effectives);
+        self.mirror_ssh_tunnels(&tunnels);
+    }
+
+    pub fn mirror_ssh_tunnels(&self, tunnels: &[crate::ssh::SshTunnelRuntimeStatus]) {
+        let data_dir = self.logs_dir.parent().unwrap_or(&self.logs_dir);
+        if let Err(e) = crate::ssh::write_state(data_dir, tunnels) {
+            tracing::warn!(error = %e, "failed to mirror SSH tunnel state to disk");
         }
     }
 }

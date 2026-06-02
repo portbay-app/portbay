@@ -95,6 +95,7 @@
       await loadCert(p.id);
       errorBus.push({
         code: "REISSUE_OK",
+        category: "infrastructure",
         whatHappened: `Cert reissued for ${p.name}.`,
         whyItMatters: "Caddy reloaded the cert; refresh your browser tab.",
         whoCausedIt: "system",
@@ -134,11 +135,20 @@
     });
   }
 
-  type Tone = "valid" | "expiring" | "missing";
+  type Tone = "valid" | "expiring" | "missing" | "error";
 
   function tone(p: ProjectView): Tone {
     const cell = certs[p.id];
     if (!cell?.info) return "missing";
+    if (
+      cell.info.status === "missingCa" ||
+      cell.info.status === "untrusted" ||
+      cell.info.status === "expired" ||
+      cell.info.status === "error"
+    ) {
+      return "error";
+    }
+    if (cell.info.status === "regenerateNeeded") return "expiring";
     const days = cell.info.daysUntilExpiry;
     if (days !== null && days < 30) return "expiring";
     return "valid";
@@ -148,7 +158,26 @@
     valid: "bg-status-running",
     expiring: "bg-status-unhealthy",
     missing: "bg-fg-subtle/60",
+    error: "bg-status-crashed",
   };
+
+  function statusLabel(info: CertInfo | null | undefined): string {
+    if (!info) return "Not issued";
+    switch (info.status) {
+      case "ready":
+        return info.trustStoreVerified === false ? "Unverified" : "Ready";
+      case "missingCa":
+        return "Missing CA";
+      case "expired":
+        return "Expired";
+      case "untrusted":
+        return "Untrusted";
+      case "regenerateNeeded":
+        return "Regenerate needed";
+      case "error":
+        return "Error";
+    }
+  }
 </script>
 
 <div class="h-full overflow-y-auto">
@@ -239,6 +268,8 @@
                       ]}"
                       title={t === "expiring"
                         ? "Expires soon"
+                        : t === "error"
+                          ? statusLabel(cell?.info)
                         : t === "missing"
                           ? "Not issued yet"
                           : "Valid"}
@@ -250,6 +281,9 @@
                       </span>
                       <span class="block text-[11.5px] font-mono text-fg-subtle truncate">
                         {p.hostname}
+                      </span>
+                      <span class="block text-[10.5px] text-fg-subtle truncate">
+                        {statusLabel(cell?.info)}
                       </span>
                     </span>
                   </span>
@@ -302,6 +336,14 @@
                     <span class="text-status-crashed" title={cell.error}>error</span>
                   {:else}
                     <span class="text-fg-subtle">not issued</span>
+                  {/if}
+                  {#if cell?.info?.errors?.length}
+                    <span
+                      class="block text-[10.5px] text-status-crashed truncate"
+                      title={cell.info.errors.join("; ")}
+                    >
+                      {cell.info.errors[0]}
+                    </span>
                   {/if}
                 </td>
 

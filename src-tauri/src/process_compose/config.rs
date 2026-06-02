@@ -70,6 +70,22 @@ struct PcProcess {
     environment: BTreeMap<String, String>,
 
     shutdown: PcShutdown,
+
+    /// Dependency edges keyed by the upstream process name. PortBay only uses
+    /// this to chain a project's pre/post-start hooks around its main process
+    /// (see [`project_to_pc_processes`]); plain projects and the
+    /// infrastructure daemons leave it `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    depends_on: Option<BTreeMap<String, PcDependsOn>>,
+}
+
+/// One `depends_on` edge. Process Compose's condition vocabulary we use:
+/// `process_completed_successfully` (upstream exited 0), `process_healthy`
+/// (upstream passed its readiness probe), and `process_started` (upstream
+/// launched — the best gate for a project with no probe).
+#[derive(Debug, Serialize)]
+struct PcDependsOn {
+    condition: &'static str,
 }
 
 /// Serialize an environment map as the `["KEY=value", …]` sequence Process
@@ -238,10 +254,10 @@ pub fn to_yaml(
 ) -> Result<String> {
     let mut processes = BTreeMap::new();
     for p in &reg.projects {
-        if let Some(entry) =
-            project_to_pc_process(p, logs_dir, mail_env, &reg.databases, &reg.runtimes)
+        for (name, entry) in
+            project_to_pc_processes(p, logs_dir, mail_env, &reg.databases, &reg.runtimes)
         {
-            processes.insert(p.id.to_string(), entry);
+            processes.insert(name, entry);
         }
     }
     for spec in php_fpm_specs {
@@ -314,6 +330,7 @@ fn php_fpm_to_pc_process(spec: &PhpFpmSpec, logs_dir: &Path) -> PcProcess {
             signal: 15,
             timeout_seconds: 5,
         },
+        depends_on: None,
     }
 }
 
@@ -362,6 +379,7 @@ fn db_daemon_to_pc_process(spec: &DatabaseDaemonSpec, logs_dir: &Path) -> PcProc
             signal: 15,
             timeout_seconds: 10,
         },
+        depends_on: None,
     }
 }
 
@@ -393,6 +411,7 @@ fn web_server_to_pc_process(spec: &WebServerSpec, logs_dir: &Path) -> PcProcess 
             signal: 15,
             timeout_seconds: 10,
         },
+        depends_on: None,
     }
 }
 
@@ -410,18 +429,29 @@ fn project_to_pc_process(
     // (a pure Caddy-served site) produces no PC entry.
     let mut command = match &p.start_command {
         Some(cmd) => cmd.clone(),
-        None => p.workspace.as_ref().map(|ws| ws.derive_dev_command())?,
+        // No explicit command: a mobile kind (iOS/Android/Flutter/Expo) derives
+        // a simulator/emulator launch; a monorepo app derives a
+        // workspace-filtered dev command; anything else has no PC entry.
+        None => match crate::mobile::launch_command(p) {
+            Some(cmd) => cmd,
+            None => p.workspace.as_ref().map(|ws| ws.derive_dev_command())?,
+        },
     };
+    let data_dir = logs_dir.parent().unwrap_or(logs_dir);
     if crate::sandbox::is_enabled(p) {
-        let data_dir = logs_dir.parent().unwrap_or(logs_dir);
         command = crate::sandbox::wrap_command(data_dir, p, &command);
     }
 
     let log_path = logs_dir.join(format!("{}.log", p.id));
-    let readiness_probe = p
-        .readiness
-        .as_ref()
-        .and_then(|r| readiness_to_pc_probe(r, p.port));
+    // Mobile launches (simulator/emulator/Metro) don't answer an HTTP/TCP probe
+    // on the project port, so readiness is "process is alive" — no probe.
+    let readiness_probe = if crate::mobile::is_mobile_kind(p.kind) {
+        None
+    } else {
+        p.readiness
+            .as_ref()
+            .and_then(|r| readiness_to_pc_probe(r, p.port))
+    };
 
     let mut environment = BTreeMap::new();
     // Inject Mailpit defaults first; the per-project env below
@@ -448,7 +478,7 @@ fn project_to_pc_process(
     for (k, v) in &p.env {
         environment.insert(k.clone(), v.clone());
     }
-    inject_runtime_path(p, runtimes, &mut environment);
+    inject_runtime_path(p, data_dir, runtimes, &mut environment);
     if crate::sandbox::is_enabled(p) {
         environment.insert("PORTBAY_SANDBOX".into(), "1".into());
         environment.insert(
@@ -475,23 +505,354 @@ fn project_to_pc_process(
             signal: 15, // SIGTERM
             timeout_seconds: 10,
         },
+        depends_on: None,
     })
+}
+
+/// Build the full set of Process Compose entries for one project: the main
+/// dev-server process plus any pre/post-start hook processes, wired together
+/// with `depends_on` edges.
+///
+/// The chain, for a project `id` with N pre-start and M post-start commands:
+///
+/// ```text
+/// id::pre::0 → id::pre::1 → … → id::pre::N-1 → id → id::post::0 → … → id::post::M-1
+/// ```
+///
+/// * Pre-start hooks are chained by `process_completed_successfully`, and the
+///   main process depends on the last one the same way — so a non-zero exit
+///   anywhere in the pre chain leaves the main process's dependency unmet and
+///   PC never starts it (the "pre-start failure aborts the start" rule).
+/// * The first post-start hook depends on the main process reaching
+///   `process_healthy` when it has a readiness probe, else `process_started`;
+///   later post hooks chain by completion. Post hooks are *downstream* of the
+///   main process, so their failure can't stop it — PortBay surfaces a warning
+///   instead (handled in the lifecycle layer).
+/// * Hook processes inherit the main process's working dir, environment (so a
+///   migrate step sees the same `DATABASE_URL`), sandbox wrapping, and
+///   `disabled` flag (so a manual-start project's hooks stay dormant until the
+///   single cascading `/process/start/{id}` call fires them), and they log to
+///   the *same* file as the main process so their output shows inline in the
+///   project's log viewer.
+///
+/// Empty hook lists collapse to exactly the old single-process behaviour.
+fn project_to_pc_processes(
+    p: &Project,
+    logs_dir: &Path,
+    mail_env: Option<&MailpitEnv>,
+    databases: &[DatabaseInstance],
+    runtimes: &RuntimeSettings,
+) -> Vec<(String, PcProcess)> {
+    let Some(mut main) = project_to_pc_process(p, logs_dir, mail_env, databases, runtimes) else {
+        return Vec::new();
+    };
+    if p.pre_start.is_empty() && p.post_start.is_empty() {
+        return vec![(p.id.to_string(), main)];
+    }
+
+    let id = p.id.to_string();
+    let data_dir = logs_dir.parent().unwrap_or(logs_dir);
+    // Hooks share the main process's runtime context. `disabled` keeps a
+    // manual-start project's hooks dormant until the cascading start; the
+    // shared log_location is what puts hook output in the project's viewer.
+    let template = HookTemplate {
+        working_dir: main.working_dir.clone(),
+        log_location: main.log_location.clone(),
+        disabled: main.disabled,
+        environment: main.environment.clone(),
+        sandboxed: crate::sandbox::is_enabled(p),
+    };
+    // Match the main command's post-readiness gate: only a process that
+    // actually exposes a probe can reach `process_healthy`.
+    let main_ready_condition = if main.readiness_probe.is_some() {
+        "process_healthy"
+    } else {
+        "process_started"
+    };
+
+    let mut out: Vec<(String, PcProcess)> = Vec::new();
+
+    // --- pre-start chain ---------------------------------------------------
+    let mut prev: Option<String> = None;
+    for (i, cmd) in p.pre_start.iter().enumerate() {
+        let name = format!("{id}::pre::{i}");
+        let mut proc = template.process(data_dir, p, cmd);
+        if let Some(upstream) = prev.take() {
+            proc.depends_on = Some(dep_edge(upstream, "process_completed_successfully"));
+        }
+        out.push((name.clone(), proc));
+        prev = Some(name);
+    }
+    if let Some(last_pre) = prev {
+        main.depends_on = Some(dep_edge(last_pre, "process_completed_successfully"));
+    }
+    out.push((id.clone(), main));
+
+    // --- post-start chain --------------------------------------------------
+    let mut prev: Option<String> = None;
+    for (i, cmd) in p.post_start.iter().enumerate() {
+        let name = format!("{id}::post::{i}");
+        let mut proc = template.process(data_dir, p, cmd);
+        let (upstream, condition) = match prev.take() {
+            None => (id.clone(), main_ready_condition),
+            Some(prev_post) => (prev_post, "process_completed_successfully"),
+        };
+        proc.depends_on = Some(dep_edge(upstream, condition));
+        out.push((name.clone(), proc));
+        prev = Some(name);
+    }
+
+    out
+}
+
+/// A single `name -> {condition}` dependency map.
+fn dep_edge(upstream: String, condition: &'static str) -> BTreeMap<String, PcDependsOn> {
+    let mut m = BTreeMap::new();
+    m.insert(upstream, PcDependsOn { condition });
+    m
+}
+
+/// The shared shape every hook process of one project takes. Built once from
+/// the main process so each hook inherits its working dir, env, log file, and
+/// disabled/sandbox state.
+struct HookTemplate {
+    working_dir: String,
+    log_location: String,
+    disabled: bool,
+    environment: BTreeMap<String, String>,
+    sandboxed: bool,
+}
+
+impl HookTemplate {
+    fn process(&self, data_dir: &Path, p: &Project, command: &str) -> PcProcess {
+        // Sandbox the hook the same way the main command is wrapped, so an
+        // install/migrate step in a sandboxed project can't escape the profile.
+        let command = if self.sandboxed {
+            crate::sandbox::wrap_command(data_dir, p, command)
+        } else {
+            command.to_string()
+        };
+        PcProcess {
+            description: None,
+            working_dir: self.working_dir.clone(),
+            command,
+            disabled: self.disabled,
+            availability: PcAvailability { restart: "no" },
+            readiness_probe: None,
+            log_location: self.log_location.clone(),
+            environment: self.environment.clone(),
+            shutdown: PcShutdown {
+                signal: 15,
+                timeout_seconds: 10,
+            },
+            depends_on: None,
+        }
+    }
+}
+
+/// Returns true when the project's kind maps to the "node" language family
+/// (Next.js, Vite, plain Node). Used to decide whether to apply the
+/// sandboxed-node minimal-PATH branch.
+fn is_node_type(p: &Project) -> bool {
+    use crate::registry::ProjectType;
+    matches!(
+        p.kind,
+        ProjectType::Next | ProjectType::Vite | ProjectType::Node
+    )
+}
+
+/// Whether a per-project corepack home holds a *materialized* package manager
+/// (so pointing `COREPACK_HOME` at it lets the run phase resolve a PM offline).
+///
+/// Corepack stores a finished PM at `<home>/v1/<pm>/<version>/` and stages each
+/// in-progress download in a `<home>/v1/corepack-<pid>-<hash>/` temp dir that it
+/// renames into place on success — but **leaves behind on a failed or blocked
+/// download**. A home whose `v1/` holds nothing but those `corepack-*` temp dirs
+/// (e.g. run-phase download attempts a loopback-only policy refused) is NOT
+/// populated: trusting it would pin `COREPACK_HOME` at a cache with no real PM
+/// and force yet another download the network policy blocks — the crash this
+/// guards against. So look *inside* `v1` for a real PM directory, ignoring the
+/// `corepack-*` temp staging dirs (and the `shims` dir `corepack enable`
+/// creates, which is not a PM cache). An earlier version checked only the
+/// top-level `home` for any entry other than `shims`, which the `v1` dir full of
+/// failed-download temp dirs satisfied — a false positive that re-armed the
+/// download crash on every launch.
+fn corepack_home_is_populated(home: &Path) -> bool {
+    std::fs::read_dir(home.join("v1"))
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name != "shims" && !name.starts_with("corepack-") && e.path().is_dir()
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn inject_runtime_path(
     p: &Project,
+    data_dir: &Path,
     runtimes: &RuntimeSettings,
     environment: &mut BTreeMap<String, String>,
 ) {
-    let Some(runtime) = &p.runtime else {
+    // Sandboxed node-type projects get a minimal, fixed PATH so the RUN phase
+    // never inherits the login-shell PATH or a competitor's binaries. The
+    // managed Node binary (or a fallback to the pinned runtime) is placed
+    // first; `/usr/bin:/bin` covers system utilities; `node_modules/.bin` makes
+    // locally-installed CLI tools (like the project's own devDependencies)
+    // available without a global install.
+    if crate::sandbox::is_enabled(p) && is_node_type(p) {
+        // Stable per-project corepack home — it survives install → run cycles
+        // (it is NOT the ephemeral scratch, which is wiped each start) and is
+        // writable in the sandbox profile, unlike `~/.cache`, which the read
+        // jail leaves read-only. Routing COREPACK_HOME here keeps every corepack
+        // read AND write confined and permitted: the sandboxed install phase
+        // populates it, the run phase reads it. This applies to EVERY sandboxed
+        // node project — not just those on a managed Node — so a project on the
+        // system Node still gets a sandbox-safe corepack home instead of
+        // crashing on the read-only `~/.cache/node/corepack`.
+        let corepack_home = data_dir
+            .join("sandbox")
+            .join(p.id.as_str())
+            .join("corepack");
+        // Corepack writes the pnpm/yarn shims into `<corepack_home>/shims`
+        // during the install phase; a managed Node ships no `pnpm` shim, so this
+        // dir must lead PATH for a `pnpm …` run command to resolve.
+        let corepack_shims = corepack_home.join("shims");
+        let node_modules_bin = format!("{}/node_modules/.bin", p.path.to_string_lossy());
+
+        // Resolve the node binary: prefer the pinned runtime, else the newest
+        // PortBay-managed Node, else none (system Node on the inherited PATH).
+        let node_binary = p
+            .runtime
+            .as_ref()
+            .and_then(|rt| crate::runtimes::resolve_binary(rt, runtimes))
+            .or_else(|| crate::runtimes::resolve_default_node(runtimes));
+
+        match node_binary.as_deref().and_then(|b| b.parent()) {
+            // Managed Node: a minimal, fixed PATH so the RUN phase never inherits
+            // the login-shell PATH or a competitor's binaries. The install phase
+            // guarantees COREPACK_HOME is populated, so the run is hard-offline.
+            Some(bin_dir) => {
+                environment.insert(
+                    "PATH".into(),
+                    format!(
+                        "{}:{}:{}:/usr/bin:/bin",
+                        corepack_shims.to_string_lossy(),
+                        bin_dir.to_string_lossy(),
+                        node_modules_bin,
+                    ),
+                );
+                // Hard-disable network in the RUN phase; the install phase
+                // already materialized the pinned PM into COREPACK_HOME.
+                environment.insert("COREPACK_ENABLE_NETWORK".into(), "0".into());
+
+                // Keep the runtime metadata exports.
+                let (lang, version) = p
+                    .runtime
+                    .as_ref()
+                    .map(|rt| (rt.lang.clone(), rt.version.clone()))
+                    .unwrap_or_else(|| ("node".into(), String::new()));
+                environment.insert("PORTBAY_RUNTIME_LANG".into(), lang);
+                if !version.is_empty() {
+                    environment.insert("PORTBAY_RUNTIME_VERSION".into(), version);
+                }
+                // Managed Node: the install phase reliably populates the
+                // per-project corepack home, so pin corepack there.
+                environment.insert(
+                    "COREPACK_HOME".into(),
+                    corepack_home.to_string_lossy().into_owned(),
+                );
+            }
+            // No managed Node: keep the inherited PATH so the system Node
+            // resolves, but lead with the corepack shims + the project's
+            // node_modules/.bin.
+            None => {
+                let inherited = environment
+                    .get("PATH")
+                    .cloned()
+                    .or_else(|| std::env::var("PATH").ok())
+                    .unwrap_or_default();
+                environment.insert(
+                    "PATH".into(),
+                    format!(
+                        "{}:{}:{inherited}",
+                        corepack_shims.to_string_lossy(),
+                        node_modules_bin,
+                    ),
+                );
+                // Hard-disable corepack's network in the RUN phase, exactly as
+                // the managed-Node branch does. The run phase must NEVER
+                // download a package manager — that is the install phase's job
+                // (it stages the pinned PM into the per-project COREPACK_HOME
+                // through the registry proxy). Without this, a corepack that
+                // can't find the pinned PM in its cache fetches it from the
+                // registry; under a loopback-only/blocked policy that DNS lookup
+                // fails and crashes the supervised process with an opaque
+                // `ENOTFOUND` corepack stack trace. With it, corepack resolves
+                // the PM from its cache (the default ~/.cache or a populated
+                // per-project home, both sandbox-readable) and otherwise fails
+                // fast with a clear "network disabled" message instead of a
+                // crash — the signal to run a sandboxed install first.
+                environment.insert("COREPACK_ENABLE_NETWORK".into(), "0".into());
+                // Pin corepack at the per-project managed home ONLY once it's
+                // been populated (by a sandboxed install). Until then leave
+                // COREPACK_HOME unset so corepack uses its default (~/.cache,
+                // readable under the sandbox): an already-cached PM then runs
+                // offline instead of forcing a download the project's network
+                // policy (e.g. loopback-only) would block — the crash that
+                // unconditional routing caused on a fresh, empty home.
+                if corepack_home_is_populated(&corepack_home) {
+                    environment.insert(
+                        "COREPACK_HOME".into(),
+                        corepack_home.to_string_lossy().into_owned(),
+                    );
+                }
+            }
+        }
         return;
-    };
-    let Some(binary) = crate::runtimes::resolve_binary(runtime, runtimes) else {
+    }
+
+    // Non-sandboxed path (or sandboxed non-node, or sandboxed node with no
+    // managed binary): prepend the runtime bin dir onto the inherited PATH, then
+    // layer the Python venv on top. Done as an `if let` (not an early return) so
+    // a Python project with NO pinned runtime still reaches the venv injection.
+    if let Some(runtime) = &p.runtime {
+        if let Some(bin_dir) = crate::runtimes::resolve_binary(runtime, runtimes)
+            .and_then(|b| b.parent().map(Path::to_path_buf))
+        {
+            let current = environment
+                .get("PATH")
+                .cloned()
+                .or_else(|| std::env::var("PATH").ok())
+                .unwrap_or_default();
+            environment.insert(
+                "PATH".into(),
+                format!("{}:{current}", bin_dir.to_string_lossy()),
+            );
+            environment.insert("PORTBAY_RUNTIME_LANG".into(), runtime.lang.clone());
+            environment.insert("PORTBAY_RUNTIME_VERSION".into(), runtime.version.clone());
+        }
+    }
+
+    inject_python_venv(p, environment);
+}
+
+/// Prepend a provisioned Python virtualenv's `bin/` onto PATH so `python`,
+/// `pip`, `uvicorn`, `flask`, `pytest` etc. resolve from the project's `.venv`
+/// rather than the system interpreter. Runs last so the venv leads PATH ahead
+/// of any pinned-runtime bin dir injected above. No-op until the venv exists
+/// (created by `provision_python_env`), so a project added before provisioning
+/// still starts cleanly on the system Python.
+fn inject_python_venv(p: &Project, environment: &mut BTreeMap<String, String>) {
+    if p.kind != crate::registry::ProjectType::Python {
         return;
-    };
-    let Some(bin_dir) = binary.parent() else {
+    }
+    let venv = p.path.join(".venv");
+    let venv_bin = venv.join("bin");
+    if !venv_bin.is_dir() {
         return;
-    };
+    }
     let current = environment
         .get("PATH")
         .cloned()
@@ -499,10 +860,9 @@ fn inject_runtime_path(
         .unwrap_or_default();
     environment.insert(
         "PATH".into(),
-        format!("{}:{current}", bin_dir.to_string_lossy()),
+        format!("{}:{current}", venv_bin.to_string_lossy()),
     );
-    environment.insert("PORTBAY_RUNTIME_LANG".into(), runtime.lang.clone());
-    environment.insert("PORTBAY_RUNTIME_VERSION".into(), runtime.version.clone());
+    environment.insert("VIRTUAL_ENV".into(), venv.to_string_lossy().into_owned());
 }
 
 fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadinessProbe> {
@@ -577,6 +937,8 @@ mod tests {
                 timeout_seconds: 75,
             }),
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: None,
             php_version: None,
@@ -585,6 +947,8 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 
@@ -605,6 +969,8 @@ mod tests {
             env: Default::default(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
@@ -613,6 +979,8 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 
@@ -646,6 +1014,80 @@ mod tests {
                 || yaml.contains("restart: 'no'")
                 || yaml.contains("restart: \"no\""),
             "expected `restart: no` in YAML, got: {yaml}"
+        );
+    }
+
+    #[test]
+    fn hooks_emit_chained_pre_and_post_processes() {
+        let mut r = Registry::new("test");
+        let mut p = next_project("laravel-app", 8000);
+        p.pre_start = vec!["pnpm install".into(), "php artisan migrate".into()];
+        p.post_start = vec!["curl -fsS http://127.0.0.1:8000/up".into()];
+        r.add_project(p).unwrap();
+
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[], true).unwrap();
+
+        // One process per hook command, named by phase + index, plus the main.
+        assert!(
+            yaml.contains("laravel-app::pre::0:"),
+            "missing pre 0: {yaml}"
+        );
+        assert!(yaml.contains("laravel-app::pre::1:"), "missing pre 1");
+        assert!(yaml.contains("laravel-app::post::0:"), "missing post 0");
+        assert!(yaml.contains("pnpm install"));
+        assert!(yaml.contains("php artisan migrate"));
+
+        // The main process waits on the last pre hook completing successfully.
+        assert!(
+            yaml.contains("laravel-app::pre::1")
+                && yaml.contains("condition: process_completed_successfully"),
+            "main must depend on the last pre hook: {yaml}"
+        );
+        // The first post hook waits for the main process to be healthy (it has
+        // an HTTP readiness probe).
+        assert!(
+            yaml.contains("condition: process_healthy"),
+            "post hook should gate on process_healthy: {yaml}"
+        );
+        // Hooks share the main process's log file so their output is inline.
+        assert_eq!(
+            yaml.matches("/tmp/logs/laravel-app.log").count(),
+            4,
+            "main + 3 hooks should all log to the project's file: {yaml}"
+        );
+    }
+
+    #[test]
+    fn post_hook_without_probe_gates_on_process_started() {
+        let mut r = Registry::new("test");
+        let mut p = next_project("no-probe-app", 9000);
+        p.readiness = Some(Readiness::Process); // no PC probe emitted
+        p.post_start = vec!["echo warm".into()];
+        r.add_project(p).unwrap();
+
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[], true).unwrap();
+        assert!(yaml.contains("no-probe-app::post::0:"));
+        assert!(
+            yaml.contains("condition: process_started"),
+            "no readiness probe → post hook gates on process_started: {yaml}"
+        );
+        assert!(
+            !yaml.contains("condition: process_healthy"),
+            "must not reference process_healthy without a probe: {yaml}"
+        );
+    }
+
+    #[test]
+    fn project_without_hooks_emits_single_process() {
+        let mut r = Registry::new("test");
+        r.add_project(next_project("plain", 3000)).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[], true).unwrap();
+        assert!(yaml.contains("plain:"));
+        assert!(!yaml.contains("::pre::"), "no pre hooks expected: {yaml}");
+        assert!(!yaml.contains("::post::"), "no post hooks expected: {yaml}");
+        assert!(
+            !yaml.contains("depends_on"),
+            "a hookless project needs no depends_on: {yaml}"
         );
     }
 
@@ -975,5 +1417,210 @@ mod tests {
             Some("/")
         );
         assert_eq!(proc["disabled"].as_bool(), Some(false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandboxed_node_project_with_managed_runtime_gets_minimal_path_and_corepack_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("node-22").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let node = bin_dir.join("node");
+        std::fs::write(&node, "#!/bin/sh\necho v22.14.0\n").unwrap();
+
+        let mut p = next_project("node-sandboxed", 3020);
+        // No explicit runtime pin — default-node resolution path.
+        p.runtime = None;
+        p.sandbox = Some(SandboxConfig::enabled(SandboxNetworkPolicy::Blocked, false));
+
+        let mut r = Registry::new("test");
+        // Register a PortBay-managed node binary.
+        r.runtimes.managed.push(crate::registry::ManagedRuntime {
+            lang: "node".into(),
+            version: "22.14.0".into(),
+            binary: node.clone(),
+            arch: crate::runtimes::download::manifest::current_arch().into(),
+        });
+        r.add_project(p).unwrap();
+
+        // logs_dir parent is the data_dir used to compute COREPACK_HOME.
+        let logs_dir = Path::new("/tmp/portbay/logs");
+        let yaml = to_yaml(&r, logs_dir, None, &[], &[], &[], true).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let env = env_kv_map(&doc["processes"]["node-sandboxed"]["environment"]);
+
+        let path = env
+            .get("PATH")
+            .expect("PATH must be set for sandboxed node project");
+        // Must start with the corepack shims dir (our managed Node ships no
+        // pnpm shim, so it must lead PATH), then the managed node bin dir.
+        assert!(
+            path.starts_with("/") && path.contains("/corepack/shims:"),
+            "corepack shims dir must lead PATH, got: {path}"
+        );
+        assert!(
+            path.contains(&format!("/corepack/shims:{}", bin_dir.to_string_lossy())),
+            "managed bin dir must follow the shims dir in PATH, got: {path}"
+        );
+        // Must include node_modules/.bin.
+        assert!(
+            path.contains("node_modules/.bin"),
+            "node_modules/.bin must be in PATH, got: {path}"
+        );
+        // Must end with /usr/bin:/bin — no inherited PATH leakage.
+        assert!(
+            path.ends_with("/usr/bin:/bin"),
+            "PATH must end with /usr/bin:/bin (minimal, no login-shell PATH), got: {path}"
+        );
+        // COREPACK_HOME must be set.
+        let corepack_home = env.get("COREPACK_HOME").expect("COREPACK_HOME must be set");
+        assert!(
+            corepack_home.contains("sandbox/node-sandboxed/corepack"),
+            "COREPACK_HOME must point to per-project corepack dir, got: {corepack_home}"
+        );
+        // COREPACK_ENABLE_NETWORK must be 0.
+        assert_eq!(
+            env.get("COREPACK_ENABLE_NETWORK").map(String::as_str),
+            Some("0"),
+            "COREPACK_ENABLE_NETWORK must be 0 in sandboxed run"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandboxed_system_node_routes_corepack_home_only_once_populated() {
+        // A sandboxed node project on the SYSTEM Node (no managed runtime). The
+        // corepack shims always lead the (inherited) PATH so the system Node
+        // resolves, but COREPACK_HOME is pinned at the per-project managed dir
+        // ONLY once that dir holds a downloaded PM. On a fresh/empty home,
+        // COREPACK_HOME is left unset so corepack falls back to ~/.cache (a
+        // cached PM then runs offline instead of forcing a download a
+        // loopback-only policy would block).
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let logs_dir = data_dir.join("logs");
+
+        let mut p = next_project("node-sys-sandboxed", 3022);
+        p.runtime = None;
+        p.sandbox = Some(SandboxConfig::enabled(
+            SandboxNetworkPolicy::LoopbackOnly,
+            false,
+        ));
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+
+        // ── Empty managed home → COREPACK_HOME unset (fallback to default) ──
+        let yaml = to_yaml(&r, &logs_dir, None, &[], &[], &[], true).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let env = env_kv_map(&doc["processes"]["node-sys-sandboxed"]["environment"]);
+        assert!(
+            !env.contains_key("COREPACK_HOME"),
+            "empty managed home must NOT pin COREPACK_HOME (fall back to ~/.cache)"
+        );
+        let path = env.get("PATH").expect("PATH must be set");
+        assert!(
+            path.contains("sandbox/node-sys-sandboxed/corepack/shims:"),
+            "corepack shims must still lead PATH, got: {path}"
+        );
+        assert!(path.contains("node_modules/.bin"), "got: {path}");
+        // The RUN phase is always hard-offline for corepack (same contract as
+        // the managed-Node branch): it resolves the PM from cache or fails
+        // cleanly, but never downloads — so a missing PM can't crash the
+        // supervised process with an `ENOTFOUND` registry stack trace.
+        assert_eq!(
+            env.get("COREPACK_ENABLE_NETWORK").map(String::as_str),
+            Some("0"),
+            "system-Node run phase must hard-disable corepack network"
+        );
+
+        // ── Populate the home with a PM → COREPACK_HOME now pinned ──
+        let pm = data_dir
+            .join("sandbox")
+            .join("node-sys-sandboxed")
+            .join("corepack")
+            .join("v1")
+            .join("pnpm")
+            .join("9.12.0");
+        std::fs::create_dir_all(&pm).unwrap();
+        let yaml2 = to_yaml(&r, &logs_dir, None, &[], &[], &[], true).unwrap();
+        let doc2: serde_yaml::Value = serde_yaml::from_str(&yaml2).unwrap();
+        let env2 = env_kv_map(&doc2["processes"]["node-sys-sandboxed"]["environment"]);
+        let home = env2
+            .get("COREPACK_HOME")
+            .expect("populated managed home must pin COREPACK_HOME");
+        assert!(
+            home.ends_with("sandbox/node-sys-sandboxed/corepack"),
+            "COREPACK_HOME must point to the per-project corepack dir, got: {home}"
+        );
+    }
+
+    // Regression guard for the run-phase crash: corepack leaves an empty
+    // `v1/corepack-<pid>-<hash>/` temp dir behind on a failed/blocked download
+    // (e.g. a loopback-only run trying to fetch a PM with no proxy). A home
+    // holding ONLY those temp dirs is NOT populated — pinning COREPACK_HOME at
+    // it would force another blocked download and crash the process. The old
+    // top-level "any entry other than shims" check treated the `v1` dir itself
+    // as proof of population; this asserts the corrected check looks inside.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn corepack_home_with_only_failed_download_temp_dirs_is_not_populated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("corepack");
+        // Mimic the on-disk state from a blocked run: v1/ with only the
+        // leftover temp staging dirs corepack failed to rename into place,
+        // plus the shims dir `corepack enable` creates.
+        std::fs::create_dir_all(home.join("v1").join("corepack-55106-706a9900.91598")).unwrap();
+        std::fs::create_dir_all(home.join("v1").join("corepack-60553-cab28fef.231eb")).unwrap();
+        std::fs::create_dir_all(home.join("shims")).unwrap();
+        assert!(
+            !corepack_home_is_populated(&home),
+            "a home with only corepack-* temp dirs must NOT count as populated"
+        );
+
+        // Now materialize a real PM → populated.
+        std::fs::create_dir_all(home.join("v1").join("pnpm").join("9.12.0")).unwrap();
+        assert!(
+            corepack_home_is_populated(&home),
+            "a home with a real v1/<pm>/<version> dir must count as populated"
+        );
+    }
+
+    #[test]
+    fn non_sandboxed_node_project_still_prepends_runtime_bin_to_path() {
+        // The non-sandboxed branch must keep its existing prepend-onto-inherited
+        // PATH behavior (regression guard for the existing test).
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("node-22").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let node = bin_dir.join("node");
+        std::fs::write(&node, "#!/bin/sh\necho v22.1.0\n").unwrap();
+
+        let mut p = next_project("runtime-path-non-sandboxed", 3021);
+        p.runtime = Some(Runtime {
+            lang: "node".into(),
+            version: "22.1.0".into(),
+        });
+        // No sandbox config — this is a plain (non-sandboxed) run.
+        let mut r = Registry::new("test");
+        r.runtimes.manual.push(ManualRuntime {
+            lang: "node".into(),
+            version: "22.1.0".into(),
+            binary: node,
+        });
+        r.add_project(p).unwrap();
+
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let env = env_kv_map(&doc["processes"]["runtime-path-non-sandboxed"]["environment"]);
+        let path = env.get("PATH").expect("PATH entry");
+        assert!(
+            path.starts_with(&bin_dir.to_string_lossy().to_string()),
+            "expected runtime bin dir first in PATH, got {path}"
+        );
+        // Non-sandboxed: no COREPACK_HOME injection.
+        assert!(
+            !env.contains_key("COREPACK_HOME"),
+            "non-sandboxed project must not have COREPACK_HOME injected"
+        );
     }
 }

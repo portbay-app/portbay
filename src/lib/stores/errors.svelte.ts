@@ -1,12 +1,9 @@
 /**
  * Toast bus — the bottom-right surface shown by `ToastHost`.
  *
- * Notification routing: every push is recorded in the bell (`notifications`),
- * which is the home for all notifications. The bottom-right toast is reserved
- * for high-priority items that need the user's attention right now — actual
- * errors, or anything offering an action the user must decide on (see
- * `isHighPriority`). Success / info / plain-warning notifications go to the
- * bell only and never toast.
+ * Notification routing is preference-driven. Each envelope carries a category
+ * and severity; the user's Settings → Notifications matrix decides whether it
+ * lands in the bell, bottom-right toast, or sound channel.
  *
  * Auto-dismiss policy (for the toasts that do show):
  *   - Toasts with `actions.length === 0` auto-dismiss after 8 s.
@@ -20,6 +17,8 @@
  * retrying internally won't stack).
  */
 import type { CommandError } from "$lib/types/error";
+import { severityForEnvelope, shouldDeliver } from "$lib/notifications/prefs";
+import { notificationPrefs } from "./notificationPrefs.svelte";
 import { notifications } from "./notifications.svelte";
 
 const AUTO_DISMISS_MS = 8_000;
@@ -41,18 +40,6 @@ function createErrorBus() {
     return `${e.code}::${e.whatHappened}`;
   }
 
-  /**
-   * Whether an envelope earns a bottom-right toast (vs. living in the bell
-   * only). High priority = a genuine error, or anything carrying an action the
-   * user must decide on. Severity falls back to the same `whoCausedIt` mapping
-   * the renderer uses (user → warning, system → error) when unset, so a plain
-   * informational/success notification stays out of the corner.
-   */
-  function isHighPriority(e: CommandError): boolean {
-    const severity = e.severity ?? (e.whoCausedIt === "user" ? "warning" : "error");
-    return severity === "error" || e.actions.length > 0;
-  }
-
   function dismiss(id: string) {
     const idx = toasts.findIndex((t) => t.id === id);
     if (idx === -1) return;
@@ -70,16 +57,24 @@ function createErrorBus() {
     const dup = notifications.value.find(
       (n) => fingerprint(n.envelope) === fp && now - n.receivedAt < DEDUP_WINDOW_MS,
     );
-    if (dup) {
+    const toastDup = toasts.find((t) => fingerprint(t.envelope) === fp && now - t.pushedAt < DEDUP_WINDOW_MS);
+    if (dup || toastDup) {
       return toasts.find((t) => fingerprint(t.envelope) === fp)?.id ?? "";
     }
 
-    // The bell is the home for every notification; record it unconditionally.
-    notifications.push(envelope);
+    const severity = severityForEnvelope(envelope);
+    const prefs = notificationPrefs.value;
+    const when = new Date(now);
 
-    // The bottom-right toast is reserved for high-priority items — actual
-    // errors or action-required envelopes. Everything else stays in the bell.
-    if (!isHighPriority(envelope)) return "";
+    if (shouldDeliver(prefs, envelope.category, severity, "bell", when)) {
+      notifications.push(envelope);
+    }
+
+    // No audible cue here. Sound is reserved for the task board: agent activity
+    // (a completed card, a comment, an execution error) plays through the
+    // activity store's `playAgentEventCue`. Command-error envelopes — including
+    // a failed save that the backend tags `agent-board` — must stay silent.
+    if (!shouldDeliver(prefs, envelope.category, severity, "toast", when)) return "";
 
     const id = crypto.randomUUID();
     const entry: ToastEntry = {

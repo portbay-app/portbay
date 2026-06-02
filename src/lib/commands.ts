@@ -11,6 +11,7 @@ import { goto } from "$app/navigation";
 import { openUrl } from "$lib/security/openUrl";
 
 import { safeInvoke } from "$lib/ipc";
+import { startProject, startProjectSandboxed } from "$lib/actions/startProject";
 import { addProjectWizard } from "$lib/stores/wizard.svelte";
 import { density } from "$lib/stores/density.svelte";
 import { errorBus } from "$lib/stores/errors.svelte";
@@ -94,6 +95,7 @@ export function collectCommands(): PaletteCommand[] {
     { id: "/languages", label: "Languages", icon: "file-code" as const },
     { id: "/logs", label: "Logs", icon: "file-text" as const },
     { id: "/inspector", label: "Inspector", icon: "activity" as const },
+    { id: "/ssh", label: "SSH Tunnels", icon: "terminal" as const },
     { id: "/settings", label: "Settings", icon: "settings" as const },
   ]) {
     cmds.push({
@@ -138,7 +140,17 @@ export function collectCommands(): PaletteCommand[] {
         run: async () => {
           try {
             await dns.ensureReady();
-            await safeInvoke("start_project", { id: p.id });
+            // Same conflict-resolving path as every Play button: a port
+            // conflict surfaces the "kill it & start" prompt. Already-sandboxed
+            // projects go through the sandboxed start so their profile +
+            // ephemeral reset still run.
+            const r = p.sandboxed
+              ? await startProjectSandboxed(p.id, p.name, {
+                  network: p.sandbox?.network ?? "loopback_only",
+                  ephemeral: p.sandbox?.ephemeral ?? true,
+                })
+              : await startProject(p.id, p.name);
+            if (r.kind === "error") errorBus.push(r.error);
           } catch {
             /* toast pushed */
           }
@@ -346,6 +358,15 @@ export function collectCommands(): PaletteCommand[] {
     keywords: ["cloudflare", "share", "public", "tunnel"],
     run: () => void goto("/tunnels"),
   });
+  cmds.push({
+    id: "ssh-tunnel.manage",
+    label: "Manage SSH tunnels",
+    detail: "Forward remote services onto localhost",
+    group: "Tunnels",
+    icon: "terminal",
+    keywords: ["ssh", "remote", "database", "jump", "bastion", "cluster", "tensorboard", "jupyter"],
+    run: () => void goto("/ssh"),
+  });
 
   return cmds;
 }
@@ -359,6 +380,7 @@ export async function executeCommand(cmd: PaletteCommand): Promise<void> {
   } catch (e) {
     errorBus.push({
       code: "PALETTE_ACTION_FAILED",
+      category: "project-error",
       whatHappened: `Action "${cmd.label}" couldn't complete: ${String(e)}`,
       whyItMatters: "Re-run from the palette or use the in-app control.",
       whoCausedIt: "system",

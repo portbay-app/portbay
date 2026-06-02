@@ -5,7 +5,7 @@ pub enum PhpError {
     #[error("PHP version {0} is not installed — run `brew install php@{0}`")]
     VersionNotInstalled(String),
 
-    #[error("php-fpm not found for PHP {0} — install the FPM variant of the Homebrew formula")]
+    #[error("php-fpm not found for PHP {0} — install the FPM package for this PHP version")]
     FpmMissing(String),
 
     #[error("io: {0}")]

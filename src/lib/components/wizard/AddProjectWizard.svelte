@@ -117,20 +117,30 @@
   /** True when the file's derived id already exists — surfaced before commit. */
   let portfileIdCollision = $state<boolean>(false);
 
+  /**
+   * True while the wizard is opened from a "New board" affordance. Board mode
+   * collapses the web-project chrome (detect, monorepo/portfile probes, the
+   * sandbox-clone card, and the host/port/start-command fields) down to "pick
+   * a folder + name", committing a `custom` project with no port. The board's
+   * cards then live under `<folder>/.portbay/tasks/`.
+   */
+  const isBoard = $derived(addProjectWizard.mode === "board");
+
   const commandPlaceholder = $derived(
     kind === "php"
       ? "leave empty for PortBay-managed PHP-FPM"
-      : kind === "flutter"
-        ? "flutter run"
-        : kind === "xcode"
-          ? "xed ."
-          : kind === "android"
-            ? "./gradlew installDebug"
-            : "pnpm dev",
+      : isMobileKind(kind)
+        ? "leave empty — PortBay launches the simulator/emulator"
+        : "pnpm dev",
   );
 
   function isMobileKind(value: ProjectType): boolean {
-    return value === "flutter" || value === "xcode" || value === "android";
+    return (
+      value === "flutter" ||
+      value === "xcode" ||
+      value === "android" ||
+      value === "expo"
+    );
   }
 
   /**
@@ -204,6 +214,45 @@
     });
     if (!picked || Array.isArray(picked)) return;
     await detect(picked as string);
+  }
+
+  /**
+   * Board mode's folder picker. Unlike `browse()`, it skips framework
+   * detection and the monorepo/portfile probes — a board doesn't run, so
+   * there's nothing to detect. It just seeds the id/name from the folder and
+   * pins the kind to `custom` with no port or start command.
+   */
+  async function browseBoardFolder() {
+    const picked = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "Select a folder for this board",
+    });
+    if (!picked || Array.isArray(picked)) return;
+    setBoardFolder(picked as string);
+  }
+
+  function setBoardFolder(folderPath: string) {
+    path = folderPath;
+    const seg = folderPath.split("/").filter(Boolean).pop() ?? "board";
+    id = seg
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    name = seg;
+    kind = "custom";
+    port = null;
+    startCommand = "";
+    hostname = "";
+    // A pure board serves nothing, so don't provision a Caddy route or a TLS
+    // cert for it. Converting it into a real project later (detail panel →
+    // Type) re-derives services and the user flips HTTPS back on.
+    https = false;
+    autoStart = false;
+    portfile = null;
+    workspaceScan = null;
+    workspaceBinding = null;
+    formError = null;
   }
 
   async function browseSandboxInstallFolder() {
@@ -399,7 +448,11 @@
       const folder = await safeInvoke<string>("validate_project_folder", {
         path: paths[0],
       });
-      await detect(folder);
+      if (isBoard) {
+        setBoardFolder(folder);
+      } else {
+        await detect(folder);
+      }
     } catch (e) {
       formError = e as CommandError;
       dropHint = "";
@@ -472,6 +525,7 @@
     } catch (e) {
       formError = {
         code: "BAD_RAW_JSON",
+        category: "project-error",
         whatHappened: `Raw config is not valid JSON: ${String(e)}`,
         whyItMatters: "Fix the JSON to apply your edits, or revert via the fields above.",
         whoCausedIt: "user",
@@ -485,6 +539,7 @@
     if (!path) {
       formError = {
         code: "BAD_INPUT",
+        category: "project-error",
         whatHappened: "Pick a project folder first.",
         whyItMatters: "PortBay needs to know where the project lives.",
         whoCausedIt: "user",
@@ -505,6 +560,7 @@
         if (missing.length > 0) {
           formError = {
             code: "BAD_INPUT",
+            category: "project-error",
             whatHappened: `Fill in ${missing.join(", ")} before importing.`,
             whyItMatters:
               "The .portbay.json lists these as secrets so they're never committed to the repo.",
@@ -551,6 +607,7 @@
       void onboarding.markOnboarded();
       errorBus.push({
         code: portfile ? "IMPORT_OK" : "ADD_OK",
+        category: "lifecycle",
         whatHappened: `${name || id} ${portfile ? "imported from .portbay.json" : "added"}.`,
         whyItMatters: "Start it from the projects table when you're ready.",
         whoCausedIt: "system",
@@ -568,6 +625,7 @@
     if (!gitUrl.trim()) {
       formError = {
         code: "BAD_INPUT",
+        category: "project-error",
         whatHappened: "Paste a Git URL first.",
         whyItMatters: "PortBay needs a repository URL to clone into the sandbox imports folder.",
         whoCausedIt: "user",
@@ -591,6 +649,7 @@
       void onboarding.markOnboarded();
       errorBus.push({
         code: "SANDBOX_IMPORT_OK",
+        category: "lifecycle",
         whatHappened: `${project.name} cloned and started in Sandbox.`,
         whyItMatters: "Inspect logs and promote it to local when you trust it.",
         whoCausedIt: "system",
@@ -642,12 +701,12 @@
     <header
       class="shrink-0 flex items-center justify-between px-5 py-4 border-b border-border"
     >
-      <h2 class="text-base font-semibold">Add project</h2>
+      <h2 class="text-base font-semibold">{isBoard ? "New board" : "Add project"}</h2>
       <button
         type="button"
         onclick={close}
         title="Close"
-        aria-label="Close add project"
+        aria-label={isBoard ? "Close new board" : "Close add project"}
         class="p-1.5 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
       >
         <Icon name="x" size={16} />
@@ -660,16 +719,23 @@
       {/if}
 
       <!-- L1: folder picker -->
-      <DashboardCard title="Project folder" flush>
+      <DashboardCard title={isBoard ? "Board folder" : "Project folder"} flush>
         <div
           class="mb-3 rounded-md border border-dashed px-4 py-5 text-center transition-colors
                  {dropActive
             ? 'border-accent bg-accent/10 text-fg'
             : 'border-border bg-bg/50 text-fg-muted'}"
         >
-          <div class="text-sm font-medium text-fg">Drop your project folder here</div>
+          <div class="text-sm font-medium text-fg">
+            {isBoard ? "Drop a folder for this board" : "Drop your project folder here"}
+          </div>
           <div class="mt-1 text-xs text-fg-subtle">
-            PortBay will validate the folder and run the same detection flow as Browse.
+            {#if isBoard}
+              The board's cards live under
+              <span class="font-mono">.portbay/tasks/</span> in this folder.
+            {:else}
+              PortBay will validate the folder and run the same detection flow as Browse.
+            {/if}
           </div>
           {#if dropHint}
             <div class="mt-2 text-xs text-status-unhealthy">{dropHint}</div>
@@ -686,26 +752,35 @@
           />
           <button
             type="button"
-            onclick={browse}
+            onclick={isBoard ? browseBoardFolder : browse}
             class="px-3 py-2 text-xs rounded-md border border-border text-fg-muted hover:text-fg hover:border-border-strong transition-colors whitespace-nowrap"
           >
             Browse…
           </button>
-          <button
-            type="button"
-            onclick={() => path && detect(path)}
-            disabled={!path || detecting}
-            class="px-3 py-2 text-xs rounded-md text-accent border border-accent/40 hover:bg-accent/10 disabled:opacity-50 transition-colors"
-          >
-            {detecting ? "Detecting…" : "Detect"}
-          </button>
+          {#if !isBoard}
+            <button
+              type="button"
+              onclick={() => path && detect(path)}
+              disabled={!path || detecting}
+              class="px-3 py-2 text-xs rounded-md text-accent border border-accent/40 hover:bg-accent/10 disabled:opacity-50 transition-colors"
+            >
+              {detecting ? "Detecting…" : "Detect"}
+            </button>
+          {/if}
         </div>
         <p class="text-xs text-fg-subtle pt-2">
-          Pick a folder; PortBay auto-detects the framework, picks a port,
-          and generates a <span class="font-mono">.test</span> hostname.
+          {#if isBoard}
+            Pick any folder — an existing repo or a fresh one for general tasks.
+            The board is registered as a non-running <span class="font-mono">custom</span>
+            project, so no server, port, or hostname is set up.
+          {:else}
+            Pick a folder; PortBay auto-detects the framework, picks a port,
+            and generates a <span class="font-mono">.test</span> hostname.
+          {/if}
         </p>
       </DashboardCard>
 
+      {#if !isBoard}
       <DashboardCard title="Clone in Sandbox" flush>
         {#snippet badge()}
           {#if canSandboxNew}
@@ -782,6 +857,7 @@
           </p>
         </div>
       </DashboardCard>
+      {/if}
 
       {#if portfile}
         <!-- .portbay.json import banner + secrets prompt -->
@@ -903,7 +979,7 @@
       {/if}
 
       <!-- L2: standard fields -->
-      <DashboardCard title="Settings" flush>
+      <DashboardCard title={isBoard ? "Board" : "Settings"} flush>
         <div class="grid grid-cols-[120px,1fr] gap-x-4 gap-y-3 items-center text-sm">
           <label for="wizard-name" class="text-fg-muted">Name</label>
           <input
@@ -913,6 +989,7 @@
             class="px-2.5 py-1.5 rounded-md bg-bg border border-border focus:border-accent/60 outline-none text-fg"
           />
 
+          {#if !isBoard}
           <label for="wizard-id" class="text-fg-muted">ID</label>
           <input
             id="wizard-id"
@@ -1036,9 +1113,17 @@
               Auto-start
             </label>
           </div>
+          {/if}
         </div>
+        {#if isBoard}
+          <p class="text-[11px] text-fg-subtle pt-1">
+            You can convert this into a runnable project any time from the
+            project's detail panel.
+          </p>
+        {/if}
       </DashboardCard>
 
+      {#if !isBoard}
       <!-- L3: raw config -->
       <DashboardCard title="Advanced" flush>
         <button
@@ -1068,6 +1153,7 @@
           </div>
         {/if}
       </DashboardCard>
+      {/if}
     </div>
 
     <footer
@@ -1088,10 +1174,10 @@
       >
         {#if submitting}
           <Icon name="refresh-cw" size={14} class="animate-spin" />
-          Adding…
+          {isBoard ? "Creating…" : "Adding…"}
         {:else}
           <Icon name="plus" size={14} />
-          Add
+          {isBoard ? "Create board" : "Add"}
         {/if}
       </button>
     </footer>

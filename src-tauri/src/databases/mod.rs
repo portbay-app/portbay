@@ -23,6 +23,9 @@ use std::time::{Duration, Instant};
 
 use crate::registry::{DatabaseEngine, DatabaseInstance};
 
+pub mod backup;
+pub mod env_profile;
+
 /// Per-engine static metadata.
 #[derive(Debug, Clone, Copy)]
 struct EngineSpec {
@@ -89,6 +92,18 @@ const SPECS: &[EngineSpec] = &[
         ],
         daemons: &["mongod"],
         clients: &["mongosh", "mongo"],
+        init_bins: &[],
+    },
+    // SQLite is file-based: there is no daemon to supervise. `sqlite3` ships
+    // with macOS (and is a Homebrew formula on stripped systems), so it doubles
+    // as both "daemon" (never launched — see `is_file_based`) and CLI client.
+    // Listing it under `daemons` keeps binary resolution + `expected_daemon_rel`
+    // total without special-casing; the reconciler skips file-based engines.
+    EngineSpec {
+        engine: DatabaseEngine::Sqlite,
+        formulae: &["sqlite"],
+        daemons: &["sqlite3"],
+        clients: &["sqlite3"],
         init_bins: &[],
     },
 ];
@@ -173,12 +188,59 @@ pub fn client_binary(engine: DatabaseEngine) -> Option<PathBuf> {
     resolve_in(engine, spec(engine).clients, prefix.as_deref())
 }
 
-fn init_binary(engine: DatabaseEngine, prefix: Option<&Path>) -> Option<PathBuf> {
-    let spec = spec(engine);
-    if spec.init_bins.is_empty() {
-        return None;
+// ===========================================================================
+// Managed-engine resolution (PortBay-managed install wins over Homebrew)
+// ===========================================================================
+//
+// A PortBay-managed engine is installed under
+// `<app-data>/database-engines/<engine>/<version>/`, with every binary
+// (daemon, client, init helper) under `<dir>/bin/`. When such an install
+// exists, its `bin` dir is searched before the Homebrew opt dirs / PATH, so
+// an engine installed through PortBay is used in preference to any system copy
+// — the engine lives inside the PortBay environment without being bundled.
+
+/// Search `managed_bin` (when set) for the first matching name, then fall back
+/// to the Homebrew/system resolution.
+fn resolve_preferring_managed(
+    engine: DatabaseEngine,
+    names: &[&str],
+    managed_bin: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(dir) = managed_bin {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
     }
-    resolve_in(engine, spec.init_bins, prefix)
+    resolve_in(engine, names, brew_prefix().as_deref())
+}
+
+/// Daemon binary, preferring a PortBay-managed install at `managed_bin`.
+pub fn daemon_binary_resolved(
+    engine: DatabaseEngine,
+    managed_bin: Option<&Path>,
+) -> Option<PathBuf> {
+    resolve_preferring_managed(engine, spec(engine).daemons, managed_bin)
+}
+
+/// CLI client binary, preferring a PortBay-managed install at `managed_bin`.
+pub fn client_binary_resolved(
+    engine: DatabaseEngine,
+    managed_bin: Option<&Path>,
+) -> Option<PathBuf> {
+    resolve_preferring_managed(engine, spec(engine).clients, managed_bin)
+}
+
+/// Resolve an engine-adjacent tool (e.g. `mysqldump`, `pg_dumpall`) by name,
+/// preferring a PortBay-managed install. Used by the backup module.
+pub fn tool_binary(
+    engine: DatabaseEngine,
+    names: &[&str],
+    managed_bin: Option<&Path>,
+) -> Option<PathBuf> {
+    resolve_preferring_managed(engine, names, managed_bin)
 }
 
 // ===========================================================================
@@ -195,9 +257,16 @@ pub struct EngineDetection {
 }
 
 /// Probe an engine: is its daemon binary present, and what version?
+/// Considers Homebrew/system installs only.
 pub fn detect(engine: DatabaseEngine) -> EngineDetection {
-    let daemon = daemon_binary(engine);
-    let client = client_binary(engine);
+    detect_resolved(engine, None)
+}
+
+/// Like [`detect`], but searches a PortBay-managed install at `managed_bin`
+/// first. A managed engine reports as installed even when no system copy exists.
+pub fn detect_resolved(engine: DatabaseEngine, managed_bin: Option<&Path>) -> EngineDetection {
+    let daemon = daemon_binary_resolved(engine, managed_bin);
+    let client = client_binary_resolved(engine, managed_bin);
 
     // Probe the daemon's raw `--version` once — needed both to extract the
     // numeric version and to disambiguate the MySQL/MariaDB pair, which share
@@ -290,6 +359,30 @@ pub fn instances_root(app_data: &Path) -> PathBuf {
     app_data.join("databases")
 }
 
+/// Root directory PortBay owns for managed engine *binaries* (distinct from
+/// instance data): `<app-data>/database-engines/`.
+pub fn engines_root(app_data: &Path) -> PathBuf {
+    app_data.join("database-engines")
+}
+
+/// Install dir for a managed engine build:
+/// `<app-data>/database-engines/<engine>/<version>/`.
+pub fn managed_engine_dir(app_data: &Path, engine: DatabaseEngine, version: &str) -> PathBuf {
+    engines_root(app_data).join(engine.id()).join(version)
+}
+
+/// The `bin` dir inside a managed engine install root.
+pub fn managed_bin_dir(install_dir: &Path) -> PathBuf {
+    install_dir.join("bin")
+}
+
+/// Relative path of the daemon binary inside a managed engine archive — the
+/// layout the portbay-runtimes build must produce (every binary under `bin/`).
+/// Used as the `expected_binary_rel` the installer validates after extraction.
+pub fn expected_daemon_rel(engine: DatabaseEngine) -> PathBuf {
+    PathBuf::from("bin").join(spec(engine).daemons[0])
+}
+
 /// The instance's own directory: `<app-data>/databases/<id>/`.
 pub fn instance_dir(app_data: &Path, id: &str) -> PathBuf {
     instances_root(app_data).join(id)
@@ -298,6 +391,13 @@ pub fn instance_dir(app_data: &Path, id: &str) -> PathBuf {
 /// The instance's data directory: `<instance-dir>/data`.
 pub fn data_dir(app_data: &Path, id: &str) -> PathBuf {
     instance_dir(app_data, id).join("data")
+}
+
+/// The default `.sqlite` file for a PortBay-managed SQLite instance:
+/// `<data-dir>/database.sqlite`. (An *adopted* instance points
+/// [`DatabaseInstance::file_path`] at an existing file elsewhere instead.)
+pub fn sqlite_file(app_data: &Path, id: &str) -> PathBuf {
+    data_dir(app_data, id).join("database.sqlite")
 }
 
 /// Default config-file path for an engine instance.
@@ -310,6 +410,8 @@ pub fn config_path(engine: DatabaseEngine, app_data: &Path, id: &str) -> Option<
         DatabaseEngine::Memcached => None,
         // PostgreSQL keeps postgresql.conf inside its data dir (initdb writes it).
         DatabaseEngine::Postgres => Some(data_dir(app_data, id).join("postgresql.conf")),
+        // File-based: no daemon, no config file.
+        DatabaseEngine::Sqlite => None,
     }
 }
 
@@ -323,6 +425,8 @@ pub fn socket_path(engine: DatabaseEngine, app_data: &Path, id: &str) -> Option<
         DatabaseEngine::Memcached => None,
         // Postgres sockets live in a directory (-k), not a single file path.
         DatabaseEngine::Postgres => None,
+        // File-based: no daemon, no socket.
+        DatabaseEngine::Sqlite => None,
     }
 }
 
@@ -334,6 +438,10 @@ pub fn is_initialized(engine: DatabaseEngine, data: &Path) -> bool {
         DatabaseEngine::Postgres => data.join("PG_VERSION").is_file(),
         // Redis/Mongo/Memcached need no schema init - an existing dir is enough.
         DatabaseEngine::Redis | DatabaseEngine::Mongo | DatabaseEngine::Memcached => data.is_dir(),
+        // SQLite: the managed database file existing is the init marker. An
+        // adopted instance (file elsewhere) reports readiness via its own
+        // `file_path`; see `instance_view`.
+        DatabaseEngine::Sqlite => data.join("database.sqlite").is_file(),
     }
 }
 
@@ -352,20 +460,26 @@ pub fn provision(
     app_data: &Path,
     id: &str,
     port: u16,
+    managed_bin: Option<&Path>,
 ) -> Result<(), String> {
     let data = data_dir(app_data, id);
     std::fs::create_dir_all(&data)
         .map_err(|e| format!("create data dir {}: {e}", data.display()))?;
 
-    let prefix = brew_prefix();
-
     if !is_initialized(engine, &data) {
         match engine {
             DatabaseEngine::Mysql => init_mysql(daemon, &data)?,
-            DatabaseEngine::Mariadb => init_mariadb(engine, &data, prefix.as_deref())?,
-            DatabaseEngine::Postgres => init_postgres(engine, &data, prefix.as_deref())?,
+            DatabaseEngine::Mariadb => init_mariadb(engine, &data, managed_bin)?,
+            DatabaseEngine::Postgres => init_postgres(engine, &data, managed_bin)?,
             DatabaseEngine::Redis | DatabaseEngine::Mongo | DatabaseEngine::Memcached => {
                 /* dir is enough */
+            }
+            // Create an empty database file. SQLite materializes a valid empty
+            // database on first open, so an empty file is a sufficient seed.
+            DatabaseEngine::Sqlite => {
+                let file = data.join("database.sqlite");
+                std::fs::File::create(&file)
+                    .map_err(|e| format!("create sqlite file {}: {e}", file.display()))?;
             }
         }
     }
@@ -396,10 +510,13 @@ fn init_mysql(daemon: &Path, data: &Path) -> Result<(), String> {
         .map_err(|e| format!("mysqld --initialize-insecure failed: {}", truncate(&e, 800)))
 }
 
-fn init_mariadb(engine: DatabaseEngine, data: &Path, prefix: Option<&Path>) -> Result<(), String> {
-    let init = init_binary(engine, prefix).ok_or_else(|| {
-        "mariadb-install-db not found — reinstall MariaDB via Homebrew.".to_string()
-    })?;
+fn init_mariadb(
+    engine: DatabaseEngine,
+    data: &Path,
+    managed_bin: Option<&Path>,
+) -> Result<(), String> {
+    let init = resolve_preferring_managed(engine, spec(engine).init_bins, managed_bin)
+        .ok_or_else(|| "mariadb-install-db not found — install MariaDB first.".to_string())?;
     let datadir_arg = format!("--datadir={}", data.display());
     let args = vec![
         datadir_arg.as_str(),
@@ -411,9 +528,13 @@ fn init_mariadb(engine: DatabaseEngine, data: &Path, prefix: Option<&Path>) -> R
         .map_err(|e| format!("mariadb-install-db failed: {}", truncate(&e, 800)))
 }
 
-fn init_postgres(engine: DatabaseEngine, data: &Path, prefix: Option<&Path>) -> Result<(), String> {
-    let initdb = init_binary(engine, prefix)
-        .ok_or_else(|| "initdb not found — reinstall PostgreSQL via Homebrew.".to_string())?;
+fn init_postgres(
+    engine: DatabaseEngine,
+    data: &Path,
+    managed_bin: Option<&Path>,
+) -> Result<(), String> {
+    let initdb = resolve_preferring_managed(engine, spec(engine).init_bins, managed_bin)
+        .ok_or_else(|| "initdb not found — install PostgreSQL first.".to_string())?;
     let pgdata = format!("--pgdata={}", data.display());
     let args = vec![
         pgdata.as_str(),
@@ -481,6 +602,8 @@ fn write_config(
             // Port + socket dir are passed as run-time flags instead.
             return Ok(());
         }
+        // File-based: no config (also unreachable — config_path is None above).
+        DatabaseEngine::Sqlite => return Ok(()),
     };
 
     if let Some(parent) = cfg_path.parent() {
@@ -538,6 +661,9 @@ pub fn run_command(instance: &DatabaseInstance, daemon: &Path, app_data: &Path) 
                 port = instance.port
             )
         }
+        // File-based engines have no daemon and never reach Process Compose
+        // (the reconciler skips them). Return an empty command defensively.
+        DatabaseEngine::Sqlite => String::new(),
     }
 }
 
@@ -554,6 +680,293 @@ pub fn client_invocation(instance: &DatabaseInstance, client: &Path) -> String {
         DatabaseEngine::Mongo => format!("{c} mongodb://127.0.0.1:{port}"),
         DatabaseEngine::Redis => format!("{c} -h 127.0.0.1 -p {port}"),
         DatabaseEngine::Memcached => format!("nc 127.0.0.1 {port}"),
+        // `sqlite3 <file>` opens an interactive shell on the database file.
+        DatabaseEngine::Sqlite => {
+            let file = instance
+                .file_path
+                .as_ref()
+                .map(|p| shell_quote(&p.to_string_lossy()))
+                .unwrap_or_default();
+            format!("{c} {file}")
+        }
+    }
+}
+
+// ===========================================================================
+// Per-database (schema) management
+// ===========================================================================
+//
+// Lists and creates/drops the *databases* (schemas) inside a running instance,
+// by running one-shot queries through the engine's CLI client. Only the SQL
+// engines expose a meaningful schema namespace — Redis (numbered DBs),
+// Memcached (no schemas), and Mongo (created on first write) are excluded.
+
+/// Whether per-database create/drop/list applies to this engine.
+pub fn supports_schema_management(engine: DatabaseEngine) -> bool {
+    matches!(
+        engine,
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb | DatabaseEngine::Postgres
+    )
+}
+
+/// A safe SQL identifier: a name we can interpolate into `CREATE DATABASE` /
+/// `DROP DATABASE` without injection risk. Conservative on purpose — letters,
+/// digits, underscores; must start with a letter or underscore; ≤ 64 chars.
+fn validate_identifier(name: &str) -> Result<(), String> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false)
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid database name `{name}` — use letters, digits, and underscores (starting with a letter or underscore)."
+        ))
+    }
+}
+
+/// System schemas hidden from the per-instance database list.
+fn is_system_schema(engine: DatabaseEngine, name: &str) -> bool {
+    match engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => matches!(
+            name,
+            "information_schema" | "mysql" | "performance_schema" | "sys"
+        ),
+        DatabaseEngine::Postgres => matches!(name, "template0" | "template1"),
+        _ => false,
+    }
+}
+
+/// List the user databases/schemas in a running instance.
+pub fn list_schemas(instance: &DatabaseInstance, client: &Path) -> Result<Vec<String>, String> {
+    let port = instance.port.to_string();
+    let args: Vec<&str> = match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => vec![
+            "-N",
+            "-B",
+            "-h",
+            "127.0.0.1",
+            "-P",
+            &port,
+            "-u",
+            "root",
+            "-e",
+            "SHOW DATABASES",
+        ],
+        DatabaseEngine::Postgres => vec![
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port,
+            "-U",
+            "postgres",
+            "-tAc",
+            "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
+        ],
+        _ => {
+            return Err(format!(
+                "listing databases isn't supported for {}.",
+                instance.engine.label()
+            ))
+        }
+    };
+    let out = run_capture(&client.to_path_buf(), &args, Duration::from_secs(10))?;
+    Ok(out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !is_system_schema(instance.engine, l))
+        .collect())
+}
+
+/// Create a database/schema in a running instance.
+pub fn create_schema(instance: &DatabaseInstance, client: &Path, name: &str) -> Result<(), String> {
+    validate_identifier(name)?;
+    let port = instance.port.to_string();
+    let sql;
+    let args: Vec<&str> = match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => {
+            sql = format!("CREATE DATABASE `{name}`");
+            vec!["-h", "127.0.0.1", "-P", &port, "-u", "root", "-e", &sql]
+        }
+        DatabaseEngine::Postgres => {
+            sql = format!("CREATE DATABASE \"{name}\"");
+            vec!["-h", "127.0.0.1", "-p", &port, "-U", "postgres", "-c", &sql]
+        }
+        _ => {
+            return Err(format!(
+                "creating databases isn't supported for {}.",
+                instance.engine.label()
+            ))
+        }
+    };
+    run_capture(&client.to_path_buf(), &args, Duration::from_secs(15)).map(|_| ())
+}
+
+/// Drop a database/schema from a running instance.
+pub fn drop_schema(instance: &DatabaseInstance, client: &Path, name: &str) -> Result<(), String> {
+    validate_identifier(name)?;
+    let port = instance.port.to_string();
+    let sql;
+    let args: Vec<&str> = match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => {
+            sql = format!("DROP DATABASE `{name}`");
+            vec!["-h", "127.0.0.1", "-P", &port, "-u", "root", "-e", &sql]
+        }
+        DatabaseEngine::Postgres => {
+            sql = format!("DROP DATABASE \"{name}\"");
+            vec!["-h", "127.0.0.1", "-p", &port, "-U", "postgres", "-c", &sql]
+        }
+        _ => {
+            return Err(format!(
+                "dropping databases isn't supported for {}.",
+                instance.engine.label()
+            ))
+        }
+    };
+    run_capture(&client.to_path_buf(), &args, Duration::from_secs(15)).map(|_| ())
+}
+
+// ===========================================================================
+// Per-project provisioning (dedicated database + user)
+// ===========================================================================
+//
+// Creates a project-owned database and a login user with a caller-supplied
+// (random, generated client-side with Web Crypto) password, then the command
+// layer injects DB_* into the project's env. SQL engines only.
+
+/// Turn an arbitrary project id/slug into a safe SQL identifier base: lowercase,
+/// non-alphanumerics collapsed to `_`, guaranteed to start with a letter, capped.
+pub fn sanitize_identifier(raw: &str) -> String {
+    let mut s: String = raw
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    s.truncate(50);
+    let needs_prefix = s
+        .chars()
+        .next()
+        .map(|c| !(c.is_ascii_alphabetic() || c == '_'))
+        .unwrap_or(true);
+    if needs_prefix {
+        s = format!("db_{s}");
+    }
+    s
+}
+
+/// A safe provisioning password: alphanumeric, 8–128 chars. The frontend
+/// generates a strong random one; the alphanumeric constraint also means it
+/// needs no quoting/escaping inside SQL string literals or connection URLs.
+fn validate_password(pw: &str) -> Result<(), String> {
+    if (8..=128).contains(&pw.len()) && pw.chars().all(|c| c.is_ascii_alphanumeric()) {
+        Ok(())
+    } else {
+        Err("database password must be 8–128 alphanumeric characters.".to_string())
+    }
+}
+
+/// Provision (idempotently) a dedicated database + login user on a running
+/// instance. MySQL/MariaDB/PostgreSQL only.
+pub fn provision_app_database(
+    instance: &DatabaseInstance,
+    client: &Path,
+    database: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    validate_identifier(database)?;
+    validate_identifier(username)?;
+    validate_password(password)?;
+    let port = instance.port.to_string();
+    match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => {
+            // One round-trip; identifiers are validated, password is alphanumeric.
+            let sql = [
+                format!("CREATE DATABASE IF NOT EXISTS `{database}`"),
+                format!("CREATE USER IF NOT EXISTS '{username}'@'%' IDENTIFIED BY '{password}'"),
+                format!("ALTER USER '{username}'@'%' IDENTIFIED BY '{password}'"),
+                format!("GRANT ALL PRIVILEGES ON `{database}`.* TO '{username}'@'%'"),
+                "FLUSH PRIVILEGES".to_string(),
+            ]
+            .join("; ");
+            let args = vec!["-h", "127.0.0.1", "-P", &port, "-u", "root", "-e", &sql];
+            run_capture(&client.to_path_buf(), &args, Duration::from_secs(20)).map(|_| ())
+        }
+        DatabaseEngine::Postgres => {
+            // Role: create-or-update its password idempotently.
+            let role = format!(
+                "DO $$ BEGIN \
+                   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{username}') THEN \
+                     CREATE ROLE \"{username}\" LOGIN PASSWORD '{password}'; \
+                   ELSE \
+                     ALTER ROLE \"{username}\" LOGIN PASSWORD '{password}'; \
+                   END IF; \
+                 END $$;"
+            );
+            run_pg(client, &port, &role)?;
+            // CREATE DATABASE can't run in a DO block; tolerate "already exists".
+            let _ = run_pg(
+                client,
+                &port,
+                &format!("CREATE DATABASE \"{database}\" OWNER \"{username}\""),
+            );
+            run_pg(
+                client,
+                &port,
+                &format!("GRANT ALL PRIVILEGES ON DATABASE \"{database}\" TO \"{username}\""),
+            )
+            .map(|_| ())
+        }
+        _ => Err(format!(
+            "per-project provisioning isn't supported for {}.",
+            instance.engine.label()
+        )),
+    }
+}
+
+fn run_pg(client: &Path, port: &str, sql: &str) -> Result<String, String> {
+    let args = vec![
+        "-h",
+        "127.0.0.1",
+        "-p",
+        port,
+        "-U",
+        "postgres",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        sql,
+    ];
+    run_capture(&client.to_path_buf(), &args, Duration::from_secs(20))
+}
+
+/// A `DATABASE_URL` for a provisioned project database (credentials inline).
+pub fn app_connection_url(
+    instance: &DatabaseInstance,
+    username: &str,
+    password: &str,
+    database: &str,
+) -> String {
+    let port = instance.port;
+    match instance.engine {
+        DatabaseEngine::Mysql | DatabaseEngine::Mariadb => {
+            format!("mysql://{username}:{password}@127.0.0.1:{port}/{database}")
+        }
+        DatabaseEngine::Postgres => {
+            format!("postgresql://{username}:{password}@127.0.0.1:{port}/{database}")
+        }
+        _ => String::new(),
     }
 }
 
@@ -692,6 +1105,7 @@ mod tests {
             data_dir: PathBuf::from("/tmp/pb/databases/myapp/data"),
             config_path: None,
             socket_path: None,
+            file_path: None,
             auto_start: false,
             linked_projects: vec![],
         }
@@ -791,6 +1205,109 @@ mod tests {
     fn shell_quote_wraps_paths_with_spaces() {
         assert_eq!(shell_quote("/tmp/pb/data"), "/tmp/pb/data");
         assert_eq!(shell_quote("/My Drive/db"), "'/My Drive/db'");
+    }
+
+    #[test]
+    fn expected_daemon_rel_lives_under_bin() {
+        assert_eq!(
+            expected_daemon_rel(DatabaseEngine::Mysql),
+            PathBuf::from("bin/mysqld")
+        );
+        assert_eq!(
+            expected_daemon_rel(DatabaseEngine::Postgres),
+            PathBuf::from("bin/postgres")
+        );
+        assert_eq!(
+            expected_daemon_rel(DatabaseEngine::Redis),
+            PathBuf::from("bin/redis-server")
+        );
+    }
+
+    #[test]
+    fn managed_engine_dir_is_namespaced_by_engine_and_version() {
+        let app = Path::new("/tmp/pb");
+        assert_eq!(
+            managed_engine_dir(app, DatabaseEngine::Postgres, "16.2"),
+            PathBuf::from("/tmp/pb/database-engines/postgres/16.2")
+        );
+        assert_eq!(
+            managed_bin_dir(&managed_engine_dir(app, DatabaseEngine::Redis, "7.4.0")),
+            PathBuf::from("/tmp/pb/database-engines/redis/7.4.0/bin")
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_managed_install_over_system() {
+        // A binary in the managed bin dir wins, without consulting Homebrew/PATH.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let mysqld = bin.join("mysqld");
+        std::fs::write(&mysqld, b"#!/bin/sh\n").unwrap();
+        let resolved = daemon_binary_resolved(DatabaseEngine::Mysql, Some(&bin));
+        assert_eq!(resolved.as_deref(), Some(mysqld.as_path()));
+    }
+
+    #[test]
+    fn validate_identifier_rejects_injection_and_bad_names() {
+        // Valid
+        assert!(validate_identifier("myapp").is_ok());
+        assert!(validate_identifier("my_app_dev").is_ok());
+        assert!(validate_identifier("_internal").is_ok());
+        // Invalid — injection / shell / SQL metacharacters and edge cases
+        assert!(validate_identifier("").is_err());
+        assert!(validate_identifier("1abc").is_err()); // leading digit
+        assert!(validate_identifier("a; DROP DATABASE x").is_err());
+        assert!(validate_identifier("a`b").is_err());
+        assert!(validate_identifier("a\"b").is_err());
+        assert!(validate_identifier("a-b").is_err());
+        assert!(validate_identifier("a b").is_err());
+        assert!(validate_identifier(&"x".repeat(65)).is_err()); // too long
+    }
+
+    #[test]
+    fn schema_management_only_for_sql_engines() {
+        assert!(supports_schema_management(DatabaseEngine::Mysql));
+        assert!(supports_schema_management(DatabaseEngine::Mariadb));
+        assert!(supports_schema_management(DatabaseEngine::Postgres));
+        assert!(!supports_schema_management(DatabaseEngine::Redis));
+        assert!(!supports_schema_management(DatabaseEngine::Mongo));
+        assert!(!supports_schema_management(DatabaseEngine::Memcached));
+    }
+
+    #[test]
+    fn sanitize_identifier_produces_safe_sql_names() {
+        assert_eq!(sanitize_identifier("my-app"), "my_app");
+        assert_eq!(sanitize_identifier("My App 2"), "my_app_2");
+        assert_eq!(sanitize_identifier("123start"), "db_123start"); // leading digit
+        assert_eq!(sanitize_identifier(""), "db_"); // empty → prefixed
+                                                    // Every result is a valid identifier.
+        for raw in ["my-app", "My App 2", "123start", "weird!!name", ""] {
+            assert!(validate_identifier(&sanitize_identifier(raw)).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_password_requires_alnum_and_length() {
+        assert!(validate_password("abc12345").is_ok());
+        assert!(validate_password("short7").is_err()); // < 8
+        assert!(validate_password("has space12").is_err());
+        assert!(validate_password("has'quote12").is_err());
+        assert!(validate_password(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn app_connection_url_embeds_credentials_per_engine() {
+        let mysql = instance(DatabaseEngine::Mysql, 3307);
+        assert_eq!(
+            app_connection_url(&mysql, "u", "pw", "u_dev"),
+            "mysql://u:pw@127.0.0.1:3307/u_dev"
+        );
+        let pg = instance(DatabaseEngine::Postgres, 5433);
+        assert_eq!(
+            app_connection_url(&pg, "u", "pw", "u_dev"),
+            "postgresql://u:pw@127.0.0.1:5433/u_dev"
+        );
     }
 
     #[test]

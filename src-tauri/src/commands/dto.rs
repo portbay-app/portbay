@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::process_compose::{Process, ProjectStatus};
 use crate::registry::{
-    CorsConfig, DomainConfig, MobileRunConfig, Project, ProjectType, Readiness, SandboxConfig,
-    WebServer, Workspace, WorkspaceTool,
+    CorsConfig, CustomTunnelConfig, DomainConfig, MobileRunConfig, Project, ProjectDeploy,
+    ProjectType, Readiness, SandboxConfig, WebServer, Workspace, WorkspaceTool,
 };
 
 /// A merged registry + runtime view of one project.
@@ -41,6 +41,10 @@ pub struct ProjectView {
     pub services: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub readiness: Option<Readiness>,
+    /// Shell commands run before the dev server on each start.
+    pub pre_start: Vec<String>,
+    /// Shell commands run after the dev server reports ready.
+    pub post_start: Vec<String>,
     pub auto_start: bool,
     pub tags: Vec<String>,
     pub document_root: Option<String>,
@@ -62,6 +66,14 @@ pub struct ProjectView {
     /// Per-project domain / routing settings (Domains page). `None` = every
     /// setting at its default (PortBay's pre-`DomainConfig` behaviour).
     pub domain: Option<DomainConfig>,
+
+    /// Attached bring-your-own named Cloudflare tunnel (Pro). `None` = only the
+    /// free Quick Share is offered for this project.
+    pub tunnel: Option<CustomTunnelConfig>,
+
+    /// One-click deploy target (host + remote path + steps), or `None` when the
+    /// project has no deploy configured.
+    pub deploy: Option<ProjectDeploy>,
 
     /// PortBay status taxonomy (`docs/UX_DESIGN.md` §5.3).
     pub status: ProjectStatus,
@@ -95,6 +107,8 @@ impl ProjectView {
             services: project.services.clone(),
             env: project.env.clone(),
             readiness: project.readiness.clone(),
+            pre_start: project.pre_start.clone(),
+            post_start: project.post_start.clone(),
             auto_start: project.auto_start,
             tags: project.tags.clone(),
             document_root: project.document_root.clone(),
@@ -106,6 +120,8 @@ impl ProjectView {
             sandboxed: crate::sandbox::is_enabled(project),
             sandbox: project.sandbox.clone(),
             domain: project.domain.clone(),
+            tunnel: project.tunnel.clone(),
+            deploy: project.deploy.clone(),
             status: proc
                 .map(|p| p.portbay_status())
                 .unwrap_or(ProjectStatus::Stopped),
@@ -341,6 +357,12 @@ pub struct WorkspaceAppDto {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProjectPatch {
     pub name: Option<String>,
+    /// Project kind/type. Mutable so a board-only `custom` project (created
+    /// from the Tasks page with no server) can later be promoted into a
+    /// runnable web/app project — and the reverse. When this changes the
+    /// kind, `update_project` recomputes `services` from the new kind unless
+    /// the patch also carries an explicit `services` list.
+    pub kind: Option<ProjectType>,
     pub hostname: Option<String>,
     pub port: Option<u16>,
     pub extra_ports: Option<Vec<u16>>,
@@ -355,6 +377,16 @@ pub struct UpdateProjectPatch {
     pub php_version: Option<String>,
     pub web_server: Option<WebServer>,
     pub mobile_run: Option<MobileRunConfig>,
+    /// How PortBay decides the project is serving. `Some` replaces the probe
+    /// (HTTP path + timeout, TCP, or trust-the-process); the editor always
+    /// sends the full value. Left unchanged when absent.
+    pub readiness: Option<Readiness>,
+    /// Pre-start hook commands. `Some` replaces the whole ordered list (the
+    /// editor sends every row); an empty vec clears all hooks.
+    pub pre_start: Option<Vec<String>>,
+    /// Post-start hook commands. Same replace-the-list semantics as
+    /// [`Self::pre_start`].
+    pub post_start: Option<Vec<String>>,
     /// Monorepo workspace binding. When present, sets/replaces the project's
     /// workspace filter (Tier-2 "run one app from the repo root"). Patch
     /// semantics: absent leaves it unchanged — clear it by removing and
@@ -372,6 +404,12 @@ pub struct UpdateProjectPatch {
     /// (the editor always sends every field); an all-default config is stored
     /// as `None` by `update_project` to keep registries clean.
     pub domain: Option<DomainConfig>,
+
+    /// Bring-your-own named Cloudflare tunnel (Pro-gated). `Some` sets/replaces
+    /// the attached tunnel; an inactive (blank) config clears it. Introducing or
+    /// changing an active tunnel without Pro is rejected core-side (`ProRequired`);
+    /// an existing one is preserved on downgrade.
+    pub tunnel: Option<CustomTunnelConfig>,
 }
 
 #[cfg(test)]
@@ -394,6 +432,8 @@ mod tests {
             services: vec!["caddy".into()],
             env: BTreeMap::new(),
             readiness: None,
+            pre_start: vec![],
+            post_start: vec![],
             auto_start: false,
             tags: vec![],
             document_root: None,
@@ -405,6 +445,8 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 

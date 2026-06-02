@@ -39,7 +39,6 @@
 
   import ProjectRowMenu from "./ProjectRowMenu.svelte";
   import OpenInButton from "./OpenInButton.svelte";
-  import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
   interface Props {
     project: ProjectView;
@@ -148,14 +147,12 @@
   async function revealInFinder(e: MouseEvent) {
     e.stopPropagation();
     try {
-      // `revealItemInDir` opens the parent folder and selects the
-      // target — works for both files and directories. Passing the
-      // project root reveals it inside its parent (e.g. `Sites/` with
-      // the project folder highlighted), which matches what most users
-      // expect from "Reveal in Finder".
-      await revealItemInDir(project.path);
+      // Reveals the project inside its parent (e.g. `Sites/` with the project
+      // folder highlighted), which matches what most users expect from "Reveal
+      // in Finder". `reveal_in_finder` also surfaces a toast on failure.
+      await safeInvoke("reveal_in_finder", { path: project.path });
     } catch {
-      /* opener pushes its own toast */
+      /* safeInvoke already pushed the toast */
     }
   }
 </script>

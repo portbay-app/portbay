@@ -60,7 +60,12 @@ fn reconcile_via_helper(
     let pairs = expected_pairs(reg, resolver_installed);
     let hash = hash_pairs(&pairs);
 
-    if cache.last_applied == Some(hash) {
+    // Skip only when the hash is unchanged *and* the file on disk still
+    // matches. A matching hash alone isn't enough: entries can drift in via
+    // direct `.add()` writes, stale CLI/test debris, or manual edits without
+    // the registry ever changing, and the periodic tick must reconcile that
+    // drift away rather than trust its own cache.
+    if cache.last_applied == Some(hash) && helper_matches(helper, &pairs) {
         return Some(StepOutcome::skipped("unchanged"));
     }
 
@@ -88,10 +93,16 @@ pub(super) fn reconcile_with(
     let pairs = expected_pairs(reg, resolver_installed);
     let hash = hash_pairs(&pairs);
 
-    if cache.last_applied == Some(hash) {
+    // See `reconcile_via_helper`: trust the success cache only when the file
+    // actually matches, so drift introduced outside the registry gets healed.
+    if cache.last_applied == Some(hash) && hosts_match(manager, &pairs) {
         return StepOutcome::skipped("unchanged");
     }
 
+    // A known permission-denied short-circuits unconditionally: this path is
+    // only reached when the privileged helper is absent, so a re-attempt can't
+    // succeed and would only churn failures every tick. (Drift on a writable
+    // file is healed above, via the helper, or on the next registry change.)
     if cache.last_perm_denied == Some(hash) {
         return StepOutcome::skipped(
             "hosts unwritable; last attempt at this hash failed with permission denied",
@@ -138,6 +149,35 @@ fn expected_pairs(reg: &Registry, resolver_installed: bool) -> Vec<(String, Ipv4
     pairs
 }
 
+/// True when the manager's current managed block equals `expected` exactly.
+/// `expected` is already sorted+deduped by [`expected_pairs`]. A read error
+/// returns `false` so the caller proceeds to a write attempt rather than
+/// assuming the file is correct.
+fn hosts_match(manager: &HostsManager, expected: &[(String, Ipv4Addr)]) -> bool {
+    match manager.list_managed() {
+        Ok(entries) => {
+            let mut actual: Vec<(String, Ipv4Addr)> =
+                entries.into_iter().map(|e| (e.hostname, e.ip)).collect();
+            actual.sort();
+            actual == expected
+        }
+        Err(_) => false,
+    }
+}
+
+/// Same as [`hosts_match`] but reading through the privileged helper.
+fn helper_matches(helper: &HostsHelperClient, expected: &[(String, Ipv4Addr)]) -> bool {
+    match helper.list() {
+        Ok(entries) => {
+            let mut actual: Vec<(String, Ipv4Addr)> =
+                entries.into_iter().map(|e| (e.hostname, e.ip)).collect();
+            actual.sort();
+            actual == expected
+        }
+        Err(_) => false,
+    }
+}
+
 fn hash_pairs(pairs: &[(String, Ipv4Addr)]) -> u64 {
     // Canonical, order-preserving byte encoding so the cache key is stable
     // across Rust toolchains (DefaultHasher's algorithm is not guaranteed to be).
@@ -175,6 +215,8 @@ mod tests {
             env: BTreeMap::new(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: None,
             php_version: None,
@@ -183,6 +225,8 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 
@@ -282,6 +326,33 @@ mod tests {
         assert!(matches!(second, StepOutcome::Applied { .. }));
         let entries = m.list_managed().unwrap();
         assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn drift_outside_registry_is_healed() {
+        let (_tmp, m) = tmp_manager();
+        let mut reg = Registry::new("test");
+        reg.add_project(project("a", "a.test")).unwrap();
+        let mut cache = HostsCache::default();
+
+        // First apply writes [a.test] and caches its hash.
+        let _ = reconcile_with(&reg, false, &mut cache, &m);
+        assert_eq!(m.list_managed().unwrap().len(), 1);
+
+        // Drift: a stale entry lands directly, bypassing the registry (stale
+        // CLI/test debris, a manual edit). The registry — and the hash — are
+        // unchanged, so the old hash-only cache would have skipped forever.
+        m.add("stale.test", Ipv4Addr::LOCALHOST).unwrap();
+        assert_eq!(m.list_managed().unwrap().len(), 2);
+
+        let outcome = reconcile_with(&reg, false, &mut cache, &m);
+        assert!(
+            matches!(outcome, StepOutcome::Applied { .. }),
+            "drift should trigger a reapply, got {outcome:?}"
+        );
+        let entries = m.list_managed().unwrap();
+        assert_eq!(entries.len(), 1, "stale entry pruned");
+        assert_eq!(entries[0].hostname, "a.test");
     }
 
     #[test]

@@ -2,7 +2,9 @@
 
 #[derive(thiserror::Error, Debug)]
 pub enum TunnelError {
-    #[error("cloudflared binary not found — bundle a sidecar or install via Homebrew")]
+    #[error(
+        "cloudflared binary not found — bundle a sidecar or install with the OS package manager"
+    )]
     BinaryMissing,
 
     #[error("failed to spawn cloudflared: {0}")]

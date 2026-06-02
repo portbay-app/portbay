@@ -12,7 +12,47 @@
     data-sveltekit-preload-data="hover"
     data-density="comfortable"
     data-theme="dark"
+    data-a11y-motion="standard"
+    data-a11y-transparency="standard"
+    data-a11y-contrast="standard"
+    data-a11y-text="normal"
+    data-a11y-focus="standard"
+    data-a11y-links="standard"
+    data-a11y-status="color"
   >
+    <!--
+      No-flash theme boot. Resolves the persisted preference (system|dark|light,
+      default system) against the OS appearance and sets the class/data-theme
+      before first paint, so a "system" user on a light OS doesn't flash dark.
+      Must stay in sync with src/lib/stores/theme.svelte.ts.
+    -->
+    <script>
+      (function () {
+        try {
+          var keys = ["portbay.themeChoice", "portbay.theme"];
+          var pref = "system";
+          for (var i = 0; i < keys.length; i++) {
+            var v = localStorage.getItem(keys[i]);
+            if (v === "system" || v === "dark" || v === "light") {
+              pref = v;
+              break;
+            }
+          }
+          var resolved =
+            pref === "system"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : pref;
+          var de = document.documentElement;
+          de.classList.toggle("dark", resolved === "dark");
+          de.classList.toggle("light", resolved === "light");
+          document.body.setAttribute("data-theme", resolved);
+        } catch (e) {
+          /* localStorage blocked — fall back to the markup default (dark) */
+        }
+      })();
+    </script>
     <div style="display: contents">%sveltekit.body%</div>
   </body>
 </html>

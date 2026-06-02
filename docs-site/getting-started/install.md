@@ -1,11 +1,14 @@
 ---
-title: Install PortBay — Homebrew, DMG & Build from Source
-description: Install PortBay on macOS with a single Homebrew command, download the signed DMG, or build from source with Tauri — full requirements and sidecar fetch steps included.
+title: Install PortBay — Homebrew, DMG, Linux & Build from Source
+description: Install PortBay on macOS or Linux, download release bundles, or build from source with Tauri — full requirements and sidecar fetch steps included.
 ---
 
 # Install
 
-PortBay ships as a signed macOS app. Developers can install the current release with Homebrew or download the DMG from GitHub Releases.
+PortBay ships as a signed macOS app today. Linux desktop builds are being added
+as AppImage, deb, rpm, Snap, and AUR packages; see
+[Linux Support](/getting-started/linux) for the current requirements and
+limitations.
 
 ## Homebrew
 
@@ -28,7 +31,8 @@ Source builds are for contributors. The app expects Node, pnpm, Rust, and Tauri 
 
 | Requirement | Notes |
 | --- | --- |
-| macOS | Primary target for the current implementation. |
+| macOS | Signed DMG and Homebrew cask. |
+| Linux | AppImage, deb, rpm, Snap, and AUR package targets; requires WebKitGTK, GTK, libayatana-appindicator, libsecret/D-Bus, `dnsmasq`, polkit, and systemd-resolved for full DNS support. |
 | Node.js | Use the project’s supported local Node version. |
 | pnpm | The repo uses `pnpm-lock.yaml`. |
 | Rust | Required for the Tauri core and CLI. |
@@ -56,7 +60,7 @@ Tauri looks for sidecars under `src-tauri/binaries/<name>-<target-triple>`. Proc
 
 The scripts write into the repository checkout. They should be run from the repo root. Do not hand-place global binaries into the app bundle while developing; the app should be able to reproduce its own expected local sidecar layout.
 
-`fetch-dnsmasq.sh` bundles the DNS resolver that powers wildcard `*.test` routing. Because PortBay ships its own copy, there is no separate `brew install dnsmasq` step — DNS routing works out of the box, both in a source checkout and in the signed release build.
+On macOS, `fetch-dnsmasq.sh` bundles the DNS resolver that powers wildcard `*.test` routing, so there is no separate `brew install dnsmasq` step. On Linux, the script writes a small wrapper that calls the system `dnsmasq`; install the distro package before running the app.
 
 ### Verify The Checkout
 

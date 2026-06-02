@@ -122,6 +122,72 @@
     />
     <path d="M9 9.5 L15 9.5 L14.7 11.5 L9.7 11.5 L9.9 13.5 L14.5 13.5 L14.3 15.5 L12 16 L9.7 15.5 L9.6 14 L9 14" stroke="#E34F26" stroke-width="0.6" fill="none" />
   </svg>
+{:else if type === "flutter"}
+  <!-- Flutter — official mark (blue on transparent; reads on the dark shell) -->
+  <img
+    src="/stacks/flutter.png"
+    width={size}
+    height={size}
+    class={cls}
+    style="object-fit:contain"
+    alt=""
+    aria-hidden="true"
+  />
+{:else if type === "xcode"}
+  <!-- Xcode — official app icon (square, self-contained background) -->
+  <img
+    src="/stacks/xcode.png"
+    width={size}
+    height={size}
+    class={cls}
+    style="object-fit:contain"
+    alt=""
+    aria-hidden="true"
+  />
+{:else if type === "android"}
+  <!-- Android — official robot mark (wide, transparent; contained in a square box) -->
+  <img
+    src="/stacks/android.png"
+    width={size}
+    height={size}
+    class={cls}
+    style="object-fit:contain"
+    alt=""
+    aria-hidden="true"
+  />
+{:else if type === "expo"}
+  <!-- Expo — official "A" mark (black on transparent); white tile keeps it legible on the dark shell -->
+  <img
+    src="/stacks/expo.png"
+    width={size}
+    height={size}
+    class={cls}
+    style="object-fit:contain;background:#fff;border-radius:22%"
+    alt=""
+    aria-hidden="true"
+  />
+{:else if type === "python"}
+  <!-- Python — official two-snake mark. The logo has 180° rotational
+       symmetry: the lower yellow snake is the upper blue snake rotated
+       about the centre, so the same half-path is drawn twice. -->
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    class={cls}
+    aria-hidden="true"
+  >
+    <path
+      fill="#3776AB"
+      d="M14.25.18l.9.2.73.26.59.3.45.32.34.34.25.34.16.33.1.3.04.26.02.2-.01.13V8.5l-.05.63-.13.55-.21.46-.26.38-.3.31-.33.25-.35.19-.35.14-.33.1-.3.07-.26.04-.21.02H8.77l-.69.05-.59.14-.5.22-.41.27-.33.32-.27.35-.2.36-.15.37-.1.35-.07.32-.04.27-.02.21v3.06H3.17l-.21-.03-.28-.07-.32-.12-.35-.18-.36-.26-.36-.36-.35-.46-.32-.59-.28-.73-.21-.88-.14-1.05-.05-1.23.06-1.22.16-1.04.24-.87.32-.71.36-.57.4-.44.42-.33.42-.24.4-.16.36-.1.32-.05.24-.01h.16l.06.01h8.16v-.83H6.18l-.01-2.75-.02-.37.05-.34.11-.31.17-.28.25-.26.31-.23.38-.2.44-.18.51-.15.58-.12.64-.1.71-.06.77-.04.84-.02 1.27.05zm-6.3 1.98l-.23.33-.08.41.08.41.23.34.33.22.41.09.41-.09.33-.22.23-.34.08-.41-.08-.41-.23-.33-.33-.22-.41-.09-.41.09z"
+    />
+    <path
+      fill="#FFD43B"
+      transform="rotate(180 12 12)"
+      d="M14.25.18l.9.2.73.26.59.3.45.32.34.34.25.34.16.33.1.3.04.26.02.2-.01.13V8.5l-.05.63-.13.55-.21.46-.26.38-.3.31-.33.25-.35.19-.35.14-.33.1-.3.07-.26.04-.21.02H8.77l-.69.05-.59.14-.5.22-.41.27-.33.32-.27.35-.2.36-.15.37-.1.35-.07.32-.04.27-.02.21v3.06H3.17l-.21-.03-.28-.07-.32-.12-.35-.18-.36-.26-.36-.36-.35-.46-.32-.59-.28-.73-.21-.88-.14-1.05-.05-1.23.06-1.22.16-1.04.24-.87.32-.71.36-.57.4-.44.42-.33.42-.24.4-.16.36-.1.32-.05.24-.01h.16l.06.01h8.16v-.83H6.18l-.01-2.75-.02-.37.05-.34.11-.31.17-.28.25-.26.31-.23.38-.2.44-.18.51-.15.58-.12.64-.1.71-.06.77-.04.84-.02 1.27.05zm-6.3 1.98l-.23.33-.08.41.08.41.23.34.33.22.41.09.41-.09.33-.22.23-.34.08-.41-.08-.41-.23-.33-.33-.22-.41-.09-.41.09z"
+    />
+  </svg>
 {:else}
   <!-- custom / fallback -->
   <svg

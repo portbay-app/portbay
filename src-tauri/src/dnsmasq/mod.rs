@@ -1,10 +1,9 @@
 //! dnsmasq adapter — wildcard DNS for `*.<suffix>` → `127.0.0.1`.
 //!
 //! One bundled sidecar (or PATH-found binary) per app instance. The
-//! daemon runs on a non-privileged loopback port; macOS routes
-//! `.<suffix>` queries to it via `/etc/resolver/<suffix>`, which is
-//! written by a separate sudo-driven command (the resolver-install
-//! card on the backlog).
+//! daemon runs on a non-privileged loopback port; the platform resolver routes
+//! `.<suffix>` queries to it via `/etc/resolver/<suffix>` on macOS or a
+//! systemd-resolved drop-in on Linux.
 //!
 //! Until that resolver file is in place, dnsmasq is harmless — it
 //! answers loopback queries that nobody sends. The lifecycle work
@@ -21,6 +20,6 @@ pub use lifecycle::{
     binary_available, find_free_port, DnsmasqSidecar, DEFAULT_PORT, PORT_SCAN_RANGE,
 };
 pub use resolver::{
-    install_via_osascript, is_installed, read_installed, resolver_file_content, resolver_file_path,
-    uninstall_via_osascript,
+    install_via_osascript, is_installed, read_installed, resolver_file_content,
+    resolver_file_content_for_suffix, resolver_file_path, uninstall_via_osascript,
 };

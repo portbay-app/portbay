@@ -5,12 +5,15 @@
 
   Flow:
     1. Pick an engine (cards). Engines that aren't installed show an
-       Install button that runs `brew install` inline.
+       Install button that downloads a signed, PortBay-managed build into the
+       PortBay environment (no Homebrew, nothing bundled into the installer).
     2. Name the instance + optional explicit port (auto-allocated if blank).
     3. Create → PortBay provisions the data dir + config and registers the
        instance, then it appears in the list.
 -->
 <script lang="ts">
+  import { Channel } from "@tauri-apps/api/core";
+
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { ErrorEnvelope } from "$lib/components/errors";
   import DatabaseMark from "./DatabaseMark.svelte";
@@ -24,46 +27,61 @@
   import type {
     DatabaseEngineId,
     DatabaseEngineView,
+    EngineInstallEvent,
   } from "$lib/types/databases";
 
   let selectedEngine = $state<DatabaseEngineId | null>(null);
   let name = $state<string>("");
   let port = $state<number | null>(null);
+  let filePath = $state<string>("");
   let autoStart = $state<boolean>(true);
   let submitting = $state<boolean>(false);
   let installingEngine = $state<DatabaseEngineId | null>(null);
+  /** Live progress line for the engine currently installing. */
+  let installLine = $state<string>("");
   let formError = $state<CommandError | null>(null);
 
   const engine = $derived<DatabaseEngineView | null>(
     databases.engines.find((e) => e.id === selectedEngine) ?? null,
   );
 
+  /** File-based engines (SQLite) have no daemon, port, or auto-start. */
+  const isFileBased = $derived(engine?.id === "sqlite");
+
   // Default the name to "<engine>-local" the first time an engine is picked.
   function pickEngine(e: DatabaseEngineView) {
     selectedEngine = e.id;
     if (!name.trim()) name = `${e.id}-local`;
     port = null;
+    filePath = "";
     formError = null;
   }
 
   async function installEngine(e: DatabaseEngineView) {
     if (installingEngine) return;
     installingEngine = e.id;
-    errorBus.push({
-      code: "DB_ENGINE_INSTALL",
-      whatHappened: `Installing ${e.label} via Homebrew…`,
-      whyItMatters: "First install can take a minute or two.",
-      whoCausedIt: "system",
-      severity: "info",
-      actions: [],
-    });
+    installLine = "Starting…";
+    const channel = new Channel<EngineInstallEvent>();
+    channel.onmessage = (ev) => {
+      if (ev.kind === "log") {
+        installLine = ev.line;
+      } else if (ev.kind === "progress") {
+        installLine = ev.total
+          ? `${Math.round((ev.downloaded / ev.total) * 100)}% downloaded`
+          : `${(ev.downloaded / 1_000_000).toFixed(1)} MB downloaded`;
+      }
+    };
     try {
-      await safeInvoke("install_database_engine", { engine: e.id });
+      await safeInvoke("install_database_engine", {
+        engine: e.id,
+        onEvent: channel,
+      });
       await databases.refreshEngines();
       errorBus.push({
         code: "DB_ENGINE_INSTALL_OK",
+        category: "infrastructure",
         whatHappened: `${e.label} installed.`,
-        whyItMatters: "You can create an instance now.",
+        whyItMatters: "It now lives inside PortBay — you can create an instance.",
         whoCausedIt: "system",
         severity: "success",
         actions: [],
@@ -72,6 +90,7 @@
       /* toast already pushed */
     } finally {
       installingEngine = null;
+      installLine = "";
     }
   }
 
@@ -95,12 +114,14 @@
         input: {
           engine: selectedEngine,
           name: name.trim(),
-          port: port ?? null,
-          autoStart,
+          port: isFileBased ? null : (port ?? null),
+          filePath: isFileBased && filePath.trim() ? filePath.trim() : null,
+          autoStart: isFileBased ? false : autoStart,
         },
       });
       errorBus.push({
         code: "DB_CREATE_OK",
+        category: "infrastructure",
         whatHappened: `${name.trim()} created.`,
         whyItMatters: autoStart
           ? "It's starting up now."
@@ -122,6 +143,7 @@
   function envelope(msg: string): CommandError {
     return {
       code: "BAD_INPUT",
+      category: "project-error",
       whatHappened: msg,
       whyItMatters: "",
       whoCausedIt: "user",
@@ -133,17 +155,56 @@
     selectedEngine = null;
     name = "";
     port = null;
+    filePath = "";
     autoStart = true;
     formError = null;
   }
+
+  let panelEl = $state<HTMLElement | null>(null);
 
   function close() {
     databases.hideWizard();
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (databases.wizardOpen && e.key === "Escape") close();
+    if (!databases.wizardOpen) return;
+    if (e.key === "Escape") {
+      close();
+      return;
+    }
+    // Tab trap: keep focus within the panel.
+    if (e.key === "Tab" && panelEl) {
+      const focusable = Array.from(
+        panelEl.querySelectorAll<HTMLElement>(
+          'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => el.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
   }
+
+  // Move focus into the panel when it opens.
+  $effect(() => {
+    if (databases.wizardOpen && panelEl) {
+      const firstFocusable = panelEl.querySelector<HTMLElement>(
+        'button:not([disabled]),input:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      );
+      firstFocusable?.focus();
+    }
+  });
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -151,9 +212,12 @@
 {#if databases.wizardOpen}
   <!-- In-layout right-side panel (rendered into the grid rail by the root
        layout). Escape + the header close button dismiss it. -->
-  <aside
+  <div
+    bind:this={panelEl}
+    role="dialog"
+    aria-modal="true"
+    aria-label="Add database"
     class="h-full w-full min-h-0 overflow-hidden bg-surface border-l border-border flex flex-col"
-    aria-label="Add Database"
   >
     <header
       class="shrink-0 flex items-center justify-between px-5 py-4 border-b border-border"
@@ -181,6 +245,9 @@
           Engine
         </h3>
         <div class="grid grid-cols-1 gap-2">
+          {#if databases.loading && databases.engines.length === 0}
+            <p class="px-3 py-3 text-[12px] text-fg-subtle">Loading engines…</p>
+          {/if}
           {#each databases.engines as e (e.id)}
             {@const isSel = selectedEngine === e.id}
             <div
@@ -210,10 +277,28 @@
                       {e.version ? `v${e.version}` : "installed"}
                     </span>
                   {/if}
+                  {#if e.managed}
+                    <span
+                      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded
+                             bg-accent/10 text-accent text-[10px] font-medium"
+                      title="Installed and managed by PortBay"
+                    >
+                      <Icon name="shield" size={9} />
+                      PortBay
+                    </span>
+                  {/if}
                 </div>
-                <p class="text-[11px] text-fg-subtle">
-                  Default port {e.defaultPort}
-                </p>
+                {#if installingEngine === e.id && installLine}
+                  <p class="text-[11px] text-accent truncate">{installLine}</p>
+                {:else if e.id === "sqlite"}
+                  <p class="text-[11px] text-fg-subtle">
+                    File-based — no daemon or port
+                  </p>
+                {:else}
+                  <p class="text-[11px] text-fg-subtle">
+                    Default port {e.defaultPort}
+                  </p>
+                {/if}
               </div>
               {#if e.installed}
                 {#if isSel}
@@ -227,6 +312,7 @@
                     void installEngine(e);
                   }}
                   disabled={installingEngine !== null}
+                  title="Download a signed, PortBay-managed build into the PortBay environment"
                   class="shrink-0 inline-flex items-center gap-1 px-2 h-7 rounded-md
                          border border-accent/40 text-accent text-[11px]
                          hover:bg-accent/10 disabled:opacity-50 transition-colors"
@@ -272,36 +358,63 @@
             </p>
           </div>
 
-          <div>
-            <label
-              for="db-port"
-              class="block text-[11px] font-medium text-fg-muted mb-1.5"
-            >
-              Port
-              <span class="text-fg-subtle font-normal">(blank = auto)</span>
-            </label>
-            <input
-              id="db-port"
-              type="number"
-              bind:value={port}
-              placeholder={engine.defaultPort.toString()}
-              class="w-40 px-3 h-9 rounded-md bg-bg border border-border
-                     text-[13px] font-mono text-fg placeholder:text-fg-subtle
-                     focus:outline-none focus:ring-1 focus:ring-accent/50
-                     focus:border-accent/40 transition-colors"
-            />
-            <p class="mt-1 text-[10.5px] text-fg-subtle">
-              PortBay allocates a free port near {engine.defaultPort} when
-              left blank.
-            </p>
-          </div>
+          {#if isFileBased}
+            <div>
+              <label
+                for="db-file"
+                class="block text-[11px] font-medium text-fg-muted mb-1.5"
+              >
+                Existing file
+                <span class="text-fg-subtle font-normal">(blank = new)</span>
+              </label>
+              <input
+                id="db-file"
+                type="text"
+                bind:value={filePath}
+                placeholder="/path/to/app/storage/database.sqlite"
+                class="w-full px-3 h-9 rounded-md bg-bg border border-border
+                       text-[13px] font-mono text-fg placeholder:text-fg-subtle
+                       focus:outline-none focus:ring-1 focus:ring-accent/50
+                       focus:border-accent/40 transition-colors"
+              />
+              <p class="mt-1 text-[10.5px] text-fg-subtle">
+                Adopt an existing <code>.sqlite</code> file in place, or leave
+                blank to create a fresh managed one. SQLite needs no daemon, so
+                there's no port and nothing to start.
+              </p>
+            </div>
+          {:else}
+            <div>
+              <label
+                for="db-port"
+                class="block text-[11px] font-medium text-fg-muted mb-1.5"
+              >
+                Port
+                <span class="text-fg-subtle font-normal">(blank = auto)</span>
+              </label>
+              <input
+                id="db-port"
+                type="number"
+                bind:value={port}
+                placeholder={engine.defaultPort.toString()}
+                class="w-40 px-3 h-9 rounded-md bg-bg border border-border
+                       text-[13px] font-mono text-fg placeholder:text-fg-subtle
+                       focus:outline-none focus:ring-1 focus:ring-accent/50
+                       focus:border-accent/40 transition-colors"
+              />
+              <p class="mt-1 text-[10.5px] text-fg-subtle">
+                PortBay allocates a free port near {engine.defaultPort} when
+                left blank.
+              </p>
+            </div>
 
-          <label class="flex items-center gap-2.5 cursor-pointer select-none">
-            <input type="checkbox" bind:checked={autoStart} class="accent-accent" />
-            <span class="text-[12.5px] text-fg">
-              Start automatically when PortBay launches
-            </span>
-          </label>
+            <label class="flex items-center gap-2.5 cursor-pointer select-none">
+              <input type="checkbox" bind:checked={autoStart} class="accent-accent" />
+              <span class="text-[12.5px] text-fg">
+                Start automatically when PortBay launches
+              </span>
+            </label>
+          {/if}
         </section>
       {/if}
     </div>
@@ -335,5 +448,5 @@
         {/if}
       </button>
     </footer>
-  </aside>
+  </div>
 {/if}

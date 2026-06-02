@@ -6,6 +6,9 @@
 //! cert metadata for the detail panel, and manual reissue.
 
 use std::fs;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::Path;
+use std::process::Command;
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -13,8 +16,8 @@ use x509_parser::pem::Pem;
 use x509_parser::prelude::*;
 
 use crate::error::{AppError, AppResult};
-use crate::mkcert::MkcertError;
-use crate::registry::ProjectId;
+use crate::mkcert::{CaTrustState, MkcertError};
+use crate::registry::{ProjectId, SslMode};
 use crate::state::AppState;
 
 /// Cert metadata surfaced to the detail panel's Certificates section.
@@ -30,12 +33,26 @@ pub struct CertInfo {
     pub expires_at: Option<String>,
     pub days_until_expiry: Option<i64>,
     pub sans: Vec<String>,
+    pub status: CertStatus,
+    pub trust_store_verified: Option<bool>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CertStatus {
+    Ready,
+    MissingCa,
+    Expired,
+    Untrusted,
+    RegenerateNeeded,
+    Error,
 }
 
 /// `install_mkcert_ca()` — runs the bundled mkcert's `-install` flow.
-/// macOS prompts for the user's password to add the CA to the system
-/// keychain. Idempotent — `mkcert -install` is safe to call when the CA
-/// is already trusted.
+/// The OS may prompt for authorization to add the CA to the system trust store.
+/// Idempotent — `mkcert -install` is safe to call when the CA is already
+/// trusted.
 #[tauri::command]
 pub async fn install_mkcert_ca(state: State<'_, AppState>) -> AppResult<()> {
     let mkcert = state
@@ -54,14 +71,20 @@ pub async fn install_mkcert_ca(state: State<'_, AppState>) -> AppResult<()> {
     match result {
         Ok(()) => Ok(()),
         Err(MkcertError::ExitStatus { status, stderr }) => {
-            // Only call it "cancelled" on a real cancel signature — macOS
-            // `security` reports a user-dismissed authorization as "cancel"/-128.
+            // Only call it "cancelled" on a real cancel signature. macOS
+            // `security` reports a user-dismissed authorization as "cancel"/-128;
+            // Linux pkexec/polkit reports authorization denial text.
             // Anything else (untrusted store, SIP, disk error) is surfaced with
             // mkcert's actual stderr instead of being mislabeled.
             let lower = stderr.to_ascii_lowercase();
-            if lower.contains("cancel") || stderr.contains("-128") {
+            if lower.contains("cancel")
+                || stderr.contains("-128")
+                || lower.contains("not authorized")
+                || lower.contains("authentication failed")
+                || lower.contains("dismissed")
+            {
                 Err(AppError::BadInput(
-                    "cancelled — macOS keychain prompt was dismissed".into(),
+                    "cancelled — the OS trust-store authorization prompt was dismissed".into(),
                 ))
             } else if stderr.is_empty() {
                 Err(AppError::Internal(format!(
@@ -104,13 +127,69 @@ pub fn read_cert_info(
 /// `404`-style `BadInput` as the empty-state case.
 #[tauri::command]
 pub async fn cert_info(state: State<'_, AppState>, id: String) -> AppResult<CertInfo> {
+    let registry = crate::commands::projects::load_registry(&state)?;
+    let project = registry.get_project(&ProjectId::new(id.clone())).cloned();
+    if let Some(project) = project.as_ref() {
+        if project.https && project.ssl_mode() == SslMode::CustomCertificate {
+            let Some((cert_path, key_path)) = project.custom_cert_paths() else {
+                return Err(AppError::BadInput(
+                    "custom certificate mode requires certificate and key paths".into(),
+                ));
+            };
+            let cert_path = Path::new(cert_path);
+            let key_path = Path::new(key_path);
+            let pem_bytes = fs::read(cert_path).map_err(AppError::Io)?;
+            let mut info = parse_cert_pem(&id, cert_path, key_path, &pem_bytes)?;
+            let desired_owned = desired_cert_names(
+                project.hostname.as_str(),
+                project.include_wildcard_subdomains(),
+            );
+            let desired: Vec<&str> = desired_owned.iter().map(String::as_str).collect();
+            if let Err(e) = validate_custom_cert_pair(cert_path, key_path, &desired) {
+                info.status = CertStatus::Error;
+                info.errors.push(e);
+            }
+            return Ok(info);
+        }
+    }
+
     let mkcert = state
         .mkcert
         .as_ref()
         .ok_or_else(|| AppError::BadInput("mkcert binary not bundled".into()))?;
 
-    read_cert_info(mkcert.certs_root(), &id)?
-        .ok_or_else(|| AppError::NotFound(format!("no cert issued for project '{id}'")))
+    let mut info = read_cert_info(mkcert.certs_root(), &id)?
+        .ok_or_else(|| AppError::NotFound(format!("no cert issued for project '{id}'")))?;
+    match mkcert.ca_status() {
+        Ok(status) => match status.state {
+            CaTrustState::Trusted => {
+                info.trust_store_verified = Some(true);
+                if info.status == CertStatus::Untrusted || info.status == CertStatus::MissingCa {
+                    info.status = CertStatus::Ready;
+                }
+            }
+            CaTrustState::Missing => {
+                info.trust_store_verified = Some(false);
+                info.status = CertStatus::MissingCa;
+                info.errors.push(format!(
+                    "mkcert root CA missing at {}",
+                    status.root_path.display()
+                ));
+            }
+            CaTrustState::Untrusted => {
+                info.trust_store_verified = Some(false);
+                info.status = CertStatus::Untrusted;
+                info.errors
+                    .push("mkcert root CA exists but is not trusted by the OS trust store".into());
+            }
+        },
+        Err(e) => {
+            info.trust_store_verified = Some(false);
+            info.status = CertStatus::Error;
+            info.errors.push(format!("CA trust check failed: {e}"));
+        }
+    }
+    Ok(info)
 }
 
 /// `reissue_cert(id)` — delete the existing cert dir, mark the
@@ -166,12 +245,42 @@ fn parse_cert_pem(
     let mut sans: Vec<String> = Vec::new();
     if let Ok(Some(san_ext)) = cert.subject_alternative_name() {
         for name in &san_ext.value.general_names {
-            if let GeneralName::DNSName(dns) = name {
-                sans.push((*dns).to_string());
+            match name {
+                GeneralName::DNSName(dns) => sans.push((*dns).to_string()),
+                GeneralName::IPAddress(bytes) => {
+                    if bytes.len() == 4 {
+                        sans.push(
+                            Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string(),
+                        );
+                    } else if bytes.len() == 16 {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(bytes);
+                        sans.push(Ipv6Addr::from(octets).to_string());
+                    }
+                }
+                _ => {}
             }
         }
     }
     sans.sort();
+    sans.dedup();
+
+    let mut errors = Vec::new();
+    if !key_path.exists() {
+        errors.push(format!("private key missing at {}", key_path.display()));
+    }
+    let status = match days_until_expiry {
+        Some(days) if days < 0 => CertStatus::Expired,
+        Some(days) if days < 30 => CertStatus::RegenerateNeeded,
+        None => CertStatus::Error,
+        _ => {
+            if errors.is_empty() {
+                CertStatus::Ready
+            } else {
+                CertStatus::Error
+            }
+        }
+    };
 
     Ok(CertInfo {
         project_id: project_id.to_string(),
@@ -181,15 +290,13 @@ fn parse_cert_pem(
         expires_at,
         days_until_expiry,
         sans,
+        status,
+        trust_store_verified: None,
+        errors,
     })
 }
 
-/// Read the DNS SAN list from an on-disk cert PEM. Best-effort: any read or
-/// parse failure yields an empty list (callers treat that as "doesn't cover
-/// the desired names" and reissue). The cert reconciler uses this to decide
-/// whether an existing cert already covers a project's desired hostnames —
-/// e.g. after wildcard subdomains are toggled on, or the hostname changes.
-pub(crate) fn cert_dns_sans(cert_path: &std::path::Path) -> Vec<String> {
+pub(crate) fn cert_all_sans(cert_path: &std::path::Path) -> Vec<String> {
     let Ok(bytes) = std::fs::read(cert_path) else {
         return Vec::new();
     };
@@ -202,11 +309,22 @@ pub(crate) fn cert_dns_sans(cert_path: &std::path::Path) -> Vec<String> {
     let mut sans = Vec::new();
     if let Ok(Some(ext)) = cert.subject_alternative_name() {
         for name in &ext.value.general_names {
-            if let GeneralName::DNSName(dns) = name {
-                sans.push((*dns).to_string());
+            match name {
+                GeneralName::DNSName(dns) => sans.push((*dns).to_string()),
+                GeneralName::IPAddress(bytes) if bytes.len() == 4 => {
+                    sans.push(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string());
+                }
+                GeneralName::IPAddress(bytes) if bytes.len() == 16 => {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(bytes);
+                    sans.push(Ipv6Addr::from(octets).to_string());
+                }
+                _ => {}
             }
         }
     }
+    sans.sort();
+    sans.dedup();
     sans
 }
 
@@ -217,6 +335,85 @@ pub(crate) fn cert_days_until_expiry(cert_path: &std::path::Path) -> Option<i64>
     let pem = Pem::iter_from_buffer(&bytes).next()?.ok()?;
     let (_, cert) = X509Certificate::from_der(&pem.contents).ok()?;
     cert.validity().time_to_expiration().map(|d| d.whole_days())
+}
+
+pub(crate) fn validate_custom_cert_pair(
+    cert_path: &Path,
+    key_path: &Path,
+    desired_names: &[&str],
+) -> std::result::Result<(), String> {
+    if !cert_path.exists() {
+        return Err(format!(
+            "certificate file not found at {}",
+            cert_path.display()
+        ));
+    }
+    if !key_path.exists() {
+        return Err(format!(
+            "private key file not found at {}",
+            key_path.display()
+        ));
+    }
+
+    let sans = cert_all_sans(cert_path);
+    if !cert_covers_names(&sans, desired_names) {
+        return Err(format!(
+            "certificate SANs do not cover {}",
+            desired_names.join(", ")
+        ));
+    }
+    if cert_days_until_expiry(cert_path).is_some_and(|days| days < 0) {
+        return Err("certificate is expired".into());
+    }
+
+    // Validate that the cert and key belong together without printing key
+    // material. macOS ships openssl/libressl; if absent, Caddy will still
+    // reject a bad pair during config load, but most users get an earlier error.
+    if which::which("openssl").is_ok() && !openssl_pair_matches(cert_path, key_path)? {
+        return Err("certificate and private key do not match".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn cert_covers_names(have: &[String], desired: &[&str]) -> bool {
+    desired.iter().all(|d| have.iter().any(|h| h == d))
+}
+
+fn openssl_pair_matches(cert_path: &Path, key_path: &Path) -> std::result::Result<bool, String> {
+    let cert_pub = Command::new("openssl")
+        .args(["x509", "-pubkey", "-noout", "-in"])
+        .arg(cert_path)
+        .output()
+        .map_err(|e| format!("openssl cert validation failed: {e}"))?;
+    if !cert_pub.status.success() {
+        return Err("openssl could not read the certificate".into());
+    }
+
+    let key_pub = Command::new("openssl")
+        .args(["pkey", "-pubout", "-in"])
+        .arg(key_path)
+        .output()
+        .map_err(|e| format!("openssl key validation failed: {e}"))?;
+    if !key_pub.status.success() {
+        return Err("openssl could not read the private key".into());
+    }
+
+    Ok(cert_pub.stdout == key_pub.stdout)
+}
+
+fn desired_cert_names(hostname: &str, include_wildcard: bool) -> Vec<String> {
+    let mut names = vec![
+        hostname.to_string(),
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    if include_wildcard {
+        names.push(format!("*.{hostname}"));
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn iso_from_asn1(t: x509_parser::time::ASN1Time) -> Option<String> {
@@ -244,6 +441,9 @@ mod tests {
             expires_at: Some("2027-01-01T00:00:00Z".into()),
             days_until_expiry: Some(365),
             sans: vec!["a.test".into()],
+            status: CertStatus::Ready,
+            trust_store_verified: Some(true),
+            errors: vec![],
         };
         let v = serde_json::to_value(&info).unwrap();
         assert!(v.get("projectId").is_some());
@@ -251,6 +451,7 @@ mod tests {
         assert!(v.get("issuedAt").is_some());
         assert!(v.get("expiresAt").is_some());
         assert!(v.get("daysUntilExpiry").is_some());
+        assert!(v.get("trustStoreVerified").is_some());
     }
 
     /// Integration-flavoured: round-trips a fake PEM through the parser.

@@ -11,17 +11,20 @@
 //! re-verify the entitlement.
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 /// Production PortBay Cloud base URL (branded custom domain — must be added to
 /// the Worker in Cloudflare). Never localhost or workers.dev in shipped builds.
 pub const CLOUD_BASE_URL: &str = "https://cloud.portbay.app";
 
-// Shown verbatim in the macOS keychain access prompt ("…stored in
+// Shown verbatim in the OS credential-store access prompt ("…stored in
 // 'PortBay Account'…"), so it's worded for a human, not as a reverse-DNS id.
 // Renaming this points us at a fresh keychain item: any session stored under
 // the old name is abandoned (harmless — the user just signs in once more).
 const KEYCHAIN_SERVICE: &str = "PortBay Account";
 const KEYCHAIN_USER: &str = "default";
+const SESSION_ENV: &str = "PORTBAY_SESSION_JSON";
+const SESSION_FILE: &str = "session.json";
 
 // ---------------------------------------------------------------------------
 // Session + keychain
@@ -40,22 +43,79 @@ fn entry() -> Result<keyring::Entry, String> {
 /// Persist the session in the OS keychain (single JSON blob).
 pub fn store_session(session: &Session) -> Result<(), String> {
     let json = serde_json::to_string(session).map_err(|e| e.to_string())?;
-    entry()?.set_password(&json).map_err(|e| e.to_string())
+    match entry().and_then(|e| e.set_password(&json).map_err(|e| e.to_string())) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(fallback_session_path());
+            Ok(())
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "OS credential store unavailable; falling back to a local PortBay session file"
+            );
+            store_session_file(&json)
+        }
+    }
 }
 
 /// Load the cached session, or `None` if not signed in / unreadable.
 pub fn load_session() -> Option<Session> {
-    let raw = entry().ok()?.get_password().ok()?;
+    if let Ok(raw) = entry().and_then(|e| e.get_password().map_err(|e| e.to_string())) {
+        if let Ok(session) = serde_json::from_str(&raw) {
+            return Some(session);
+        }
+    }
+    if let Ok(raw) = std::env::var(SESSION_ENV) {
+        if let Ok(session) = serde_json::from_str(&raw) {
+            return Some(session);
+        }
+    }
+    let raw = std::fs::read_to_string(fallback_session_path()).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
 /// Remove the cached session. Idempotent (a missing entry is success).
 pub fn clear_session() -> Result<(), String> {
-    match entry()?.delete_credential() {
+    let keyring_result = match entry() {
+        Ok(entry) => match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "OS credential store unavailable during session clear");
+            Ok(())
+        }
+    };
+    let file_result = match std::fs::remove_file(fallback_session_path()) {
         Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.to_string()),
+    };
+    keyring_result.and(file_result)
+}
+
+fn fallback_session_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("PortBay")
+        .join(SESSION_FILE)
+}
+
+fn store_session_file(json: &str) -> Result<(), String> {
+    let path = fallback_session_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -182,22 +242,49 @@ pub async fn refresh_session(base_url: &str, refresh_token: &str) -> RefreshOutc
     }
 }
 
+/// Serializes every refresh process-wide. Refresh tokens are **single-use** —
+/// each refresh rotates to a new one (see [`refresh_session`]) — so two refreshes
+/// racing on the same stored token make the second POST an already-consumed token
+/// → `401` → the session is cleared and the user is signed out. This was the
+/// "click Sync and get signed out" bug: the sync refresh raced the startup
+/// `account_resync`. The lock makes refreshes run one-at-a-time, and each reloads
+/// the latest stored session *inside* the lock so the rotated token is never
+/// reused. (Process-local — it fixes the GUI's own concurrent paths.)
+static REFRESH_LOCK: Mutex<()> = Mutex::const_new(());
+
+/// Refresh the stored session under [`REFRESH_LOCK`], persisting the rotation
+/// (`Rotated`) or clearing the dead session (`Unauthorized`). Every refresh path
+/// goes through here so token rotation can't race itself.
+pub async fn refresh_session_locked(base_url: &str) -> RefreshOutcome {
+    let _guard = REFRESH_LOCK.lock().await;
+    // Reload inside the lock: a queued caller must see the token a prior refresh
+    // just rotated, not the one it read before blocking.
+    let Some(session) = load_session() else {
+        return RefreshOutcome::Unauthorized;
+    };
+    let outcome = refresh_session(base_url, &session.refresh_token).await;
+    match &outcome {
+        RefreshOutcome::Rotated(ns) => {
+            let _ = store_session(ns);
+        }
+        RefreshOutcome::Unauthorized => {
+            let _ = clear_session();
+        }
+        RefreshOutcome::Transient => {}
+    }
+    outcome
+}
+
 /// Return a usable access token for an authenticated API call, refreshing the
 /// session first (access tokens are short-lived). `None` when not signed in or
 /// the session is definitively dead (a transient failure falls back to the
 /// stored access token so an offline op can still be attempted).
 pub async fn access_token_refreshing(base_url: &str) -> Option<String> {
-    let session = load_session()?;
-    match refresh_session(base_url, &session.refresh_token).await {
-        RefreshOutcome::Rotated(ns) => {
-            let _ = store_session(&ns);
-            Some(ns.access_token)
-        }
-        RefreshOutcome::Unauthorized => {
-            let _ = clear_session();
-            None
-        }
-        RefreshOutcome::Transient => Some(session.access_token),
+    load_session()?;
+    match refresh_session_locked(base_url).await {
+        RefreshOutcome::Rotated(ns) => Some(ns.access_token),
+        RefreshOutcome::Unauthorized => None,
+        RefreshOutcome::Transient => load_session().map(|s| s.access_token),
     }
 }
 

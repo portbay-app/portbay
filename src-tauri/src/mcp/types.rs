@@ -29,11 +29,13 @@ pub enum McpProjectKind {
     Next,
     Vite,
     Php,
+    Python,
     Static,
     Node,
     Flutter,
     Xcode,
     Android,
+    Expo,
     Custom,
 }
 
@@ -43,11 +45,13 @@ impl From<McpProjectKind> for ProjectType {
             McpProjectKind::Next => ProjectType::Next,
             McpProjectKind::Vite => ProjectType::Vite,
             McpProjectKind::Php => ProjectType::Php,
+            McpProjectKind::Python => ProjectType::Python,
             McpProjectKind::Static => ProjectType::Static,
             McpProjectKind::Node => ProjectType::Node,
             McpProjectKind::Flutter => ProjectType::Flutter,
             McpProjectKind::Xcode => ProjectType::Xcode,
             McpProjectKind::Android => ProjectType::Android,
+            McpProjectKind::Expo => ProjectType::Expo,
             McpProjectKind::Custom => ProjectType::Custom,
         }
     }
@@ -59,11 +63,13 @@ impl From<ProjectType> for McpProjectKind {
             ProjectType::Next => McpProjectKind::Next,
             ProjectType::Vite => McpProjectKind::Vite,
             ProjectType::Php => McpProjectKind::Php,
+            ProjectType::Python => McpProjectKind::Python,
             ProjectType::Static => McpProjectKind::Static,
             ProjectType::Node => McpProjectKind::Node,
             ProjectType::Flutter => McpProjectKind::Flutter,
             ProjectType::Xcode => McpProjectKind::Xcode,
             ProjectType::Android => McpProjectKind::Android,
+            ProjectType::Expo => McpProjectKind::Expo,
             ProjectType::Custom => McpProjectKind::Custom,
         }
     }
@@ -356,22 +362,8 @@ pub struct DetectResult {
     pub suggested_php_version: Option<String>,
 }
 
-/// One environment-health check.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct DoctorFinding {
-    pub check: String,
-    /// `ok`, `warn`, or `fail`.
-    pub verdict: String,
-    pub detail: String,
-}
-
-/// Result of `portbay_doctor`.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct DoctorResult {
-    /// True when no check returned `fail`.
-    pub ok: bool,
-    pub findings: Vec<DoctorFinding>,
-}
+// `portbay_doctor` returns `crate::doctor::DoctorReport` directly (the shared
+// core behind the CLI `portbay doctor`), so there's no MCP-local doctor type.
 
 /// One sidecar's state.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -444,6 +436,27 @@ pub struct TunnelStatusArgs {
     /// The project id (slug) whose tunnel you want. Must match the id used
     /// when the share was started in the PortBay app.
     pub id: String,
+}
+
+/// Look up one SSH tunnel by its id.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SshTunnelStatusArgs {
+    /// The SSH tunnel id (slug), as returned by `portbay_list_ssh_tunnels`.
+    pub id: String,
+}
+
+/// Run one command on a saved SSH connection's remote host. Only reachable when
+/// the operator has explicitly enabled the `ssh-exec` toolset (see
+/// `portbay_ssh_execute`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SshExecuteArgs {
+    /// The SSH connection id (slug), as returned by `portbay_list_ssh_connections`.
+    pub connection_id: String,
+    /// The shell command to run on the remote host.
+    pub command: String,
+    /// Optional working directory to run from (`cd <cwd> && <command>`).
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 // =============================================================================
@@ -665,6 +678,62 @@ pub struct SetDatabaseAutoStartArgs {
     pub auto_start: bool,
 }
 
+/// Inspect the schema (tables, columns, foreign keys) of a database instance.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseSchemaArgs {
+    /// The database instance id (slug), from `portbay_list_databases`.
+    pub id: String,
+}
+
+/// Run a read-only query against a database instance.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseQueryArgs {
+    /// The database instance id (slug), from `portbay_list_databases`.
+    pub id: String,
+    /// A single read-only statement (`SELECT`/`WITH`/`SHOW`/`EXPLAIN`/…).
+    /// Writes, DDL, multiple statements, and CTE-wrapped writes are rejected.
+    pub sql: String,
+    /// For server engines, the schema/database to run against (e.g. `app_dev`).
+    /// Omit for SQLite or to use the instance default.
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// Max rows to return (clamped to 1..=500; defaults to 100). Unbounded
+    /// `SELECT`s are capped server-side regardless.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Get the query plan (`EXPLAIN`) for a read-only statement.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseExplainArgs {
+    /// The database instance id (slug), from `portbay_list_databases`.
+    pub id: String,
+    /// A single read-only statement to explain.
+    pub sql: String,
+    /// For server engines, the schema/database to plan against. Omit for SQLite.
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// When true, run `EXPLAIN ANALYZE` (PostgreSQL: ANALYZE + BUFFERS) to collect
+    /// actual execution timing and buffer hit data. The query is actually executed.
+    /// Ignored for SQLite. Defaults to false.
+    #[serde(default)]
+    pub analyze: bool,
+}
+
+/// Run a WRITE/DDL statement, gated on the user approving it in the PortBay app.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseExecuteArgs {
+    /// The database instance id (slug), from `portbay_list_databases`.
+    pub id: String,
+    /// A single write/DDL statement (INSERT/UPDATE/DELETE/CREATE/ALTER/…). It
+    /// will NOT run until the user approves it in PortBay. Read-only statements
+    /// are rejected — use `portbay_db_query` for those.
+    pub sql: String,
+    /// For server engines, the schema/database to run against. Omit for SQLite.
+    #[serde(default)]
+    pub schema: Option<String>,
+}
+
 // =============================================================================
 // DNS / domain tool inputs
 // =============================================================================
@@ -773,4 +842,240 @@ pub struct ImportProjectsArgs {
     /// Import every site the source exposes, ignoring `ids`. Defaults to false.
     #[serde(default)]
     pub all: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Per-project task board ("Project Context & Task Authority")
+// ---------------------------------------------------------------------------
+
+/// List a project's task cards.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TasksListArgs {
+    /// Project id.
+    pub project: String,
+    /// Optional column filter: `Backlog`, `Todo`, `InProgress`, `Blocked`,
+    /// `Review`, `Done`, or `Rejected`.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// Get the next actionable card (the top `Todo`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskNextArgs {
+    /// Project id.
+    pub project: String,
+}
+
+/// Read one card in full (all fields + the markdown body).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskGetArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+}
+
+/// Create a new card. Lands in `Backlog` unless `status` is given.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskCreateArgs {
+    /// Project id.
+    pub project: String,
+    /// Card title.
+    pub title: String,
+    /// Markdown description / body.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Initial column. Defaults to `Backlog`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// `critical`, `high`, `medium`, or `low`.
+    #[serde(default)]
+    pub priority: Option<String>,
+    /// Acceptance criteria.
+    #[serde(default)]
+    pub acceptance: Option<String>,
+    /// Files or modules this task is expected to touch — a starting set for the
+    /// agent (it may touch more). Naming them lifts first-run success.
+    #[serde(default)]
+    pub touchpoints: Option<Vec<String>>,
+    /// Labels to tag the card with.
+    #[serde(default)]
+    pub labels: Option<Vec<String>>,
+    /// Numeric effort estimate.
+    #[serde(default)]
+    pub estimate: Option<f64>,
+    /// Seed from a built-in template by name ("Implement feature", "Fix bug",
+    /// "Write tests", "Refactor"). Explicit fields above win; the template fills
+    /// the rest (body, checklist sub-steps, acceptance criteria, labels).
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+/// Tick or untick a card's checklist item.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskCheckArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// Checklist item index.
+    pub idx: u32,
+    /// Mark done (true) or reopen (false). Defaults to true.
+    #[serde(default)]
+    pub done: Option<bool>,
+    /// Run id from the dispatch prompt (validated against the card's claim).
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+/// Append items to a card's checklist — the agent's own sub-step tracker.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskChecklistAddArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// Sub-task descriptions to append (e.g. `["P0: wire form", "P1: tests"]`).
+    pub items: Vec<String>,
+    /// Optional checklist heading (set on first use).
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Run id from the dispatch prompt.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+/// Post a comment on a card (shows in its activity thread).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskCommentArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// Comment text (markdown).
+    pub text: String,
+    /// Run id from the dispatch prompt.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+/// Acknowledge a dispatched card — proves the agent engaged.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskAckArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// The run id from the dispatch prompt.
+    pub run_id: String,
+}
+
+/// Advance a card and/or post a progress note. Validates `run_id` against the
+/// card's active claim and enforces the transition rules (an agent may never
+/// set `Rejected`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskUpdateArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// The run id from the dispatch prompt. Required to advance a claimed card.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// New column: `InProgress`, `Done`, `Blocked`, `Review`, or `Todo`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// A short progress note (recorded in the audit log; also a heartbeat).
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Reason, when moving to `Blocked`.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Record the files / modules you actually touched (or found relevant).
+    /// Replaces the card's touchpoints — a working artifact for the next run
+    /// and the human's review. Other card content stays human-owned.
+    #[serde(default)]
+    pub touchpoints: Option<Vec<String>>,
+}
+
+/// Read the current continuation brief.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct HandoffGetArgs {
+    /// Project id.
+    pub project: String,
+}
+
+/// Append a new entry to the rolling hand-off log (newest on top).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct HandoffUpdateArgs {
+    /// Project id.
+    pub project: String,
+    /// The "where we left off" note: current goal, what was just done, and the
+    /// next concrete step. Keep it minimal — the log is size-capped and prunes
+    /// oldest entries first.
+    pub narrative: String,
+    /// Who is writing this entry (e.g. your agent name, "claude", "codex"). Used
+    /// to sign the entry. Optional; defaults to "agent".
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
+/// Finish (or block) a dispatched card in one call: acknowledge, optionally
+/// comment + update the hand-off, then set the terminal status. Idempotent — a
+/// retry once the card already sits in the target status is a no-op (no
+/// duplicate comment / hand-off entry).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskCompleteArgs {
+    /// Project id.
+    pub project: String,
+    /// Card id.
+    pub id: String,
+    /// The run id from the dispatch prompt.
+    pub run_id: String,
+    /// Terminal status to set: `Done` (default), `Blocked`, or `Review`. You may
+    /// NOT set `Rejected` — that's human-only.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Optional acceptance/confirmation comment for the card's thread. Skip for
+    /// routine work — a comment per task is not required.
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// Optional minimal hand-off note (what changed, the next step, open items),
+    /// appended as the newest continuation-brief entry.
+    #[serde(default)]
+    pub handoff: Option<String>,
+    /// Sign the hand-off entry (your agent name). Optional; falls back to the
+    /// dispatched agent, then "agent".
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Record the files / modules you actually touched (working artifact for the
+    /// next run and the human's review).
+    #[serde(default)]
+    pub touchpoints: Option<Vec<String>>,
+}
+
+/// Read the project's learnings memory (what works here).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct LearningsGetArgs {
+    /// Project id.
+    pub project: String,
+}
+
+/// Record a project learning — a validated approach or a correction the next run
+/// here should know. Appended newest-first; an identical rule is a no-op.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct LearningAddArgs {
+    /// Project id.
+    pub project: String,
+    /// The rule itself — a concise, actionable lesson (e.g. "Run `composer test`,
+    /// not `phpunit` directly"). One lesson per call; keep it tight.
+    pub text: String,
+    /// WHY the rule holds — the reasoning that makes it durable (e.g. "the project
+    /// wraps phpunit with an env bootstrap"). The thing that lets the next agent
+    /// trust it instead of re-discovering it. Strongly recommended.
+    #[serde(default)]
+    pub why: Option<String>,
+    /// Optional concrete "How to apply" guidance for the next run.
+    #[serde(default)]
+    pub how: Option<String>,
 }

@@ -53,6 +53,13 @@ fn artifact_catalogue(kind: ProjectType) -> &'static [(&'static str, &'static st
             ("bootstrap/cache", "Bootstrap cache"),
             ("storage/framework/cache", "Framework cache"),
         ],
+        ProjectType::Python => &[
+            (".venv", "Virtualenv"),
+            ("__pycache__", "Bytecode cache"),
+            (".pytest_cache", "pytest cache"),
+            (".mypy_cache", "mypy cache"),
+            ("dist", "Build output"),
+        ],
         ProjectType::Static => &[("dist", "Build output"), ("build", "Build output")],
         ProjectType::Flutter => &[
             ("build", "Flutter build"),
@@ -64,6 +71,12 @@ fn artifact_catalogue(kind: ProjectType) -> &'static [(&'static str, &'static st
             ("build", "Gradle build"),
             ("app/build", "Android app build"),
             (".gradle", "Gradle cache"),
+        ],
+        ProjectType::Expo => &[
+            ("node_modules", "Dependencies"),
+            (".expo", "Expo cache"),
+            ("ios/build", "iOS build"),
+            ("android/build", "Android build"),
         ],
         ProjectType::Custom => &[
             ("node_modules", "Dependencies"),
@@ -496,19 +509,12 @@ async fn run_auto_detect(app: &AppHandle) {
     notify_detected(new_count);
 }
 
-/// Fire-and-forget macOS notification about newly detected projects.
+/// Fire-and-forget desktop notification about newly detected projects.
 fn notify_detected(count: usize) {
-    #[cfg(target_os = "macos")]
-    {
-        let body =
-            format!("Found {count} new project(s) in your workspace — open PortBay to add them.");
-        let script = format!("display notification \"{body}\" with title \"PortBay\"");
-        let _ = std::process::Command::new("/usr/bin/osascript")
-            .args(["-e", &script])
-            .spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = count;
+    crate::notifications::desktop_banner(
+        "PortBay",
+        &format!("Found {count} new project(s) in your workspace - open PortBay to add them."),
+    );
 }
 
 /// Spawn the background auto-clean + log-retention + auto-detect scheduler for

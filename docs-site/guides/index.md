@@ -1,6 +1,6 @@
 ---
 title: PortBay Guides — Day-to-Day Operations
-description: "Guides for running projects with PortBay: HTTPS routing, PHP setup, custom domain suffixes, environment variables, project groups, and CLI usage."
+description: "Guides for running projects with PortBay: HTTPS routing, PHP setup, SSH tunnels, custom domain suffixes, environment variables, project groups, and CLI usage."
 ---
 
 # Guides
@@ -14,4 +14,5 @@ These guides cover day-to-day operations once PortBay is installed.
 | [Custom Domain Suffix](/guides/custom-domain-suffix) | You want hostnames under a suffix other than `.test`. |
 | [Environment Variables](/guides/environment-variables) | A project needs runtime variables or shared templates. |
 | [Project Groups](/guides/project-groups) | Multiple projects should start, stop, or restart together. |
+| [SSH Tunnels](/guides/ssh-tunnels) | You need to forward a remote database, VPS/cPanel host, cloud VM, bastion-only service, or ML cluster dashboard onto localhost. |
 | [CLI Usage](/guides/cli-usage) | You want terminal parity with the app. |

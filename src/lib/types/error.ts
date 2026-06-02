@@ -6,6 +6,8 @@
  * (`P2 — Error envelope renderer`). The type lives here so other modules
  * can be wired against it from day one.
  */
+import type { NotificationCategory } from "$lib/notifications/prefs";
+
 export type Severity = "success" | "info" | "warning" | "error";
 
 export interface CommandError {
@@ -13,6 +15,7 @@ export interface CommandError {
   whatHappened: string;
   whyItMatters: string;
   whoCausedIt: "user" | "system";
+  category: NotificationCategory;
   actions: ErrorAction[];
   /** Optional inner detail (stack trace, error chain) for the "Show details"
       expander. Rust side may omit this. */
@@ -43,6 +46,7 @@ export function isCommandError(value: unknown): value is CommandError {
     typeof v.whatHappened === "string" &&
     typeof v.whyItMatters === "string" &&
     typeof v.whoCausedIt === "string" &&
+    typeof v.category === "string" &&
     Array.isArray(v.actions)
   );
 }

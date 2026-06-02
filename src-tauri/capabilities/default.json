@@ -9,10 +9,13 @@
     "core:window:allow-show",
     "shell:allow-execute",
     "opener:default",
+    "opener:allow-open-path",
     "opener:allow-reveal-item-in-dir",
     "dialog:default",
+    "notification:default",
     "updater:default",
     "process:allow-restart",
+    "drag:default",
     {
       "identifier": "shell:allow-spawn",
       "allow": [
@@ -21,7 +24,8 @@
         { "name": "binaries/mkcert", "sidecar": true, "args": true },
         { "name": "binaries/mailpit", "sidecar": true, "args": true },
         { "name": "binaries/cloudflared", "sidecar": true, "args": true },
-        { "name": "binaries/dnsmasq", "sidecar": true, "args": true }
+        { "name": "binaries/dnsmasq", "sidecar": true, "args": true },
+        { "name": "/usr/bin/ssh", "sidecar": false, "args": true }
       ]
     }
   ]

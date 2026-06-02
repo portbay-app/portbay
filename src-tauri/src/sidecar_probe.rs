@@ -5,9 +5,9 @@
 //! only what's *honestly* observable from outside the app process:
 //!
 //! - **process-compose** — its HTTP admin API answers liveness directly.
-//! - **dnsmasq** — the `/etc/resolver/<suffix>` file is the cross-process
-//!   signal (the wildcard routing + port). The daemon's *liveness* is owned by
-//!   the app, so we report the routing intent, not a live up/down.
+//! - **dnsmasq** — the platform resolver file is the cross-process signal (the
+//!   wildcard routing + port). The daemon's *liveness* is owned by the app, so
+//!   we report the routing intent, not a live up/down.
 //! - **/etc/hosts** — the managed-entry count is readable from disk.
 //!
 //! Caddy (dynamic admin port), the mkcert CA, and Mailpit are owned by the app
@@ -71,9 +71,7 @@ pub async fn probe(pc_port: u16, suffix: &str) -> Vec<SidecarProbe> {
     // dnsmasq — the resolver file tells us the wildcard routing + port; the
     // daemon's liveness is the app's to know.
     let contents = resolver::read_installed(suffix);
-    let installed = contents
-        .as_deref()
-        .is_some_and(|c| c.contains("nameserver 127.0.0.1"));
+    let installed = contents.as_deref().is_some_and(resolver_points_to_portbay);
     let port = contents.as_deref().and_then(parse_resolver_port);
     out.push(SidecarProbe {
         name: "dnsmasq",
@@ -114,12 +112,18 @@ pub async fn probe(pc_port: u16, suffix: &str) -> Vec<SidecarProbe> {
     out
 }
 
-/// Pull the `port <n>` line out of an `/etc/resolver/<suffix>` file body.
+fn resolver_points_to_portbay(contents: &str) -> bool {
+    contents.contains("nameserver 127.0.0.1") || contents.contains("DNS=127.0.0.1:")
+}
+
+/// Pull the target port out of the platform resolver file body.
 fn parse_resolver_port(contents: &str) -> Option<u16> {
     contents.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("port ")
-            .and_then(|n| n.trim().parse().ok())
+        let line = line.trim();
+        line.strip_prefix("port ")
+            .map(str::trim)
+            .or_else(|| line.strip_prefix("DNS=127.0.0.1:").map(str::trim))
+            .and_then(|n| n.split_whitespace().next()?.parse().ok())
     })
 }
 
@@ -131,6 +135,10 @@ mod tests {
     fn parses_resolver_port_from_body() {
         assert_eq!(
             parse_resolver_port("nameserver 127.0.0.1\nport 53053\n"),
+            Some(53053)
+        );
+        assert_eq!(
+            parse_resolver_port("DNS=127.0.0.1:53053\nDomains=~test\n"),
             Some(53053)
         );
         assert_eq!(parse_resolver_port("nameserver 127.0.0.1\n"), None);

@@ -18,7 +18,9 @@ use crate::caddy::types::{
     AdminConfig, AppsConfig, AutomaticHttps, CaddyConfig, HttpApp, MatchClause, Route, Server,
     ServerErrors, TlsApp, TlsCertFile, TlsCertificates,
 };
-use crate::registry::{Project, ProjectType, Registry, WebServer};
+use crate::registry::{
+    AcmeDnsProvider, AcmeIssuer, Project, ProjectType, Registry, SslMode, WebServer,
+};
 
 /// Caddy logger name our per-server access logs emit under. The HTTP request
 /// inspector tails the file this logger writes.
@@ -260,7 +262,11 @@ pub fn bootstrap_config(admin_port: u16, https_port: u16) -> CaddyConfig {
                 servers,
             },
             tls: TlsApp {
-                certificates: TlsCertificates { load_files: vec![] },
+                certificates: TlsCertificates {
+                    load_files: vec![],
+                    automate: vec![],
+                },
+                automation: None,
             },
         },
         logging: None,
@@ -354,6 +360,8 @@ where
     let mut https_routes: Vec<Route> = Vec::new();
     let mut http_routes: Vec<Route> = Vec::new();
     let mut cert_files: Vec<TlsCertFile> = Vec::new();
+    let mut acme_subjects: Vec<String> = Vec::new();
+    let mut acme_policies: Vec<serde_json::Value> = Vec::new();
 
     for p in &reg.projects {
         // `expose_when_running` projects that aren't up are skipped entirely,
@@ -385,6 +393,13 @@ where
                     key: paths.key,
                     tags: vec![format!("project:{}", p.id)],
                 });
+            }
+            if p.ssl_mode() == SslMode::PublicAcme {
+                let subjects = acme_subjects_for_project(p);
+                if let Some(policy) = acme_policy_for_project(p, &subjects) {
+                    acme_subjects.extend(subjects);
+                    acme_policies.push(policy);
+                }
             }
         } else {
             http_routes.push(project_to_route(p, php_socket_dir, reg, normalize_all));
@@ -442,11 +457,104 @@ where
             tls: TlsApp {
                 certificates: TlsCertificates {
                     load_files: cert_files,
+                    automate: acme_subjects,
                 },
+                automation: (!acme_policies.is_empty())
+                    .then(|| json!({ "policies": acme_policies })),
             },
         },
         logging: None,
     })
+}
+
+fn acme_subjects_for_project(p: &Project) -> Vec<String> {
+    let mut subjects = vec![p.hostname.clone()];
+    if p.include_wildcard_subdomains() {
+        subjects.push(format!("*.{}", p.hostname));
+    }
+    subjects.sort();
+    subjects.dedup();
+    subjects
+}
+
+fn acme_policy_for_project(p: &Project, subjects: &[String]) -> Option<serde_json::Value> {
+    let domain = p.domain.as_ref()?;
+    let acme = domain.acme.clone().unwrap_or_default();
+    let mut issuer = match acme.issuer {
+        AcmeIssuer::LetsEncrypt | AcmeIssuer::GoogleTrustServices => json!({
+            "module": "acme",
+            "ca": acme.directory_url(),
+        }),
+        AcmeIssuer::ZeroSsl => {
+            if let Some(api_key) = acme
+                .zerossl_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                json!({ "module": "zerossl", "api_key": api_key })
+            } else {
+                json!({
+                    "module": "acme",
+                    "ca": acme.directory_url(),
+                })
+            }
+        }
+    };
+
+    if let Some(email) = acme
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        issuer["email"] = json!(email);
+    }
+    if let (Some(key_id), Some(mac_key)) = (
+        acme.eab_key_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        acme.eab_hmac_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        issuer["external_account"] = json!({
+            "key_id": key_id,
+            "mac_key": mac_key,
+        });
+    }
+    if acme.dns_provider == AcmeDnsProvider::Cloudflare {
+        if let Some(token) = acme
+            .dns_api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let dns_provider = json!({
+                "name": "cloudflare",
+                "api_token": token,
+            });
+            if acme.issuer == AcmeIssuer::ZeroSsl && issuer["module"] == "zerossl" {
+                issuer["cname_validation"] = json!({
+                    "provider": dns_provider,
+                });
+            } else {
+                issuer["challenges"] = json!({
+                    "dns": {
+                        "provider": dns_provider,
+                    },
+                });
+            }
+        }
+    }
+
+    Some(json!({
+        "subjects": subjects,
+        "key_type": acme.key_type.caddy_key_type(),
+        "issuers": [issuer],
+    }))
 }
 
 /// Enable a JSON access log on every server in `cfg`, writing to `log_path`.
@@ -814,6 +922,8 @@ mod tests {
             env: Default::default(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: None,
             php_version: None,
@@ -824,6 +934,8 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 
@@ -842,6 +954,8 @@ mod tests {
             env: Default::default(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: Some("public".into()),
             php_version: Some(php.into()),
@@ -852,6 +966,8 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 
@@ -946,6 +1062,103 @@ mod tests {
 
         // Route 2 is the real project handler (the reverse-proxy subroute).
         assert!(sub["routes"][2]["handle"][0].get("handler").is_some());
+    }
+
+    #[test]
+    fn public_acme_project_emits_automation_policy() {
+        let mut p = next_project("public", 3010, true);
+        p.hostname = "app.example.com".into();
+        p.domain = Some(crate::registry::DomainConfig {
+            ssl_mode: crate::registry::SslMode::PublicAcme,
+            acme: Some(crate::registry::AcmeConfig {
+                issuer: crate::registry::AcmeIssuer::LetsEncrypt,
+                email: Some("admin@example.com".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let cfg =
+            build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(
+            v["apps"]["tls"]["certificates"]["automate"][0],
+            "app.example.com"
+        );
+        let policy = &v["apps"]["tls"]["automation"]["policies"][0];
+        assert_eq!(policy["subjects"][0], "app.example.com");
+        assert_eq!(policy["key_type"], "p384");
+        assert_eq!(policy["issuers"][0]["module"], "acme");
+        assert_eq!(
+            policy["issuers"][0]["ca"],
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        assert_eq!(policy["issuers"][0]["email"], "admin@example.com");
+    }
+
+    #[test]
+    fn google_acme_project_emits_eab_policy() {
+        let mut p = next_project("google", 3010, true);
+        p.hostname = "api.example.com".into();
+        p.domain = Some(crate::registry::DomainConfig {
+            ssl_mode: crate::registry::SslMode::PublicAcme,
+            acme: Some(crate::registry::AcmeConfig {
+                issuer: crate::registry::AcmeIssuer::GoogleTrustServices,
+                environment: crate::registry::AcmeEnvironment::Staging,
+                eab_key_id: Some("kid".into()),
+                eab_hmac_key: Some("hmac".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let cfg =
+            build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let v = serde_json::to_value(&cfg).unwrap();
+        let issuer = &v["apps"]["tls"]["automation"]["policies"][0]["issuers"][0];
+        assert_eq!(issuer["module"], "acme");
+        assert_eq!(
+            issuer["ca"],
+            "https://dv.acme-v02.test-api.pki.goog/directory"
+        );
+        assert_eq!(issuer["external_account"]["key_id"], "kid");
+        assert_eq!(issuer["external_account"]["mac_key"], "hmac");
+    }
+
+    #[test]
+    fn zerossl_acme_project_emits_cloudflare_dns_policy() {
+        let mut p = next_project("zerossl", 3010, true);
+        p.hostname = "example.com".into();
+        p.domain = Some(crate::registry::DomainConfig {
+            ssl_mode: crate::registry::SslMode::PublicAcme,
+            include_wildcard_subdomains: true,
+            acme: Some(crate::registry::AcmeConfig {
+                issuer: crate::registry::AcmeIssuer::ZeroSsl,
+                zerossl_api_key: Some("zero-api-key".into()),
+                dns_provider: crate::registry::AcmeDnsProvider::Cloudflare,
+                dns_api_token: Some("cf-token".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let cfg =
+            build_config(&r, 2019, 80, 8443, Path::new("/tmp/portbay-php"), no_certs).unwrap();
+        let v = serde_json::to_value(&cfg).unwrap();
+        let automate = &v["apps"]["tls"]["certificates"]["automate"];
+        assert_eq!(automate[0], "*.example.com");
+        assert_eq!(automate[1], "example.com");
+        let issuer = &v["apps"]["tls"]["automation"]["policies"][0]["issuers"][0];
+        assert_eq!(issuer["module"], "zerossl");
+        assert_eq!(issuer["api_key"], "zero-api-key");
+        assert_eq!(issuer["cname_validation"]["provider"]["name"], "cloudflare");
+        assert_eq!(
+            issuer["cname_validation"]["provider"]["api_token"],
+            "cf-token"
+        );
     }
 
     #[test]

@@ -494,6 +494,8 @@ mod tests {
             env: Default::default(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
@@ -504,6 +506,8 @@ mod tests {
             cors: None,
             sandbox: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 

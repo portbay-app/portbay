@@ -7,7 +7,7 @@ description: Register a local folder as a PortBay project via the GUI wizard or 
 
 Projects are registered from local folders. PortBay records the launch command, port, hostname, HTTPS setting, optional services, and readiness probe in the registry.
 
-![PortBay projects list](/screenshots/projects.png)
+<ThemeImage name="projects" alt="PortBay projects list" />
 
 ## Supported Project Types
 

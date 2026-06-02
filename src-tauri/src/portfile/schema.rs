@@ -67,13 +67,24 @@ pub struct PortbayFile {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
 
-    /// Shell commands the importer can offer to run after the project
-    /// is registered (`composer install`, `bun install`, etc.). PortBay
-    /// does not auto-run them today — that's a hooks card on the
-    /// backlog — but the file carries them so any future runner has
-    /// the source material.
+    /// **Legacy.** Pre-dates the pre/post-start hooks below. Earlier docs
+    /// described it as "commands the importer can offer to run after the
+    /// project is registered". Export never populated it; it is kept only so
+    /// older hand-authored files still parse, and on import its contents are
+    /// folded into [`Self::pre_start`] when that's empty. New files use
+    /// `pre_start` / `post_start`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_install: Vec<String>,
+
+    /// Shell commands run before the dev server on each start (deps install,
+    /// DB migrate). Mirrors `Project::pre_start`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_start: Vec<String>,
+
+    /// Shell commands run after the dev server reports ready (health checks,
+    /// warm-up). Mirrors `Project::post_start`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_start: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<Readiness>,

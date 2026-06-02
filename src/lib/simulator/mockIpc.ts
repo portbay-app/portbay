@@ -61,6 +61,42 @@ export function installSimulatorIpcBrowser(payload: {
     reopenPreviousProjects: false,
     confirmBeforeStopAll: true,
     desktopNotifications: false,
+    notifications: {
+      schemaVersion: 1,
+      channels: {
+        lifecycle: { toast: false, bell: true, banner: false, sound: false },
+        "project-error": { toast: true, bell: true, banner: false, sound: true },
+        "agent-board": { toast: false, bell: true, banner: false, sound: true },
+        updates: { toast: false, bell: true, banner: false, sound: false },
+        crash: { toast: true, bell: true, banner: false, sound: true },
+        infrastructure: { toast: false, bell: true, banner: false, sound: false },
+        "account-sync": { toast: false, bell: true, banner: false, sound: false },
+      },
+      severityFloor: "everything",
+      quietHours: { enabled: false, start: "22:00", end: "07:00", exemptErrors: true },
+      snoozeUntil: null,
+      sound: {
+        volumeFollowsOs: true,
+        cuePerCategory: {
+          lifecycle: "done",
+          "project-error": "error",
+          "agent-board": "comment",
+          updates: "done",
+          crash: "error",
+          infrastructure: "attention",
+          "account-sync": "comment",
+        },
+      },
+    },
+    accessibility: {
+      reduceMotion: false,
+      reduceTransparency: false,
+      highContrast: false,
+      textScale: "normal",
+      focusMode: "standard",
+      underlineLinks: false,
+      colorIndependentStatus: false,
+    },
     accentColor: "blue",
     defaultWorkspaceFolder: "",
     autoDetectProjects: false,
@@ -96,6 +132,189 @@ export function installSimulatorIpcBrowser(payload: {
     return projects.find((p) => p.id === id);
   }
 
+  function demoDbSchema(id: unknown): any {
+    const sqlite = id === "quill-sqlite";
+    if (sqlite) {
+      return {
+        engine: "sqlite",
+        schemas: [],
+        tables: [
+          {
+            schema: null,
+            name: "documents",
+            columns: [
+              { name: "id", dataType: "INTEGER", nullable: false, primaryKey: true },
+              { name: "title", dataType: "TEXT", nullable: false, primaryKey: false },
+              { name: "metadata", dataType: "TEXT", nullable: true, primaryKey: false },
+            ],
+            foreignKeys: [],
+          },
+          {
+            schema: null,
+            name: "comments",
+            columns: [
+              { name: "id", dataType: "INTEGER", nullable: false, primaryKey: true },
+              { name: "document_id", dataType: "INTEGER", nullable: false, primaryKey: false },
+              { name: "body", dataType: "TEXT", nullable: false, primaryKey: false },
+            ],
+            foreignKeys: [
+              {
+                table: "comments",
+                column: "document_id",
+                refTable: "documents",
+                refColumn: "id",
+              },
+            ],
+          },
+        ],
+      };
+    }
+    const schema = id === "hatchway-pg" ? "public" : "app";
+    return {
+      engine: id === "hatchway-pg" ? "postgres" : "mysql",
+      schemas: [schema],
+      tables: [
+        {
+          schema,
+          name: "users",
+          columns: [
+            { name: "id", dataType: "integer", nullable: false, primaryKey: true },
+            { name: "email", dataType: "varchar", nullable: false, primaryKey: false },
+            { name: "profile", dataType: "json", nullable: true, primaryKey: false },
+          ],
+          foreignKeys: [],
+        },
+        {
+          schema,
+          name: "orders",
+          columns: [
+            { name: "id", dataType: "integer", nullable: false, primaryKey: true },
+            { name: "user_id", dataType: "integer", nullable: false, primaryKey: false },
+            { name: "total", dataType: "decimal", nullable: false, primaryKey: false },
+          ],
+          foreignKeys: [
+            { table: "orders", column: "user_id", refTable: "users", refColumn: "id" },
+          ],
+        },
+      ],
+    };
+  }
+
+  function demoDbRows(table: unknown): any {
+    const name = typeof table === "string" ? table : "users";
+    if (name === "documents") {
+      return {
+        columns: [
+          { name: "id", dataType: "INTEGER", nullable: false, primaryKey: true },
+          { name: "title", dataType: "TEXT", nullable: false, primaryKey: false },
+          { name: "metadata", dataType: "TEXT", nullable: true, primaryKey: false },
+        ],
+        rows: [
+          [1, "Launch notes", { status: "draft", tags: ["release", "docs"] }],
+          [2, "API guide", { status: "published", tags: ["api"] }],
+        ],
+        affectedRows: 0,
+        truncated: false,
+      };
+    }
+    if (name === "orders") {
+      return {
+        columns: [
+          { name: "id", dataType: "integer", nullable: false, primaryKey: true },
+          { name: "user_id", dataType: "integer", nullable: false, primaryKey: false },
+          { name: "total", dataType: "decimal", nullable: false, primaryKey: false },
+        ],
+        rows: [
+          [101, 1, "129.00"],
+          [102, 2, "74.50"],
+        ],
+        affectedRows: 0,
+        truncated: false,
+      };
+    }
+    return {
+      columns: [
+        { name: "id", dataType: "integer", nullable: false, primaryKey: true },
+        { name: "email", dataType: "varchar", nullable: false, primaryKey: false },
+        { name: "profile", dataType: "json", nullable: true, primaryKey: false },
+      ],
+      rows: [
+        [1, "nora@example.test", { role: "admin", flags: ["beta"] }],
+        [2, "dev@example.test", { role: "member", flags: [] }],
+      ],
+      affectedRows: 0,
+      truncated: false,
+    };
+  }
+
+  function demoExplain(id: unknown): any {
+    const driver =
+      id === "hatchway-pg" ? "postgres" : id === "quill-sqlite" ? "sqlite" : "mysql";
+    const sqlite = driver === "sqlite";
+    const empty = {
+      buffersHit: null,
+      buffersRead: null,
+      actualRows: null,
+      actualTimeMs: null,
+      actualLoops: null,
+      hashCondition: null,
+      extra: {},
+    };
+    const root = {
+      id: "node-0",
+      nodeType: sqlite ? "SEARCH" : "Hash Join",
+      relation: sqlite ? "users" : null,
+      startupCost: sqlite ? null : 18.5,
+      totalCost: sqlite ? null : 412.7,
+      planRows: sqlite ? null : 1280,
+      filter: null,
+      indexCondition: null,
+      joinType: sqlite ? null : "Inner",
+      ...empty,
+      hashCondition: sqlite ? null : "users.id = orders.user_id",
+      children: [
+        {
+          id: "node-1",
+          nodeType: sqlite ? "SCAN" : "Seq Scan",
+          relation: "users",
+          startupCost: sqlite ? null : 0,
+          totalCost: sqlite ? null : 254.0,
+          planRows: sqlite ? null : 9800,
+          filter: "users.active = true",
+          indexCondition: null,
+          joinType: null,
+          ...empty,
+          extra: sqlite ? {} : { accessType: "ALL" },
+          children: [],
+        },
+        {
+          id: "node-2",
+          nodeType: sqlite ? "SEARCH" : "Index Scan",
+          relation: "orders",
+          startupCost: sqlite ? null : 0.42,
+          totalCost: sqlite ? null : 96.3,
+          planRows: sqlite ? null : 1280,
+          filter: null,
+          indexCondition: sqlite ? "orders_user_id_idx" : "orders.user_id = users.id",
+          joinType: null,
+          ...empty,
+          children: [],
+        },
+      ],
+    };
+    return {
+      root,
+      planningTimeMs: sqlite ? null : 0.42,
+      executionTimeMs: null,
+      originalQuery: "SELECT * FROM users JOIN orders ON orders.user_id = users.id",
+      driver,
+      hasAnalyzeData: false,
+      rawOutput: sqlite
+        ? "QUERY PLAN\n`--SEARCH users\n   `--SCAN orders"
+        : JSON.stringify({ "Node Type": "Hash Join", demo: true }, null, 2),
+    };
+  }
+
   function runtimeFor(p: any): unknown {
     if (p && p.runtime) return p.runtime;
     return {
@@ -129,7 +348,10 @@ export function installSimulatorIpcBrowser(payload: {
       issuedAt: issued.toISOString(),
       expiresAt: expires.toISOString(),
       daysUntilExpiry: Math.round((expires.getTime() - now) / day),
-      sans: [p.hostname],
+      sans: [p.hostname, "localhost", "127.0.0.1", "::1"],
+      status: "ready",
+      trustStoreVerified: true,
+      errors: [],
     };
   }
 
@@ -308,6 +530,13 @@ export function installSimulatorIpcBrowser(payload: {
         if (next) Object.assign(prefs, next);
         return Promise.resolve({ ...prefs });
       }
+      case "get_notification_prefs":
+        return Promise.resolve(prefs.notifications);
+      case "set_notification_prefs": {
+        const next = args && (args.prefs as Record<string, unknown>);
+        if (next) prefs.notifications = next;
+        return Promise.resolve(prefs.notifications);
+      }
       case "mark_close_toast_seen":
         prefs.closeToMenuBarToastSeen = true;
         return Promise.resolve(null);
@@ -316,6 +545,15 @@ export function installSimulatorIpcBrowser(payload: {
       case "account_resync":
         return Promise.resolve(fixtures.entitlement);
       case "logout":
+        return Promise.resolve(fixtures.entitlement);
+      // Avatar fetch is backend-only (network + disk cache); the hosted demo
+      // has neither, so the chip falls back to the account's initials.
+      case "get_account_avatar":
+        return Promise.resolve(null);
+      // Profile edits are no-ops in the hosted demo — echo the fixture entitlement.
+      case "update_display_name":
+      case "upload_avatar":
+      case "remove_avatar":
         return Promise.resolve(fixtures.entitlement);
       case "begin_login":
         return Promise.resolve({ authorize_url: null });
@@ -338,6 +576,14 @@ export function installSimulatorIpcBrowser(payload: {
         return Promise.resolve(fixtures.databaseEngines);
       case "list_database_instances":
         return Promise.resolve(fixtures.databaseInstances);
+      case "database_client_schema":
+        return Promise.resolve(demoDbSchema(args && args.id));
+      case "database_client_table_rows":
+        return Promise.resolve(demoDbRows(args && args.table));
+      case "database_client_query":
+        return Promise.resolve(demoDbRows("users"));
+      case "database_client_explain":
+        return Promise.resolve(demoExplain(args && args.id));
       case "list_dns_records":
         return Promise.resolve(fixtures.dnsRecords);
       case "dns_preflight":
@@ -387,7 +633,9 @@ export function installSimulatorIpcBrowser(payload: {
       case "dnsmasq_uninstall_resolver":
         return Promise.resolve(null);
       case "onboarding_status":
-        return Promise.resolve({ onboarded: true, seenCloseToast: true });
+        // Shape must match OnboardingStatus { onboarded, registryEmpty } — the
+        // simulator ships seeded fixtures, so the board is onboarded + non-empty.
+        return Promise.resolve({ onboarded: true, registryEmpty: false });
       case "start_project":
       case "force_start_project":
         return startProject(args && args.id);
@@ -407,6 +655,9 @@ export function installSimulatorIpcBrowser(payload: {
           if (patch.https !== undefined) p.https = patch.https;
           if (patch.autoStart !== undefined) p.autoStart = patch.autoStart;
           if (patch.name !== undefined) p.name = patch.name;
+          if (patch.kind !== undefined) p.type = patch.kind;
+          if (patch.startCommand !== undefined)
+            p.startCommand = patch.startCommand ?? undefined;
           if (patch.domain !== undefined) {
             const d = patch.domain as Record<string, unknown> | null;
             // Normalise an all-default config to null, mirroring the core.
@@ -478,6 +729,7 @@ export function installSimulatorIpcBrowser(payload: {
       // an array rather than the default null.
       case "detect_sources":
         return Promise.resolve([]);
+
       default:
         // Unknown list_* commands get an empty array (stores expecting arrays
         // don't throw on boot); everything else resolves null.

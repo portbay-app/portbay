@@ -34,8 +34,8 @@
   }
 
   function runFix(key: string, command: string) {
-    // The privileged helper install triggers a macOS password prompt + a Login
-    // Items entry. Explain it first via the dialog instead of firing on click.
+    // The privileged helper install triggers an OS authorization prompt.
+    // Explain it first via the dialog instead of firing on click.
     if (command === "install_privileged_helper") {
       permFor = { key, command };
       return;

@@ -101,13 +101,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/private_keys"
           printf '%s' "${{ secrets.APPLE_API_KEY_P8 }}" > "$RUNNER_TEMP/private_keys/AuthKey.p8"
 
-      # Bake the macOS 26 Liquid Glass icon (Icon Composer) into the bundle
-      # BEFORE Tauri signs/notarises. Non-fatal: if no compiled Assets.car is
-      # committed and this runner lacks Xcode 26, it logs a warning and the
-      # build ships the icon.icns fallback. See
+      # The macOS 26 Liquid Glass icon (Icon Composer) is wired into the bundle
+      # statically: the compiled catalog lives at
+      # src-tauri/icons/macos-liquid-glass/compiled/Assets.car and is registered
+      # as a bundle resource in tauri.conf.json, with CFBundleIconName set in
+      # src-tauri/Info.plist (Tauri v2 merges it). So `tauri build` below bakes,
+      # signs and notarises it with no pre-build step and no Xcode 26 on the
+      # runner. To refresh the catalog run scripts/prepare-macos-liquid-glass-icon.sh
+      # locally and commit the result. See
       # src-tauri/icons/macos-liquid-glass/README.md.
-      - name: Bake macOS 26 Liquid Glass icon (pre-build)
-        run: bash scripts/prepare-macos-liquid-glass-icon.sh
 
       - name: Build signed app
         env:
@@ -123,7 +125,7 @@ jobs:
           # Tauri Updater plugin signature.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build --target aarch64-apple-darwin
+        run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
 
       # Tauri notarizes + staples the .app, then wraps it in a DMG it signs but
       # does NOT notarize. A quarantined DMG download then trips Gatekeeper at
@@ -187,9 +189,133 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  build-linux:
+    name: build · Linux x86_64
+    runs-on: ubuntu-22.04
+    if: vars.RELEASE_SIGNING_ENABLED == 'true'
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            libsecret-1-dev \
+            dnsmasq \
+            libnotify-bin \
+            policykit-1 \
+            rpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch Linux sidecar binaries
+        run: |
+          ./scripts/fetch-process-compose.sh
+          ./scripts/fetch-caddy.sh
+          ./scripts/fetch-mkcert.sh
+          ./scripts/fetch-mailpit.sh
+          ./scripts/fetch-cloudflared.sh
+          ./scripts/fetch-dnsmasq.sh
+
+      - name: Build Linux helper sidecars
+        run: |
+          ./scripts/build-hosts-helper.sh
+          ./scripts/build-mcp.sh
+
+      - name: Build Linux bundles
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build --bundles appimage,deb,rpm
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: portbay-linux-x86_64
+          path: |
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/appimage/*.AppImage.tar.gz
+            src-tauri/target/release/bundle/appimage/*.AppImage.tar.gz.sig
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+          retention-days: 14
+          if-no-files-found: warn
+
+  build-snap:
+    name: build · Snap amd64
+    runs-on: ubuntu-22.04
+    needs: [build-linux, publish-release]
+    if: vars.RELEASE_SIGNING_ENABLED == 'true' && vars.SNAP_BUILD_ENABLED == 'true'
+    permissions:
+      contents: write
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download Linux deb artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: portbay-linux-x86_64
+          path: artifacts/
+
+      - name: Install Snapcraft
+        run: |
+          sudo snap install core22
+          sudo snap install snapcraft --classic
+
+      - name: Prepare snap source deb
+        run: |
+          set -euo pipefail
+          deb="$(find artifacts -type f -name '*.deb' | head -n 1)"
+          if [ -z "$deb" ]; then
+            echo "::error::No deb artifact found for Snap build."
+            exit 1
+          fi
+          cp "$deb" portbay.deb
+
+      - name: Build snap
+        run: snapcraft --destructive-mode
+
+      - name: Upload Snap artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: portbay-snap-amd64
+          path: "*.snap"
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Attach snap to draft release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: "*.snap"
+          draft: true
+
   publish-release:
     name: publish · GitHub Release + updater manifest
-    needs: [build-and-sign]
+    needs: [build-and-sign, build-linux]
     runs-on: ubuntu-latest
     if: vars.RELEASE_SIGNING_ENABLED == 'true'
     permissions:
@@ -200,7 +326,6 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
-          name: portbay-macos-arm64
           path: artifacts/
 
       # Assemble the Tauri Updater manifest (`latest.json`) the in-app updater
@@ -214,22 +339,44 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          tarball="$(find artifacts -type f -name '*.app.tar.gz' | head -n 1)"
-          sig="$(find artifacts -type f -name '*.app.tar.gz.sig' | head -n 1)"
-          if [ -z "$tarball" ] || [ -z "$sig" ]; then
+          mac_tarball="$(find artifacts -type f -name '*.app.tar.gz' | head -n 1)"
+          mac_sig="$(find artifacts -type f -name '*.app.tar.gz.sig' | head -n 1)"
+          linux_tarball="$(find artifacts -type f -name '*.AppImage.tar.gz' | head -n 1)"
+          linux_sig="$(find artifacts -type f -name '*.AppImage.tar.gz.sig' | head -n 1)"
+          if [ -z "$mac_tarball" ] || [ -z "$mac_sig" ]; then
             echo "::error::Updater artifacts missing (.app.tar.gz / .sig). Is bundle.createUpdaterArtifacts enabled and TAURI_SIGNING_PRIVATE_KEY set?"
             exit 1
           fi
-          asset="$(basename "$tarball")"
-          signature="$(cat "$sig")"
-          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${asset}"
+          mac_asset="$(basename "$mac_tarball")"
+          mac_signature="$(cat "$mac_sig")"
+          mac_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${mac_asset}"
           pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          # jq builds valid JSON and escapes the multi-line signature safely.
-          jq -n \
+          if [ -n "$linux_tarball" ] && [ -n "$linux_sig" ]; then
+            linux_asset="$(basename "$linux_tarball")"
+            linux_signature="$(cat "$linux_sig")"
+            linux_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${linux_asset}"
+            jq -n \
+              --arg version "$version" \
+              --arg pub_date "$pub_date" \
+              --arg mac_signature "$mac_signature" \
+              --arg mac_url "$mac_url" \
+              --arg linux_signature "$linux_signature" \
+              --arg linux_url "$linux_url" \
+              '{
+                version: $version,
+                notes: "See the release notes on GitHub.",
+                pub_date: $pub_date,
+                platforms: {
+                  "darwin-aarch64": { signature: $mac_signature, url: $mac_url },
+                  "linux-x86_64": { signature: $linux_signature, url: $linux_url }
+                }
+              }' > artifacts/latest.json
+          else
+            jq -n \
             --arg version "$version" \
             --arg pub_date "$pub_date" \
-            --arg signature "$signature" \
-            --arg url "$url" \
+            --arg signature "$mac_signature" \
+            --arg url "$mac_url" \
             '{
               version: $version,
               notes: "See the release notes on GitHub.",
@@ -238,6 +385,7 @@ jobs:
                 "darwin-aarch64": { signature: $signature, url: $url }
               }
             }' > artifacts/latest.json
+          fi
           echo "Wrote artifacts/latest.json for v$version:"
           cat artifacts/latest.json
 
@@ -263,6 +411,12 @@ jobs:
             artifacts/**/*.dmg
             artifacts/**/*.app.tar.gz
             artifacts/**/*.app.tar.gz.sig
+            artifacts/**/*.AppImage
+            artifacts/**/*.AppImage.tar.gz
+            artifacts/**/*.AppImage.tar.gz.sig
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
+            artifacts/**/*.snap
             artifacts/**/portbay-cargo-sbom.cdx.json
             artifacts/latest.json
           draft: true
@@ -372,3 +526,90 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         working-directory: homebrew-portbay
         run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --auto --squash
+
+  update-aur-bin:
+    name: publish · AUR portbay-bin
+    needs: [publish-release]
+    runs-on: ubuntu-latest
+    if: vars.RELEASE_SIGNING_ENABLED == 'true' && vars.AUR_PUBLISH_ENABLED == 'true'
+    permissions:
+      contents: read
+    env:
+      AUR_REPO: ssh://aur@aur.archlinux.org/portbay-bin.git
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: portbay-linux-x86_64
+          path: artifacts/
+
+      - name: Resolve deb metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          deb="$(find artifacts -type f -name '*.deb' | head -n 1)"
+          if [ -z "$deb" ]; then
+            echo "::error::No deb artifact found for AUR update."
+            exit 1
+          fi
+          asset="$(basename "$deb")"
+          sha="$(sha256sum "$deb" | awk '{print $1}')"
+          {
+            echo "version=$version"
+            echo "asset=$asset"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure AUR SSH
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          printf '%s\n' \
+            'Host aur.archlinux.org' \
+            '  IdentityFile ~/.ssh/aur' \
+            '  User aur' > ~/.ssh/config
+
+      - name: Clone AUR repo
+        run: git clone "$AUR_REPO" aur-portbay-bin
+
+      - name: Render PKGBUILD and .SRCINFO
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp packaging/aur/PKGBUILD aur-portbay-bin/PKGBUILD
+          cp packaging/aur/.SRCINFO aur-portbay-bin/.SRCINFO
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${{ steps.meta.outputs.asset }}"
+          aur_source="portbay-bin-${{ steps.meta.outputs.version }}.deb::${url}"
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=${{ steps.meta.outputs.version }}/" \
+            -e "s#^source_x86_64=.*#source_x86_64=(\"${aur_source}\")#" \
+            -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${{ steps.meta.outputs.sha }}')/" \
+            aur-portbay-bin/PKGBUILD
+          sed -i \
+            -e "s/^\tpkgver = .*/\tpkgver = ${{ steps.meta.outputs.version }}/" \
+            -e "s#^\tsource_x86_64 = .*#\tsource_x86_64 = ${aur_source}#" \
+            -e "s/^\tsha256sums_x86_64 = .*/\tsha256sums_x86_64 = ${{ steps.meta.outputs.sha }}/" \
+            aur-portbay-bin/.SRCINFO
+
+      - name: Push AUR update
+        working-directory: aur-portbay-bin
+        run: |
+          set -euo pipefail
+          git config user.name "PortBay Release Bot"
+          git config user.email "maintainers@portbay.app"
+          if git diff --quiet; then
+            echo "AUR package already up to date."
+            exit 0
+          fi
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update PortBay to ${{ steps.meta.outputs.version }}"
+          git push

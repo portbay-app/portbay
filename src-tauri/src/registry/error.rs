@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use crate::registry::types::{DatabaseInstanceId, ProjectId};
+use crate::registry::types::{
+    DatabaseInstanceId, ProjectId, SshConnectionId, SshIdentityId, SshTunnelId,
+};
 
 /// Errors surfaced by the registry layer.
 ///
@@ -44,6 +46,24 @@ pub enum RegistryError {
 
     #[error("database instance `{0}` already exists")]
     DuplicateDatabaseId(DatabaseInstanceId),
+
+    #[error("SSH tunnel `{0}` not found")]
+    SshTunnelNotFound(SshTunnelId),
+
+    #[error("SSH tunnel `{0}` already exists")]
+    DuplicateSshTunnelId(SshTunnelId),
+
+    #[error("SSH connection `{0}` not found")]
+    SshConnectionNotFound(SshConnectionId),
+
+    #[error("SSH connection `{0}` already exists")]
+    DuplicateSshConnectionId(SshConnectionId),
+
+    #[error("SSH identity `{0}` not found")]
+    SshIdentityNotFound(SshIdentityId),
+
+    #[error("SSH identity `{0}` already exists")]
+    DuplicateSshIdentityId(SshIdentityId),
 
     #[error("no data directory available on this OS — cannot resolve the default registry path")]
     NoDataDir,

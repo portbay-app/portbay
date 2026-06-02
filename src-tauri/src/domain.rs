@@ -155,6 +155,8 @@ mod tests {
             env: BTreeMap::new(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: None,
             php_version: None,
@@ -163,6 +165,8 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 

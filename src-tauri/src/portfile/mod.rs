@@ -83,6 +83,8 @@ pub fn export_project(project: &Project) -> PortbayFile {
         env_template,
         secrets,
         post_install: Vec::new(),
+        pre_start: project.pre_start.clone(),
+        post_start: project.post_start.clone(),
         readiness: project.readiness.clone(),
         tags: project.tags.clone(),
     }
@@ -198,6 +200,14 @@ pub fn materialise_project(
         },
         env,
         readiness,
+        // Prefer the explicit hook fields; fold the legacy `post_install` list
+        // into pre-start when the file predates them.
+        pre_start: if plan.file.pre_start.is_empty() {
+            plan.file.post_install.clone()
+        } else {
+            plan.file.pre_start.clone()
+        },
+        post_start: plan.file.post_start.clone(),
         auto_start: plan.file.auto_start,
         tags: plan.file.tags.clone(),
         document_root: plan.file.document_root.clone(),
@@ -212,6 +222,8 @@ pub fn materialise_project(
         cors: None,
         sandbox: None,
         domain: None,
+        tunnel: None,
+        deploy: None,
     })
 }
 
@@ -253,6 +265,8 @@ mod tests {
             env,
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec!["client:demo".into()],
             document_root: Some("public".into()),
             php_version: Some("8.3".into()),
@@ -261,6 +275,8 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 
@@ -278,6 +294,46 @@ mod tests {
         assert!(parsed.https);
         assert_eq!(parsed.env_template.len(), 2);
         assert!(parsed.secrets.is_empty());
+    }
+
+    #[test]
+    fn hooks_survive_export_import_roundtrip() {
+        let mut p = sample_project();
+        p.pre_start = vec!["composer install".into(), "php artisan migrate".into()];
+        p.post_start = vec!["php artisan about".into()];
+
+        let file = export_project(&p);
+        let json = to_json_string(&file).unwrap();
+        // Wire form is camelCase.
+        assert!(json.contains("preStart"));
+        assert!(json.contains("postStart"));
+
+        let parsed = from_json_bytes(json.as_bytes()).unwrap();
+        let plan = ImportPlan::new(parsed, p.path.clone());
+        let project =
+            materialise_project(&plan, ProjectId::new("demo-cms"), &BTreeMap::new()).unwrap();
+        assert_eq!(project.pre_start, p.pre_start);
+        assert_eq!(project.post_start, p.post_start);
+    }
+
+    #[test]
+    fn legacy_post_install_folds_into_pre_start() {
+        // A hand-authored file from before the hook fields existed.
+        let json = r#"{
+            "version": 1,
+            "name": "Legacy",
+            "type": "node",
+            "hostname": "legacy.test",
+            "https": true,
+            "autoStart": false,
+            "postInstall": ["npm ci"]
+        }"#;
+        let parsed = from_json_bytes(json.as_bytes()).unwrap();
+        let plan = ImportPlan::new(parsed, PathBuf::from("/tmp/legacy"));
+        let project =
+            materialise_project(&plan, ProjectId::new("legacy"), &BTreeMap::new()).unwrap();
+        assert_eq!(project.pre_start, vec!["npm ci".to_string()]);
+        assert!(project.post_start.is_empty());
     }
 
     #[test]
@@ -351,6 +407,8 @@ mod tests {
             env_template,
             secrets: vec![],
             post_install: vec![],
+            pre_start: vec![],
+            post_start: vec![],
             readiness: None,
             tags: vec![],
         };
@@ -382,6 +440,8 @@ mod tests {
             env_template: BTreeMap::new(),
             secrets: vec!["DB_PASSWORD".into(), "APP_KEY".into()],
             post_install: vec![],
+            pre_start: vec![],
+            post_start: vec![],
             readiness: None,
             tags: vec![],
         };
@@ -412,6 +472,8 @@ mod tests {
             env_template: BTreeMap::new(),
             secrets: vec!["APP_KEY".into()],
             post_install: vec![],
+            pre_start: vec![],
+            post_start: vec![],
             readiness: None,
             tags: vec![],
         };

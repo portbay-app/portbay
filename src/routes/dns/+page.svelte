@@ -21,6 +21,7 @@
   import { dns } from "$lib/stores/dns.svelte";
   import { confirmDialog } from "$lib/stores/confirm.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { groups } from "$lib/stores/groups.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { MAX_DNS_CACHE_SIZE, MAX_DNS_LOCAL_TTL } from "$lib/types/dns";
@@ -33,6 +34,7 @@
 
   let selection = $state<Selection>({ type: "config" });
   let query = $state<string>("");
+  let collapsed = $state<Set<string>>(new Set());
   let copied = $state<string | null>(null);
   // Gates the privileged-helper install behind an explicit, explained prompt —
   // the request only fires when the user confirms in the dialog, never on load.
@@ -47,7 +49,15 @@
   onMount(() => {
     void dns.refresh();
     void projects.start();
+    void groups.refresh();
   });
+
+  function toggleSection(id: string) {
+    const next = new Set(collapsed);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    collapsed = next;
+  }
 
   // Resync the form whenever the store's settings or suffix change (initial
   // load, after a save, after a suffix migration). While the user is editing,
@@ -90,6 +100,73 @@
       (h) => h.hostname.toLowerCase().includes(q) || h.ip.includes(q),
     );
   });
+
+  // ── Grouping ────────────────────────────────────────────────────────────────
+  // Records and hosts that belong to a project group are listed under that
+  // group's name (collapsible); everything else stays a plain list below, the
+  // same shape the rail has with no groups at all. Records carry a projectId;
+  // hosts are matched back to a project by hostname.
+  const sortedGroups = $derived(
+    [...groups.value].sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  const claimedProjectIds = $derived.by<Set<string>>(() => {
+    const claimed = new Set<string>();
+    for (const g of groups.value) for (const id of g.projectIds) claimed.add(id);
+    return claimed;
+  });
+  const projectIdByHostname = $derived.by<Map<string, string>>(
+    () => new Map(projects.value.map((p) => [p.hostname, p.id])),
+  );
+
+  interface RecordSection {
+    id: string;
+    name: string;
+    items: DnsRecord[];
+  }
+  const recordGroups = $derived.by<RecordSection[]>(() => {
+    const out: RecordSection[] = [];
+    for (const g of sortedGroups) {
+      const ids = new Set(g.projectIds);
+      const items = filteredRecords.filter(
+        (r) => r.projectId !== null && ids.has(r.projectId),
+      );
+      if (items.length === 0) continue;
+      out.push({ id: `rec:${g.id}`, name: g.name, items });
+    }
+    return out;
+  });
+  const ungroupedRecords = $derived(
+    filteredRecords.filter(
+      (r) => r.projectId === null || !claimedProjectIds.has(r.projectId),
+    ),
+  );
+  const recordsGrouped = $derived(recordGroups.length > 0);
+
+  interface HostSection {
+    id: string;
+    name: string;
+    items: ManagedHostsEntry[];
+  }
+  const hostGroups = $derived.by<HostSection[]>(() => {
+    const out: HostSection[] = [];
+    for (const g of sortedGroups) {
+      const ids = new Set(g.projectIds);
+      const items = filteredHosts.filter((h) => {
+        const pid = projectIdByHostname.get(h.hostname);
+        return pid !== undefined && ids.has(pid);
+      });
+      if (items.length === 0) continue;
+      out.push({ id: `host:${g.id}`, name: g.name, items });
+    }
+    return out;
+  });
+  const ungroupedHosts = $derived(
+    filteredHosts.filter((h) => {
+      const pid = projectIdByHostname.get(h.hostname);
+      return pid === undefined || !claimedProjectIds.has(pid);
+    }),
+  );
+  const hostsGrouped = $derived(hostGroups.length > 0);
 
   const selectedRecord = $derived.by<DnsRecord | null>(() => {
     const sel = selection;
@@ -154,6 +231,74 @@
     void dns.setSuffix(next);
   }
 </script>
+
+{#snippet groupHeader(id: string, name: string, count: number)}
+  {@const isCollapsed = collapsed.has(id)}
+  <button
+    type="button"
+    onclick={() => toggleSection(id)}
+    aria-expanded={!isCollapsed}
+    class="w-full flex items-center gap-1.5 px-2 pt-1.5 pb-1 text-left
+           text-[10.5px] uppercase tracking-wide text-fg-subtle hover:text-fg
+           transition-colors"
+  >
+    <Icon
+      name="chevron-right"
+      size={11}
+      class="shrink-0 transition-transform {isCollapsed ? '' : 'rotate-90'}"
+    />
+    <span class="min-w-0 flex-1 truncate font-medium">{name}</span>
+    <span class="shrink-0 font-mono">{count}</span>
+  </button>
+{/snippet}
+
+{#snippet recordRow(rec: DnsRecord)}
+  {@const active =
+    selection.type === "record" && selection.hostname === rec.hostname}
+  <button
+    type="button"
+    onclick={() => (selection = { type: "record", hostname: rec.hostname })}
+    class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left
+           transition-colors {active
+      ? 'bg-accent/10 ring-1 ring-inset ring-accent/40'
+      : 'hover:bg-surface-2/60'}"
+  >
+    <Icon
+      name={rec.kind === "wildcard" ? "star" : "link"}
+      size={12}
+      class="shrink-0 text-fg-subtle"
+    />
+    <span class="flex-1 min-w-0 font-mono text-[12px] text-fg truncate">
+      {rec.hostname}
+    </span>
+    <span
+      class="shrink-0 text-[9.5px] uppercase tracking-wide px-1.5 py-0.5 rounded
+             {rec.routedVia === 'dnsmasq'
+        ? 'bg-status-running/15 text-status-running'
+        : 'bg-fg-subtle/15 text-fg-subtle'}"
+    >
+      {rec.routedVia === "dnsmasq" ? "dns" : "hosts"}
+    </span>
+  </button>
+{/snippet}
+
+{#snippet hostRow(h: ManagedHostsEntry)}
+  {@const active = selection.type === "hosts" && selection.hostname === h.hostname}
+  <button
+    type="button"
+    onclick={() => (selection = { type: "hosts", hostname: h.hostname })}
+    class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left
+           transition-colors {active
+      ? 'bg-accent/10 ring-1 ring-inset ring-accent/40'
+      : 'hover:bg-surface-2/60'}"
+  >
+    <Icon name="file-text" size={12} class="shrink-0 text-fg-subtle" />
+    <span class="flex-1 min-w-0 font-mono text-[12px] text-fg truncate">
+      {h.hostname}
+    </span>
+    <span class="shrink-0 font-mono text-[10.5px] text-fg-subtle">{h.ip}</span>
+  </button>
+{/snippet}
 
 <div class="h-full flex">
   <!-- Left rail -->
@@ -226,35 +371,21 @@
         {#if filteredRecords.length === 0}
           <p class="px-2 py-1.5 text-[11px] text-fg-subtle">No matching records.</p>
         {:else}
-          {#each filteredRecords as rec (rec.hostname)}
-            {@const active =
-              selection.type === "record" && selection.hostname === rec.hostname}
-            <button
-              type="button"
-              onclick={() =>
-                (selection = { type: "record", hostname: rec.hostname })}
-              class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left
-                     transition-colors {active
-                ? 'bg-accent/10 ring-1 ring-inset ring-accent/40'
-                : 'hover:bg-surface-2/60'}"
-            >
-              <Icon
-                name={rec.kind === "wildcard" ? "star" : "link"}
-                size={12}
-                class="shrink-0 text-fg-subtle"
-              />
-              <span class="flex-1 min-w-0 font-mono text-[12px] text-fg truncate">
-                {rec.hostname}
-              </span>
-              <span
-                class="shrink-0 text-[9.5px] uppercase tracking-wide px-1.5 py-0.5 rounded
-                       {rec.routedVia === 'dnsmasq'
-                  ? 'bg-status-running/15 text-status-running'
-                  : 'bg-fg-subtle/15 text-fg-subtle'}"
-              >
-                {rec.routedVia === "dnsmasq" ? "dns" : "hosts"}
-              </span>
-            </button>
+          {#each recordGroups as section (section.id)}
+            {@render groupHeader(section.id, section.name, section.items.length)}
+            {#if !collapsed.has(section.id)}
+              <div class="space-y-0.5 pb-1">
+                {#each section.items as rec (rec.hostname)}
+                  {@render recordRow(rec)}
+                {/each}
+              </div>
+            {/if}
+          {/each}
+          {#if recordsGrouped && ungroupedRecords.length > 0}
+            <div class="pt-1 mt-1 border-t border-border/40"></div>
+          {/if}
+          {#each ungroupedRecords as rec (rec.hostname)}
+            {@render recordRow(rec)}
           {/each}
         {/if}
       </div>
@@ -275,23 +406,21 @@
         {:else if filteredHosts.length === 0}
           <p class="px-2 py-1.5 text-[11px] text-fg-subtle">No matching entries.</p>
         {:else}
-          {#each filteredHosts as h (h.hostname)}
-            {@const active =
-              selection.type === "hosts" && selection.hostname === h.hostname}
-            <button
-              type="button"
-              onclick={() => (selection = { type: "hosts", hostname: h.hostname })}
-              class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left
-                     transition-colors {active
-                ? 'bg-accent/10 ring-1 ring-inset ring-accent/40'
-                : 'hover:bg-surface-2/60'}"
-            >
-              <Icon name="file-text" size={12} class="shrink-0 text-fg-subtle" />
-              <span class="flex-1 min-w-0 font-mono text-[12px] text-fg truncate">
-                {h.hostname}
-              </span>
-              <span class="shrink-0 font-mono text-[10.5px] text-fg-subtle">{h.ip}</span>
-            </button>
+          {#each hostGroups as section (section.id)}
+            {@render groupHeader(section.id, section.name, section.items.length)}
+            {#if !collapsed.has(section.id)}
+              <div class="space-y-0.5 pb-1">
+                {#each section.items as h (h.hostname)}
+                  {@render hostRow(h)}
+                {/each}
+              </div>
+            {/if}
+          {/each}
+          {#if hostsGrouped && ungroupedHosts.length > 0}
+            <div class="pt-1 mt-1 border-t border-border/40"></div>
+          {/if}
+          {#each ungroupedHosts as h (h.hostname)}
+            {@render hostRow(h)}
           {/each}
         {/if}
       </div>
@@ -434,7 +563,7 @@
                   also resolve via dnsmasq on port {pf.dnsmasqPort}.
                 {/if}
               {:else}
-                One macOS password prompt installs PortBay's privileged helper; it
+                One OS authorization prompt installs PortBay's privileged helper; it
                 then writes your project hostnames into
                 <code class="font-mono">/etc/hosts</code> with no further prompts.
               {/if}

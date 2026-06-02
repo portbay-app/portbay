@@ -64,6 +64,59 @@ pub fn fpm_fastcgi_dial(tuning: &FpmTuning, socket_path: &std::path::Path) -> St
     }
 }
 
+/// The login name of the user this process runs as, for the FPM pool's
+/// `user` / `listen.owner` directives. Prefers `$USER` (always set in a normal
+/// session) and falls back to the password database via the real uid, since a
+/// launchd-spawned GUI app may not inherit `$USER`. `None` if neither resolves,
+/// in which case the caller omits the ownership directives rather than writing
+/// an unresolvable value — PHP-FPM does not expand `$USER`, so a literal there
+/// aborts startup with "cannot get uid for user '$USER'".
+fn current_username() -> Option<String> {
+    if let Ok(u) = std::env::var("USER") {
+        let u = u.trim();
+        if !u.is_empty() {
+            return Some(u.to_string());
+        }
+    }
+    // SAFETY: `getuid` is always safe. `getpwuid` returns a pointer into a
+    // static buffer owned by libc; we copy the name out immediately and never
+    // retain the pointer. A null return (no matching passwd entry) → None.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() {
+            return None;
+        }
+        let name = (*pw).pw_name;
+        if name.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(name)
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
+}
+
+/// Primary group name for the running user. macOS commonly uses `staff`, but
+/// Linux distros usually create a user-private primary group; hard-coding
+/// `staff` makes PHP-FPM abort on Linux.
+fn current_groupname() -> Option<String> {
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() {
+            return None;
+        }
+        let gr = libc::getgrgid((*pw).pw_gid);
+        if gr.is_null() || (*gr).gr_name.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr((*gr).gr_name)
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
+}
+
 /// Render the FPM pool config for a version. One `[www]` pool listening on
 /// the socket path, with process-manager tuning from `tuning` and any php.ini
 /// overrides from `ini` layered in as `php_admin_value` directives.
@@ -90,6 +143,19 @@ pub fn render_pool_config(
         std::path::PathBuf::from(tuning.slowlog.trim())
     };
     let access_log_path = pool_dir.join("php-fpm.access.log");
+    // PHP-FPM does NOT expand env vars in its config, so a literal `$USER` made
+    // FPM abort at startup with "cannot get uid for user '$USER'". Resolve the
+    // real login name and substitute it; if we can't resolve it, omit the
+    // ownership directives entirely (FPM then defaults the worker + socket to
+    // the user it already runs as — which is exactly what we want, since it
+    // runs non-root) rather than emit an unresolvable literal.
+    let user = current_username();
+    let group = current_groupname();
+    let user_directive = match (&user, &group) {
+        (Some(u), Some(g)) => format!("user = {u}\ngroup = {g}\n"),
+        (Some(u), None) => format!("user = {u}\n"),
+        (None, _) => String::new(),
+    };
     let mut out = format!(
         "; PortBay-managed FPM pool for PHP {ver}\n\
          [global]\n\
@@ -97,23 +163,28 @@ pub fn render_pool_config(
          error_log = /tmp/portbay-php-fpm-{ver_safe}.log\n\
          \n\
          [www]\n\
-         user = $USER\n\
-         group = staff\n\
+         {user_directive}\
          listen = {listen}\n\
          pm = {pm}\n\
          pm.max_children = {max_children}\n",
         ver = install.version,
         ver_safe = install.version.replace('.', "-"),
+        user_directive = user_directive,
         listen = listen,
         pm = pm_mode(&tuning.pm),
         max_children = tuning.max_children.max(1),
     );
     if tuning.listen != "tcp" {
-        out.push_str(
-            "listen.owner = $USER\n\
-             listen.group = staff\n\
-             listen.mode = 0660\n",
-        );
+        // Socket ownership only when we resolved a real user; `listen.mode`
+        // always applies. The socket is created by the running (non-root) user,
+        // so it's already owned correctly even without the owner directive.
+        if let Some(u) = &user {
+            let _ = writeln!(out, "listen.owner = {u}");
+        }
+        if let Some(g) = &group {
+            let _ = writeln!(out, "listen.group = {g}");
+        }
+        out.push_str("listen.mode = 0660\n");
     }
 
     // start/spare servers are dynamic-only; ondemand uses an idle timeout.
@@ -241,6 +312,35 @@ mod tests {
         assert!(cfg.contains("PHP 8.3"));
         assert!(cfg.contains("/tmp/data/php/8.3/php-fpm.sock"));
         assert!(cfg.contains("[www]"));
+    }
+
+    // Regression guard: PHP-FPM doesn't expand env vars, so a literal `$USER`
+    // in the pool config aborted FPM at startup with "cannot get uid for user
+    // '$USER'". The rendered config must never contain `$USER`, and (when a
+    // username resolves, which it does in the test environment) must carry a
+    // concrete `user = <name>` directive.
+    #[test]
+    fn render_pool_config_never_emits_literal_user_var() {
+        let cfg = render_pool_config(
+            &sample_install(),
+            Path::new("/tmp/data/php/8.3/php-fpm.sock"),
+            &FpmTuning::default(),
+            &BTreeMap::new(),
+        );
+        assert!(
+            !cfg.contains("$USER"),
+            "rendered FPM config must not contain the literal $USER: {cfg}"
+        );
+        if let Some(u) = current_username() {
+            assert!(
+                cfg.contains(&format!("user = {u}\n")),
+                "expected a concrete user directive for {u}: {cfg}"
+            );
+            // Unix-socket default tuning → socket owner is the real user too.
+            assert!(cfg.contains(&format!("listen.owner = {u}\n")), "{cfg}");
+        }
+        // The socket mode is always emitted for a unix listen.
+        assert!(cfg.contains("listen.mode = 0660"));
     }
 
     #[test]

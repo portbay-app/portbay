@@ -12,7 +12,7 @@ use tauri::{AppHandle, State};
 
 use crate::domain::{migrate_registry_suffix, DomainMigration};
 use crate::error::{AppError, AppResult};
-use crate::preferences::Preferences;
+use crate::preferences::{NotificationPrefs, Preferences};
 use crate::registry::store;
 use crate::state::AppState;
 use crate::tray;
@@ -27,6 +27,31 @@ pub struct DomainSettings {
 #[tauri::command]
 pub async fn get_preferences(state: State<'_, AppState>) -> AppResult<Preferences> {
     Ok(state.preferences_snapshot())
+}
+
+#[tauri::command]
+pub async fn get_notification_prefs(state: State<'_, AppState>) -> AppResult<NotificationPrefs> {
+    Ok(state.preferences_snapshot().notifications.normalised())
+}
+
+#[tauri::command]
+pub async fn set_notification_prefs(
+    state: State<'_, AppState>,
+    prefs: NotificationPrefs,
+) -> AppResult<NotificationPrefs> {
+    let prefs = prefs.normalised();
+    let mut next = state.preferences_snapshot();
+    next.notifications = prefs.clone();
+    next.save()
+        .map_err(|e| AppError::Internal(format!("failed to save preferences: {e}")))?;
+    {
+        let mut guard = state
+            .preferences
+            .lock()
+            .expect("preferences mutex poisoned");
+        *guard = next;
+    }
+    Ok(prefs)
 }
 
 /// Replace the persisted preferences and reconcile any UI side effects.
@@ -44,6 +69,7 @@ pub async fn set_preferences(
     let previous = state.preferences_snapshot();
 
     let mut prefs = prefs;
+    prefs.notifications = prefs.notifications.normalised();
     // Starting (or restarting) the auto-clean clock: when the cadence flips on
     // from "off" — or was never stamped — anchor `last_auto_clean` to now so
     // the first automatic pass is one full cadence away, never an immediate
@@ -115,11 +141,11 @@ pub async fn set_preferences(
         }
     }
 
-    // Previously a dead toggle. Now installs/removes a per-user LaunchAgent so
-    // PortBay actually opens at login.
+    // Previously a dead toggle. Now installs/removes the platform's per-user
+    // autostart entry so PortBay actually opens at login.
     if previous.launch_at_login != prefs.launch_at_login {
         if let Err(e) = apply_launch_at_login(prefs.launch_at_login) {
-            tracing::warn!(error = %e, "failed to update launch-at-login LaunchAgent");
+            tracing::warn!(error = %e, "failed to update launch-at-login entry");
         }
     }
 
@@ -170,8 +196,57 @@ fn apply_launch_at_login(enabled: bool) -> std::io::Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[cfg(not(target_os = "linux"))]
 fn apply_launch_at_login(_enabled: bool) -> std::io::Result<()> {
     Ok(())
+}
+
+/// Linux desktop autostart uses the XDG Autostart spec. This is the most
+/// broadly-supported equivalent to a macOS LaunchAgent for GUI sessions.
+#[cfg(target_os = "linux")]
+fn apply_launch_at_login(enabled: bool) -> std::io::Result<()> {
+    let config = dirs::config_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no config dir"))?;
+    let autostart = config.join("autostart");
+    let desktop = autostart.join("portbay.desktop");
+
+    if !enabled {
+        return match std::fs::remove_file(&desktop) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        };
+    }
+
+    std::fs::create_dir_all(&autostart)?;
+    let exe = std::env::current_exe()?;
+    let contents = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Version=1.0\n\
+         Name=PortBay\n\
+         Comment=Start PortBay at login\n\
+         Exec={exe}\n\
+         Terminal=false\n\
+         X-GNOME-Autostart-enabled=true\n",
+        exe = desktop_exec_quote(&exe.to_string_lossy()),
+    );
+    let tmp = desktop.with_extension("desktop.tmp");
+    std::fs::write(&tmp, contents.as_bytes())?;
+    std::fs::rename(&tmp, &desktop)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_exec_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 #[tauri::command]

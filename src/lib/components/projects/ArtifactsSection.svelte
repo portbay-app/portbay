@@ -87,6 +87,7 @@
   function freedToast(bytes: number) {
     errorBus.push({
       code: "ARTIFACTS_CLEANED",
+      category: "lifecycle",
       whatHappened: `Freed ${formatBytes(bytes)}.`,
       whyItMatters: "",
       whoCausedIt: "system",

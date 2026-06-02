@@ -17,6 +17,10 @@ use crate::hosts::{HostsEntry, HostsError, HostsManager};
 pub const SOCKET_PATH: &str = "/var/run/portbay-hosts-helper.sock";
 pub const PLIST_NAME: &str = "com.portbay-app.portbay.hosts-helper.plist";
 pub const HELPER_LABEL: &str = "com.portbay-app.portbay.hosts-helper";
+#[cfg(target_os = "linux")]
+pub const SYSTEMD_SERVICE_NAME: &str = "portbay-hosts-helper.service";
+#[cfg(target_os = "linux")]
+pub const POLKIT_ACTION_ID: &str = "com.portbay-app.portbay.hosts-helper.install";
 
 #[derive(Debug, thiserror::Error)]
 pub enum HelperError {
@@ -72,13 +76,13 @@ pub enum HelperRequest {
         entries: Vec<HelperEntry>,
         domain_suffix: String,
     },
-    /// Write `/etc/resolver/<suffix>` pointing macOS at the local dnsmasq
+    /// Write the platform resolver file pointing the OS at the local dnsmasq
     /// port. Root-only — that's why it goes through the helper.
     InstallResolver {
         suffix: String,
         port: u16,
     },
-    /// Remove `/etc/resolver/<suffix>`.
+    /// Remove the platform resolver file.
     RemoveResolver {
         suffix: String,
     },
@@ -142,6 +146,14 @@ pub struct HostsHelperClient {
 
 impl HostsHelperClient {
     pub fn system() -> Self {
+        // When a sandbox override is active the privileged helper must be
+        // bypassed: it always writes the real `/etc/hosts`, ignoring the
+        // override. Point it at a socket that can't exist so `is_available()`
+        // is false and every call falls back to `HostsManager::system()`,
+        // which honours `PORTBAY_HOSTS_PATH`.
+        if std::env::var_os("PORTBAY_HOSTS_PATH").is_some() {
+            return Self::new(PathBuf::from("/dev/null/portbay-hosts-helper.disabled"));
+        }
         Self::new(SOCKET_PATH)
     }
 
@@ -249,7 +261,13 @@ pub const INSTALLED_BIN: &str = "/usr/local/bin/portbay-hosts-helper";
 
 /// The LaunchDaemon plist that runs the helper as root at boot and keeps it
 /// alive. Installed to `/Library/LaunchDaemons/<PLIST_NAME>`.
-fn daemon_plist() -> String {
+///
+/// `allow_uid` is the UID of the user installing PortBay; it is baked into the
+/// daemon's argv so the root daemon will only honour socket connections from
+/// that user (see [`serve`]). Without it, any local process could drive the
+/// root helper.
+#[cfg(target_os = "macos")]
+fn daemon_plist(allow_uid: u32) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -261,11 +279,55 @@ fn daemon_plist() -> String {
     <string>{INSTALLED_BIN}</string>
     <string>--socket</string><string>{SOCKET_PATH}</string>
     <string>--hosts-file</string><string>/etc/hosts</string>
+    <string>--allow-uid</string><string>{allow_uid}</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
 </dict>
 </plist>
+"#
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_service(allow_uid: u32) -> String {
+    format!(
+        r#"[Unit]
+Description=PortBay privileged hosts helper
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={INSTALLED_BIN} --socket {SOCKET_PATH} --hosts-file /etc/hosts --allow-uid {allow_uid}
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
+"#
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn polkit_policy() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>PortBay</vendor>
+  <vendor_url>https://portbay.app</vendor_url>
+  <action id="{POLKIT_ACTION_ID}">
+    <description>Install the PortBay privileged hosts helper</description>
+    <message>Authentication is required to install PortBay's helper for local DNS and hosts-file management.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">{INSTALLED_BIN}</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
 "#
     )
 }
@@ -308,7 +370,9 @@ pub fn install_daemon(helper_bin: &Path) -> Result<()> {
          /bin/launchctl bootstrap system '{plist_path}'\n\
          /bin/launchctl enable system/{HELPER_LABEL}\n",
         src = shell_single_quote(&staged_bin.to_string_lossy()),
-        plist = daemon_plist(),
+        // This runs as the (unprivileged) console user — only the inner script
+        // is elevated — so getuid() here is the user the daemon must trust.
+        plist = daemon_plist(unsafe { libc::getuid() }),
     );
 
     let tmp = work.join("install.sh");
@@ -341,10 +405,70 @@ pub fn install_daemon(helper_bin: &Path) -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[cfg(not(target_os = "linux"))]
 pub fn install_daemon(_helper_bin: &Path) -> Result<()> {
     Err(HelperError::Protocol(
-        "privileged helper install is macOS-only in this build".into(),
+        "privileged helper install is not supported on this platform".into(),
     ))
+}
+
+/// Install the helper as a root-owned systemd service via pkexec/polkit.
+/// Linux has no LaunchDaemon equivalent; this gives PortBay one privileged
+/// daemon listening on the same Unix socket and still restricts clients by UID.
+#[cfg(target_os = "linux")]
+pub fn install_daemon(helper_bin: &Path) -> Result<()> {
+    use std::process::Command;
+
+    let work = stage_dir()?;
+    let staged_bin = work.join("portbay-hosts-helper");
+    std::fs::copy(helper_bin, &staged_bin).map_err(|e| HelperError::io(&staged_bin, e))?;
+    let service_path = format!("/etc/systemd/system/{SYSTEMD_SERVICE_NAME}");
+    let policy_path = format!("/usr/share/polkit-1/actions/{POLKIT_ACTION_ID}.policy");
+    let script = format!(
+        "#!/bin/sh\nset -e\n\
+         /usr/bin/install -d -m 755 /usr/local/bin\n\
+         /usr/bin/install -m 755 {src} '{INSTALLED_BIN}'\n\
+         /usr/bin/install -d -m 755 /etc/systemd/system /usr/share/polkit-1/actions\n\
+         /bin/cat > '{service_path}' <<'PORTBAY_SYSTEMD'\n{service}PORTBAY_SYSTEMD\n\
+         /bin/chmod 644 '{service_path}'\n\
+         /bin/cat > '{policy_path}' <<'PORTBAY_POLKIT'\n{policy}PORTBAY_POLKIT\n\
+         /bin/chmod 644 '{policy_path}'\n\
+         /bin/systemctl daemon-reload\n\
+         /bin/systemctl enable --now '{SYSTEMD_SERVICE_NAME}'\n",
+        src = shell_single_quote(&staged_bin.to_string_lossy()),
+        service = systemd_service(unsafe { libc::getuid() }),
+        policy = polkit_policy(),
+    );
+
+    let tmp = work.join("install.sh");
+    std::fs::write(&tmp, script).map_err(|e| HelperError::io(&tmp, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| HelperError::io(&tmp, e))?;
+    }
+
+    let output = Command::new("pkexec")
+        .arg("/bin/sh")
+        .arg(&tmp)
+        .output()
+        .map_err(|e| HelperError::io("pkexec", e))?;
+    let _ = std::fs::remove_dir_all(&work);
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("dismissed") || stderr.contains("Not authorized") {
+        return Err(HelperError::BadRequest(
+            "cancelled — the authorization dialog was dismissed".into(),
+        ));
+    }
+    Err(HelperError::Protocol(format!(
+        "helper install failed: {}",
+        stderr.trim()
+    )))
 }
 
 /// Create a private staging directory under `/private/tmp` for the privileged
@@ -357,6 +481,27 @@ fn stage_dir() -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = PathBuf::from("/private/tmp").join(format!(
+        "portbay-helper-install.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| HelperError::io(&dir, e))?;
+    let mut perms = std::fs::metadata(&dir)
+        .map_err(|e| HelperError::io(&dir, e))?
+        .permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(&dir, perms).map_err(|e| HelperError::io(&dir, e))?;
+    Ok(dir)
+}
+
+#[cfg(target_os = "linux")]
+fn stage_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = PathBuf::from("/tmp").join(format!(
         "portbay-helper-install.{}.{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -389,6 +534,7 @@ fn shell_single_quote(s: &str) -> String {
 }
 
 /// Escape a string for embedding inside an AppleScript double-quoted literal.
+#[cfg(target_os = "macos")]
 fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -447,21 +593,14 @@ pub fn handle_request(request: HelperRequest, manager: &HostsManager) -> Result<
             Ok(HelperResponse::ok())
         }
         HelperRequest::InstallResolver { suffix, port } => {
-            let path = crate::dnsmasq::resolver::resolver_file_path(&suffix);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| HelperError::io(parent, e))?;
-            }
-            std::fs::write(&path, crate::dnsmasq::resolver::resolver_file_content(port))
-                .map_err(|e| HelperError::io(&path, e))?;
+            crate::dnsmasq::resolver::install_as_root(&suffix, port)
+                .map_err(|e| HelperError::Protocol(e.to_string()))?;
             Ok(HelperResponse::ok())
         }
         HelperRequest::RemoveResolver { suffix } => {
-            let path = crate::dnsmasq::resolver::resolver_file_path(&suffix);
-            match std::fs::remove_file(&path) {
-                Ok(()) => Ok(HelperResponse::ok()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HelperResponse::ok()),
-                Err(e) => Err(HelperError::io(&path, e)),
-            }
+            crate::dnsmasq::resolver::uninstall_as_root(&suffix)
+                .map_err(|e| HelperError::Protocol(e.to_string()))?;
+            Ok(HelperResponse::ok())
         }
     }
 }
@@ -493,39 +632,119 @@ fn ensure_valid_resolver_suffix(suffix: &str) -> Result<()> {
     }
 }
 
-pub fn serve(socket_path: &Path, manager: HostsManager) -> Result<()> {
+/// Run the privileged helper, listening on `socket_path` and applying every
+/// mutation through `manager`.
+///
+/// `allow_uid` is the only UID (besides root) permitted to drive the daemon.
+/// The daemon runs as root, so without an owner restriction any local process
+/// could connect and rewrite `/etc/hosts` within the dev suffix or wipe the
+/// PortBay block. We enforce this two ways: the socket is chowned to `allow_uid`
+/// at mode `0600` (kernel-level gate), AND every accepted connection's peer
+/// credentials are checked via `getpeereid` (defence in depth, in case the mode
+/// didn't take on some filesystem). `None` is the dev/manual path (`sudo
+/// portbay-hosts-helper …` with no installer): it keeps the socket world-
+/// connectable and skips the peer check, relying on the suffix guard alone.
+pub fn serve(socket_path: &Path, manager: HostsManager, allow_uid: Option<u32>) -> Result<()> {
     if socket_path.exists() {
         std::fs::remove_file(socket_path).map_err(|e| HelperError::io(socket_path, e))?;
     }
     let listener = UnixListener::bind(socket_path).map_err(|e| HelperError::io(socket_path, e))?;
 
-    // The daemon runs as root, so the socket it creates is root-owned. The
-    // PortBay app connects as the logged-in user, which needs write access to
-    // the socket to open it. Loosen the mode to 0666 — the security boundary
-    // is `request_allowed`/`ensure_host_matches_suffix` (every mutation must
-    // target a hostname under the configured dev suffix), not socket
-    // ownership, so a world-connectable socket can still only touch PortBay's
-    // own `/etc/hosts` block under `*.<suffix>`.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(socket_path)
-            .map_err(|e| HelperError::io(socket_path, e))?
-            .permissions();
-        perms.set_mode(0o666);
-        std::fs::set_permissions(socket_path, perms)
-            .map_err(|e| HelperError::io(socket_path, e))?;
+        match allow_uid {
+            // Production: restrict the socket to the installing user at 0600 so
+            // the kernel rejects every other unprivileged process before it can
+            // even send a byte. root still has access (it owns the daemon).
+            Some(uid) => {
+                use std::os::unix::ffi::OsStrExt;
+                let c_path = std::ffi::CString::new(socket_path.as_os_str().as_bytes())
+                    .map_err(|e| HelperError::Protocol(e.to_string()))?;
+                // gid (uid_t)-1 == "leave group unchanged".
+                let rc = unsafe { libc::chown(c_path.as_ptr(), uid, u32::MAX) };
+                if rc != 0 {
+                    return Err(HelperError::io(
+                        socket_path,
+                        std::io::Error::last_os_error(),
+                    ));
+                }
+                let perms = std::fs::Permissions::from_mode(0o600);
+                std::fs::set_permissions(socket_path, perms)
+                    .map_err(|e| HelperError::io(socket_path, e))?;
+            }
+            // Dev/manual: no installer recorded an owner. Keep it permissive;
+            // the suffix guard remains the boundary.
+            None => {
+                let perms = std::fs::Permissions::from_mode(0o666);
+                std::fs::set_permissions(socket_path, perms)
+                    .map_err(|e| HelperError::io(socket_path, e))?;
+            }
+        }
     }
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                // Defence in depth on top of the socket mode: reject any peer
+                // that isn't the allowed user or root, then drop the connection.
+                if let Some(uid) = allow_uid {
+                    match peer_uid(&stream) {
+                        Some(peer) if peer == uid || peer == 0 => {}
+                        peer => {
+                            tracing::warn!(
+                                target: "hosts-helper",
+                                ?peer, allowed = uid,
+                                "rejected hosts-helper connection from unauthorized uid"
+                            );
+                            continue;
+                        }
+                    }
+                }
                 let _ = handle_stream(stream, &manager);
             }
             Err(e) => return Err(HelperError::io(socket_path, e)),
         }
     }
     Ok(())
+}
+
+/// Resolve the connecting peer's UID via `getpeereid(2)`. `None` if the lookup
+/// fails (treated as untrusted by the caller).
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    use std::os::unix::io::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    (rc == 0).then_some(uid)
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    use std::mem;
+    use std::os::unix::io::AsRawFd;
+
+    let mut cred: libc::ucred = unsafe { mem::zeroed() };
+    let mut len = mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    (rc == 0).then_some(cred.uid)
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))
+))]
+fn peer_uid(_stream: &UnixStream) -> Option<u32> {
+    None
 }
 
 fn handle_stream(mut stream: UnixStream, manager: &HostsManager) -> Result<()> {
@@ -581,6 +800,15 @@ mod tests {
         let path = dir.path().join("hosts");
         std::fs::write(&path, contents).unwrap();
         (dir, HostsManager::new(path))
+    }
+
+    #[test]
+    fn peer_uid_resolves_the_connecting_uid() {
+        // getpeereid against a real socketpair must report our own uid — this
+        // is the mechanism serve() relies on to reject foreign-uid callers.
+        let (a, _b) = UnixStream::pair().expect("socketpair");
+        let me = unsafe { libc::getuid() };
+        assert_eq!(peer_uid(&a), Some(me));
     }
 
     #[test]

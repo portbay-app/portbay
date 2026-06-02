@@ -12,11 +12,18 @@ export interface Account {
   /** `null` for email-auth accounts. */
   github_id: number | null;
   login: string;
+  /** User-set display name (schema ≥ 3); source of the avatar initials. */
+  display_name?: string | null;
+  /** Server-resolved avatar to fetch — custom upload or GitHub (schema ≥ 3). */
+  avatar_url?: string | null;
 }
 
 export interface Entitlements {
   /** `null` = unlimited (pro); free = 6; anonymous = 3. */
   max_projects: number | null;
+  /** License activation cap (schema ≥ 3): Pro = 2, free/anonymous = 1.
+   *  Absent (`undefined`) on a legacy schema-2 cached doc. */
+  max_devices?: number | null;
   sync: boolean;
   custom_port_cors: boolean;
   mail: "limited" | "full";
@@ -49,6 +56,7 @@ export const ANONYMOUS_FALLBACK: EffectiveEntitlement = {
   account: null,
   entitlements: {
     max_projects: 3,
+    max_devices: 1,
     sync: false,
     custom_port_cors: false,
     mail: "limited",

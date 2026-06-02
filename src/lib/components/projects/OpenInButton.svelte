@@ -27,8 +27,17 @@
   interface Props {
     projectId: string;
     variant?: "full" | "icon";
+    /** Restrict the menu to these tool kinds. Defaults to all kinds. */
+    kinds?: DevToolKind[];
+    /** Trigger label (full variant only). Defaults to "Open in". */
+    label?: string;
   }
-  let { projectId, variant = "full" }: Props = $props();
+  let {
+    projectId,
+    variant = "full",
+    kinds = ["editor", "agent", "terminal", "file-manager"],
+    label = "Open in",
+  }: Props = $props();
 
   const KIND_ORDER: DevToolKind[] = ["editor", "agent", "terminal", "file-manager"];
   const KIND_LABEL: Record<DevToolKind, string> = {
@@ -75,11 +84,14 @@
     void devTools.start();
   });
 
+  // Tools in scope for this instance (after the optional `kinds` filter).
+  const available = $derived(devTools.value.filter((t) => kinds.includes(t.kind)));
+
   const groupedTools = $derived.by<
     { kind: DevToolKind; items: DevToolInfo[] }[]
   >(() => {
     const groups = new Map<DevToolKind, DevToolInfo[]>();
-    for (const t of devTools.value) {
+    for (const t of available) {
       const list = groups.get(t.kind) ?? [];
       list.push(t);
       groups.set(t.kind, list);
@@ -99,7 +111,7 @@
 
   function toggle(e: MouseEvent) {
     e.stopPropagation();
-    if (devTools.value.length === 0) return;
+    if (available.length === 0) return;
     if (!open) recomputePosition();
     open = !open;
   }
@@ -111,6 +123,7 @@
       await safeInvoke("open_in_ide", { id: projectId, ide: tool.id });
       errorBus.push({
         code: "OPEN_IN_TOOL",
+        category: "lifecycle",
         whatHappened: `Opening project in ${tool.label}.`,
         whyItMatters:
           import.meta.env.PUBLIC_SIMULATOR === "true"
@@ -149,9 +162,9 @@
   }
 
   const tooltip = $derived(
-    devTools.value.length === 0
-      ? "No supported editors, agents, or terminals detected"
-      : "Open this project in an installed editor, agent, or terminal",
+    available.length === 0
+      ? "No supported tools detected"
+      : `${label} an installed tool`,
   );
 </script>
 
@@ -167,11 +180,11 @@
     bind:this={triggerEl}
     type="button"
     onclick={toggle}
-    disabled={devTools.value.length === 0}
+    disabled={available.length === 0}
     aria-haspopup="menu"
     aria-expanded={open}
     title={tooltip}
-    aria-label="Open in…"
+    aria-label="{label}…"
     class="inline-flex items-center justify-center w-7 h-7 rounded-md
            text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors
            disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
@@ -183,7 +196,7 @@
     bind:this={triggerEl}
     type="button"
     onclick={toggle}
-    disabled={devTools.value.length === 0}
+    disabled={available.length === 0}
     aria-haspopup="menu"
     aria-expanded={open}
     title={tooltip}
@@ -193,7 +206,7 @@
            disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-surface"
   >
     <Icon name="external-link" size={13} />
-    <span class="flex-1 text-left">Open in</span>
+    <span class="flex-1 text-left">{label}</span>
     <Icon name="chevron-down" size={11} class="opacity-70" />
   </button>
 {/if}

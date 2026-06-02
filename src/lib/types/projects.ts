@@ -9,16 +9,19 @@
  */
 import type { PortbayStatus } from "./status";
 import type { CommandError } from "./error";
+import type { CustomTunnelConfig } from "./tunnel";
 
 export type ProjectType =
   | "next"
   | "vite"
   | "php"
+  | "python"
   | "static"
   | "node"
   | "flutter"
   | "xcode"
   | "android"
+  | "expo"
   | "custom";
 
 export type WebServer = "caddy" | "nginx" | "apache";
@@ -37,6 +40,16 @@ export interface Readiness {
   path?: string;
   timeout_seconds?: number;
 }
+
+/** Result of the editor's "Probe now" one-shot readiness check. */
+export interface ReadinessProbeResult {
+  ok: boolean;
+  detail: string;
+  elapsedMs: number;
+}
+
+/** Streamed event from `provision_python_env` (Python venv setup). */
+export type ProvisionEvent = { kind: "log"; line: string } | { kind: "done" };
 
 /** Package manager / task runner used to scope a single-app run in a monorepo. */
 export type WorkspaceTool = "pnpm" | "npm" | "yarn" | "bun" | "turbo";
@@ -110,6 +123,48 @@ export interface SandboxConfig {
 /** How a domain's hostname is published to the local resolver. */
 export type ResolverMode = "auto" | "hosts" | "dnsmasq";
 
+export type SslMode =
+  | "automatic_local"
+  | "custom_certificate"
+  | "self_signed"
+  | "public_acme";
+
+export type AcmeIssuer =
+  | "lets_encrypt"
+  | "zero_ssl"
+  | "google_trust_services";
+export type AcmeEnvironment = "production" | "staging";
+export type AcmeDnsProvider = "none" | "cloudflare";
+export type AcmeKeyType = "rsa2048" | "rsa4096" | "p256" | "p384";
+
+export interface AcmeConfig {
+  issuer: AcmeIssuer;
+  environment: AcmeEnvironment;
+  email?: string | null;
+  keyType: AcmeKeyType;
+  eabKeyId?: string | null;
+  eabHmacKey?: string | null;
+  zerosslApiKey?: string | null;
+  dnsProvider: AcmeDnsProvider;
+  dnsApiToken?: string | null;
+  forceRequest: boolean;
+  debug: boolean;
+}
+
+export const defaultAcmeConfig = (): AcmeConfig => ({
+  issuer: "lets_encrypt",
+  environment: "production",
+  email: null,
+  keyType: "p384",
+  eabKeyId: null,
+  eabHmacKey: null,
+  zerosslApiKey: null,
+  dnsProvider: "none",
+  dnsApiToken: null,
+  forceRequest: false,
+  debug: false,
+});
+
 /**
  * Per-project domain / routing settings edited on the Domains page. Mirrors
  * the Rust `registry::DomainConfig`. `null` on a project means every setting
@@ -123,10 +178,51 @@ export interface DomainConfig {
   resolverMode: ResolverMode;
   /** PortBay issues/renews this hostname's cert. Defaults true. */
   autoManageCert: boolean;
+  sslMode: SslMode;
+  customCertPath?: string | null;
+  customKeyPath?: string | null;
+  acme?: AcmeConfig | null;
   /** Also route + certify `*.hostname`. */
   includeWildcardSubdomains: boolean;
   /** Only publish the Caddy route while the project's process is running. */
   exposeWhenRunning: boolean;
+}
+
+/**
+ * One-click deploy target attached to a project. Mirrors the Rust
+ * `registry::ProjectDeploy`: sync `localSubdir` (or the whole project) to
+ * `remotePath` on the saved SSH connection, then run `steps`. Holds no
+ * secrets — the connection's credentials live with the SSH connection.
+ */
+export interface ProjectDeploy {
+  /** Saved SSH connection id to deploy to. */
+  connectionId: string;
+  /** Absolute remote directory files sync into (e.g. `/var/www/app`). */
+  remotePath: string;
+  /** Project sub-directory to upload (e.g. `dist`); blank = whole project. */
+  localSubdir?: string | null;
+  /** Ordered remote build/release commands (stop on first non-zero exit). */
+  steps: string[];
+  /** Path segments skipped during the upload walk. */
+  exclude: string[];
+}
+
+/** Defaults that match the Rust side for a fresh deploy config. */
+export const defaultProjectDeploy = (connectionId = ""): ProjectDeploy => ({
+  connectionId,
+  remotePath: "",
+  localSubdir: null,
+  steps: [],
+  exclude: ["node_modules", ".git"],
+});
+
+/** Outcome of a `project_deploy_run`: sync summary + per-step results. */
+export interface DeployRunResult {
+  uploaded: number;
+  bytes: number;
+  skipped: string[];
+  remotePath: string;
+  steps: import("./sshTunnels").StepResult[];
 }
 
 /** Defaults that match the Rust side — used when a project has no `domain`. */
@@ -135,6 +231,10 @@ export const defaultDomainConfig = (): DomainConfig => ({
   pathPrefix: null,
   resolverMode: "auto",
   autoManageCert: true,
+  sslMode: "automatic_local",
+  customCertPath: null,
+  customKeyPath: null,
+  acme: null,
   includeWildcardSubdomains: false,
   exposeWhenRunning: false,
 });
@@ -153,6 +253,10 @@ export interface ProjectView {
   services: string[];
   env: Record<string, string>;
   readiness?: Readiness;
+  /** Shell commands run before the dev server on each start. */
+  preStart: string[];
+  /** Shell commands run after the dev server reports ready. */
+  postStart: string[];
   autoStart: boolean;
   tags: string[];
   documentRoot?: string;
@@ -164,6 +268,10 @@ export interface ProjectView {
   sandboxed: boolean;
   sandbox?: SandboxConfig | null;
   domain?: DomainConfig | null;
+  /** Attached bring-your-own named Cloudflare tunnel (Pro), or null. */
+  tunnel?: CustomTunnelConfig | null;
+  /** One-click deploy target (host + remote path + steps), or null. */
+  deploy?: ProjectDeploy | null;
   status: PortbayStatus;
   runtime?: RuntimeInfo;
   /** A reason this project's selected web server can't serve (e.g. nginx/apache
@@ -186,11 +294,13 @@ export const typeLabel: Record<ProjectType, string> = {
   next: "Next",
   vite: "Vite",
   php: "PHP",
+  python: "Python",
   static: "Static",
   node: "Node",
   flutter: "Flutter",
   xcode: "Xcode",
   android: "Android",
+  expo: "Expo",
   custom: "Custom",
 };
 
@@ -236,6 +346,7 @@ export function webServerWarningEnvelope(
       : "Switch to Caddy, or install the web server.";
   return {
     code: "WEB_SERVER_MISSING",
+    category: "project-error",
     whatHappened: what,
     whyItMatters: why,
     whoCausedIt: "user",

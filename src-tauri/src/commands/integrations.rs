@@ -337,6 +337,39 @@ fn tool_definition(id: &str) -> Option<ToolDefinition> {
         .find(|definition| definition.id == id)
 }
 
+/// Resolve a terminal tool id (`warp` / `iterm` / `ghostty` / `terminal`) to its
+/// installed `.app` bundle path. Used by the agent dispatcher to host an
+/// interactive run in the user's preferred terminal. Returns `None` for an
+/// unknown id, a non-terminal id, or a terminal that isn't installed.
+/// Only the tasks-gated agent dispatcher (`crate::context`) calls this.
+#[cfg(feature = "tasks")]
+pub(crate) fn resolve_terminal_app(id: &str) -> Option<PathBuf> {
+    let def = tool_definition(id)?;
+    if def.kind != ToolKind::Terminal {
+        return None;
+    }
+    match def.launch {
+        LaunchMode::MacApp(app) => resolve_mac_app(app),
+        _ => None,
+    }
+}
+
+/// The first detected terminal id, in `TOOL_DEFINITIONS` order (user-installed
+/// terminals before the always-present macOS Terminal.app). Used as the default
+/// when the user hasn't picked a preferred terminal yet.
+/// Only the tasks-gated agent dispatcher (`crate::context`) calls this.
+#[cfg(feature = "tasks")]
+pub(crate) fn first_detected_terminal() -> Option<String> {
+    TOOL_DEFINITIONS
+        .iter()
+        .filter(|d| d.kind == ToolKind::Terminal)
+        .find(|d| match d.launch {
+            LaunchMode::MacApp(app) => resolve_mac_app(app).is_some(),
+            _ => false,
+        })
+        .map(|d| d.id.to_string())
+}
+
 fn scheme_is_available(scheme: DeepLinkScheme) -> bool {
     match scheme {
         DeepLinkScheme::ClaudeCli => {
@@ -507,6 +540,89 @@ pub async fn open_privacy_settings(app: AppHandle, kind: String) -> AppResult<()
         .spawn()
         .map_err(|e| AppError::Internal(format!("failed to open privacy settings: {e}")))?;
     Ok(())
+}
+
+/// What the frontend needs to start a native drag of PortBay itself: the path
+/// the OS should drag (the `.app` bundle in a packaged build, the executable in
+/// dev) and a small icon to show under the cursor. Dropping the bundle into the
+/// System Settings Accessibility list is the macOS gesture that grants the
+/// permission, so the drag sheet hands these to `tauri-plugin-drag`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionDragPayload {
+    /// Absolute path to drag (the `.app` bundle when packaged, else the exe).
+    pub bundle_path: String,
+    /// Absolute path to a PNG drag image (PortBay's app icon, written to temp).
+    pub icon_path: String,
+}
+
+/// Resolve the drag target + icon for the permission sheet's drag-to-grant
+/// gesture. The `.app` bundle is found by walking up from the running
+/// executable; the drag image is PortBay's bundled icon, materialised to a
+/// temp PNG once so `tauri-plugin-drag` has a real filesystem path.
+/// Resolve a real `.app` bundle to drag into the privacy list. macOS only
+/// accepts an app bundle there (not a bare binary), so we try, in order:
+///   1. The `.app` enclosing the running executable — the packaged/installed
+///      case, where dropping it grants *this* process directly.
+///   2. The `tauri build` bundle that sits next to the dev binary at
+///      `target/<profile>/bundle/macos/PortBay.app` — so the drop still
+///      completes during `tauri dev` (build the app once to populate it).
+///   3. An installed copy in /Applications or ~/Applications.
+///   4. The executable itself, as a last resort.
+fn resolve_app_bundle(exe: &Path) -> PathBuf {
+    if let Some(app) = exe
+        .ancestors()
+        .find(|p| p.extension().is_some_and(|e| e == "app"))
+    {
+        return app.to_path_buf();
+    }
+    if let Some(dir) = exe.parent() {
+        let dev_bundle = dir.join("bundle/macos/PortBay.app");
+        if dev_bundle.exists() {
+            return dev_bundle;
+        }
+    }
+    let mut installed = vec![PathBuf::from("/Applications/PortBay.app")];
+    if let Some(home) = dirs::home_dir() {
+        installed.push(home.join("Applications/PortBay.app"));
+    }
+    if let Some(found) = installed.into_iter().find(|p| p.exists()) {
+        return found;
+    }
+    exe.to_path_buf()
+}
+
+#[tauri::command]
+pub async fn permission_drag_payload() -> AppResult<PermissionDragPayload> {
+    let exe = std::env::current_exe()
+        .map_err(|e| AppError::Internal(format!("cannot resolve current exe: {e}")))?;
+
+    // The macOS Accessibility list only accepts a real `.app` bundle drop — a
+    // bare executable is rejected, so we must resolve an actual bundle.
+    let bundle = resolve_app_bundle(&exe);
+
+    // Materialise the bundled icon to a stable temp path (idempotent: only
+    // written when missing). 128px is plenty for a drag cursor image.
+    const ICON_PNG: &[u8] = include_bytes!("../../icons/128x128.png");
+    let icon_path = std::env::temp_dir().join("portbay-drag-icon.png");
+    if !icon_path.exists() {
+        std::fs::write(&icon_path, ICON_PNG)
+            .map_err(|e| AppError::Internal(format!("cannot write drag icon: {e}")))?;
+    }
+
+    Ok(PermissionDragPayload {
+        bundle_path: bundle.to_string_lossy().into_owned(),
+        icon_path: icon_path.to_string_lossy().into_owned(),
+    })
+}
+
+/// Relaunch PortBay. macOS caches a process's Accessibility trust at launch, so
+/// a permission granted while the app is running only takes effect after a
+/// restart — the permission sheet calls this once the user has added PortBay to
+/// the Accessibility list. `restart()` replaces the process and never returns.
+#[tauri::command]
+pub async fn relaunch_app(app: AppHandle) {
+    app.restart();
 }
 
 #[cfg(test)]

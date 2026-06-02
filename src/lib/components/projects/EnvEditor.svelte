@@ -171,6 +171,7 @@
       if (parsed.length === 0) {
         errorBus.push({
           code: "DOTENV_EMPTY",
+          category: "project-error",
           whatHappened: "No KEY=value pairs found in that file.",
           whyItMatters: "Pick a different file or use bulk paste.",
           whoCausedIt: "user",
@@ -215,6 +216,7 @@
       await projects.refresh();
       errorBus.push({
         code: "ENV_SAVED",
+        category: "lifecycle",
         whatHappened: `Environment updated for ${project.name}.`,
         whyItMatters: restartNeeded
           ? "Restart the project for changes to take effect."

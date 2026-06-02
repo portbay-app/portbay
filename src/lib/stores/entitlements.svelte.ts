@@ -11,6 +11,7 @@
 import { browser } from "$app/environment";
 import { openUrl } from "$lib/security/openUrl";
 import { invokeQuiet, safeInvoke } from "$lib/ipc";
+import { invalidateUserAvatar } from "$lib/userAvatar";
 import {
   ANONYMOUS_FALLBACK,
   type Account,
@@ -147,6 +148,41 @@ function createEntitlementsStore() {
     } catch {
       value = ANONYMOUS_FALLBACK;
     }
+    // Drop the cached avatar promise so a subsequent sign-in re-fetches rather
+    // than reusing the prior account's face (the backend clears its disk cache).
+    invalidateUserAvatar();
+  }
+
+  /**
+   * Set or clear the account display name (Pro/Free signed-in only). Re-pulls
+   * the freshly signed entitlement, so `value.account.display_name` updates.
+   */
+  async function updateDisplayName(name: string | null): Promise<void> {
+    value = await safeInvoke<EffectiveEntitlement>("update_display_name", { name });
+    invalidateUserAvatar();
+  }
+
+  /** Upload a custom avatar from a local file path. Re-pulls the entitlement. */
+  async function uploadAvatar(path: string): Promise<void> {
+    value = await safeInvoke<EffectiveEntitlement>("upload_avatar", { path });
+    invalidateUserAvatar();
+  }
+
+  /** Remove the custom avatar (revert to GitHub/initials). Re-pulls the entitlement. */
+  async function removeAvatar(): Promise<void> {
+    value = await safeInvoke<EffectiveEntitlement>("remove_avatar");
+    invalidateUserAvatar();
+  }
+
+  /**
+   * Start the Pro purchase: ask the backend for a per-user Paddle checkout URL
+   * and open it in the system browser. Requires a signed-in session (the URL is
+   * attributed to the account so the webhook can issue Pro). `safeInvoke` toasts
+   * a friendly error if not signed in or checkout isn't configured yet.
+   */
+  async function startCheckout(): Promise<void> {
+    const url = await safeInvoke<string>("pro_checkout_url");
+    await openUrl(url);
   }
 
   /** Whether a Pro-gated feature is currently unlocked. */
@@ -225,16 +261,27 @@ function createEntitlementsStore() {
     get maxProjects(): number | null {
       return value.entitlements.max_projects;
     },
+    /** License device-activation cap (Pro = 2). Defaults to 2 for a legacy
+     *  schema-2 Pro doc that predates the field; 1 otherwise. */
+    get maxDevices(): number {
+      const m = value.entitlements.max_devices;
+      if (typeof m === "number") return m;
+      return value.entitlements.sync ? 2 : 1;
+    },
     get account(): Account | null {
       return value.account;
     },
     load,
     refresh,
     resync,
+    updateDisplayName,
+    uploadAvatar,
+    removeAvatar,
     login,
     cancelLogin,
     logout: clear,
     clear,
+    startCheckout,
     allows,
     canAddProject,
     canSandbox,

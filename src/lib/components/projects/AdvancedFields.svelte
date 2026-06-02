@@ -18,6 +18,7 @@
   import { projects } from "$lib/stores/projects.svelte";
   import { runtimes } from "$lib/stores/runtimes.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
+  import CustomTunnelField from "./CustomTunnelField.svelte";
   import { account } from "$lib/stores/account.svelte";
   import type { CommandError } from "$lib/types/error";
   import type {
@@ -150,7 +151,8 @@
   const isMobile = $derived(
     project.type === "flutter" ||
       project.type === "xcode" ||
-      project.type === "android",
+      project.type === "android" ||
+      project.type === "expo",
   );
 
   const mobileDraft = $derived<MobileRunConfig>({
@@ -257,6 +259,7 @@
       await projects.refresh();
       errorBus.push({
         code: "ADVANCED_SAVED",
+        category: "lifecycle",
         whatHappened: `${project.name} updated.`,
         whyItMatters: "Restart the project for changes to take effect.",
         whoCausedIt: "system",
@@ -430,9 +433,17 @@
         class="w-full px-2.5 py-1.5 rounded-md bg-bg border border-border
                focus:border-accent/60 outline-none text-fg font-mono text-xs resize-y"
       ></textarea>
-      <label class="flex items-center gap-2 text-[11px] text-fg-muted">
-        <input type="checkbox" bind:checked={corsCredentialsDraft} class="accent-accent" />
-        Allow credentials (<code class="text-fg-subtle">Access-Control-Allow-Credentials</code>)
+      <label class="flex items-start gap-2 text-[11px] text-fg-muted leading-relaxed">
+        <input
+          type="checkbox"
+          bind:checked={corsCredentialsDraft}
+          class="accent-accent mt-0.5 shrink-0"
+        />
+        <span class="min-w-0">
+          Allow credentials (<code
+            class="text-fg-subtle align-baseline break-all">Access-Control-Allow-Credentials</code
+          >)
+        </span>
       </label>
       <p class="text-[10px] text-fg-subtle">
         One allowed origin per line. Only these origins are echoed back — never a
@@ -682,6 +693,14 @@
       </p>
     </section>
   {/if}
+
+  <!-- Custom tunnel (Pro) — self-saving, independent of the bar below. -->
+  <section class="space-y-2">
+    <div class="flex items-center gap-2">
+      <span class="text-xs uppercase tracking-wide text-fg-subtle">Public tunnel</span>
+    </div>
+    <CustomTunnelField {project} />
+  </section>
 
   {#if anyDirty}
     <div

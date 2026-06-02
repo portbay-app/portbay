@@ -1,14 +1,15 @@
 ---
-title: PortBay Pro — Pricing, Features & How to Unlock
-description: PortBay Pro is pay-what-you-want and perpetual — unlock unlimited projects, encrypted multi-device sync, and early-access features by donating or merging a pull request.
+title: PortBay Pro — Pricing, Features & How to Get Pro
+description: PortBay Pro is $59/yr — unlimited projects, encrypted multi-device sync (up to 2 devices), and early-access features. OSS contributors earn Pro by merging a pull request.
 ---
 
 # PortBay Pro
 
-PortBay is free and open source under Apache-2.0. **Pro is optional.** It is a
-pay-what-you-want, perpetual way to support the project and unlock the hosted
-conveniences — a synced account across your machines, higher project limits, and
-a few power-user features. There is no subscription.
+PortBay is free and open source under AGPL-3.0. **Pro is optional.** It is a
+**$59/yr subscription** that unlocks the hosted conveniences — a synced account
+across your machines, higher project limits, and a few power-user features.
+Pro activates on up to **2 devices**, renews annually, and you can cancel
+anytime.
 
 We're up front about this because the alternative — quietly bolting a paywall
 onto an "open, no-paywall" tool — would be a bait-and-switch. So here's exactly
@@ -23,6 +24,7 @@ and whether your account holds a Pro entitlement.
 |---|---|---|---|
 | Auth | None — fresh install | Signed in (GitHub or email) | Signed in + Pro license |
 | Project cap | **3** | **6** | **Unlimited** |
+| Devices | 1 | 1 | Up to 2 |
 | Multi-device sync | — | — | End-to-end encrypted |
 | Custom ports & CORS | Defaults | Defaults | Fully configurable |
 | Mail server | Catch & view | Catch & view | Full SMTP access |
@@ -69,18 +71,17 @@ acquisition paths (see below). Pro activates on the next license refresh.
 
 ## How to get Pro
 
-Two paths — pay with money or with code. Either one issues a perpetual Pro
-license tied to your account.
+### Buy Pro ($59/yr)
 
-### Donate
+> **Coming soon.** The checkout is not yet live. Join the waitlist at
+> [portbay.app/pro](https://portbay.app/pro) and you'll hear when it opens.
 
-Support the project financially and Pro unlocks automatically.
+Pro is $59/yr, activates on up to 2 devices, renews annually, and you can
+cancel anytime. Once checkout is live:
 
-1. [Donate to PortBay](https://opencollective.com/portbay).
-2. Sign in to PortBay with the account you want Pro on (**Settings → Account**,
-   or the user menu).
-3. Pro activates on your next license refresh. Already donated and don't see it?
-   Open the upgrade sheet and choose **"Already done it? Refresh my license."**
+1. Sign in to PortBay (**Settings → Account**, or the user menu).
+2. Open the upgrade sheet and choose **"Get Pro — $59/yr"**.
+3. Complete checkout in your browser; Pro activates on your next license refresh.
 
 ### Contribute
 
@@ -89,6 +90,22 @@ merged, Pro is issued to your GitHub account automatically.
 
 1. Find an issue or improvement — see [Contributing](/contributing).
 2. Open a pull request; once it's merged, Pro unlocks on your next refresh.
+
+### Tip jar
+
+[Buy Me a Coffee](https://buymeacoffee.com/beiruti) remains open as a voluntary
+tip jar — tips are appreciated but do not grant Pro entitlements.
+
+## Devices
+
+A Pro license activates on **up to 2 devices**. Each device is tracked by a
+stable per-install identifier that persists across app restarts and updates.
+
+- The 2-device cap is enforced server-side at activation time.
+- If you need to free a slot (reinstall on a new machine, decommission an old
+  one), go to **Settings → Sync** and deactivate the device you no longer use.
+- The server returns a clear `device_limit_reached` message and shows the
+  current device list so you can self-manage.
 
 ## The signed entitlement
 
@@ -100,16 +117,17 @@ layer agree on:
 
 ```jsonc
 {
-  "schema": 2,
+  "schema": 3,
   "account":       { "github_id": 12345, "login": "octocat" },
-  "tier":          "pro",      // "free" | "pro"  (never "anonymous")
-  "source":        "donate",   // "signup" | "donate" | "contribute" | "manual" | null
+  "tier":          "pro",           // "free" | "pro"  (never "anonymous")
+  "source":        "subscription",  // "signup" | "contribute" | "manual" | "subscription" | null
   "issued_at":     "2026-05-24T00:00:00.000Z",
   "recheck_after": "2026-06-23T00:00:00.000Z",
   "grace_days":    21,
   "revoked":       false,
   "entitlements": {
     "max_projects":    null,   // null = unlimited (Pro); Free = 6; anon = 3
+    "max_devices":     2,      // Pro = 2; Free = 1; anon = 1
     "sync":            true,
     "custom_port_cors":true,
     "mail":            "full", // "limited" | "full"
@@ -227,7 +245,7 @@ accounts receive priority on bug reports and support requests.
 
 See the [Privacy Policy](https://docs.portbay.app/legal/privacy) and
 [Terms of Service](https://docs.portbay.app/legal/terms). In short: the
-software stays Apache-2.0; the hosted Pro service has its own terms. You can
+software stays AGPL-3.0; the hosted Pro service has its own terms. You can
 export or delete your account data at any time. A lapsed or revoked license
 only blocks new gated actions — your existing projects are never touched.
 

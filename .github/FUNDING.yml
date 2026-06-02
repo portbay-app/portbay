@@ -3,9 +3,8 @@
 # Activation checklist (the button only appears once the targets exist):
 #   - GitHub Sponsors: enable Sponsors for the portbay-app org (or your account)
 #     at https://github.com/sponsors — the handle below must match.
-#   - Open Collective: create the collective at https://opencollective.com/portbay
-#     under a fiscal host; the slug below must match.
+#   - Buy Me a Coffee: the username below must match buymeacoffee.com/<username>.
 # Comment out either line until its target is live to avoid a dead link.
 
 github: [portbay-app]
-open_collective: portbay
+buy_me_a_coffee: beiruti

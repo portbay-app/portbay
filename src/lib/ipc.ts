@@ -21,6 +21,7 @@ import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { errorBus } from "$lib/stores/errors.svelte";
 import { startTimer } from "$lib/perf";
 import { isCommandError, type CommandError } from "$lib/types/error";
+import type { NotificationCategory } from "$lib/notifications/prefs";
 
 export async function safeInvoke<T>(
   command: string,
@@ -66,6 +67,27 @@ export async function invokeQuiet<T>(
  */
 export function normalise(raw: unknown): CommandError {
   if (isCommandError(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    const v = raw as Record<string, unknown>;
+    if (
+      typeof v.code === "string" &&
+      typeof v.whatHappened === "string" &&
+      typeof v.whyItMatters === "string" &&
+      typeof v.whoCausedIt === "string" &&
+      Array.isArray(v.actions)
+    ) {
+      return {
+        code: v.code,
+        whatHappened: v.whatHappened,
+        whyItMatters: v.whyItMatters,
+        whoCausedIt: v.whoCausedIt === "user" ? "user" : "system",
+        category: defaultCategoryForCode(v.code),
+        actions: v.actions as CommandError["actions"],
+        details: typeof v.details === "string" ? v.details : undefined,
+        severity: isSeverity(v.severity) ? v.severity : undefined,
+      };
+    }
+  }
   // Tauri can reject with a string (e.g. unknown-command errors before
   // reaching Rust). Capture it as a generic envelope.
   return {
@@ -73,6 +95,27 @@ export function normalise(raw: unknown): CommandError {
     whatHappened: typeof raw === "string" ? raw : String(raw),
     whyItMatters: "An unexpected error occurred.",
     whoCausedIt: "system",
+    category: "project-error",
     actions: [],
   };
+}
+
+function isSeverity(value: unknown): value is CommandError["severity"] {
+  return value === "success" || value === "info" || value === "warning" || value === "error";
+}
+
+function defaultCategoryForCode(code: string): NotificationCategory {
+  if (/DNS|HOSTS|CERT|CADDY|TUNNEL|DATABASE|MAILPIT|SIDECAR/.test(code)) {
+    return "infrastructure";
+  }
+  if (/AUTH|ACCOUNT|SYNC|LICENSE|ENTITLEMENT|PRO|DEVICE/.test(code)) {
+    return "account-sync";
+  }
+  if (/CRASH|PANIC|TELEMETRY/.test(code)) {
+    return "crash";
+  }
+  if (/UPDATE|UPDATER/.test(code)) {
+    return "updates";
+  }
+  return "project-error";
 }

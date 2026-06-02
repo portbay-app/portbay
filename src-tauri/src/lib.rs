@@ -1,11 +1,20 @@
 // PortBay — Tauri 2 + Rust core.
 
+pub mod agents;
 pub mod auth;
+pub mod avatar;
 pub mod caddy;
 pub mod commands;
+// Proprietary task board. Source injected from `portbay-cloud/desktop-pro` for
+// official builds; absent from the public OSS tree (no `tasks` feature).
+#[cfg(feature = "tasks")]
+pub mod context;
 pub mod databases;
+pub mod db_approval;
+pub mod db_client;
 pub mod dnsmasq;
 pub mod dock_icon;
+pub mod doctor;
 pub mod domain;
 pub mod entitlements;
 pub mod error;
@@ -13,10 +22,13 @@ pub mod flags;
 pub mod hosts;
 pub mod hosts_helper;
 pub mod import;
+pub mod install_proxy;
 pub mod mailpit;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod mkcert;
+pub mod mobile;
+pub mod notifications;
 pub mod php;
 pub mod port_holder;
 pub mod portfile;
@@ -29,7 +41,9 @@ pub mod registry;
 pub mod runtimes;
 pub mod sandbox;
 pub mod sidecar_probe;
+pub mod sidecar_reclaim;
 pub mod smoke;
+pub mod ssh;
 pub mod state;
 pub mod sync;
 pub mod telemetry;
@@ -59,6 +73,11 @@ const DEFAULT_DOMAIN_SUFFIX: &str = "portbay.test";
 /// dirty-notify channel from CRUD commands; this is the fallback that
 /// catches drift from CLI writes to the same registry file.
 const RECONCILE_SAFETY_PERIOD: Duration = Duration::from_secs(30);
+
+/// How often the SSH reconnect supervisor scans for dropped tunnels. Cheap when
+/// idle (a mutex + per-tunnel liveness probe); a dropped auto-reconnect tunnel
+/// becomes eligible for its first backed-off retry within one scan.
+const SSH_SUPERVISOR_PERIOD: Duration = Duration::from_secs(2);
 
 /// Install the global `tracing` subscriber. Idempotent — repeated calls
 /// (e.g. from tests) silently no-op via `try_init`. Filter follows the
@@ -143,12 +162,37 @@ pub fn run() {
     // process-compose) and before runtime detection.
     crate::runtimes::env::bootstrap_user_env();
 
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    // Single-instance guard MUST be the first plugin registered (Tauri
+    // requirement). When a user launches PortBay while a copy is already
+    // running, the second process invokes this callback in the *existing*
+    // instance and then exits — so it never reaches `setup` and never spawns a
+    // second sidecar stack squatting the canonical ports. We focus the live
+    // window so the relaunch feels like "bring to front", the standard desktop
+    // UX. (macOS's own Reopen event does the same on Dock-icon clicks; this
+    // covers `open -n`, the CLI, and `tauri dev`.)
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Native file-drag-out for the permission sheet's drag-to-grant gesture.
+        .plugin(tauri_plugin_drag::init())
         .setup(|app| {
             // Box-the-error helper — most fallible setup steps just
             // need their error stringified for Tauri's setup signature.
@@ -255,6 +299,44 @@ pub fn run() {
             // at boot, so a stale file from a crashed prior run must not make the
             // CLI / MCP server report phantom tunnels.
             state.persist_tunnel_state();
+            state.persist_ssh_tunnel_state();
+
+            // Recover-on-boot for the three sidecars spawned *directly* as app
+            // children — caddy, dnsmasq, mailpit. Unlike process-compose (swept
+            // above) these had no boot reclamation, so a crash / `tauri dev`
+            // rebuild left them orphaned to launchd, still holding :443 / the DNS
+            // port / the SMTP port. The fresh stack then couldn't bind :443 and
+            // silently fell back to an alternate port, serving no TLS for the
+            // canonical host (the ERR_SSL_PROTOCOL_ERROR incident). Reaping them
+            // here — before we boot our own — frees the canonical ports so the
+            // fresh Caddy binds :443. `All` mode is safe: none of ours is up yet,
+            // so any match is by definition stale. For Caddy the reclaim also
+            // waits for :443 to actually release before returning, closing the
+            // kill→rebind race. Foreign caddy/dnsmasq/mailpit (ServBay, Homebrew)
+            // never match — the signature keys on PortBay's own config paths.
+            //
+            // php-fpm is reaped here too — it's a process-compose child, so the
+            // stale-PC sweep above orphans it (PC gets SIGKILLed before it can
+            // drain a 5 s FPM shutdown), and an orphaned FPM master keeps its
+            // unix socket bound. The fresh build's php-fpm then fails to start
+            // ("Another FPM instance seems to already listen…") and surfaces as a
+            // spurious "php-fpm crashed" notification. Reaping it now — after the
+            // PC sweep, before we boot our own PC — frees the socket.
+            for kind in [
+                sidecar_reclaim::SidecarKind::Caddy,
+                sidecar_reclaim::SidecarKind::Dnsmasq,
+                sidecar_reclaim::SidecarKind::Mailpit,
+                sidecar_reclaim::SidecarKind::PhpFpm,
+            ] {
+                sidecar_reclaim::reclaim_stale(kind, sidecar_reclaim::SweepMode::All);
+            }
+
+            // Advisory pidfile so the CLI / `portbay doctor` can tell the app is
+            // live (and reclaim only orphans, never the live app's children).
+            // The single-instance plugin is the real double-spawn guard; this is
+            // just out-of-process visibility. Removed on graceful shutdown;
+            // `app_running` re-checks PID liveness so a crash-leftover is ignored.
+            sidecar_reclaim::write_pidfile();
 
             state.boot_pc(app.handle(), &yaml_path).map_err(boxed)?;
 
@@ -305,19 +387,71 @@ pub fn run() {
             state_ref.reconciler.mark_dirty();
             reconciler::spawn_reconcile_loop(app.handle().clone(), RECONCILE_SAFETY_PERIOD);
 
+            // Background SSH reconnect supervisor — restores dropped auto-reconnect
+            // tunnels with exponential backoff regardless of whether the SSH page
+            // is open, and never blocks an async worker (the reconnect spawn runs
+            // on the blocking pool).
+            commands::ssh_tunnels::spawn_ssh_supervisor(
+                app.handle().clone(),
+                SSH_SUPERVISOR_PERIOD,
+            );
+
             // Spawn the status poller + metrics poller. Both run for the
             // lifetime of the app.
             commands::events::spawn_status_poller(app.handle().clone());
             commands::metrics::spawn_metrics_poller(app.handle().clone());
+            // Watch every project's audit log for new agent activity (comments,
+            // blocks, warnings) and surface it to the topbar bell + desktop.
+            // Board-only: the bell shell ships in every build, but the scanner
+            // that feeds it is injected with the `tasks` feature.
+            #[cfg(feature = "tasks")]
+            notifications::spawn_scanner(app.handle().clone());
 
             // Tail Caddy's JSON access log → `portbay://request` events for the
             // HTTP request inspector. Idle until Caddy writes its first entry.
             commands::http_inspector::spawn_request_tailer(app.handle().clone());
 
+            // Reconcile per-project task-board leases on boot: a board dispatched
+            // an agent, then the app (or laptop) went down. Any lease whose
+            // process is gone / heartbeat expired is reclaimed (card → To Do,
+            // reason logged) so a crashed run never wedges the board (edge cases
+            // #2/#11). Best-effort; never blocks startup. Board-only.
+            #[cfg(feature = "tasks")]
+            {
+                let app_h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let st: tauri::State<AppState> = app_h.state();
+                    if let Ok(reg) = store::load_or_default(&st.registry_path, &st.domain_suffix) {
+                        for project in reg.list_projects() {
+                            let _ = crate::context::automation::reconcile(project);
+                        }
+                    }
+                });
+            }
+
             // Background build-artifact auto-clean. No-op unless the user opted
             // into a weekly/monthly cadence in Settings; the cadence gate lives
             // inside the scheduler.
             commands::artifacts::spawn_auto_clean_scheduler(app.handle().clone());
+
+            // Reap idle SSH sessions. Cached exec/SFTP sessions keep a host
+            // authenticated so navigating the workspace doesn't re-prompt; this
+            // drops any idle longer than 15 minutes (next action re-auths) and
+            // any whose handle has already closed, so a host never holds an open
+            // connection forever.
+            {
+                let app_h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                    loop {
+                        tick.tick().await;
+                        let st: tauri::State<AppState> = app_h.state();
+                        st.exec.lock().await.reap_idle(MAX_IDLE);
+                        st.sftp.lock().await.reap_idle(MAX_IDLE);
+                    }
+                });
+            }
 
             // Reopen previously-running projects, if the user enabled it. Runs in
             // the background: waits for the PC daemon to accept commands, starts
@@ -477,10 +611,12 @@ pub fn run() {
             commands::projects::list_projects,
             commands::projects::get_project,
             commands::projects::add_project,
+            commands::projects::provision_python_env,
             commands::projects::clone_git_project_sandboxed,
             commands::projects::update_project,
             commands::projects::remove_project,
             commands::projects::detect_project,
+            commands::projects::probe_readiness,
             commands::projects::detect_workspace_apps,
             commands::projects::validate_project_folder,
             commands::projects::project_icon,
@@ -491,12 +627,16 @@ pub fn run() {
             commands::lifecycle::restart_project,
             commands::lifecycle::promote_project_to_local,
             commands::lifecycle::sandbox_violations,
+            commands::lifecycle::install_project_sandboxed,
             commands::lifecycle::stop_all,
             commands::lifecycle::open_project,
+            commands::lifecycle::reveal_in_finder,
             commands::lifecycle::preview_port_conflict,
             commands::integrations::installed_dev_tools,
             commands::integrations::open_in_ide,
             commands::integrations::open_privacy_settings,
+            commands::integrations::permission_drag_payload,
+            commands::integrations::relaunch_app,
             commands::integrations::resolve_mcp_binary_path,
             commands::sidecars::sidecar_status,
             commands::sidecars::pc_alive,
@@ -541,6 +681,57 @@ pub fn run() {
             commands::tunnel::stop_tunnel,
             commands::tunnel::list_tunnels,
             commands::tunnel::tunnel_status,
+            commands::tunnel::list_named_tunnels,
+            commands::ssh_tunnels::ssh_tunnel_list,
+            commands::ssh_tunnels::ssh_tunnel_save,
+            commands::ssh_tunnels::ssh_tunnel_delete,
+            commands::ssh_tunnels::ssh_tunnel_start,
+            commands::ssh_tunnels::ssh_tunnel_stop,
+            commands::ssh_tunnels::ssh_tunnel_test,
+            commands::ssh_tunnels::ssh_tunnel_open_database,
+            commands::sftp::sftp_connect,
+            commands::sftp::sftp_home_dir,
+            commands::sftp::sftp_list_dir,
+            commands::sftp::sftp_stat,
+            commands::sftp::sftp_mkdir,
+            commands::sftp::sftp_rename,
+            commands::sftp::sftp_remove_file,
+            commands::sftp::sftp_remove_dir,
+            commands::sftp::sftp_chmod,
+            commands::sftp::sftp_read_text,
+            commands::sftp::sftp_read_preview,
+            commands::sftp::sftp_write_text,
+            commands::sftp::sftp_upload,
+            commands::sftp::sftp_download,
+            commands::sftp::sftp_transfer,
+            commands::sftp::sftp_disconnect,
+            commands::ssh_exec::ssh_exec_run,
+            commands::ssh_exec::ssh_deploy_run,
+            commands::ssh_pty::ssh_pty_open,
+            commands::ssh_pty::ssh_pty_input,
+            commands::ssh_pty::ssh_pty_resize,
+            commands::ssh_pty::ssh_pty_close,
+            commands::ssh_agent::ssh_agent_open,
+            commands::ssh_agent::ssh_agent_chat,
+            commands::ssh_agent::ssh_agent_run,
+            commands::ssh_agent::ssh_agent_close,
+            commands::ssh_connections::ssh_connections_list,
+            commands::ssh_connections::ssh_connection_save,
+            commands::ssh_connections::ssh_connection_delete,
+            commands::ssh_connections::ssh_connection_detect_os,
+            commands::ssh_connections::ssh_connection_probe,
+            commands::ssh_connections::ssh_known_host_remove,
+            crate::ssh::interaction::ssh_interaction_respond,
+            crate::ssh::interaction::ssh_interaction_cancel,
+            commands::ssh_connections::ssh_connection_touch,
+            commands::ssh_connections::ssh_set_credential,
+            commands::ssh_connections::ssh_clear_credential,
+            commands::ssh_connections::ssh_has_stored_credential,
+            commands::ssh_connections::ssh_forget_credentials,
+            commands::ssh_connections::ssh_config_import,
+            commands::ssh_identities::ssh_identities_list,
+            commands::ssh_identities::ssh_identity_save,
+            commands::ssh_identities::ssh_identity_delete,
             commands::onboarding::onboarding_status,
             commands::onboarding::mark_onboarded,
             commands::onboarding::reset_onboarding,
@@ -553,20 +744,32 @@ pub fn run() {
             commands::groups::stop_group,
             commands::groups::restart_group,
             commands::projects::set_xdebug_mode,
+            commands::projects::project_get_deploy,
+            commands::projects::project_set_deploy,
+            commands::deploy::project_deploy_run,
+            commands::localfs::local_list_dir,
+            commands::localfs::local_stat,
             commands::metrics::system_metrics,
             commands::preferences::get_preferences,
             commands::preferences::set_preferences,
+            commands::preferences::get_notification_prefs,
+            commands::preferences::set_notification_prefs,
             commands::preferences::get_domain_settings,
             commands::preferences::update_domain_suffix,
             commands::preferences::mark_close_toast_seen,
             commands::entitlements::get_entitlement,
             commands::entitlements::refresh_entitlement,
             commands::entitlements::clear_entitlement,
+            commands::entitlements::pro_checkout_url,
             commands::auth::begin_login,
             commands::auth::poll_login,
             commands::auth::cancel_login,
             commands::auth::logout,
             commands::auth::account_resync,
+            commands::auth::get_account_avatar,
+            commands::profile::update_display_name,
+            commands::profile::upload_avatar,
+            commands::profile::remove_avatar,
             commands::sync::sync_state,
             commands::sync::enable_sync,
             commands::sync::get_recovery_key,
@@ -574,6 +777,7 @@ pub fn run() {
             commands::sync::disable_sync,
             commands::sync::sync_push,
             commands::sync::sync_pull,
+            commands::sync::activate_device,
             commands::sync::list_sync_devices,
             commands::sync::revoke_sync_device,
             commands::runtimes::list_runtimes,
@@ -585,6 +789,7 @@ pub fn run() {
             commands::runtimes::install_runtime,
             commands::databases::list_database_engines,
             commands::databases::install_database_engine,
+            commands::databases::remove_managed_engine,
             commands::databases::list_database_instances,
             commands::databases::create_database_instance,
             commands::databases::remove_database_instance,
@@ -595,6 +800,22 @@ pub fn run() {
             commands::databases::unlink_database_from_project,
             commands::databases::set_database_auto_start,
             commands::databases::open_database_client,
+            commands::databases::list_instance_databases,
+            commands::databases::create_instance_database,
+            commands::databases::drop_instance_database,
+            commands::databases::provision_project_database,
+            commands::databases::list_database_backups,
+            commands::databases::backup_database_instance,
+            commands::databases::restore_database_backup,
+            commands::databases::delete_database_backup,
+            commands::databases::database_client_schema,
+            commands::databases::database_client_table_rows,
+            commands::databases::database_client_query,
+            commands::databases::database_client_explain,
+            commands::databases::database_client_preview_writes,
+            commands::databases::database_client_apply_writes,
+            commands::databases::list_pending_db_writes,
+            commands::databases::resolve_db_write,
             commands::telemetry::telemetry_settings,
             commands::telemetry::list_crash_reports,
             commands::telemetry::read_crash_report,
@@ -604,6 +825,130 @@ pub fn run() {
             commands::telemetry::record_telemetry_event,
             commands::updater::check_for_update,
             commands::updater::install_update,
+            // Per-project task board (Project Context & Task Authority).
+            // Board-only handlers — injected with the `tasks` feature; absent
+            // from the public OSS build. `generate_handler!` honours the per-
+            // entry `#[cfg]`, so the public build registers none of these.
+            #[cfg(feature = "tasks")]
+            commands::tasks::tasks_list,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_get,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_card_path,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_config_get,
+            #[cfg(feature = "tasks")]
+            commands::tasks::agents_installed,
+            #[cfg(feature = "tasks")]
+            commands::tasks::set_agent_path,
+            #[cfg(feature = "tasks")]
+            commands::tasks::clear_agent_path,
+            #[cfg(feature = "tasks")]
+            commands::tasks::set_agent_launch_mode,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_audit,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_cloud_sync,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_templates,
+            #[cfg(feature = "tasks")]
+            commands::tasks::scratchpad_get,
+            #[cfg(feature = "tasks")]
+            commands::tasks::scratchpad_set,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_capture,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_promote,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_create,
+            #[cfg(feature = "tasks")]
+            commands::tasks::fetch_link_metadata,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_update,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_move,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_reorder,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_reorder_many,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_delete,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_check_item,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_comment,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_checklist_add,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_archive,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_subscribe,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_attach,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_detach,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_attachment_path,
+            #[cfg(feature = "tasks")]
+            commands::tasks::open_attachment,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_attachment_data_url,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_start_dictation,
+            #[cfg(feature = "tasks")]
+            commands::tasks::open_accessibility_settings,
+            #[cfg(feature = "tasks")]
+            commands::tasks::card_activity,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_run_log,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_branch,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_duplicate,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_start_with_agent,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_comment_dispatch,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_comment_edit,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_comment_delete,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_stop_agent,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_reconcile,
+            #[cfg(feature = "tasks")]
+            commands::tasks::board_config_set,
+            #[cfg(feature = "tasks")]
+            commands::tasks::context_sync,
+            #[cfg(feature = "tasks")]
+            commands::tasks::context_show,
+            #[cfg(feature = "tasks")]
+            commands::tasks::handoff_show,
+            #[cfg(feature = "tasks")]
+            commands::tasks::handoff_update,
+            #[cfg(feature = "tasks")]
+            commands::tasks::handoff_replace,
+            #[cfg(feature = "tasks")]
+            commands::tasks::handoff_set_max_chars,
+            #[cfg(feature = "tasks")]
+            commands::tasks::learnings_show,
+            #[cfg(feature = "tasks")]
+            commands::tasks::learnings_replace,
+            #[cfg(feature = "tasks")]
+            commands::tasks::learnings_set_max_chars,
+            #[cfg(feature = "tasks")]
+            commands::tasks::tasks_watch,
+            #[cfg(feature = "tasks")]
+            commands::tasks::tasks_unwatch,
+            #[cfg(feature = "tasks")]
+            commands::tasks::project_mcp_status,
+            #[cfg(feature = "tasks")]
+            commands::tasks::setup_project_mcp,
+            commands::notifications::notifications_list,
+            commands::notifications::notifications_mark_read,
+            commands::notifications::notifications_mark_all_read,
+            commands::notifications::notifications_clear,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -139,20 +139,33 @@ fn mkcert_status(state: &AppState) -> SidecarStatus {
         };
     };
 
-    if mkcert.is_ca_installed() {
-        SidecarStatus {
+    match mkcert.ca_status() {
+        Ok(status) => match status.state {
+            crate::mkcert::CaTrustState::Trusted => SidecarStatus {
+                name: "mkcert",
+                status: SidecarState::Running,
+                detail: Some("CA trusted in system keychain".into()),
+                last_error: None,
+            },
+            crate::mkcert::CaTrustState::Missing => SidecarStatus {
+                name: "mkcert",
+                status: SidecarState::Stopped,
+                detail: Some("CA not installed — click Install local CA".into()),
+                last_error: None,
+            },
+            crate::mkcert::CaTrustState::Untrusted => SidecarStatus {
+                name: "mkcert",
+                status: SidecarState::Unreachable,
+                detail: Some("CA exists but is not trusted — reinstall local CA".into()),
+                last_error: None,
+            },
+        },
+        Err(e) => SidecarStatus {
             name: "mkcert",
-            status: SidecarState::Running,
-            detail: Some("CA installed in system keychain".into()),
-            last_error: None,
-        }
-    } else {
-        SidecarStatus {
-            name: "mkcert",
-            status: SidecarState::Stopped,
-            detail: Some("CA not installed — click Install local CA".into()),
-            last_error: None,
-        }
+            status: SidecarState::Unreachable,
+            detail: Some("CA trust check failed".into()),
+            last_error: Some(e.to_string()),
+        },
     }
 }
 
@@ -184,7 +197,9 @@ fn dnsmasq_status(state: &AppState) -> SidecarStatus {
         SidecarStatus {
             name: "dnsmasq",
             status: SidecarState::NotInstalled,
-            detail: Some("install via `brew install dnsmasq` or bundle a sidecar".into()),
+            detail: Some(
+                "install `dnsmasq` with the OS package manager or bundle a sidecar".into(),
+            ),
             last_error: None,
         }
     }

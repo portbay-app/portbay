@@ -168,6 +168,8 @@ mod tests {
             env: BTreeMap::new(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: None,
             php_version: None,
@@ -176,6 +178,8 @@ mod tests {
             runtime: None,
             workspace: None,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 
@@ -242,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_v1_file_migrates_backs_up_and_rewrites_as_v2() {
+    fn loading_a_v1_file_migrates_backs_up_and_rewrites_at_current_version() {
         use crate::registry::types::ProjectId;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -276,10 +280,10 @@ mod tests {
             serde_json::from_slice(&fs::read(&backup).unwrap()).unwrap();
         assert_eq!(backed["version"], 1);
 
-        // The live file is rewritten in v2 shape, so a second load is a no-op
-        // (no migration, identical result).
+        // The live file is rewritten at the current schema version, so a second
+        // load is a no-op (no migration, identical result).
         let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(on_disk["version"], 2);
+        assert_eq!(on_disk["version"], SUPPORTED_VERSION);
         let reg2 = load_from(&path).unwrap();
         assert_eq!(reg2, reg);
     }

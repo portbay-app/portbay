@@ -7,6 +7,7 @@ export { default as DashboardCard } from "./DashboardCard.svelte";
 export { default as LighthouseLogo } from "./LighthouseLogo.svelte";
 export { default as Sparkline } from "./Sparkline.svelte";
 export { default as StackIcon } from "./StackIcon.svelte";
+export { default as HostMark } from "./HostMark.svelte";
 export { default as ProjectAvatar } from "./ProjectAvatar.svelte";
 export { default as Toggle } from "./Toggle.svelte";
 export { default as Segmented } from "./Segmented.svelte";

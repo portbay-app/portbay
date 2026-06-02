@@ -55,7 +55,7 @@ export APPLE_TEAM_ID="V2CYH6HZT8"
 ./scripts/fetch-mailpit.sh
 ./scripts/fetch-cloudflared.sh
 pnpm install
-pnpm tauri build --target aarch64-apple-darwin
+pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
 ```
 
 Expected output:

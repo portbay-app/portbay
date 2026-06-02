@@ -105,12 +105,16 @@ pub struct MatchClause {
 #[derive(Debug, Clone, Serialize)]
 pub struct TlsApp {
     pub certificates: TlsCertificates,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automation: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TlsCertificates {
     #[serde(default)]
     pub load_files: Vec<TlsCertFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automate: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +191,7 @@ mod tests {
                 },
                 tls: TlsApp {
                     certificates: TlsCertificates::default(),
+                    automation: None,
                 },
             },
             logging: None,

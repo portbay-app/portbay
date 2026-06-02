@@ -173,8 +173,8 @@
     ellipsis menu is `position: fixed` and needs to escape the card
     bounds. ProjectRowMenu handles its own layering.
   -->
-  <div class="bg-surface border border-border rounded-2xl">
-    <table class="w-full">
+  <div class="bg-surface border border-border rounded-2xl overflow-x-auto">
+    <table class="w-full min-w-[640px]">
       <thead>
         <tr
           class="text-[11px] uppercase tracking-wide text-fg-subtle text-left

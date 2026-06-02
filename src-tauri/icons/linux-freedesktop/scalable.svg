@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="PortBay">
+  <rect width="1024" height="1024" rx="220" fill="#f8fafc"/>
+  <path d="M213 624h598l-70 118c-22 37-61 60-104 60H386c-43 0-83-23-105-60z" fill="#2563eb"/>
+  <path d="M304 318h416v256H304z" fill="#0f172a"/>
+  <path d="M360 374h304v144H360z" fill="#e0f2fe"/>
+  <path d="M248 574h528l35 50H213z" fill="#38bdf8"/>
+  <path d="M428 222h168v96H428z" fill="#2563eb"/>
+  <path d="M472 142h80v80h-80z" fill="#0f172a"/>
+</svg>

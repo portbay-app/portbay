@@ -9,6 +9,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::commands::dto::{StopAllReport, StopAllResultEntry};
+use crate::commands::events::emit_proc_log;
 use crate::commands::projects::load_registry;
 use crate::error::{AppError, AppResult};
 use crate::port_holder;
@@ -28,12 +29,102 @@ fn default_true() -> bool {
     true
 }
 
+/// Result of a one-shot sandboxed dependency install. `output` is the tail of the
+/// combined stdout+stderr (capped), and `violations` are the sandbox-denial lines
+/// extracted from it so the UI can show what the profile blocked during install.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxInstallReport {
+    /// The plain install command that was run (e.g. `pnpm install`), not the
+    /// sandbox wrapper.
+    pub command: String,
+    pub ok: bool,
+    pub exit_code: Option<i32>,
+    pub output: String,
+    /// Seatbelt file/exec denials extracted from the install output.
+    pub violations: Vec<String>,
+    /// Non-registry hosts the install tried (and was refused by the proxy) to
+    /// reach — the network side of "what the sandbox blocked."
+    pub blocked_hosts: Vec<String>,
+}
+
+/// Keep only the last `max_bytes` of `s`, prefixing an elision marker when
+/// truncated, on a char boundary so the string stays valid UTF-8.
+fn tail(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("… (truncated)\n{}", &s[start..])
+}
+
+/// Start every database instance linked to `project_id` so the app can connect
+/// on boot. File-based engines (SQLite) have no daemon and are always
+/// available, so they're skipped. Best-effort: a database that fails to start
+/// is logged but doesn't block the project (the app surfaces the connection
+/// error itself, which is more actionable than a blocked Play).
+async fn start_linked_databases(app: &AppHandle, state: &State<'_, AppState>, project_id: &str) {
+    let pid = ProjectId::new(project_id);
+    let linked: Vec<String> = {
+        let Ok(registry) = load_registry(state) else {
+            return;
+        };
+        registry
+            .list_databases()
+            .iter()
+            .filter(|inst| {
+                !inst.engine.is_file_based() && inst.linked_projects.iter().any(|p| p == &pid)
+            })
+            .map(|inst| inst.process_id())
+            .collect()
+    };
+    if linked.is_empty() {
+        return;
+    }
+    // Reconcile so the `db-<id>` processes exist in PC's loaded YAML before we
+    // start them (a stale reconcile would otherwise 404 the start).
+    let _ = state.reconciler.tick(app).await;
+    let Ok(client) = state.pc_client() else {
+        return;
+    };
+    for process_id in linked {
+        if let Err(e) = client.start(&process_id).await {
+            tracing::warn!(
+                target: "lifecycle",
+                "linked database `{process_id}` for project `{project_id}` failed to start: {e}"
+            );
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn start_project(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
+    // Immediate, terminal-style feedback in the log view: name the project and
+    // echo the command the moment Play is pressed. Without this the panel sits
+    // blank until the child emits its first line — which can be many seconds
+    // for a dev server that compiles before printing — making PortBay feel
+    // laggy next to a terminal that echoes `$ pnpm dev` instantly. Live-only
+    // narration; emitted before any of the slower start work below.
+    if let Ok(reg) = load_registry(&state) {
+        if let Some(p) = reg.get_project(&ProjectId::new(&id)) {
+            emit_proc_log(&app, &id, "system", format!("▶ Starting {}…", p.name));
+            if let Some(cmd) = p.start_command.as_deref().filter(|c| !c.trim().is_empty()) {
+                emit_proc_log(&app, &id, "system", format!("$ {cmd}"));
+            }
+        }
+    }
+
+    // Bring up any database the project is linked to first, so the app can
+    // connect the moment its own process starts.
+    start_linked_databases(&app, &state, &id).await;
+
     // Pure Caddy-served projects have no Process Compose process. Generated
     // Nginx/Apache PHP backends do, but their process id is derived.
     if let Some(process_id) = project_pc_process_id(&state, &id)? {
@@ -48,6 +139,17 @@ pub async fn start_project(
         // let Process Compose try, fail mysteriously, and surface a bare
         // "exited with code 1" — the cause the user reported.
         if let Some(holder) = preflight_port(&state, &id)? {
+            // Surface *why* the start was refused in the log itself, so the log
+            // view stays the single source of truth rather than only a toast.
+            emit_proc_log(
+                &app,
+                &id,
+                "error",
+                format!(
+                    "✗ Port {} is already in use by {} — start aborted.",
+                    holder.0, holder.1
+                ),
+            );
             return Err(AppError::PortConflict {
                 port: holder.0,
                 holder: holder.1,
@@ -60,6 +162,12 @@ pub async fn start_project(
         // `reopen_previous_projects` can restart it next launch.
         session_add(&state, &id);
     } else if project_is_static_served(&state, &id)? {
+        emit_proc_log(
+            &app,
+            &id,
+            "system",
+            "Serving static files via Caddy — no process to run.",
+        );
         // A static site has no process — Caddy serves its files directly. Mark
         // it "started" in the session; the reconcile tick below then publishes
         // its route (it's no longer suppressed) and the status poller reports
@@ -184,6 +292,162 @@ pub async fn sandbox_violations(
     let client = state.pc_client()?;
     let lines = client.logs(&id, 0, limit.unwrap_or(250)).await?;
     Ok(crate::sandbox::violation_lines(&lines))
+}
+
+/// `install_project_sandboxed(id)` — run the project's dependency install under
+/// the sandbox with the network phase split: the install gets `Outbound` egress
+/// (package managers need their registry) while the project's *run* policy is
+/// untouched and stays as restrictive as the user set it. This is the right
+/// place to contain a supply-chain attack — `postinstall` / Composer scripts run
+/// at install time, confined here so they can fetch dependencies but can't read
+/// your credentials, keychains, or other projects' files.
+///
+/// One-shot: it runs to completion and returns the output, rather than joining
+/// the supervised Process Compose lifecycle. macOS only (Seatbelt), same as
+/// [`start_project_sandboxed`].
+///
+/// Egress is pinned to package registries: the install runs `loopback_only` and
+/// reaches the network only through [`crate::install_proxy`], an allowlisting
+/// CONNECT proxy on `127.0.0.1`. A Seatbelt profile can't express domain pinning
+/// (it filters by IP/port, not DNS name), so the proxy enforces it and reports
+/// any non-registry host the install was refused as `blocked_hosts`.
+#[tauri::command]
+pub async fn install_project_sandboxed(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<SandboxInstallReport> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (&state, &id);
+        Err(AppError::Unsupported {
+            feature: "Sandboxed install",
+            reason: "Sandboxed install is only available on macOS.",
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let registry = load_registry(&state)?;
+        let project = registry
+            .get_project(&ProjectId::new(id.clone()))
+            .ok_or_else(|| AppError::NotFound(id.clone()))?
+            .clone();
+
+        let Some(install_cmd) = crate::sandbox::install_command(&project) else {
+            return Err(AppError::BadInput(
+                "No dependency manifest found to install — expected a package.json or composer.json."
+                    .into(),
+            ));
+        };
+
+        let data_dir = state
+            .logs_dir
+            .parent()
+            .unwrap_or(&state.logs_dir)
+            .to_path_buf();
+
+        // Fail closed: prove macOS accepts the install profile before running.
+        crate::sandbox::preflight_install(&data_dir, &project)
+            .map_err(|e| AppError::Internal(format!("sandbox could not be activated: {e}")))?;
+        // Give the (ephemeral) cache scratch a clean dir if ephemeral mode is on.
+        crate::sandbox::reset_ephemeral_state(&data_dir, &project)
+            .map_err(|e| AppError::Internal(format!("sandbox reset failed: {e}")))?;
+
+        // Registry-pinning proxy: install runs loopback-only and reaches the
+        // network only through this allowlisting CONNECT proxy on 127.0.0.1, so
+        // a malicious postinstall can fetch dependencies but can't phone home to
+        // an arbitrary host.
+        let proxy = crate::install_proxy::RunningProxy::start()
+            .await
+            .map_err(|e| AppError::Internal(format!("could not start registry proxy: {e}")))?;
+
+        // For node-type projects, put the managed Node bin dir on PATH during
+        // install so PortBay's own `corepack` resolves, enable the pnpm/yarn
+        // shims into the per-project corepack dir (our managed Node ships no
+        // `pnpm` shim), and run the install through them so the pinned PM is
+        // materialized into COREPACK_HOME for the offline run phase.
+        let (node_env, effective_install_cmd) = {
+            use crate::registry::ProjectType;
+            let is_node = matches!(
+                project.kind,
+                ProjectType::Next | ProjectType::Vite | ProjectType::Node
+            );
+            if is_node {
+                let rts = &registry.runtimes;
+                let node_bin = project
+                    .runtime
+                    .as_ref()
+                    .and_then(|rt| crate::runtimes::resolve_binary(rt, rts))
+                    .or_else(|| crate::runtimes::resolve_default_node(rts));
+                let bin_dir = node_bin.as_deref().and_then(|b| b.parent());
+                let corepack_home = data_dir
+                    .join("sandbox")
+                    .join(project.id.as_str())
+                    .join("corepack");
+                let env = crate::sandbox::node_install_env_prefix(bin_dir, Some(&corepack_home));
+                // Always materialize the pnpm/yarn shims into the per-project
+                // corepack home and route the install through them, so the
+                // pinned PM lands in COREPACK_HOME (writable in the sandbox) for
+                // the offline run phase — whether on a managed Node (shims lead
+                // a minimal PATH) or the system Node (shims enabled via the
+                // login-shell corepack, COREPACK_HOME steered at the managed
+                // dir). `corepack enable` only creates symlinks (no network).
+                let cmd = format!(
+                    "{}{}",
+                    crate::sandbox::corepack_enable_preamble(&corepack_home),
+                    install_cmd
+                );
+                (env, cmd)
+            } else {
+                (String::new(), install_cmd.clone())
+            }
+        };
+        let wrapped = crate::sandbox::wrap_install_command(
+            &data_dir,
+            &project,
+            &effective_install_cmd,
+            &proxy.proxy_url(),
+            &node_env,
+        );
+        let workdir = project.path.clone();
+
+        // Installs can legitimately take minutes; cap at 15 to avoid a wedged
+        // child blocking forever. The command runs through `/bin/sh -c` because
+        // the wrapper is a shell line (env prefix + `sandbox-exec …`).
+        let run = tokio::time::timeout(
+            std::time::Duration::from_secs(900),
+            tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&wrapped)
+                .current_dir(&workdir)
+                .output(),
+        )
+        .await;
+
+        // Always tear the proxy down (and harvest refused hosts), even on
+        // timeout/spawn error, so it never outlives the install.
+        let blocked_hosts = proxy.stop();
+
+        let output = run
+            .map_err(|_| AppError::Internal("sandboxed install timed out after 15 minutes".into()))?
+            .map_err(|e| AppError::Internal(format!("could not run install: {e}")))?;
+
+        let mut combined = String::new();
+        combined.push_str(&String::from_utf8_lossy(&output.stdout));
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        let violations = crate::sandbox::violation_lines(
+            &combined.lines().map(str::to_string).collect::<Vec<_>>(),
+        );
+
+        Ok(SandboxInstallReport {
+            command: install_cmd,
+            ok: output.status.success(),
+            exit_code: output.status.code(),
+            output: tail(&combined, 16_384),
+            violations,
+            blocked_hosts,
+        })
+    }
 }
 
 /// `force_start_project(id)` — the user's explicit "stop whatever's on the port
@@ -434,7 +698,12 @@ async fn reap_owned_orphans(state: &State<'_, AppState>, id: &str) -> u32 {
 const STOP_REAP_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
 
 #[tauri::command]
-pub async fn stop_project(state: State<'_, AppState>, id: String) -> AppResult<()> {
+pub async fn stop_project(app: AppHandle, state: State<'_, AppState>, id: String) -> AppResult<()> {
+    if let Ok(reg) = load_registry(&state) {
+        if let Some(p) = reg.get_project(&ProjectId::new(&id)) {
+            emit_proc_log(&app, &id, "system", format!("■ Stopping {}…", p.name));
+        }
+    }
     // Stop any tunnel sharing this project first: a cloudflared tunnel pointed
     // at a now-stopped project would otherwise stay "running" in the UI while
     // every visitor gets an error. Best-effort — NotRunning is fine. Done before
@@ -481,6 +750,11 @@ pub async fn restart_project(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
+    if let Ok(reg) = load_registry(&state) {
+        if let Some(p) = reg.get_project(&ProjectId::new(&id)) {
+            emit_proc_log(&app, &id, "system", format!("↻ Restarting {}…", p.name));
+        }
+    }
     // Static / pure-Caddy projects have nothing to restart in PC; just
     // re-assert routing so the file_server route is fresh.
     let Some(process_id) = project_pc_process_id(&state, &id)? else {
@@ -500,6 +774,12 @@ pub async fn restart_project(
     // surface the same PortConflict envelope start_project uses.
     tokio::time::sleep(std::time::Duration::from_millis(750)).await;
     if let Some((port, holder)) = preflight_port(&state, &id)? {
+        emit_proc_log(
+            &app,
+            &id,
+            "error",
+            format!("✗ Port {port} is already in use by {holder} — restart aborted."),
+        );
         return Err(AppError::PortConflict { port, holder });
     }
 
@@ -687,6 +967,38 @@ pub async fn open_project(app: AppHandle, state: State<'_, AppState>, id: String
     Ok(())
 }
 
+/// Reveal a filesystem path in the OS file manager (Finder on macOS), robust to
+/// paths that don't exist yet.
+///
+/// The opener plugin's `reveal_item_in_dir` canonicalises the path first and
+/// errors if it's missing — so "Reveal data folder" on a database whose data
+/// dir hasn't been created yet (instance never started) would fail silently.
+/// Instead we reveal the path when it exists, else open the nearest existing
+/// ancestor directory, and only error when nothing along the path exists.
+#[tauri::command]
+pub async fn reveal_in_finder(app: AppHandle, path: String) -> AppResult<()> {
+    let target = std::path::PathBuf::from(&path);
+    if target.exists() {
+        return app
+            .opener()
+            .reveal_item_in_dir(&target)
+            .map_err(|e| AppError::Internal(format!("reveal failed: {e}")));
+    }
+    // Not created yet — open the closest ancestor that does exist so the button
+    // still lands the user in the right place rather than doing nothing.
+    let mut cursor = target.as_path();
+    while let Some(parent) = cursor.parent() {
+        if parent.exists() {
+            return app
+                .opener()
+                .open_path(parent.to_string_lossy(), None::<&str>)
+                .map_err(|e| AppError::Internal(format!("open failed: {e}")));
+        }
+        cursor = parent;
+    }
+    Err(AppError::NotFound(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +1028,8 @@ mod tests {
             env: BTreeMap::new(),
             readiness: None,
             auto_start: false,
+            pre_start: vec![],
+            post_start: vec![],
             tags: vec![],
             document_root: None,
             php_version: None,
@@ -724,6 +1038,8 @@ mod tests {
             runtime: None,
             workspace: ws,
             domain: None,
+            tunnel: None,
+            deploy: None,
         }
     }
 
