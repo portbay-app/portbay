@@ -8,8 +8,11 @@
 **The open-source, container-free local development environment manager for macOS.**
 
 One Play button per project. One Stop that always works. Real HTTPS hostnames,
-managed DNS and a reverse proxy you never touch — and you can drive the whole
-stack from your editor, your terminal, or your AI agent.
+managed DNS, and a reverse proxy you never touch.
+
+And it's the local dev environment your AI coding agents can actually drive: a
+per-project task board that hands cards to Claude Code, Codex, Cursor, Gemini, and
+more — plus a built-in SSH workspace for the servers those projects ship to.
 
 [Documentation](https://docs.portbay.app) ·
 [Architecture](./docs/ARCHITECTURE.md) ·
@@ -53,7 +56,7 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 
 ## What it does
 
-- **Point it at a folder — it already knows the project.** PortBay reads the framework (Next.js, Vite, plain Node, PHP, Laravel) and fills in the start command, port, hostname, and HTTPS. Nothing to configure by hand before the first run.
+- **Point it at a folder — it already knows the project.** PortBay reads the framework (Next.js, Vite, plain Node, PHP, Laravel, Python) and fills in the start command, port, hostname, and HTTPS. Nothing to configure by hand before the first run.
 - **One-click Play / Stop per project** — start and stop a project without hunting for the right terminal tab.
 - **A universal Stop-All** kill switch that always works, even after a crash.
 - **Real HTTPS hostnames** like `https://myproject.test`, issued and trusted locally.
@@ -61,6 +64,7 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 - **Reverse-proxy routing** managed for you through [Caddy](https://caddyserver.com)'s admin API.
 - **Bundled databases** — PortBay-supervised MySQL, MariaDB, Postgres, Redis, MongoDB, and Memcached.
 - **Public sharing** — expose any project over a [Cloudflare](https://www.cloudflare.com/products/tunnel/) tunnel with one click.
+- **A built-in SSH workspace** — save your remote hosts and get an interactive terminal, an SFTP file browser with inline editing, local/reverse/SOCKS port-forward tunnels, and live processes/ports panels — for the servers your projects ship to, without opening a separate SSH app.
 - **A sandboxed runner** — run an untrusted or freshly-cloned project inside a macOS sandbox, inspect it, then promote it to a normal local run.
 - **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 69 agent tools.
 - **A task board your agents work** — every project gets a Kanban board whose cards are Markdown in your repo. Move a card to *To Do* and the coding agent you assigned — Claude Code, Codex, Cursor, Gemini, Aider, and more — picks it up, does the work, and writes a handoff note for the next run.
@@ -94,6 +98,28 @@ recognised out of the box, and you can point it at any other CLI.
 - **It stays out of trouble.** A card can be blocked on others until they land, an optional *Review* column holds agent-"done" work for a human to approve, and runs whose process dies are reclaimed automatically.
 - **One board, three front ends.** The GUI, the `portbay` CLI, and the MCP server read and write the same cards — so an agent connected over MCP can claim the next card, record the files it touched, and move it to *Review* or *Done*, all through PortBay's agent tools.
 
+## A full SSH workspace, in the same app
+
+The projects you run locally have to ship somewhere. PortBay gives you a real SSH
+client for the servers on the other end — saved hosts, a terminal, files, and
+tunnels — so you don't keep a second app open just to reach them.
+
+Save a connection once and open a workspace for it: an interactive terminal, an
+SFTP file browser with an inline code editor (open a remote file, edit, ⌘S), and
+port-forward tunnels you start and stop with a click — with live processes and
+listening-ports panels read straight off the host.
+
+<div align="center">
+
+<img src="docs-site/public/screenshots/ssh-dark.png" alt="PortBay's SSH workspace — terminal, SFTP file browser, and tunnels for a remote host" width="840" />
+
+</div>
+
+- **Saved hosts with the details that matter.** Key, password, or `ssh-agent` auth; proxy-jump through a bastion; per-host environment and stage tags; and a one-look health probe with latency and host-key trust.
+- **Tunnels without memorising flags.** Forward a remote database to `localhost`, expose a local service back to a server, or open a SOCKS proxy — local, reverse, and dynamic forwards, kept alive and reconnected for you.
+- **Edit and deploy in place.** Browse the remote filesystem, open a file in the built-in editor, run a saved deploy step list, or drop into the terminal — all on the connection you already opened.
+- **An agent on the box, when it's there.** If a host runs Ollama, PortBay can talk to it — a small on-host assistant that only ever runs the commands you approve.
+
 ## A look around
 
 |  |  |
@@ -107,8 +133,9 @@ recognised out of the box, and you can point it at any other CLI.
 
 ## How it compares
 
-PortBay is not the first local-dev manager. It is the open-source, container-free,
-native one.
+PortBay is not the first local-dev manager. It's the open-source, container-free,
+native one — and the only one that ships a per-project AI agent task board and a
+full SSH/SFTP workspace in the same app.
 
 | | PortBay | Laravel Herd | ServBay | Docker / OrbStack |
 |---|---|---|---|---|
@@ -116,7 +143,9 @@ native one.
 | Price | Free · optional Pro | Free / paid Pro | Free / paid | Free / paid |
 | Container-free | ✅ | ✅ | ✅ | ❌ |
 | Local HTTPS + `.test` | ✅ | ✅ | ✅ | Manual |
-| Multi-runtime (Node/PHP/…) | ✅ | PHP-first | ✅ | ✅ |
+| Multi-runtime (Node/PHP/Python) | ✅ | PHP-first | ✅ | ✅ |
+| AI agent task board | ✅ | ❌ | ❌ | ❌ |
+| Built-in SSH / SFTP / tunnels | ✅ | ❌ | ❌ | ❌ |
 | Idle footprint | Small (native) | Small | Medium | Large |
 | Cross-platform | macOS (Linux/Windows planned) | macOS/Windows | macOS/Windows | All |
 
@@ -210,7 +239,7 @@ PortBay is released and in active use on macOS (Apple Silicon). Most of what
 follows is already shipped — not planned.
 
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, full CLI. *Shipped.*
-- **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, and one-step import from Herd / ServBay / MAMP. *Shipped.*
+- **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, an SSH workspace (terminal, SFTP, port-forward tunnels), and one-step import from Herd / ServBay / MAMP. *Shipped.*
 - **AI & automation** — an MCP server (69 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed, and a per-project task board hands cards to the coding agent of your choice. *Shipped.*
 - **Release** — signed & notarized DMG, Homebrew cask, and in-app auto-update. *Shipped.*
 
