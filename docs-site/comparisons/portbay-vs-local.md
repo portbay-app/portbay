@@ -20,7 +20,8 @@ PortBay is an open-source (AGPL-3.0), container-free local dev manager for macOS
 | Reverse proxy | Caddy (automatic) | Managed by Local |
 | Footprint | Small (native) | Large (container images) |
 | Platform | macOS (Apple Silicon) | macOS + Windows + Linux |
-| Automation | CLI + MCP | Limited CLI |
+| Automation | CLI + MCP (69 tools) | Limited CLI |
+| AI agent task board | ✅ Markdown cards + handoff memory | ❌ |
 
 ## What they share
 
@@ -35,6 +36,8 @@ PortBay runs code **natively** — no container engine, no image pulls. Node pro
 PortBay handles **Node and static sites** as first-class citizens alongside PHP. If you run a Next.js front-end, a Laravel API, and a static landing page, all three can live in PortBay under their own `.test` hostnames. Local is designed specifically for WordPress.
 
 PortBay includes a **CLI with full parity** to the GUI, plus an **MCP server** that exposes every project action to AI agents and external tools. Local's automation surface is limited by comparison.
+
+PortBay also gives those agents **work to do**. Every project gets a task board whose cards are Markdown files in your repo — move a card to *To Do* and the coding agent you assigned (Claude Code, Codex, Cursor, Gemini, and more) picks it up, does the work on your machine, and appends a handoff brief the next run reads first. For an agency juggling many sites, that means the small fixes queue up and get done without a developer sitting on each one.
 
 PortBay's **Cloudflare tunnel** integration lets you share a live local project publicly in one step without installing a separate tunnel client. Local offers a similar feature called Live Links through its own service.
 
@@ -60,7 +63,7 @@ Local's WP Engine integration is seamless if you host on WP Engine: one-click pu
 - You build beyond WordPress — Node, Next.js, Laravel, Vite apps, static sites, or any mix.
 - Open source matters for your tooling or organization.
 - You want native execution with no container overhead.
-- CLI-first automation and MCP server support for AI-assisted workflows are important.
+- CLI-first automation, MCP server support, and a task board your coding agents work are important.
 - Perpetual Pro access via contribution (not a commercial product) fits your context.
 - You prefer a lighter footprint on your Mac.
 

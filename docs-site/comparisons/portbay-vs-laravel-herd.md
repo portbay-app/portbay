@@ -20,7 +20,8 @@ PortBay is an open-source (AGPL-3.0), container-free local dev manager for macOS
 | Reverse proxy | Caddy (automatic) | Nginx (automatic) |
 | Footprint | Small (native) | Small (native) |
 | Platform | macOS (Apple Silicon) | macOS + Windows |
-| Automation | CLI + MCP | CLI (Herd CLI) |
+| Automation | CLI + MCP (69 tools) | CLI + MCP server |
+| AI agent task board | ✅ Markdown cards + handoff memory | ❌ |
 
 ## What they share
 
@@ -33,6 +34,8 @@ PortBay is **open source**: the full codebase is on GitHub under AGPL-3.0, so yo
 PortBay is **multi-runtime from the ground up**. You can run a Next.js front-end, a PHP/Laravel API, and a static marketing site in the same session, each under its own `.test` hostname, all managed by a single tool. Herd's runtime story is PHP-first; Node support exists but is not the primary use case.
 
 PortBay's reverse proxy is Caddy, managed through its admin API and driven by a declarative JSON registry. Herd uses Nginx. Both are automatic, but PortBay exposes the proxy layer via CLI and an MCP server, making it scriptable by AI agents and CI workflows.
+
+Both tools now ship an MCP server — Herd's lets an agent inspect sites, switch PHP versions, and manage services. PortBay goes a step further and gives the agent **work to do**. Every project gets a task board whose cards are Markdown files in your repo: write a card, move it to *To Do*, and the coding agent you assigned — Claude Code, Codex, Cursor, Gemini, and more — picks it up, does the work on your machine, and appends a handoff brief the next run reads first. With Herd, your agent can answer questions about the environment; with PortBay, it can also clear your backlog while you're in a meeting.
 
 Pro access in PortBay is earned by a donation or a merged pull request — it is a perpetual license, not a subscription.
 
@@ -55,7 +58,8 @@ Herd's paid Pro tier offers extras like Expose (public tunnels), Valet-compatibl
 
 - You mix Node (Next.js, Vite, plain Node APIs) with PHP projects and need one tool to manage both.
 - Open source matters — you want to read the code, contribute, or run a fork.
-- You want CLI-first automation and MCP server support for AI-assisted workflows.
+- You want your coding agents *working* — a per-project task board that dispatches cards to Claude Code, Codex, Cursor, or Gemini, with handoff memory between runs.
+- You want CLI-first automation and a 69-tool MCP server for AI-assisted workflows.
 - You prefer Caddy's declarative config model over Nginx.
 - Pro access via contribution (not subscription) fits your preferences.
 

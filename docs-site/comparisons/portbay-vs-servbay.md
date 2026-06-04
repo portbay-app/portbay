@@ -20,7 +20,8 @@ PortBay is an open-source (AGPL-3.0), container-free local dev manager for macOS
 | Reverse proxy | Caddy (automatic) | Caddy / Nginx (selectable) |
 | Footprint | Small (native) | Medium–large (bundled runtimes) |
 | Platform | macOS (Apple Silicon) | macOS |
-| Automation | CLI + MCP | GUI-first |
+| Automation | CLI + MCP (69 tools) | GUI-first |
+| AI agent task board | ✅ Markdown cards + handoff memory | ❌ |
 
 ## What they share
 
@@ -33,6 +34,8 @@ PortBay is **open source** under AGPL-3.0. The codebase is public, auditable, an
 PortBay is intentionally lean. Rather than bundling every version of every runtime, it manages projects against runtimes you already have installed — or installs what you need. The result is a smaller disk footprint and less ambient background resource use.
 
 PortBay's **declarative JSON registry** means your project configuration is a file you can check into version control and share across machines. The full CLI and an **MCP server** let you script every operation, including from AI agents.
+
+PortBay also puts those agents to work. Every project gets a **task board** whose cards are Markdown files in your repo: write a card, move it to *To Do*, and the coding agent you assigned — Claude Code, Codex, Cursor, Gemini, and more — picks it up, does the work on your machine, and appends a handoff brief the next run reads first. ServBay's automation story is GUI-first; there is nothing in its model that hands work to an agent.
 
 Pro access is a one-time contribution (donation or merged PR) rather than a tiered subscription.
 
@@ -54,6 +57,7 @@ ServBay's GUI is comprehensive and works well for developers who prefer visual m
 - Open source matters — you want to inspect the code or contribute.
 - You want a lighter tool that works with your existing runtime installs rather than replacing them with a bundled copy.
 - You mix Node, PHP, and static projects and want a single consistent interface across all of them.
+- You want a task board your coding agents work — write the card, review the diff — not just a GUI for services.
 - CLI and MCP automation are important for your workflow or team.
 - A perpetual Pro license (contribution-based, no subscription) fits better than tiered pricing.
 

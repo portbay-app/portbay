@@ -20,7 +20,8 @@ PortBay is an open-source (AGPL-3.0), container-free local dev manager for macOS
 | Reverse proxy | Caddy (automatic) | Traefik (automatic) |
 | Footprint | Small (native) | Large (container images per project) |
 | Platform | macOS (Apple Silicon) | macOS, Linux, Windows |
-| Automation | CLI + MCP | CLI (ddev), extensive add-ons |
+| Automation | CLI + MCP (69 tools) | CLI (ddev), extensive add-ons |
+| AI agent task board | ✅ Markdown cards + handoff memory | ❌ |
 
 ## What they share
 
@@ -33,6 +34,8 @@ PortBay runs your code **natively on the host** — no container engine required
 The **small footprint** is a concrete benefit. PortBay targets under 80 MB idle RAM and a sub-30 MB installer. A DDEV project involves container images that can be hundreds of megabytes each. If you run several projects simultaneously, the resource difference is noticeable.
 
 PortBay's **MCP server** exposes every project action — start, stop, add hostname, view logs — to AI agents and external automation. DDEV has no equivalent today.
+
+Beyond exposing tools, PortBay gives agents **work**. Every project gets a task board whose cards are Markdown files in your repo — move a card to *To Do* and the coding agent you assigned (Claude Code, Codex, Cursor, Gemini, and more) picks it up, does the work on your machine, and appends a handoff brief the next run reads first. Your backlog moves while you review diffs instead of babysitting prompts.
 
 PortBay's **Cloudflare tunnel integration** lets you share a local project publicly in one step. DDEV has `ddev share` via ngrok, but that's a separate service.
 
@@ -61,7 +64,7 @@ DDEV's add-on ecosystem is mature: Solr, Elasticsearch, Redis, Mailpit, and many
 - You want to skip Docker entirely and run Node and PHP natively.
 - Footprint matters — fewer GB of container images, lower idle RAM.
 - You mix Node, Next.js, or Vite front-ends with PHP back-ends and want one tool for both.
-- MCP server support for AI-assisted workflows is on your list.
+- MCP server support for AI-assisted workflows is on your list — or a task board that dispatches cards to your coding agents.
 - macOS-only is fine for your team today.
 - You want perpetual Pro access via contribution rather than ongoing sponsorship.
 

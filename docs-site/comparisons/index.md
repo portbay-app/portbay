@@ -11,23 +11,28 @@ managed DNS, and a Caddy reverse proxy you never configure by hand. This page
 compares it with the tools developers usually weigh against it, and says plainly
 where each one is the better pick.
 
-Two things set PortBay apart across the board: it is **open source (AGPL-3.0)**
-where most of these tools are closed, and it is **container-free *and*
-multi-runtime** — it runs Node, PHP, and static sites natively, without the
-PHP-only ceiling of Herd/Valet or the container layer of Docker/DDEV.
+Three things set PortBay apart across the board: it is **open source
+(AGPL-3.0)** where most of these tools are closed; it is **container-free
+*and* multi-runtime** — it runs Node, PHP, and static sites natively, without
+the PHP-only ceiling of Herd/Valet or the container layer of Docker/DDEV; and
+it **puts AI agents to work**. Every project gets a task board whose cards are
+Markdown files in your repo — move a card to *To Do* and the coding agent you
+assigned (Claude Code, Codex, Cursor, Gemini, and more) picks it up, does the
+work on your machine, and leaves a handoff brief for the next run. MCP servers
+are spreading across this category; a board your agents actually work is not.
 
 ## At a glance
 
-| Tool | Open source | Price | Container-free | Multi-runtime | Local HTTPS + `.test` | Footprint |
-|---|---|---|---|---|---|---|
-| **PortBay** | ✅ AGPL-3.0 | Free · optional Pro | ✅ | ✅ Node / PHP / static | ✅ | Small (native) |
-| [Laravel Herd](/comparisons/portbay-vs-laravel-herd) | ❌ | Free / paid Pro | ✅ | PHP-first | ✅ | Small |
-| [ServBay](/comparisons/portbay-vs-servbay) | ❌ | Free / paid | ✅ | ✅ | ✅ | Medium |
-| [MAMP / XAMPP](/comparisons/portbay-vs-mamp) | ❌ | Free / paid Pro | ✅ | PHP-first | Partial | Medium |
-| [Docker / OrbStack](/comparisons/portbay-vs-docker) | Engine ✅ / app ❌ | Free / paid | ❌ containers | ✅ | Manual | Large |
-| [Laravel Valet](/comparisons/portbay-vs-laravel-valet) | ✅ MIT | Free | ✅ | PHP-first | ✅ | Tiny |
-| [DDEV](/comparisons/portbay-vs-ddev) | ✅ | Free | ❌ containers | ✅ | ✅ | Large |
-| [Local](/comparisons/portbay-vs-local) | ❌ | Free | ❌ containers | WordPress-first | ✅ | Large |
+| Tool | Open source | Price | Container-free | Multi-runtime | Local HTTPS + `.test` | Agent task board | Footprint |
+|---|---|---|---|---|---|---|---|
+| **PortBay** | ✅ AGPL-3.0 | Free · optional Pro | ✅ | ✅ Node / PHP / static | ✅ | ✅ | Small (native) |
+| [Laravel Herd](/comparisons/portbay-vs-laravel-herd) | ❌ | Free / paid Pro | ✅ | PHP-first | ✅ | ❌ | Small |
+| [ServBay](/comparisons/portbay-vs-servbay) | ❌ | Free / paid | ✅ | ✅ | ✅ | ❌ | Medium |
+| [MAMP / XAMPP](/comparisons/portbay-vs-mamp) | ❌ | Free / paid Pro | ✅ | PHP-first | Partial | ❌ | Medium |
+| [Docker / OrbStack](/comparisons/portbay-vs-docker) | Engine ✅ / app ❌ | Free / paid | ❌ containers | ✅ | Manual | ❌ | Large |
+| [Laravel Valet](/comparisons/portbay-vs-laravel-valet) | ✅ MIT | Free | ✅ | PHP-first | ✅ | ❌ | Tiny |
+| [DDEV](/comparisons/portbay-vs-ddev) | ✅ | Free | ❌ containers | ✅ | ✅ | ❌ | Large |
+| [Local](/comparisons/portbay-vs-local) | ❌ | Free | ❌ containers | WordPress-first | ✅ | ❌ | Large |
 
 ## Pick the right comparison
 
@@ -56,4 +61,5 @@ you need Linux or Windows today, PortBay is macOS-only for now — those platfor
 are on the [roadmap](https://github.com/portbay-app/portbay#roadmap).
 
 If you run a mix of Node, PHP, and static projects and want one open, lightweight
-tool to manage them all, [get started](/getting-started/install).
+tool to manage them all — with a task board your coding agents work while you're
+on something else — [get started](/getting-started/install).
