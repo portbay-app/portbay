@@ -20,7 +20,8 @@ PortBay is an open-source (AGPL-3.0), container-free local dev manager for macOS
 | Reverse proxy | Caddy (automatic) | Apache (manual vhosts) |
 | Footprint | Small (native) | Medium |
 | Platform | macOS (Apple Silicon) | MAMP: macOS + Windows · XAMPP: cross-platform |
-| Automation | CLI + MCP | Limited CLI |
+| Automation | CLI + MCP (69 tools) | Limited CLI |
+| AI agent task board | ✅ Markdown cards + handoff memory | ❌ |
 
 ## What they share
 
@@ -33,6 +34,8 @@ PortBay was built with **HTTPS-first** as a default. Every project gets a real `
 PortBay is **multi-runtime**. You run Node, PHP, and static sites under the same tool, each behind the same Caddy proxy, each with its own hostname. MAMP and XAMPP are Apache-centric PHP stacks; Node is outside their model.
 
 The **JSON registry** makes project configuration version-controllable. The full CLI and MCP server let you automate starts, stops, and rebuilds from scripts or AI agents — none of which is possible with a GUI-only tool.
+
+And PortBay belongs to a different era of tooling entirely on one axis: it puts **AI coding agents to work**. Every project gets a task board whose cards are Markdown files in your repo — move a card to *To Do* and the agent you assigned (Claude Code, Codex, Cursor, Gemini, and more) picks it up, does the work on your machine, and leaves a handoff brief for the next run. MAMP and XAMPP predate this workflow and have no answer to it.
 
 PortBay is **open source**. MAMP's core app is closed. XAMPP is from the Apache Friends project but is not itself open-source in the same sense as an auditable codebase under active community development.
 
@@ -56,6 +59,7 @@ For developers maintaining legacy PHP applications that depend on specific Apach
 - You want real `.test` HTTPS out of the box without editing `/etc/hosts` or paying for MAMP Pro.
 - You run Node projects alongside PHP and need one tool to manage both.
 - CLI-first workflows, scripting, and MCP automation matter to you.
+- You work with AI coding agents and want a board that dispatches tasks to them instead of pasting prompts into a terminal.
 - Open source matters — you want to see the code and contribute.
 - You want modern tooling that isn't built around Apache configuration files.
 

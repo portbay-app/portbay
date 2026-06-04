@@ -20,7 +20,8 @@ PortBay is an open-source (AGPL-3.0), container-free local dev manager for macOS
 | Reverse proxy | Caddy (automatic) | Manual (container config) |
 | Footprint | Small (native) | Large (container engine + images) |
 | Platform | macOS (Apple Silicon) | macOS, Linux, Windows |
-| Automation | CLI + MCP | CLI (docker, compose), full API |
+| Automation | CLI + MCP (69 tools) | CLI (docker, compose), full API, MCP toolkit |
+| AI agent task board | ✅ Markdown cards + handoff memory | ❌ |
 
 ## What they share
 
@@ -33,6 +34,8 @@ PortBay runs your code **directly on the host** — the Node or PHP process runs
 Real HTTPS `.test` hostnames come **out of the box**. With Docker, getting per-project HTTPS locally requires setting up a reverse proxy container (Traefik, nginx-proxy, Caddy in a container) and configuring it — it's doable but is setup work you do yourself. PortBay handles this automatically.
 
 The **declarative JSON registry** and full CLI mean every project action (start, stop, add domain, share via Cloudflare tunnel) is scriptable from the terminal or via PortBay's MCP server, without writing Dockerfiles.
+
+Docker gives agents tools; PortBay gives them **a job**. Every project gets a task board whose cards are Markdown files in your repo — move a card to *To Do* and the coding agent you assigned (Claude Code, Codex, Cursor, Gemini, and more) picks it up, does the work on your machine, and appends a handoff brief the next run reads first. Compose orchestrates your services; the board orchestrates your backlog.
 
 For developers running Apple Silicon Macs, native execution avoids the performance hit that some workloads experience inside a container layer, particularly around filesystem I/O.
 
@@ -60,7 +63,7 @@ OrbStack specifically is worth calling out: on Apple Silicon it is meaningfully 
 - You run a mix of Node and PHP projects and want one lightweight tool to manage them.
 - You prefer not to maintain Dockerfiles and Compose files for local dev.
 - Open source under AGPL-3.0 matters for your tooling choices.
-- You want MCP server support for AI-assisted development workflows.
+- You want MCP server support for AI-assisted development workflows — and a task board that hands whole cards to your coding agents.
 
 ## Bottom line
 
