@@ -8,8 +8,12 @@
 **The open-source, container-free local development environment manager for macOS.**
 
 One Play button per project. One Stop that always works. Real HTTPS hostnames,
-managed DNS and a reverse proxy you never touch — and you can drive the whole
-stack from your editor, your terminal, or your AI agent.
+managed DNS, and a reverse proxy you never touch.
+
+It also puts your AI coding agents to work. Every project gets a task board:
+write a card, move it to *To Do*, and the agent you assigned — Claude Code,
+Codex, Cursor, Gemini — picks it up, does the work in your repo, and leaves a
+handoff note so the next run starts where this one stopped.
 
 [Documentation](https://docs.portbay.app) ·
 [Architecture](./docs/ARCHITECTURE.md) ·
@@ -17,6 +21,8 @@ stack from your editor, your terminal, or your AI agent.
 [Contributing](./CONTRIBUTING.md)
 
 `macOS` · Built with Tauri 2 · Rust · Svelte 5
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-support-FFDD00?style=flat&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/beiruti)
 
 > **Status:** released for macOS (Apple Silicon). Signed, notarized builds ship
 > via DMG and Homebrew — see [Getting started](#getting-started). Linux and
@@ -51,7 +57,7 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 
 ## What it does
 
-- **Point it at a folder — it already knows the project.** PortBay reads the framework (Next.js, Vite, plain Node, PHP, Laravel) and fills in the start command, port, hostname, and HTTPS. Nothing to configure by hand before the first run.
+- **Point it at a folder — it already knows the project.** PortBay reads the framework (Next.js, Vite, plain Node, PHP, Laravel, Python) and fills in the start command, port, hostname, and HTTPS. Nothing to configure by hand before the first run.
 - **One-click Play / Stop per project** — start and stop a project without hunting for the right terminal tab.
 - **A universal Stop-All** kill switch that always works, even after a crash.
 - **Real HTTPS hostnames** like `https://myproject.test`, issued and trusted locally.
@@ -59,14 +65,74 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 - **Reverse-proxy routing** managed for you through [Caddy](https://caddyserver.com)'s admin API.
 - **Bundled databases** — PortBay-supervised MySQL, MariaDB, Postgres, Redis, MongoDB, and Memcached.
 - **Public sharing** — expose any project over a [Cloudflare](https://www.cloudflare.com/products/tunnel/) tunnel with one click.
+- **A built-in SSH workspace** — save your remote hosts and get an interactive terminal, an SFTP file browser with inline editing, local/reverse/SOCKS port-forward tunnels, and live processes/ports panels — for the servers your projects ship to, without opening a separate SSH app.
 - **A sandboxed runner** — run an untrusted or freshly-cloned project inside a macOS sandbox, inspect it, then promote it to a normal local run.
-- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as agent tools.
+- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 69 agent tools.
 - **A declarative registry** — projects live in JSON; the daemon reconciles reality to match.
 - **Live logs, status, and metrics** per project, plus a macOS menu-bar mode.
 - **Already using Herd, ServBay, or MAMP?** Import your existing sites in one step — no re-entering paths, ports, and PHP versions.
 
+And the one that gives you back the most time: **a task board your AI agents
+work**. Write a card in any project, move it to *To Do*, and the agent you
+assigned — Claude Code, Codex, Cursor, Gemini, Aider, and more — picks it up,
+does the work, and writes a handoff note for the next run.
+[Here's how that works.](#a-task-board-your-ai-agents-actually-work)
+
 Everything is driven by a Rust core with full CLI parity, so the GUI — and your
 AI agent — are clients, not the source of truth.
+
+## A task board your AI agents actually work
+
+Working with a coding agent is still a part-time job. You open a terminal,
+explain the task, watch it run, answer its questions — and when the session
+ends, everything it learned goes with it. The next run starts from zero. So
+does the next agent. So do you.
+
+PortBay replaces that loop with a board. Every project gets one, and the cards
+are plain Markdown files inside your repo (`.portbay/tasks/`) — they version
+with your code and stay readable with or without PortBay. Write the card once,
+move it to **To Do**, and the agent you assigned picks it up and starts
+working — in your project, on your machine, while you do something else.
+
+PortBay launches the coding agent you already have installed; it never runs a
+model of its own. Claude Code, Codex, Cursor, Gemini, Aider, Copilot, OpenCode,
+Amp, Qwen, and Antigravity are recognised out of the box, and you can point it
+at any other CLI.
+
+<div align="center">
+
+<img src="docs-site/public/screenshots/tasks-dark.png" alt="PortBay's per-project task board with AI agents working cards" width="840" />
+
+<sub>The board for one project: cards move from <i>To Do</i> to <i>Done</i> as the agent works them — each card a Markdown file in your repo.</sub>
+
+</div>
+
+- **Assign per card, or set a board default.** Auto-dispatch the moment a card hits *To Do*, or require a click to confirm each run.
+- **A handoff doc that travels with the work.** When a run ends it appends to `.portbay/HANDOFF.md` — a short, newest-first brief the next run (or the next person) reads to continue without re-deriving context. No run starts from zero.
+- **It stays out of trouble.** A card can be blocked on others until they land, an optional *Review* column holds agent-"done" work for a human to approve, and runs whose process dies are reclaimed automatically.
+- **One board, three front ends.** The GUI, the `portbay` CLI, and the MCP server read and write the same cards — so an agent connected over MCP can claim the next card, record the files it touched, and move it to *Review* or *Done*, all through PortBay's agent tools.
+
+## A full SSH workspace, in the same app
+
+The projects you run locally have to ship somewhere. PortBay gives you a real SSH
+client for the servers on the other end — saved hosts, a terminal, files, and
+tunnels — so you don't keep a second app open just to reach them.
+
+Save a connection once and open a workspace for it: an interactive terminal, an
+SFTP file browser with an inline code editor (open a remote file, edit, ⌘S), and
+port-forward tunnels you start and stop with a click — with live processes and
+listening-ports panels read straight off the host.
+
+<div align="center">
+
+<img src="docs-site/public/screenshots/ssh-dark.png" alt="PortBay's SSH workspace — terminal, SFTP file browser, and tunnels for a remote host" width="840" />
+
+</div>
+
+- **Saved hosts with the details that matter.** Key, password, or `ssh-agent` auth; proxy-jump through a bastion; per-host environment and stage tags; and a one-look health probe with latency and host-key trust.
+- **Tunnels without memorising flags.** Forward a remote database to `localhost`, expose a local service back to a server, or open a SOCKS proxy — local, reverse, and dynamic forwards, kept alive and reconnected for you.
+- **Edit and deploy in place.** Browse the remote filesystem, open a file in the built-in editor, run a saved deploy step list, or drop into the terminal — all on the connection you already opened.
+- **An agent on the box, when it's there.** If a host runs Ollama, PortBay can talk to it — a small on-host assistant that only ever runs the commands you approve.
 
 ## A look around
 
@@ -81,8 +147,9 @@ AI agent — are clients, not the source of truth.
 
 ## How it compares
 
-PortBay is not the first local-dev manager. It is the open-source, container-free,
-native one.
+PortBay is not the first local-dev manager. It's the open-source, container-free,
+native one — built for developers whose projects are started by a Play button
+and worked on by AI agents.
 
 | | PortBay | Laravel Herd | ServBay | Docker / OrbStack |
 |---|---|---|---|---|
@@ -90,16 +157,25 @@ native one.
 | Price | Free · optional Pro | Free / paid Pro | Free / paid | Free / paid |
 | Container-free | ✅ | ✅ | ✅ | ❌ |
 | Local HTTPS + `.test` | ✅ | ✅ | ✅ | Manual |
-| Multi-runtime (Node/PHP/…) | ✅ | PHP-first | ✅ | ✅ |
+| Multi-runtime (Node/PHP/Python) | ✅ | PHP-first | ✅ | ✅ |
+| MCP server for agents | ✅ 69 tools | ✅ | ❌ | ✅ |
+| AI agent task board — write a card, an agent does the work | ✅ | ❌ | ❌ | ❌ |
+| Agent handoff memory between runs | ✅ | ❌ | ❌ | ❌ |
+| Built-in SSH / SFTP / tunnels | ✅ | ❌ | ❌ | ❌ |
 | Idle footprint | Small (native) | Small | Medium | Large |
 | Cross-platform | macOS (Linux/Windows planned) | macOS/Windows | macOS/Windows | All |
 
+An MCP server is fast becoming standard equipment — Herd ships one too. The
+difference is what happens after the agent connects. In PortBay it can pick up
+a card from the board, do the work, record the files it touched, and leave a
+brief for the next run — a loop you'd otherwise be running by hand.
+
 If you live in PHP on macOS today, Herd is excellent. PortBay's bet is a single
 open, lightweight tool that handles mixed Node/PHP/static stacks without a daemon
-zoo. It's free and open source (AGPL-3.0); an optional, pay-what-you-want
-[Pro tier](https://docs.portbay.app/pro/) — earned with a donation **or** a merged
-pull request — funds the project and unlocks hosted multi-device sync and a few
-power-user features. No subscription, and nothing you can't build yourself.
+zoo. It's free and open source (AGPL-3.0); an optional
+[Pro tier](https://docs.portbay.app/pro/) ($59/yr, or earned by merging a pull
+request) funds the project and unlocks hosted multi-device sync and a few
+power-user features. Nothing you can't build yourself.
 
 For head-to-head breakdowns, see the in-depth comparisons — PortBay vs
 [Laravel Herd](https://docs.portbay.app/comparisons/portbay-vs-laravel-herd),
@@ -184,8 +260,8 @@ PortBay is released and in active use on macOS (Apple Silicon). Most of what
 follows is already shipped — not planned.
 
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, full CLI. *Shipped.*
-- **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, and one-step import from Herd / ServBay / MAMP. *Shipped.*
-- **AI & automation** — an MCP server (58 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed. *Shipped.*
+- **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, an SSH workspace (terminal, SFTP, port-forward tunnels), and one-step import from Herd / ServBay / MAMP. *Shipped.*
+- **AI & automation** — an MCP server (69 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed, and a per-project task board hands cards to the coding agent of your choice. *Shipped.*
 - **Release** — signed & notarized DMG, Homebrew cask, and in-app auto-update. *Shipped.*
 
 ### On the roadmap
