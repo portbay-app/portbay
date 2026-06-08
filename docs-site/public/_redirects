@@ -1,0 +1,6 @@
+# Cloudflare static-asset redirects. Copied to the dist root by VitePress
+# (everything in public/ lands at /). One rule per line: from  to  status.
+
+# Feature renamed "Smart Dictation" → "Speech-to-Text" (2026-06). Preserve any
+# inbound links / search-index entries pointing at the old path.
+/guides/smart-dictation  /guides/speech-to-text  301

@@ -7,11 +7,11 @@ description: Provision and manage local MySQL, MariaDB, PostgreSQL, Redis, Mongo
 
 PortBay can provision, configure, and supervise local database instances on your machine. Each instance gets an isolated data directory, an engine-specific config file, and a dedicated port — all managed through Process Compose, the same supervision layer that runs your dev servers. Supported engines are MySQL, MariaDB, PostgreSQL, Redis, MongoDB, and Memcached. Instances can be linked to projects, which injects connection env vars (`DATABASE_URL`, `DB_*`) into the linked project's process on every start.
 
-![PortBay databases](/screenshots/databases.png)
+<ThemeImage name="databases" alt="PortBay databases" />
 
 ## Quickstart
 
-**Prerequisites:** The engine binary must be installed via Homebrew. If it isn't, the Add Database wizard shows the install hint.
+**Prerequisites:** The engine binary must be installed via Homebrew on macOS or your Linux package manager on Linux. If it isn't, the Add Database wizard shows the install hint.
 
 1. Open the **Databases** section from the sidebar.
 2. Click **Add Database**, pick an engine, give the instance a name, and optionally specify a port (PortBay auto-allocates one if left blank).
@@ -34,7 +34,7 @@ Port numbers shown above are the defaults; the actual port for your instance is 
 ### Create an instance from an engine
 
 1. Click **Add Database**.
-2. Select an engine. If it shows as not installed, run the displayed `brew install …` command and reopen the wizard.
+2. Select an engine. If it shows as not installed, run the displayed install command for your OS and reopen the wizard.
 3. Enter a name (slugified into the instance ID) and, optionally, a custom port.
 4. Enable **Start automatically when PortBay launches** if you want the daemon to come up on every app start.
 5. Click **Create**. The wizard spins while provisioning runs.
@@ -76,7 +76,7 @@ To unlink, click the **×** next to the project name in the Linked projects card
 
 ### Open in a DB client
 
-Click **Client** in the toolbar. PortBay resolves the engine's CLI binary from the Homebrew opt directory and opens it in Terminal.app, pre-configured for the instance's port:
+Click **Client** in the toolbar. PortBay resolves the engine's CLI binary from the managed install or system PATH and opens it in your desktop terminal, pre-configured for the instance's port:
 
 | Engine | Command format |
 | --- | --- |
@@ -99,7 +99,7 @@ Click **Remove** in the toolbar. A confirmation dialog presents two choices:
 - **Deregister only** — stops the daemon, drops the instance from the registry and from any linked projects, leaves the data directory on disk. You can re-add the instance later and it will reuse the existing data.
 - **Delete data + deregister** — does the above and also deletes the instance's data directory. Irreversible.
 
-If the binary is no longer present when you try to start (`binaryAvailable: false`), an error note appears under the instance name. Reinstall the engine via Homebrew to restore normal operation.
+If the binary is no longer present when you try to start (`binaryAvailable: false`), an error note appears under the instance name. Reinstall the engine with Homebrew or your Linux package manager to restore normal operation.
 
 ### ProjectDbConnection vs. DatabaseInstanceView
 
@@ -118,14 +118,14 @@ A project can have both: a `DatabaseInstanceView` linked to it (PortBay's manage
 
 ### Supported engines
 
-| Engine | ID | Default port | Homebrew install | CLI client |
+| Engine | ID | Default port | macOS install | Linux package |
 | --- | --- | --- | --- | --- |
-| MySQL | `mysql` | 3306 | `brew install mysql` | `mysql` |
-| MariaDB | `mariadb` | 3306 | `brew install mariadb` | `mariadb` / `mysql` |
-| PostgreSQL | `postgres` | 5432 | `brew install postgresql@16` | `psql` |
-| Redis | `redis` | 6379 | `brew install redis` | `redis-cli` |
-| MongoDB | `mongo` | 27017 | `brew install mongodb-community` | `mongosh` |
-| Memcached | `memcached` | 11211 | `brew install memcached` | none (uses `nc`) |
+| MySQL | `mysql` | 3306 | `brew install mysql` | `mysql-server` / `mysql-client` |
+| MariaDB | `mariadb` | 3306 | `brew install mariadb` | `mariadb-server` / `mariadb-client` |
+| PostgreSQL | `postgres` | 5432 | `brew install postgresql@16` | `postgresql` / `postgresql-client` |
+| Redis | `redis` | 6379 | `brew install redis` | `redis-server` / `redis-tools` |
+| MongoDB | `mongo` | 27017 | `brew install mongodb-community` | `mongodb-org` plus `mongosh` |
+| Memcached | `memcached` | 11211 | `brew install memcached` | `memcached` |
 
 MySQL and MariaDB share the same default port (3306). If both are registered, PortBay auto-allocates a different port for whichever is added second.
 

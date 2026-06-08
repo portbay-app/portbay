@@ -1,12 +1,12 @@
 ---
 layout: home
-title: PortBay — Open-Source Local Dev Environment for macOS
-description: Open-source, container-free local dev environment for macOS — a Laravel Herd alternative. Real HTTPS .test domains, managed DNS, reverse proxy, and bundled databases, with no /etc/hosts editing.
+title: PortBay — Open-Source Local Dev Environment
+description: Open-source, container-free local dev environment for macOS and Linux — a Laravel Herd alternative. Real HTTPS .test domains, managed DNS, reverse proxy, and bundled databases, with no hand-edited /etc/hosts.
 
 hero:
   name: PortBay
   text: One Play button per project.
-  tagline: Run Node, PHP, and static sites with real HTTPS hostnames, managed DNS, and a reverse proxy you never touch. No containers, no hand-edited /etc/hosts.
+  tagline: Run Node, PHP, Python, and static sites with real HTTPS hostnames, managed DNS, and a reverse proxy you never touch. No containers, no hand-edited /etc/hosts.
   actions:
     - theme: brand
       text: Get started
@@ -34,26 +34,39 @@ features:
   - title: Bundled databases
     details: PortBay-supervised MySQL, MariaDB, Postgres, and Redis instances with connection details and per-project links.
     link: /guides/databases
+  - title: A full SSH workspace
+    details: Save a remote host, then open an interactive terminal, an SFTP file browser with an inline editor, and port-forward tunnels — without keeping a second app open.
+    link: /guides/ssh-tunnels
   - title: Sandboxed runner (Pro)
     details: Run an untrusted project inside a macOS sandbox profile, inspect it, then promote it to a normal local run.
     link: /guides/sandbox
   - title: Drive it from an AI agent
-    details: An MCP server exposes PortBay's tools and resources to Claude Code, Cursor, and Zed.
+    details: An MCP server exposes 69 tools and resources to Claude Code, Cursor, Zed, and any MCP-aware client.
     link: /agents/
+  - title: A task board your agents work
+    details: Move a card to To Do and the AI agent you assigned picks it up, works it in your repo, and writes a hand-off note for the next run.
+    link: /guides/task-board
+  - title: Local AI, managed
+    details: PortBay installs, starts, and supervises a local Ollama server, and pulls models from the live catalog — nothing leaves your Mac.
+    link: /guides/local-ai
+  - title: Speech-to-Text
+    details: Hold Fn and talk — on-device speech-to-text plus a local AI rewrite turn spoken thoughts into text worth keeping. ⌘Z restores your exact words.
+    link: /guides/speech-to-text
 ---
 
-![PortBay managing local projects](/screenshots/projects.png)
+<ThemeImage name="projects" alt="PortBay managing local projects" />
 
 > **See it without installing.** The [interactive simulator](https://try.portbay.app) runs the real PortBay interface against a set of sample projects, right in your browser — click Play on a project and watch it start.
 
 ## Current Release State
 
-PortBay is released for macOS (Apple Silicon). Signed, notarized builds ship via the DMG and Homebrew cask; Linux and Windows are still ahead. The docs track the current implementation.
+PortBay is released for macOS (Apple Silicon), with Linux desktop packages in active support. Signed, notarized macOS builds ship via the DMG and Homebrew cask; Linux builds target AppImage, deb, rpm, Snap, and AUR packages. Windows is still ahead.
 
 | Area | Status |
 | --- | --- |
 | macOS app (Apple Silicon) | Available — signed & notarized |
-| Linux and Windows | On the roadmap |
+| Linux app (x86_64) | In active support — AppImage, deb, rpm, Snap, AUR |
+| Windows | On the roadmap |
 | Homebrew cask, DMG, auto-update | Available |
 | Process Compose sidecar | Bundled in the app and for local development |
 | Caddy, mkcert, Mailpit, cloudflared | Bundled in the app; fetched per checkout when building from source |

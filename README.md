@@ -52,8 +52,9 @@ record — a hostname, a start command, a port — and the app owns the rest:
 lifecycle, routing, and certificates. Stop the app and every project stops.
 Restart one project and the others are untouched.
 
-The design constraint is to stay **native and small**: under 80 MB idle RAM and a
-sub-30 MB installer, so it sits next to your editor and browser without being noticed.
+The design constraint is to stay **native and small**: under 80 MB idle RAM and an
+installer under 100 MB (currently ~76 MB with all bundled sidecars), so it sits next
+to your editor and browser without being noticed.
 
 ## What it does
 
@@ -67,6 +68,8 @@ sub-30 MB installer, so it sits next to your editor and browser without being no
 - **Public sharing** — expose any project over a [Cloudflare](https://www.cloudflare.com/products/tunnel/) tunnel with one click.
 - **A built-in SSH workspace** — save your remote hosts and get an interactive terminal, an SFTP file browser with inline editing, local/reverse/SOCKS port-forward tunnels, and live processes/ports panels — for the servers your projects ship to, without opening a separate SSH app.
 - **A sandboxed runner** — run an untrusted or freshly-cloned project inside a macOS sandbox, inspect it, then promote it to a normal local run.
+- **A managed local AI server** — PortBay installs, starts, and supervises [Ollama](https://ollama.com), pulls models from the live catalog, and shares one local endpoint with dictation, agents, and your own tools. Nothing leaves your Mac.
+- **Speech-to-Text** — hold Fn 🌐 and talk: an on-device speech model plus a local AI rewrite turn spoken thoughts into clean task cards, commits, and prompts. ⌘Z always restores your exact words — and with a local speech model it works in **any app on your Mac**, not just PortBay.
 - **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 69 agent tools.
 - **A declarative registry** — projects live in JSON; the daemon reconciles reality to match.
 - **Live logs, status, and metrics** per project, plus a macOS menu-bar mode.
@@ -134,6 +137,49 @@ listening-ports panels read straight off the host.
 - **Edit and deploy in place.** Browse the remote filesystem, open a file in the built-in editor, run a saved deploy step list, or drop into the terminal — all on the connection you already opened.
 - **An agent on the box, when it's there.** If a host runs Ollama, PortBay can talk to it — a small on-host assistant that only ever runs the commands you approve.
 
+## Local AI that stays local
+
+Local models are useful the moment someone else runs the server. PortBay does:
+it installs a signed [Ollama](https://ollama.com) build, starts and supervises
+it like any other project, and pulls models straight from the live ollama.com
+catalog — grouped by family, with sizes, freshness, and honest one-line
+guidance on what each is good at. One endpoint (`127.0.0.1:11434`) feeds
+everything: dictation rewrites, the SSH host assistant, task dispatch, and any
+tool of yours that already speaks Ollama. Models and prompts never leave the
+machine.
+
+<div align="center">
+
+<img src="docs-site/public/screenshots/ai-dark.png" alt="PortBay's AI page — a managed local Ollama server with storage, runtime, and model catalog" width="840" />
+
+<sub>The AI page: a supervised Ollama server, the live model catalog, and every local AI consumer pointed at one endpoint.</sub>
+
+</div>
+
+And on top of it sits the feature you'll use twenty times a day:
+**Speech-to-Text**. Hold **Fn 🌐** and talk — a speech model running on your Mac's
+Neural Engine (Whisper or Parakeet, your pick) transcribes, a local AI model
+polishes the rambling into text you'd actually keep, and **⌘Z always restores
+your exact words**. Your jargon survives: custom terms, project names, and
+vocabulary learned from past dictations are corrected *toward*, never away
+from.
+
+With a local speech model downloaded, dictation works **anywhere on your
+Mac** — your editor, browser, Slack. A recording HUD grows out of the camera
+notch while you talk; release Fn and the words land at your cursor, in
+whatever app you were in.
+
+<div align="center">
+
+<img src="docs-site/public/screenshots/dictation-overlay-dark.png" alt="PortBay's notch dictation overlay — live waveform and caption while dictating into any app" width="720" />
+
+<sub>Dictating into another app: the HUD lives in the notch, the transcript lands at your cursor — audio never leaves the machine.</sub>
+
+</div>
+
+[Local AI guide](https://docs.portbay.app/guides/local-ai) ·
+[Speech-to-Text guide](https://docs.portbay.app/guides/speech-to-text)
+
 ## A look around
 
 |  |  |
@@ -144,6 +190,8 @@ listening-ports panels read straight off the host.
 | ![PortBay web servers](docs-site/public/screenshots/web-servers-dark.png) | ![PortBay public tunnels](docs-site/public/screenshots/tunnels-dark.png) |
 | **Certificates** — locally-trusted HTTPS | **Local DNS** — wildcard `.test` resolution |
 | ![PortBay certificates](docs-site/public/screenshots/certificates-dark.png) | ![PortBay DNS](docs-site/public/screenshots/dns-dark.png) |
+| **Model catalog** — the live ollama.com library | **Speech-to-Text** — on-device speech, local rewrites |
+| ![PortBay AI model catalog](docs-site/public/screenshots/ai-models-dark.png) | ![PortBay Speech-to-Text](docs-site/public/screenshots/ai-dictation-dark.png) |
 
 ## How it compares
 
@@ -161,21 +209,16 @@ and worked on by AI agents.
 | MCP server for agents | ✅ 69 tools | ✅ | ❌ | ✅ |
 | AI agent task board — write a card, an agent does the work | ✅ | ❌ | ❌ | ❌ |
 | Agent handoff memory between runs | ✅ | ❌ | ❌ | ❌ |
+| Managed local LLM server (Ollama) | ✅ | ❌ | ✅ | Manual |
+| On-device Speech-to-Text with AI cleanup | ✅ | ❌ | ❌ | ❌ |
 | Built-in SSH / SFTP / tunnels | ✅ | ❌ | ❌ | ❌ |
 | Idle footprint | Small (native) | Small | Medium | Large |
 | Cross-platform | macOS (Linux/Windows planned) | macOS/Windows | macOS/Windows | All |
 
-An MCP server is fast becoming standard equipment — Herd ships one too. The
-difference is what happens after the agent connects. In PortBay it can pick up
+An MCP server is fast becoming standard equipment. In PortBay it can pick up
 a card from the board, do the work, record the files it touched, and leave a
 brief for the next run — a loop you'd otherwise be running by hand.
 
-If you live in PHP on macOS today, Herd is excellent. PortBay's bet is a single
-open, lightweight tool that handles mixed Node/PHP/static stacks without a daemon
-zoo. It's free and open source (AGPL-3.0); an optional
-[Pro tier](https://docs.portbay.app/pro/) ($59/yr, or earned by merging a pull
-request) funds the project and unlocks hosted multi-device sync and a few
-power-user features. Nothing you can't build yourself.
 
 For head-to-head breakdowns, see the in-depth comparisons — PortBay vs
 [Laravel Herd](https://docs.portbay.app/comparisons/portbay-vs-laravel-herd),
@@ -186,20 +229,7 @@ For head-to-head breakdowns, see the in-depth comparisons — PortBay vs
 [DDEV](https://docs.portbay.app/comparisons/portbay-vs-ddev), and
 [Local](https://docs.portbay.app/comparisons/portbay-vs-local).
 
-## How it works
 
-```
-GUI (Tauri + Svelte)
-  └─ Tauri IPC → PortBay Core (Rust)
-                   ├─ Process Compose  — manages your dev processes
-                   ├─ Caddy            — reverse proxy (admin API for live routes)
-                   ├─ dnsmasq          — wildcard *.test resolution
-                   ├─ mkcert           — locally-trusted HTTPS certificates
-                   └─ Hosts file       — managed entries via a privileged helper
-```
-
-The full design is in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md); the UX
-principles are in [`docs/UX_DESIGN.md`](./docs/UX_DESIGN.md).
 
 ## Getting started
 
@@ -237,36 +267,21 @@ pnpm install
 ./scripts/fetch-cloudflared.sh
 ./scripts/fetch-dnsmasq.sh
 
-pnpm tauri dev
-```
 
-Re-run a fetch script after bumping the version constant inside it. On a fresh
-clone, `pnpm tauri dev` will not start until the sidecar binaries are in place.
 
-## Documentation
-
-The documentation site is built with [VitePress](https://vitepress.dev) and lives
-in [`docs-site/`](./docs-site) — install, first run, project setup, CLI reference,
-registry schema, troubleshooting, and migration guides from Herd / ServBay / MAMP.
-
-```bash
-pnpm docs:dev      # local preview
-pnpm docs:build
-```
 
 ## Status
 
-PortBay is released and in active use on macOS (Apple Silicon). Most of what
-follows is already shipped — not planned.
 
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, full CLI. *Shipped.*
 - **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, an SSH workspace (terminal, SFTP, port-forward tunnels), and one-step import from Herd / ServBay / MAMP. *Shipped.*
 - **AI & automation** — an MCP server (69 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed, and a per-project task board hands cards to the coding agent of your choice. *Shipped.*
+- **Local AI** — a managed Ollama server with a live model catalog, plus Speech-to-Text: on-device transcription (Whisper / Parakeet on the Neural Engine), local AI transcript rewrites, and system-wide dictation into any app. *Shipped.*
 - **Release** — signed & notarized DMG, Homebrew cask, and in-app auto-update. *Shipped.*
 
 ### On the roadmap
 
-- **More platforms** — Apple Silicon today; Intel and Linux next, then Windows.
+- **More platforms** — Apple Silicon today; Linux next, then Windows. 
 
 ## Contributing
 
@@ -303,7 +318,7 @@ code. See [Community vs Pro](./docs/pages/community-vs-pro.md) and the
 PortBay Community is licensed under the **GNU Affero General Public License v3.0
 only** ([`AGPL-3.0-only`](./LICENSE)) — you may use, study, modify, and share it,
 and if you distribute it or run a modified version as a network service, the
-AGPL's terms apply. PortBay Pro is separate commercial software.
+AGPL's terms apply. 
 
 - Plain-English summary: [docs/pages/license.md](./docs/pages/license.md)
 - License map and policy: [docs/legal/licensing.md](./docs/legal/licensing.md)

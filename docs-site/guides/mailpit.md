@@ -131,8 +131,8 @@ The Mailpit card in Services reports one of four states:
 | --- | --- |
 | Running | Sidecar is up. Detail line shows the actual ports. |
 | Stopped | Binary is on PATH but the process is not running. Restart PortBay. |
-| Not installed | No `mailpit` binary found (bundled or PATH). Install via Homebrew. |
-| Unreachable | Process may be in an error state. Check Console.app or restart PortBay. |
+| Not installed | No `mailpit` binary found (bundled or PATH). Install it with Homebrew or your Linux package manager, or use a bundle that includes the sidecar. |
+| Unreachable | Process may be in an error state. Check the app logs or restart PortBay. |
 
 ### Startup Behavior
 

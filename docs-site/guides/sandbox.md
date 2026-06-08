@@ -9,7 +9,7 @@ Sandbox mode runs a project's process inside a macOS `sandbox-exec` profile that
 
 Sandbox mode is a **Pro feature**, gated on the `early_access` entitlement.
 
-![PortBay sandboxed project](/screenshots/projects.png)
+<ThemeImage name="projects" alt="PortBay sandboxed project" />
 
 The project list shows a shield badge on the "Untrusted Demo" row when sandbox is active.
 

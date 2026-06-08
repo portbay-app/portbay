@@ -7,7 +7,7 @@ description: How PortBay routes each project through Caddy to a real https://*.t
 
 PortBay uses Caddy as the reverse proxy. The app generates route configuration from the registry and applies it through Caddy’s admin API.
 
-![PortBay web servers](/screenshots/web-servers.png)
+<ThemeImage name="web-servers" alt="PortBay web servers" />
 
 The **Web Servers** page shows how each project is served: Caddy is the bundled edge that maps hostnames to ports and terminates local HTTPS, with Nginx and Apache detected when a project needs them.
 
@@ -23,7 +23,7 @@ flowchart LR
 
 ## Certificate Model
 
-![PortBay certificates](/screenshots/certificates.png)
+<ThemeImage name="certificates" alt="PortBay certificates" />
 
 The **Certificates** page lists every HTTPS project with its common name, issuer, and expiry, and lets you reissue a certificate from the row actions. mkcert issues local certificates per project. PortBay stores them under:
 

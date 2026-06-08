@@ -122,7 +122,7 @@ Each tick runs four sub-reconcilers in order:
 | `~/Library/Application Support/PortBay/process-compose.yaml` | Generated Process Compose config |
 | `~/Library/Application Support/PortBay/caddy/autosave.json` | Caddy-managed autosave |
 | `/etc/hosts` | PortBay-managed host block (fallback when dnsmasq is not installed) |
-| `/etc/resolver/<suffix>` | dnsmasq resolver stub (when zero-config DNS is active) |
+| `/etc/resolver/<suffix>` or `/etc/systemd/resolved.conf.d/portbay-<suffix>.conf` | dnsmasq resolver stub/drop-in (when zero-config DNS is active) |
 
 ## Phase Status
 
