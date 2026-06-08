@@ -58,6 +58,17 @@ export interface StepResult {
   exitCode: number;
 }
 
+/**
+ * One live progress event from a streaming deploy run, delivered on the
+ * `portbay://deploy` channel and keyed by the caller-generated `runId`.
+ * `sync` only fires for project deploys (the file-upload leg).
+ */
+export type DeployEvent =
+  | { kind: "sync"; runId: string; uploaded: number; total: number; bytes: number }
+  | { kind: "stepStarted"; runId: string; index: number; command: string }
+  | { kind: "output"; runId: string; index: number; stderr: boolean; chunk: string }
+  | { kind: "stepDone"; runId: string; index: number; exitCode: number; durationMs: number };
+
 /** Result of one `ssh_exec_run` command: captured output + exit code. */
 export interface ExecResult {
   stdout: string;

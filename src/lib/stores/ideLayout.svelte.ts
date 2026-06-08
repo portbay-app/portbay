@@ -12,7 +12,14 @@
 /** Left-rail activity views (rendered in the primary sidebar). The Agent lives
  * in its own right-hand aux panel (see `agentVisible`/`agentWidth`), not here. */
 export type ActivityView = "explorer" | "deploy" | "tunnels" | "sftp";
-export type PanelTab = "terminal" | "logs" | "processes" | "ports";
+export type PanelTab =
+  | "terminal"
+  | "logs"
+  | "processes"
+  | "gpu"
+  | "ports"
+  | "problems"
+  | "jobs";
 
 const VALID_VIEWS: ActivityView[] = ["explorer", "deploy", "tunnels", "sftp"];
 

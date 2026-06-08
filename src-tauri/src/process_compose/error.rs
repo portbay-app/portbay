@@ -43,17 +43,4 @@ pub enum PcError {
     YamlSerialize(#[from] serde_yaml::Error),
 }
 
-impl PcError {
-    /// Constructor used by file I/O sites that need to attach the offending
-    /// path to the error. Reintroduced as soon as the CLI starts writing
-    /// PC YAML files to disk.
-    #[allow(dead_code)]
-    pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
-        Self::Io {
-            path: path.into(),
-            source,
-        }
-    }
-}
-
 pub type Result<T> = std::result::Result<T, PcError>;

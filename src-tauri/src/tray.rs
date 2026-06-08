@@ -64,6 +64,7 @@ pub const CLOSE_TOAST_CHANNEL: &str = "portbay://close-to-menubar-hint";
 /// accessibility hatch.
 const ID_SHOW_WINDOW: &str = "show-window";
 const ID_PREFERENCES: &str = "preferences";
+const ID_PASTE_DICTATION: &str = "paste-last-dictation";
 const ID_QUIT: &str = "quit";
 
 /// Aggregate health used to pick the tray-icon colour. The variants
@@ -175,7 +176,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .build(app)?;
 
     let state: tauri::State<AppState> = app.state();
-    let mut tray = state.tray.lock().expect("tray mutex poisoned");
+    let mut tray = state.tray.lock().unwrap_or_else(|e| e.into_inner());
     tray.icon = Some(icon);
     tray.last_status = Some(AggregateStatus::Idle);
     Ok(())
@@ -185,7 +186,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 /// Re-enabling calls `install` again with a fresh menu.
 pub fn uninstall(app: &AppHandle) {
     let state: tauri::State<AppState> = app.state();
-    let mut tray = state.tray.lock().expect("tray mutex poisoned");
+    let mut tray = state.tray.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(icon) = tray.icon.take() {
         // Hiding is sufficient; the icon drops on scope exit which the
         // platform layer treats as removal.
@@ -221,7 +222,7 @@ pub fn refresh(
     // tray IPC. `TrayIcon` methods are documented as main-thread safe
     // so this re-entry into the platform layer is fine.
     let (need_update, icon_clone) = {
-        let mut tray = state.tray.lock().expect("tray mutex poisoned");
+        let mut tray = state.tray.lock().unwrap_or_else(|e| e.into_inner());
         let icon = match tray.icon.as_ref() {
             Some(i) => i.clone(),
             None => return, // tray disabled by preference
@@ -247,15 +248,59 @@ pub fn refresh(
     }
 }
 
-/// Right-click fallback menu. Three items — the rich list lives in
-/// the popover webview.
+/// Right-click fallback menu. The rich list lives in the popover webview;
+/// this carries the global hatches plus the dictation rescue item — "Paste
+/// Last Dictation" re-delivers the most recent transcript into the
+/// frontmost app (freeflow's "Paste Again"), so a paste the target app ate
+/// is one tray click from recovery. The item only appears once a dictation
+/// has been recorded.
 fn build_fallback_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    MenuBuilder::new(app)
+    let mut menu = MenuBuilder::new(app)
         .text(ID_SHOW_WINDOW, "Show PortBay window")
-        .text(ID_PREFERENCES, "Preferences…")
-        .separator()
-        .text(ID_QUIT, "Quit PortBay")
-        .build()
+        .text(ID_PREFERENCES, "Preferences…");
+    if let Some(latest) = crate::dictation_history::latest() {
+        menu = menu
+            .separator()
+            .text(
+                ID_PASTE_DICTATION,
+                format!("Paste Last Dictation — “{}”", preview_label(&latest.text)),
+            );
+    }
+    menu.separator().text(ID_QUIT, "Quit PortBay").build()
+}
+
+/// Truncate a transcript to a menu-friendly preview (whole chars, single
+/// line). 32 chars reads comfortably next to the item title.
+fn preview_label(text: &str) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= 32 {
+        one_line
+    } else {
+        let cut: String = one_line.chars().take(31).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Rebuild the fallback menu so the paste item reflects the newest
+/// dictation. Called after every recorded session (and on clear). Cheap —
+/// the menu is four-to-six static items.
+pub fn refresh_dictation_item(app: &AppHandle) {
+    let state: tauri::State<AppState> = app.state();
+    let icon = {
+        let tray = state.tray.lock().unwrap_or_else(|e| e.into_inner());
+        match tray.icon.as_ref() {
+            Some(i) => i.clone(),
+            None => return, // tray disabled by preference
+        }
+    };
+    match build_fallback_menu(app) {
+        Ok(menu) => {
+            if let Err(e) = icon.set_menu(Some(menu)) {
+                tracing::warn!(error = %e, "tray: dictation menu refresh failed");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "tray: dictation menu rebuild failed"),
+    }
 }
 
 /// Dispatcher for the fallback menu. Per-project actions and Stop-all
@@ -279,6 +324,13 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
             show_main_window(app);
             // Frontend listens to `portbay://nav` to push routes.
             let _ = app.emit("portbay://nav", "/settings");
+        }
+        ID_PASTE_DICTATION => {
+            // Re-deliver into whatever app is frontmost right now — status
+            // menus track without activating us, so that's still the user's
+            // app. Falls back to a plain clipboard copy when delivery
+            // isn't possible (no Accessibility, PortBay frontmost, …).
+            crate::dictation_anywhere::paste_latest(app);
         }
         _ => {}
     }
@@ -345,7 +397,7 @@ fn toggle_panel(app: &AppHandle, click: PhysicalPosition<f64>, rect: Rect) {
         let v = state
             .tray
             .lock()
-            .expect("tray mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .last_hidden_at
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(200));
         v
@@ -407,7 +459,7 @@ pub fn hide_panel(app: &AppHandle) {
         state
             .tray
             .lock()
-            .expect("tray mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .last_hidden_at = Some(std::time::Instant::now());
     }
 }

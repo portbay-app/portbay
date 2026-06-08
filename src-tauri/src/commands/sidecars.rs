@@ -85,7 +85,7 @@ async fn pc_status(state: &AppState) -> SidecarStatus {
     let client = state
         .pc_client
         .lock()
-        .expect("pc_client mutex poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .clone();
     let (status, detail) = match client {
         None => (SidecarState::Stopped, Some("not started".into())),
@@ -107,7 +107,7 @@ async fn caddy_status(state: &AppState) -> SidecarStatus {
     let client = state
         .caddy_client
         .lock()
-        .expect("caddy_client mutex poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .clone();
     let (status, detail) = match client {
         None => (SidecarState::Stopped, Some("not started".into())),
@@ -171,7 +171,7 @@ fn mkcert_status(state: &AppState) -> SidecarStatus {
 
 fn dnsmasq_status(state: &AppState) -> SidecarStatus {
     let (running, port) = {
-        let guard = state.dnsmasq.lock().expect("dnsmasq mutex poisoned");
+        let guard = state.dnsmasq.lock().unwrap_or_else(|e| e.into_inner());
         (guard.is_running(), guard.port())
     };
     if running {
@@ -207,7 +207,7 @@ fn dnsmasq_status(state: &AppState) -> SidecarStatus {
 
 fn mailpit_status(app: &AppHandle, state: &AppState) -> SidecarStatus {
     let (running, smtp, ui) = {
-        let guard = state.mailpit.lock().expect("mailpit mutex poisoned");
+        let guard = state.mailpit.lock().unwrap_or_else(|e| e.into_inner());
         (guard.is_running(), guard.smtp_port(), guard.ui_port())
     };
     if running {

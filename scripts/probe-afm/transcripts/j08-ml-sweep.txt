@@ -1,0 +1,1 @@
+sweep the learning rate from one e minus five to one e minus three and log the F1 score per epoch

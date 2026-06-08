@@ -31,6 +31,11 @@ export interface TerminalPrefs {
   /** Ordered regex → colour rules that tint matching terminal output. Order is
    *  priority: earlier rules win an overlap. */
   highlightRules: HighlightRule[];
+  /** Feed recent terminal output (not just typed commands) to the host model
+   *  for the inline next-command suggestion. Off by default: the buffer can hold
+   *  secrets. When on it's capped + lightly redacted and still only ever sent to
+   *  the host's own model over SSH. */
+  suggestBufferContext: boolean;
 }
 
 const STORAGE_KEY = "portbay.ssh.terminalPrefs";
@@ -61,6 +66,7 @@ const DEFAULTS: TerminalPrefs = {
   cursorBlink: true,
   startupCommand: "",
   highlightRules: DEFAULT_RULES,
+  suggestBufferContext: false,
 };
 
 /** Coerce stored/parsed JSON into a clean rule list (drops malformed entries,
@@ -119,6 +125,7 @@ function load(): TerminalPrefs {
         "highlightRules" in parsed
           ? sanitizeRules(parsed.highlightRules)
           : DEFAULT_RULES.map((r) => ({ ...r })),
+      suggestBufferContext: parsed.suggestBufferContext ?? DEFAULTS.suggestBufferContext,
     };
   } catch {
     return { ...DEFAULTS };

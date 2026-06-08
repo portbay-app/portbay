@@ -31,12 +31,16 @@ pub enum AgentKind {
     Qwen,
     Copilot,
     Antigravity,
+    /// Local Ollama model run as a chat (not an agentic CLI): dispatch opens
+    /// `ollama run <model>` as an interactive REPL with the prompt on the
+    /// clipboard. No MCP/tools — it's a chat model, not a file-editing agent.
+    Ollama,
     Custom,
 }
 
 impl AgentKind {
     /// Every dispatchable agent, in display order.
-    pub const ALL: [AgentKind; 11] = [
+    pub const ALL: [AgentKind; 12] = [
         AgentKind::Claude,
         AgentKind::Codex,
         AgentKind::Cursor,
@@ -47,6 +51,7 @@ impl AgentKind {
         AgentKind::Qwen,
         AgentKind::Copilot,
         AgentKind::Antigravity,
+        AgentKind::Ollama,
         AgentKind::Custom,
     ];
 
@@ -63,6 +68,7 @@ impl AgentKind {
             AgentKind::Qwen => "qwen",
             AgentKind::Copilot => "copilot",
             AgentKind::Antigravity => "antigravity",
+            AgentKind::Ollama => "ollama",
             AgentKind::Custom => "custom",
         }
     }
@@ -80,6 +86,7 @@ impl AgentKind {
             AgentKind::Qwen => "Qwen Code",
             AgentKind::Copilot => "Copilot CLI",
             AgentKind::Antigravity => "Antigravity",
+            AgentKind::Ollama => "Ollama",
             AgentKind::Custom => "Custom",
         }
     }
@@ -97,6 +104,7 @@ impl AgentKind {
             "qwen" => AgentKind::Qwen,
             "copilot" => AgentKind::Copilot,
             "antigravity" | "gravity" => AgentKind::Antigravity,
+            "ollama" => AgentKind::Ollama,
             "custom" => AgentKind::Custom,
             _ => return None,
         })
@@ -109,7 +117,7 @@ mod tests {
 
     #[test]
     fn all_has_correct_count() {
-        assert_eq!(AgentKind::ALL.len(), 11);
+        assert_eq!(AgentKind::ALL.len(), 12);
     }
 
     #[test]

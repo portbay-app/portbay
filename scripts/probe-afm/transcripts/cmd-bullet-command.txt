@@ -1,0 +1,1 @@
+Here are the steps. Bullet point. Install the dependencies. Bullet point. Run the migrations.

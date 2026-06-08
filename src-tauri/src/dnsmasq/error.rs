@@ -23,14 +23,4 @@ pub enum DnsmasqError {
     },
 }
 
-impl DnsmasqError {
-    #[allow(dead_code)]
-    pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
-        Self::Io {
-            path: path.into(),
-            source,
-        }
-    }
-}
-
 pub type Result<T> = std::result::Result<T, DnsmasqError>;

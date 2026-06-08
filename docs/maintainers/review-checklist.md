@@ -14,6 +14,7 @@ This checklist is for maintainers reviewing incoming pull requests. Work through
 ## 2. Tests
 
 - [ ] New behavior has tests. Bug fixes have a regression test. Refactors at minimum preserve existing test coverage.
+- [ ] Task automation shell gates (`acceptanceCheck` and `verify: shell`) are reviewed as trusted local project scripts. They execute through `/bin/sh -c` in the project directory and must not be sourced from untrusted remote content.
 - [ ] Tests exercise the actual change — not just happy path if failure modes are meaningful.
 - [ ] `cargo test --no-default-features` passes locally (or CI confirms it).
 - [ ] `pnpm test` (Vitest) passes.

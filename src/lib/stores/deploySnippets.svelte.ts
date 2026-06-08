@@ -3,11 +3,18 @@
  * connection, so a Phase-3 deploy you ran once can be recalled and re-run
  * instead of retyped.
  *
- * Local convenience state (like terminal prefs / IDE layout), so it persists to
- * localStorage rather than the registry — it carries no secrets, just command
- * text the user already sees and explicitly runs.
+ * Persistence: the Rust backend file `<data_dir>/PortBay/ssh-deploy-snippets.json`
+ * (via `ssh_deploy_snippets_get/set`). Snippets used to live only in
+ * localStorage, but WKWebView keys its storage by bundle identity — running
+ * the dev binary unbundled vs. wrapped in a signed .app lands in different
+ * containers and saved snippets silently "vanished" across relaunches. The
+ * data-dir file survives all of that; localStorage stays as a mirror so the
+ * hosted simulator (no Tauri backend) keeps working, and any pre-existing
+ * localStorage snippets are merged into the backend file on first load.
  */
 import { browser } from "$app/environment";
+
+import { invokeQuiet } from "$lib/ipc";
 
 export interface DeploySnippet {
   id: string;
@@ -28,7 +35,7 @@ function freshId(): string {
   return `snip-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
 
-function load(): SnippetMap {
+function loadLocal(): SnippetMap {
   if (!browser) return {};
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -40,15 +47,60 @@ function load(): SnippetMap {
   }
 }
 
+/** Union of two maps, per connection, deduped by snippet id (base wins). */
+function merge(base: SnippetMap, extra: SnippetMap): SnippetMap {
+  const out: SnippetMap = { ...base };
+  for (const [conn, snippets] of Object.entries(extra)) {
+    const have = new Set((out[conn] ?? []).map((s) => s.id));
+    const fresh = snippets.filter((s) => !have.has(s.id));
+    if (fresh.length) out[conn] = [...(out[conn] ?? []), ...fresh];
+  }
+  return out;
+}
+
 function createDeploySnippetsStore() {
-  let map = $state<SnippetMap>(load());
+  // Seed synchronously from localStorage so the pane isn't empty for the
+  // first frame; the backend file is authoritative and hydrates over it.
+  let map = $state<SnippetMap>(loadLocal());
+  // Until backend hydration settles, writes go to localStorage only — a
+  // premature `set` could clobber the file with the (possibly empty) seed.
+  let backendReady = false;
+
+  if (browser) void hydrate();
+
+  async function hydrate() {
+    let fromBackend: SnippetMap;
+    try {
+      const raw = await invokeQuiet<SnippetMap | null>("ssh_deploy_snippets_get");
+      if (!raw || typeof raw !== "object") return; // no real backend — stay on localStorage
+      fromBackend = raw;
+    } catch {
+      // No backend (hosted simulator) — stay on the localStorage mirror.
+      return;
+    }
+    const local = map;
+    map = merge(fromBackend, local);
+    backendReady = true;
+    // One-time migration: anything that existed only in localStorage is now
+    // part of the merged map — push it into the backend file.
+    const localOnly = Object.entries(local).some(([conn, snippets]) => {
+      const have = new Set((fromBackend[conn] ?? []).map((s) => s.id));
+      return snippets.some((s) => !have.has(s.id));
+    });
+    if (localOnly) persist();
+  }
 
   function persist() {
     if (!browser) return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
     } catch {
-      /* storage unavailable; keep in-memory */
+      /* storage unavailable; the backend file still has it */
+    }
+    if (backendReady) {
+      invokeQuiet("ssh_deploy_snippets_set", { snippets: map }).catch(() => {
+        /* write failed; localStorage mirror still has it for this identity */
+      });
     }
   }
 

@@ -16,6 +16,7 @@ import {
   type NotificationPrefs,
 } from "$lib/notifications/prefs";
 import type { WebServer } from "$lib/types/projects";
+import type { AiPrefs } from "$lib/types/ai";
 
 export type AccentColor =
   | "blue"
@@ -40,6 +41,84 @@ export interface AccessibilityPrefs {
   focusMode: AccessibilityFocusMode;
   underlineLinks: boolean;
   colorIndependentStatus: boolean;
+}
+
+/** How aggressively dictated transcripts are post-processed. */
+export type DictationRewriteMode = "off" | "light" | "smart";
+
+/** Smart Dictation — the rewrite layer over macOS dictation. Smart by
+ * default via the on-device Apple provider (latches off for the session on
+ * machines without Apple Intelligence); the transcript only ever goes to the
+ * configured (local) provider, never audio, never the network beyond
+ * `endpoint`. */
+export interface DictationPrefs {
+  mode: DictationRewriteMode;
+  /** Provider id — "apple" (on-device Foundation Models, macOS 26+, the
+   * zero-setup default) or "ollama" (local server the user runs). */
+  provider: string;
+  /** Provider base URL (Ollama only; Apple is on-device). */
+  endpoint: string;
+  /** Model name; empty = auto-pick from installed models (Ollama only). */
+  model: string;
+  /** Push-to-talk: hold the Fn (🌐) key with a dictation field focused to
+   * dictate; release to stop. Independent of the rewrite mode. */
+  pushToTalk: boolean;
+  /** User-curated dictation terms ("refactor", "Tailwind", "Shopify") merged
+   * ahead of every automatic vocabulary source backend-side — the plain
+   * words and niche brands dictation garbles that no harvest can supply.
+   * The prompt takes the first 12. */
+  customTerms: string[];
+  /** Transcription engine: "macos" (system dictation types into the field,
+   * the default) or "local" (the bundled sidecar captures the mic and runs
+   * a downloaded Whisper/Parakeet model on-device). */
+  sttEngine: string;
+  /** Local STT model (catalog id, e.g. "parakeet-tdt-v3"). Only read when
+   * sttEngine === "local"; empty = no model chosen yet. */
+  sttModel: string;
+  /** "Dictate anywhere": hold Fn in ANY app and the local engine's
+   * transcript is pasted into it. Off by default — needs the Accessibility
+   * grant and a local model. Only read when sttEngine === "local". */
+  anywhere: boolean;
+  /** Hands-free variant of "dictate anywhere": double-tap Fn starts a
+   * session that stays live without holding the key; a single Fn tap (or
+   * the notch's stop button, or Esc) finishes it. On by default within the
+   * anywhere opt-in. */
+  anywhereDoubleTap: boolean;
+  /** Recording-overlay placement: "notch" (camera-housing HUD, default) or
+   * "bottom" (floating pill near the bottom of the pointer's screen — for
+   * Macs without a notch). */
+  overlayPosition: string;
+  /** Raw mic-RMS floor below which the overlay waveform stays flat —
+   * raise it so the bars don't dance to a noisy room. Backend clamps to
+   * 0–0.05; default 0.01 (the previously hardcoded floor). */
+  overlayNoiseFloor: number;
+  /** Live-transcript preview tail: the overlay keeps the last N characters
+   * (head-truncated so the newest words stay visible). Backend clamps to
+   * 50–800; default 150. */
+  overlayPreviewChars: number;
+  /** "Polish dictation everywhere": run the Smart Dictation rewrite engine
+   * over the system-wide transcript before pasting, so rambly speech lands
+   * clean in any app. Off by default; only read inside the anywhere opt-in.
+   * A failed/timed-out rewrite degrades to the raw transcript. */
+  anywherePolish: boolean;
+  /** Per-app RewriteContext overrides for the polished anywhere path:
+   * frontmost bundle id → context wire string (snake_case). Resolution falls
+   * back to built-ins (terminals → terminal_command) then GeneralNote, so an
+   * empty list still does the right thing. */
+  anywhereAppContexts: AppContextRule[];
+}
+
+/** One per-app rewrite-context override for the polished anywhere path. */
+export interface AppContextRule {
+  bundleId: string;
+  context: string;
+}
+
+/** Local speech-to-text model storage (the AI page's "Speech to text"
+ * section manages it). Which engine transcribes lives on `dictation`. */
+export interface SttPrefs {
+  /** Where downloaded STT models live; one subdirectory per catalog id. */
+  modelsDir: string;
 }
 
 export interface Preferences {
@@ -103,6 +182,15 @@ export interface Preferences {
   lastAutoClean: number;
   /** Extra project-relative dir names to treat as artifacts. */
   autoCleanExtraDirs: string[];
+
+  // AI / local Ollama
+  ai: AiPrefs;
+
+  // Dictation
+  dictation: DictationPrefs;
+
+  // Local speech-to-text storage
+  stt: SttPrefs;
 }
 
 const DEFAULTS: Preferences = {
@@ -144,6 +232,56 @@ const DEFAULTS: Preferences = {
   autoCleanSchedule: "off",
   lastAutoClean: 0,
   autoCleanExtraDirs: [],
+  ai: {
+    endpoint: "http://127.0.0.1:11434",
+    modelsDir: "",
+    binaryPath: "",
+    keepAlive: "5m",
+    flashAttention: false,
+    origins: "http://localhost,https://localhost,http://127.0.0.1,https://127.0.0.1",
+    numParallel: null,
+    debug: false,
+    modelDownloadThreads: null,
+    noHistory: false,
+    noPrune: false,
+    scheduleSpread: false,
+    multiUserCache: false,
+    kvCacheType: "",
+    gpuOverhead: null,
+    loadTimeout: "",
+    maxLoadedModels: null,
+    maxQueue: null,
+    llmLibrary: "",
+    httpProxy: "",
+    httpsProxy: "",
+    noProxy: "",
+  },
+  dictation: {
+    // Smart by default: zero-setup on-device polish (Wispr-Flow-style). On
+    // machines without Apple Intelligence the first rewrite resolves
+    // `no_model` and the rewriter latches the provider off for the session —
+    // dictation keeps working raw, with no nagging.
+    mode: "smart",
+    provider: "apple",
+    endpoint: "http://127.0.0.1:11434",
+    model: "",
+    pushToTalk: true,
+    customTerms: [],
+    sttEngine: "macos",
+    sttModel: "",
+    anywhere: false,
+    anywhereDoubleTap: true,
+    overlayPosition: "notch",
+    overlayNoiseFloor: 0.01,
+    overlayPreviewChars: 150,
+    anywherePolish: false,
+    anywhereAppContexts: [],
+  },
+  stt: {
+    // Backend materializes the real platform default (…/PortBay/ai-models/speech)
+    // into get_preferences; this empty string never reaches the UI.
+    modelsDir: "",
+  },
 };
 
 // Per-accent CSS variable values. Keyed off `accentColor`, applied to
@@ -272,10 +410,16 @@ function createPreferencesStore() {
 export const preferences = createPreferencesStore();
 
 function normalisePreferences(prefs: Preferences): Preferences {
+  const ai = { ...DEFAULTS.ai, ...(prefs.ai ?? {}) };
+  if (!ai.endpoint && prefs.dictation?.endpoint) ai.endpoint = prefs.dictation.endpoint;
+  const dictation = { ...DEFAULTS.dictation, ...(prefs.dictation ?? {}), endpoint: ai.endpoint };
   return {
     ...prefs,
     notifications: normaliseNotificationPrefs(prefs.notifications ?? DEFAULT_NOTIFICATION_PREFS),
     accessibility: { ...DEFAULTS.accessibility, ...(prefs.accessibility ?? {}) },
+    ai,
+    dictation,
+    stt: { ...DEFAULTS.stt, ...(prefs.stt ?? {}) },
   };
 }
 

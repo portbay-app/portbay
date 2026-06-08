@@ -27,6 +27,7 @@
     | "settings"
     | "search"
     | "plus"
+    | "minus"
     | "refresh-cw"
     | "x"
     | "check"
@@ -61,10 +62,14 @@
     | "users"
     | "user"
     | "activity"
+    | "cpu"
+    | "thermometer"
+    | "gauge"
     | "layers"
     | "list"
     | "grid-2x2"
     | "chevrons-up-down"
+    | "chevrons-down-up"
     | "chevron-up"
     | "log-out"
     | "database"
@@ -91,6 +96,7 @@
     | "paperclip"
     | "image"
     | "mic"
+    | "audio-lines"
     | "accessibility"
     | "save"
     | "archive"
@@ -99,7 +105,18 @@
     | "folder-open"
     | "shield-check"
     | "shield-off"
-    | "alert-triangle";
+    | "alert-triangle"
+    | "ban"
+    | "credit-card"
+    | "unplug"
+    | "lock-open"
+    | "shield-alert"
+    | "wand-sparkles"
+    | "spell-check"
+    | "pen-line"
+    | "list-ordered"
+    | "download"
+    | "loader-circle";
 </script>
 
 <script lang="ts">
@@ -117,6 +134,7 @@
     Settings,
     Search,
     Plus,
+    Minus,
     RefreshCw,
     X,
     Check,
@@ -151,10 +169,14 @@
     Users,
     User,
     Activity,
+    Cpu,
+    Thermometer,
+    Gauge,
     Layers,
     List,
     Grid2x2,
     ChevronsUpDown,
+    ChevronsDownUp,
     ChevronUp,
     LogOut,
     Database,
@@ -181,6 +203,7 @@
     Paperclip,
     Image as ImageIcon,
     Mic,
+    AudioLines,
     Accessibility,
     Save,
     Archive,
@@ -190,6 +213,17 @@
     ShieldCheck,
     ShieldOff,
     AlertTriangle,
+    Ban,
+    CreditCard,
+    Unplug,
+    LockOpen,
+    ShieldAlert,
+    WandSparkles,
+    SpellCheck,
+    PenLine,
+    ListOrdered,
+    Download,
+    LoaderCircle,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -222,6 +256,7 @@
     settings: Settings,
     search: Search,
     plus: Plus,
+    minus: Minus,
     "refresh-cw": RefreshCw,
     x: X,
     check: Check,
@@ -256,10 +291,14 @@
     users: Users,
     user: User,
     activity: Activity,
+    cpu: Cpu,
+    thermometer: Thermometer,
+    gauge: Gauge,
     layers: Layers,
     list: List,
     "grid-2x2": Grid2x2,
     "chevrons-up-down": ChevronsUpDown,
+    "chevrons-down-up": ChevronsDownUp,
     "chevron-up": ChevronUp,
     "log-out": LogOut,
     database: Database,
@@ -286,6 +325,7 @@
     paperclip: Paperclip,
     image: ImageIcon,
     mic: Mic,
+    "audio-lines": AudioLines,
     accessibility: Accessibility,
     save: Save,
     archive: Archive,
@@ -295,6 +335,17 @@
     "shield-check": ShieldCheck,
     "shield-off": ShieldOff,
     "alert-triangle": AlertTriangle,
+    ban: Ban,
+    "credit-card": CreditCard,
+    unplug: Unplug,
+    "lock-open": LockOpen,
+    "shield-alert": ShieldAlert,
+    "wand-sparkles": WandSparkles,
+    "spell-check": SpellCheck,
+    "pen-line": PenLine,
+    "list-ordered": ListOrdered,
+    download: Download,
+    "loader-circle": LoaderCircle,
   };
 
   const Component = $derived(iconMap[name]);

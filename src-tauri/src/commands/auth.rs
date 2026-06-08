@@ -115,6 +115,75 @@ pub async fn logout() -> AppResult<EffectiveEntitlement> {
     Ok(entitlements::anonymous_fallback())
 }
 
+/// Request account deletion (GDPR erasure, deferred). The cloud stamps the
+/// request, revokes every session, and purges the account 30 days later; the
+/// user can sign back in within the window and cancel from Settings
+/// (`cancel_account_deletion`). Server-first: the cloud must confirm the
+/// scheduling before any local state is cleared, so a failure leaves the user
+/// signed in. On success, clears the keychain session, the cached
+/// entitlement, and the avatar cache, and falls back to anonymous.
+#[tauri::command]
+pub async fn delete_account() -> AppResult<EffectiveEntitlement> {
+    let token = auth::access_token_refreshing(CLOUD_BASE_URL)
+        .await
+        .ok_or_else(|| AppError::Internal("You're not signed in.".into()))?;
+    auth::delete_account_remote(CLOUD_BASE_URL, &token)
+        .await
+        .map_err(AppError::Internal)?;
+    let _ = auth::clear_session();
+    let _ = entitlements::clear_cache();
+    crate::avatar::clear_cache();
+    Ok(entitlements::anonymous_fallback())
+}
+
+/// Pending-deletion status for the signed-in account, so Settings can show
+/// the erasure countdown + cancel affordance after a re-sign-in (a pending
+/// deletion survives sign-in by design). Quiet-friendly: callers use
+/// `invokeQuiet` — offline or signed-out simply yields an error the UI
+/// ignores (no banner).
+#[tauri::command]
+pub async fn account_status() -> AppResult<auth::AccountStatus> {
+    let token = auth::access_token_refreshing(CLOUD_BASE_URL)
+        .await
+        .ok_or_else(|| AppError::Internal("You're not signed in.".into()))?;
+    auth::account_status_remote(CLOUD_BASE_URL, &token)
+        .await
+        .map_err(AppError::Internal)
+}
+
+/// Cancel a pending account deletion — the deliberate "keep my account"
+/// action in Settings. Server-first: a failure (toasted by `safeInvoke`)
+/// leaves the pending banner up. Returns the refreshed status so the UI
+/// flips back to normal in one round trip.
+#[tauri::command]
+pub async fn cancel_account_deletion() -> AppResult<auth::AccountStatus> {
+    let token = auth::access_token_refreshing(CLOUD_BASE_URL)
+        .await
+        .ok_or_else(|| AppError::Internal("You're not signed in.".into()))?;
+    auth::cancel_deletion_remote(CLOUD_BASE_URL, &token)
+        .await
+        .map_err(AppError::Internal)?;
+    auth::account_status_remote(CLOUD_BASE_URL, &token)
+        .await
+        .map_err(AppError::Internal)
+}
+
+/// Export the signed-in account's hosted data (GDPR portability) and write the
+/// JSON document to `dest_path` — a location the user picked via the save
+/// dialog in Settings → Account.
+#[tauri::command]
+pub async fn export_account_data(dest_path: String) -> AppResult<()> {
+    let token = auth::access_token_refreshing(CLOUD_BASE_URL)
+        .await
+        .ok_or_else(|| AppError::Internal("You're not signed in.".into()))?;
+    let json = auth::export_account_remote(CLOUD_BASE_URL, &token)
+        .await
+        .map_err(AppError::Internal)?;
+    std::fs::write(&dest_path, json)
+        .map_err(|e| AppError::Internal(format!("could not write the export file: {e}")))?;
+    Ok(())
+}
+
 /// Resolve the signed-in account's avatar as a `data:` URL for the topbar
 /// profile chip, or `null` when there is none (signed out, an email-auth
 /// account, or the fetch failed with no cache). Quiet by design — the UI falls

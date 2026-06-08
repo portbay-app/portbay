@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": [
+      "binaries/process-compose",
+      "binaries/caddy",
+      "binaries/mkcert",
+      "binaries/mailpit",
+      "binaries/cloudflared",
+      "binaries/dnsmasq",
+      "binaries/portbay-hosts-helper",
+      "binaries/portbay-mcp",
+      "binaries/portbay-afm",
+      "binaries/portbay-stt"
+    ]
+  }
+}

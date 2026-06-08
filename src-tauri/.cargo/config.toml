@@ -1,0 +1,8 @@
+# Dev-run hook: macOS re-signs every freshly built binary with a stable code
+# identity before launch (see scripts/macos-dev-sign-run.sh for why — per-app
+# consent state like the dictation onboarding resets on every rebuild under
+# cargo's default ad-hoc signature, which embeds a per-build hash). No-op on
+# machines without a signing identity (contributors, CI). Relative path:
+# cargo runs from src-tauri/.
+[target.'cfg(target_os = "macos")']
+runner = "../scripts/macos-dev-sign-run.sh"

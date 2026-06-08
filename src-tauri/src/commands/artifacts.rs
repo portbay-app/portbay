@@ -5,12 +5,31 @@
 //! reclaim space with a one-click clean — the local-dev equivalent of
 //! `rm -rf .next node_modules`.
 //!
-//! Safety: the clean commands take a *relative* dir key, not a
+//! ## Two cleanup surfaces, two safety levels
+//!
+//! 1. **Manual clean** (the user clicks a row, or "Clean all" in the detail
+//!    panel) may remove *anything* in the catalogue — including dependency
+//!    stores (`node_modules`, `vendor`, `.venv`) and build output (`dist`,
+//!    `.next`). That's a deliberate, eyes-on action: the user sees the size and
+//!    chooses, the way `npkill`/CleanMyMac surface reclaimable space.
+//!
+//! 2. **Scheduled auto-clean** (the unattended background pass) is far more
+//!    conservative. It only ever deletes dirs flagged [`auto_safe`] — pure,
+//!    regenerable caches that (a) rebuild locally with **no network**, and
+//!    (b) cannot break a running process or the project's integrity if removed.
+//!    Dependency stores and build *output* are never touched by the scheduler,
+//!    because deleting them forces a reinstall/rebuild (network) or can break a
+//!    live dev server. This split is why a weekly pass can no longer wipe
+//!    `node_modules` out from under a project.
+//!
+//! Safety (both surfaces): the clean commands take a *relative* dir key, not a
 //! frontend-supplied absolute path. The key must match this module's
 //! hardcoded catalogue for the project's type, and the resolved target is
 //! re-checked to live inside the project folder before any deletion. Symlinks
 //! are never followed while measuring, so a measure/clean can't escape the
 //! project tree.
+//!
+//! [`auto_safe`]: artifact_catalogue
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -38,52 +57,120 @@ pub struct ArtifactDir {
     pub file_count: u64,
     /// Newest file mtime as Unix seconds, or `None` for an empty dir.
     pub last_modified: Option<u64>,
+    /// Whether the background scheduler will auto-delete this dir. `true` only
+    /// for regenerable caches (rebuild locally, no reinstall, no integrity
+    /// risk); `false` for dependency stores and build output, which stay
+    /// manual-only. Lets the UI mark a row "won't be auto-cleaned".
+    pub auto_clean: bool,
 }
 
-/// Known build-output dirs per project type: `(relative path, label)`.
+/// One catalogue entry: `(project-relative path, label, auto_safe)`.
+///
+/// `auto_safe` is the entire safety contract of the background scheduler. It is
+/// `true` **only** for a regenerable cache that:
+///   * rebuilds locally with no network access, and
+///   * cannot break a running process or the project's integrity if deleted.
+///
+/// Everything a project needs reinstalled (`node_modules`, `vendor`, `.venv`,
+/// `.gradle`, `.pub-cache`) or rebuilt and possibly served (`dist`, `build`,
+/// `.next`, `public/build`, `*/build`) is `auto_safe = false`: still offered
+/// for a deliberate manual clean, but never swept by the unattended pass. This
+/// is the line that keeps a scheduled clean from forcing a `pnpm install`.
+type Artifact = (&'static str, &'static str, bool);
+
+const AUTO_SAFE: bool = true;
+const MANUAL_ONLY: bool = false;
+
+/// Known artifact dirs per project type: `(relative path, label, auto_safe)`.
 /// Hardcoded so a clean target can never be an arbitrary user string.
-fn artifact_catalogue(kind: ProjectType) -> &'static [(&'static str, &'static str)] {
+fn artifact_catalogue(kind: ProjectType) -> &'static [Artifact] {
     match kind {
-        ProjectType::Next => &[(".next", "Next.js build"), ("node_modules", "Dependencies")],
-        ProjectType::Vite => &[("dist", "Vite build"), ("node_modules", "Dependencies")],
-        ProjectType::Node => &[("dist", "Build output"), ("node_modules", "Dependencies")],
+        // Node family: the package store and primary build output are
+        // manual-only; the tool/build *caches* under them are auto-safe.
+        ProjectType::Next => &[
+            (".next/cache", "Next.js build cache", AUTO_SAFE),
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            (".turbo", "Turbo cache", AUTO_SAFE),
+            (".next", "Next.js build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::Vite => &[
+            ("node_modules/.vite", "Vite dep cache", AUTO_SAFE),
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            (".turbo", "Turbo cache", AUTO_SAFE),
+            ("dist", "Vite build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::Node => &[
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            (".turbo", "Turbo cache", AUTO_SAFE),
+            ("dist", "Build output", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        // Laravel/PHP: the framework regenerates its own caches on demand, so
+        // they're auto-safe; Composer packages and the compiled front-end are
+        // manual-only (a `composer install` / `npm run build` to restore).
         ProjectType::Php => &[
-            ("vendor", "Composer packages"),
-            ("public/build", "Front-end build"),
-            ("bootstrap/cache", "Bootstrap cache"),
-            ("storage/framework/cache", "Framework cache"),
+            ("bootstrap/cache", "Bootstrap cache", AUTO_SAFE),
+            ("storage/framework/cache", "Framework cache", AUTO_SAFE),
+            ("storage/framework/views", "Compiled views", AUTO_SAFE),
+            ("vendor", "Composer packages", MANUAL_ONLY),
+            ("public/build", "Front-end build", MANUAL_ONLY),
         ],
         ProjectType::Python => &[
-            (".venv", "Virtualenv"),
-            ("__pycache__", "Bytecode cache"),
-            (".pytest_cache", "pytest cache"),
-            (".mypy_cache", "mypy cache"),
-            ("dist", "Build output"),
+            ("__pycache__", "Bytecode cache", AUTO_SAFE),
+            (".pytest_cache", "pytest cache", AUTO_SAFE),
+            (".mypy_cache", "mypy cache", AUTO_SAFE),
+            (".ruff_cache", "ruff cache", AUTO_SAFE),
+            (".venv", "Virtualenv", MANUAL_ONLY),
+            ("dist", "Build output", MANUAL_ONLY),
         ],
-        ProjectType::Static => &[("dist", "Build output"), ("build", "Build output")],
+        // A static site's `dist`/`build` is what's being served — never sweep
+        // it automatically; only a generic build cache is auto-safe.
+        ProjectType::Static => &[
+            (".cache", "Build cache", AUTO_SAFE),
+            ("dist", "Build output", MANUAL_ONLY),
+            ("build", "Build output", MANUAL_ONLY),
+        ],
+        // Flutter/Dart: every dir here needs a network `pub get` or a rebuild to
+        // restore, so none are auto-safe.
         ProjectType::Flutter => &[
-            ("build", "Flutter build"),
-            (".dart_tool", "Dart tool cache"),
-            (".pub-cache", "Pub cache"),
+            ("build", "Flutter build", MANUAL_ONLY),
+            (".dart_tool", "Dart tool cache", MANUAL_ONLY),
+            (".pub-cache", "Pub cache", MANUAL_ONLY),
         ],
-        ProjectType::Xcode => &[("build", "Xcode build"), ("DerivedData", "Derived data")],
+        // Xcode's DerivedData is the canonical safe-to-delete cache (Xcode
+        // rebuilds it with no network); the build product is manual-only.
+        ProjectType::Xcode => &[
+            ("DerivedData", "Derived data", AUTO_SAFE),
+            ("build", "Xcode build", MANUAL_ONLY),
+        ],
+        // Gradle re-downloads dependencies when its caches are cleared, so
+        // `.gradle` is manual-only; build outputs likewise.
         ProjectType::Android => &[
-            ("build", "Gradle build"),
-            ("app/build", "Android app build"),
-            (".gradle", "Gradle cache"),
+            ("build", "Gradle build", MANUAL_ONLY),
+            ("app/build", "Android app build", MANUAL_ONLY),
+            (".gradle", "Gradle cache", MANUAL_ONLY),
         ],
         ProjectType::Expo => &[
-            ("node_modules", "Dependencies"),
-            (".expo", "Expo cache"),
-            ("ios/build", "iOS build"),
-            ("android/build", "Android build"),
+            (".expo", "Expo cache", AUTO_SAFE),
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+            ("ios/build", "iOS build", MANUAL_ONLY),
+            ("android/build", "Android build", MANUAL_ONLY),
         ],
+        // Custom projects have an unknown shape: only the universally-safe
+        // tooling caches are auto-cleaned; everything reinstall-or-rebuild stays
+        // manual-only.
         ProjectType::Custom => &[
-            ("node_modules", "Dependencies"),
-            ("dist", "Build output"),
-            ("build", "Build output"),
-            (".next", "Next.js build"),
-            ("vendor", "Composer packages"),
+            (".turbo", "Turbo cache", AUTO_SAFE),
+            (".cache", "Build cache", AUTO_SAFE),
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+            ("dist", "Build output", MANUAL_ONLY),
+            ("build", "Build output", MANUAL_ONLY),
+            (".next", "Next.js build", MANUAL_ONLY),
+            ("vendor", "Composer packages", MANUAL_ONLY),
         ],
     }
 }
@@ -91,14 +178,19 @@ fn artifact_catalogue(kind: ProjectType) -> &'static [(&'static str, &'static st
 /// The built-in catalogue plus the user's custom extra dirs (from
 /// preferences), applied to every project type. Custom entries that duplicate a
 /// built-in key are skipped so a row never appears twice.
-fn effective_catalogue(kind: ProjectType, extra: &[String]) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = artifact_catalogue(kind)
+///
+/// User-added extra dirs are treated as `auto_safe`: the whole purpose of the
+/// "extra dirs to clean" setting is to opt those paths into the auto pass, so
+/// honouring that is the user's explicit choice (and they default to caches
+/// like `.turbo`/`.cache`).
+fn effective_catalogue(kind: ProjectType, extra: &[String]) -> Vec<(String, String, bool)> {
+    let mut out: Vec<(String, String, bool)> = artifact_catalogue(kind)
         .iter()
-        .map(|(r, l)| (r.to_string(), l.to_string()))
+        .map(|(r, l, safe)| (r.to_string(), l.to_string(), *safe))
         .collect();
     for rel in sanitize_extra_dirs(extra) {
-        if !out.iter().any(|(r, _)| *r == rel) {
-            out.push((rel, "Custom".to_string()));
+        if !out.iter().any(|(r, _, _)| *r == rel) {
+            out.push((rel, "Custom".to_string(), AUTO_SAFE));
         }
     }
     out
@@ -123,7 +215,17 @@ fn sanitize_extra_dirs(extra: &[String]) -> Vec<String> {
 fn is_known_artifact(kind: ProjectType, rel: &str, extra: &[String]) -> bool {
     effective_catalogue(kind, extra)
         .iter()
-        .any(|(r, _)| r == rel)
+        .any(|(r, _, _)| r == rel)
+}
+
+/// Which cleanup surface a clean pass is running on. A manual clean removes the
+/// full catalogue; the unattended scheduler removes only `auto_safe` caches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanScope {
+    /// Manual, eyes-on clean — may delete dependency stores and build output.
+    Manual,
+    /// Background scheduler — regenerable caches only.
+    Scheduled,
 }
 
 /// `scan_artifacts(id)` — measure every catalogued artifact dir that exists in
@@ -138,18 +240,18 @@ pub async fn scan_artifacts(state: State<'_, AppState>, id: String) -> AppResult
     let kind = project.kind;
     let extra = state.preferences_snapshot().auto_clean_extra_dirs;
 
-    let present: Vec<(String, String, PathBuf)> = effective_catalogue(kind, &extra)
+    let present: Vec<(String, String, bool, PathBuf)> = effective_catalogue(kind, &extra)
         .into_iter()
-        .filter_map(|(rel, label)| {
+        .filter_map(|(rel, label, auto_safe)| {
             let p = base.join(&rel);
-            p.is_dir().then_some((rel, label, p))
+            p.is_dir().then_some((rel, label, auto_safe, p))
         })
         .collect();
 
     let result = tokio::task::spawn_blocking(move || {
         present
             .into_iter()
-            .map(|(rel, label, p)| {
+            .map(|(rel, label, auto_clean, p)| {
                 let (size_bytes, file_count, last_modified) = measure_dir(&p);
                 ArtifactDir {
                     rel,
@@ -158,6 +260,7 @@ pub async fn scan_artifacts(state: State<'_, AppState>, id: String) -> AppResult
                     size_bytes,
                     file_count,
                     last_modified,
+                    auto_clean,
                 }
             })
             .collect::<Vec<_>>()
@@ -191,17 +294,32 @@ pub async fn clean_artifact(state: State<'_, AppState>, id: String, rel: String)
 pub async fn clean_all_artifacts(state: State<'_, AppState>, id: String) -> AppResult<u64> {
     let (base, kind) = project_base(&state, &id)?;
     let extra = state.preferences_snapshot().auto_clean_extra_dirs;
-    tokio::task::spawn_blocking(move || clean_project_artifacts(&base, kind, &extra))
-        .await
-        .map_err(|e| AppError::Internal(format!("artifact clean task failed: {e}")))?
+    // A manual "Clean all" is an eyes-on action, so it may remove the full
+    // catalogue (dependency stores and build output included).
+    tokio::task::spawn_blocking(move || {
+        clean_project_artifacts(&base, kind, &extra, CleanScope::Manual)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("artifact clean task failed: {e}")))?
 }
 
-/// Delete every catalogued (+ custom) artifact dir present under `base`,
-/// returning total bytes reclaimed. Blocking — call inside `spawn_blocking`.
-/// Shared by the per-project clean command and the background scheduler.
-fn clean_project_artifacts(base: &Path, kind: ProjectType, extra: &[String]) -> AppResult<u64> {
+/// Delete catalogued (+ custom) artifact dirs present under `base`, returning
+/// total bytes reclaimed. Blocking — call inside `spawn_blocking`.
+///
+/// `scope` gates *what* is eligible: [`CleanScope::Manual`] removes the whole
+/// catalogue; [`CleanScope::Scheduled`] removes only `auto_safe` caches, so the
+/// background pass can never delete a dependency store or build output.
+fn clean_project_artifacts(
+    base: &Path,
+    kind: ProjectType,
+    extra: &[String],
+    scope: CleanScope,
+) -> AppResult<u64> {
     let mut freed = 0u64;
-    for (rel, _) in effective_catalogue(kind, extra) {
+    for (rel, _, auto_safe) in effective_catalogue(kind, extra) {
+        if scope == CleanScope::Scheduled && !auto_safe {
+            continue;
+        }
         let target = base.join(&rel);
         if target.is_dir() {
             freed += remove_within(base, &target)?;
@@ -342,8 +460,10 @@ async fn run_auto_clean_if_due(app: &AppHandle) {
     let freed = tokio::task::spawn_blocking(move || {
         let mut total = 0u64;
         for (base, kind) in projects {
-            // One project's clean error must not abort the whole pass.
-            total += clean_project_artifacts(&base, kind, &extra).unwrap_or(0);
+            // Scheduled scope: regenerable caches only — never a dependency
+            // store or build output. One project's error must not abort the pass.
+            total +=
+                clean_project_artifacts(&base, kind, &extra, CleanScope::Scheduled).unwrap_or(0);
         }
         total
     })
@@ -618,22 +738,69 @@ mod tests {
         // `node_modules` is already a Next built-in; the custom entry must not
         // duplicate it, while `.turbo` is genuinely added.
         let extra = vec![".turbo".to_string(), "node_modules".to_string()];
-        let rels: Vec<String> = effective_catalogue(ProjectType::Next, &extra)
-            .into_iter()
-            .map(|(r, _)| r)
-            .collect();
+        let cat = effective_catalogue(ProjectType::Next, &extra);
+        let rels: Vec<String> = cat.iter().map(|(r, _, _)| r.clone()).collect();
         assert!(rels.contains(&".turbo".to_string()));
         assert_eq!(rels.iter().filter(|r| *r == "node_modules").count(), 1);
+        // node_modules stays manual-only even though `.turbo` was added as a
+        // user extra; an extra-supplied dir is treated as auto-safe.
+        let auto_safe = |rel: &str| cat.iter().find(|(r, _, _)| r == rel).map(|(_, _, s)| *s);
+        assert_eq!(auto_safe("node_modules"), Some(false));
+        assert_eq!(auto_safe(".turbo"), Some(true));
+    }
+
+    /// The core safety invariant: no dependency store or rebuildable output dir
+    /// is ever `auto_safe`, for ANY project type. This is the guard that stops a
+    /// scheduled pass from wiping `node_modules`/`.venv`/`vendor`.
+    #[test]
+    fn scheduled_clean_never_targets_dependency_or_output_dirs() {
+        const NEVER_AUTO: &[&str] = &[
+            "node_modules",
+            ".venv",
+            "vendor",
+            ".gradle",
+            ".pub-cache",
+            ".dart_tool",
+            "dist",
+            "build",
+            ".next",
+            "public/build",
+            "app/build",
+            "ios/build",
+            "android/build",
+        ];
+        let kinds = [
+            ProjectType::Next,
+            ProjectType::Vite,
+            ProjectType::Node,
+            ProjectType::Php,
+            ProjectType::Python,
+            ProjectType::Static,
+            ProjectType::Flutter,
+            ProjectType::Xcode,
+            ProjectType::Android,
+            ProjectType::Expo,
+            ProjectType::Custom,
+        ];
+        for kind in kinds {
+            for (rel, _, auto_safe) in artifact_catalogue(kind) {
+                if NEVER_AUTO.contains(rel) {
+                    assert!(!auto_safe, "{rel} must never be auto-safe (kind {kind:?})");
+                }
+            }
+        }
     }
 
     #[test]
     fn is_known_artifact_honours_custom_dirs() {
+        // `coverage` is in no built-in catalogue, so it's only a valid clean
+        // target when the user has added it as an extra dir.
         assert!(is_known_artifact(
             ProjectType::Next,
-            ".turbo",
-            &[".turbo".to_string()]
+            "coverage",
+            &["coverage".to_string()]
         ));
-        assert!(!is_known_artifact(ProjectType::Next, ".turbo", &[]));
+        assert!(!is_known_artifact(ProjectType::Next, "coverage", &[]));
     }
 
     #[test]
@@ -645,12 +812,59 @@ mod tests {
             fs::create_dir_all(base.join(d)).unwrap();
             fs::write(base.join(d).join("f"), b"0123456789").unwrap(); // 10 bytes
         }
-        let freed =
-            clean_project_artifacts(&base, ProjectType::Next, &[".turbo".to_string()]).unwrap();
+        let freed = clean_project_artifacts(
+            &base,
+            ProjectType::Next,
+            &[".turbo".to_string()],
+            CleanScope::Manual,
+        )
+        .unwrap();
         assert_eq!(freed, 20); // .next + .turbo, not untracked
         assert!(!base.join(".next").exists());
         assert!(!base.join(".turbo").exists());
         assert!(base.join("untracked").exists());
+    }
+
+    #[test]
+    fn scheduled_clean_keeps_node_modules_and_build_but_clears_caches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_path_buf();
+        // Manual-only: a dependency store and the build output.
+        // Auto-safe: the Next build cache, a tooling cache, and a user extra.
+        for d in [
+            "node_modules",
+            ".next",
+            ".next/cache",
+            "node_modules/.cache",
+            ".turbo",
+        ] {
+            fs::create_dir_all(base.join(d)).unwrap();
+            fs::write(base.join(d).join("f"), b"0123456789").unwrap(); // 10 bytes each
+        }
+        let freed = clean_project_artifacts(
+            &base,
+            ProjectType::Next,
+            &[".turbo".to_string()],
+            CleanScope::Scheduled,
+        )
+        .unwrap();
+
+        // The dependency store and build output survive a scheduled pass...
+        assert!(
+            base.join("node_modules").exists(),
+            "scheduled clean must never remove node_modules"
+        );
+        assert!(
+            base.join(".next").exists(),
+            "scheduled clean must keep build output"
+        );
+        // ...while the regenerable caches are reclaimed.
+        assert!(!base.join(".next/cache").exists());
+        assert!(!base.join("node_modules/.cache").exists());
+        assert!(!base.join(".turbo").exists());
+        // 3 cache dirs × 10 bytes. (node_modules still holds its own 10-byte
+        // file plus the now-removed .cache child.)
+        assert_eq!(freed, 30);
     }
 
     #[test]

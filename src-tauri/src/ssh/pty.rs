@@ -37,6 +37,13 @@ pub enum PtyControl {
     Close,
 }
 
+/// A live pty session's control sender plus the connection it shells into, so
+/// a host-level disconnect can find and close every shell on that host.
+struct PtyEntry {
+    connection_id: String,
+    control: UnboundedSender<PtyControl>,
+}
+
 /// Registry of live pty sessions, keyed by an opaque pty id. Each entry is the
 /// sender half of its I/O task's control channel; the task owns the russh
 /// channel + session and exits when a [`PtyControl::Close`] arrives, the shell
@@ -44,7 +51,7 @@ pub enum PtyControl {
 #[derive(Default)]
 pub struct PtyManager {
     next: u64,
-    sessions: HashMap<String, UnboundedSender<PtyControl>>,
+    sessions: HashMap<String, PtyEntry>,
 }
 
 impl PtyManager {
@@ -58,9 +65,21 @@ impl PtyManager {
         format!("pty-{}", self.next)
     }
 
-    /// Record a session's control sender under `id`.
-    pub fn register(&mut self, id: String, control: UnboundedSender<PtyControl>) {
-        self.sessions.insert(id, control);
+    /// Record a session's control sender under `id`, tagged with the
+    /// connection it shells into.
+    pub fn register(
+        &mut self,
+        id: String,
+        connection_id: String,
+        control: UnboundedSender<PtyControl>,
+    ) {
+        self.sessions.insert(
+            id,
+            PtyEntry {
+                connection_id,
+                control,
+            },
+        );
     }
 
     /// Send a control message to a session. Returns `false` if the id is unknown
@@ -68,7 +87,7 @@ impl PtyManager {
     /// further keystrokes).
     pub fn send(&self, id: &str, ctrl: PtyControl) -> bool {
         match self.sessions.get(id) {
-            Some(tx) => tx.send(ctrl).is_ok(),
+            Some(entry) => entry.control.send(ctrl).is_ok(),
             None => false,
         }
     }
@@ -76,6 +95,25 @@ impl PtyManager {
     /// Forget a session (its task tears down when the sender drops).
     pub fn remove(&mut self, id: &str) {
         self.sessions.remove(id);
+    }
+
+    /// Close + forget every shell on a connection (host-level disconnect). The
+    /// Close is best-effort; dropping the sender ends the I/O task regardless.
+    pub fn disconnect_connection(&mut self, conn_id: &str) {
+        self.sessions.retain(|_, entry| {
+            if entry.connection_id != conn_id {
+                return true;
+            }
+            let _ = entry.control.send(PtyControl::Close);
+            false
+        });
+    }
+
+    /// Whether any live shell is open on this connection.
+    pub fn has_connection(&self, conn_id: &str) -> bool {
+        self.sessions
+            .values()
+            .any(|entry| entry.connection_id == conn_id)
     }
 
     /// Drop every session (app shutdown / window destroy).

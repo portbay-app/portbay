@@ -185,14 +185,22 @@ mod toolset_tests {
     fn ssh_exec_is_excluded_from_the_default_surface() {
         // Remote execution is off by default — never in `all()`, never via `all`.
         assert!(!ToolGroup::all().contains(&ToolGroup::SshExec));
-        assert!(!ToolGroup::parse_list("all").unwrap().contains(&ToolGroup::SshExec));
+        assert!(!ToolGroup::parse_list("all")
+            .unwrap()
+            .contains(&ToolGroup::SshExec));
     }
 
     #[test]
     fn ssh_exec_must_be_named_explicitly() {
         // Both spellings resolve to the SshExec group...
-        assert_eq!(ToolGroup::parse("ssh-exec").unwrap(), vec![ToolGroup::SshExec]);
-        assert_eq!(ToolGroup::parse("ssh_exec").unwrap(), vec![ToolGroup::SshExec]);
+        assert_eq!(
+            ToolGroup::parse("ssh-exec").unwrap(),
+            vec![ToolGroup::SshExec]
+        );
+        assert_eq!(
+            ToolGroup::parse("ssh_exec").unwrap(),
+            vec![ToolGroup::SshExec]
+        );
         // ...and composing it with `all` adds it on top of the default surface.
         let groups = ToolGroup::parse_list("all,ssh-exec").unwrap();
         assert!(groups.contains(&ToolGroup::SshExec));
@@ -1670,8 +1678,11 @@ impl PortbayMcp {
     #[tool(
         name = "portbay_tasks_list",
         description = "List a project's task board cards (the live board PortBay also shows the \
-                       human). Optionally filter by column. Read this to see the plan before \
-                       acting; the board — not your memory — is the source of truth.",
+                       human). Optionally filter by column. Returns compact summaries \
+                       (bodyChars + checklist/attachment/link counts, no bodies) — use \
+                       portbay_task_get for one card's full detail rather than full=true, \
+                       which inlines every body on the board. If you were dispatched to work \
+                       a specific card you already have it; you do not need this call to start.",
         annotations(title = "List tasks", read_only_hint = true, open_world_hint = false)
     )]
     async fn tasks_list(
@@ -1988,6 +1999,9 @@ impl PortbayMcp {
                     .tasks_list(TasksListArgs {
                         project: id.to_string(),
                         status: None,
+                        // The resource is an orientation read — summaries, like
+                        // the tool's default.
+                        full: None,
                     })
                     .and_then(|v| to_json(&v)),
             ),

@@ -386,6 +386,52 @@
     link.click();
     URL.revokeObjectURL(url);
   }
+
+  function focusGridCell(rowIndex: number, colIndex: number) {
+    if (!rows) return;
+    const maxRow = visibleRows.length - 1;
+    const maxCol = rows.columns.length - 1;
+    const row = Math.max(0, Math.min(maxRow, rowIndex));
+    const col = Math.max(0, Math.min(maxCol, colIndex));
+    const cell = document.querySelector<HTMLElement>(`[data-grid-cell="${row}:${col}"]`);
+    cell?.focus();
+  }
+
+  function activateGridCell(row: unknown[], colIndex: number) {
+    if (!rows) return;
+    const colName = rows.columns[colIndex]?.name ?? "";
+    const value = row[colIndex];
+    if (canEdit) {
+      startEdit(rowKeyOf(row), colName, value);
+    } else if (isInspectable(value)) {
+      inspected = { label: colName || "value", value };
+    }
+  }
+
+  function onGridCellKeydown(
+    e: KeyboardEvent,
+    row: unknown[],
+    rowIndex: number,
+    colIndex: number,
+  ) {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      focusGridCell(rowIndex, colIndex + 1);
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      focusGridCell(rowIndex, colIndex - 1);
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      focusGridCell(rowIndex + 1, colIndex);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      focusGridCell(rowIndex - 1, colIndex);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      activateGridCell(row, colIndex);
+    }
+  }
 </script>
 
 <div class="h-full flex flex-col min-h-0">
@@ -470,7 +516,7 @@
       <!-- Scroll region (only rows scroll) -->
       <div class="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
         <div class="flex-1 min-h-0 overflow-auto">
-          <table class="min-w-full text-left text-[12px]">
+          <table class="min-w-full text-left text-[12px]" role="grid">
             <thead class="sticky top-0 bg-surface z-10">
               <tr class="border-b border-border/60">
                 {#if canEdit}
@@ -540,6 +586,10 @@
                     {@const editingThis =
                       canEdit && editing?.rowKey === rowKey && editing?.col === colName}
                     <td
+                      role="gridcell"
+                      tabindex="0"
+                      data-grid-cell={`${rowIndex}:${colIndex}`}
+                      onkeydown={(e) => onGridCellKeydown(e, row, rowIndex, colIndex)}
                       class="px-3 py-2 max-w-[260px] align-top font-mono text-[11px]
                              {isEdited(rowKey, colName)
                         ? 'text-accent bg-accent/5'

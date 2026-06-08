@@ -857,6 +857,13 @@ pub struct TasksListArgs {
     /// `Review`, `Done`, or `Rejected`.
     #[serde(default)]
     pub status: Option<String>,
+    /// Include each card's full body, checklist items, attachments and links.
+    /// Default `false`: cards come back as compact summaries (`bodyChars`,
+    /// `checklist: {done,total}`, `attachments`/`links` counts) — fetch one
+    /// card's detail with `portbay_task_get` instead of pulling every body on
+    /// the board into context.
+    #[serde(default)]
+    pub full: Option<bool>,
 }
 
 /// Get the next actionable card (the top `Todo`).

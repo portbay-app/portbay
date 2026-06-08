@@ -16,8 +16,9 @@ Report privately through either channel:
 - **GitHub private advisory (preferred):**
   [Report a vulnerability](https://github.com/portbay-app/portbay/security/advisories/new)
 - **Email:** security@portbay.app
-  <!-- TODO(maintainers): confirm a monitored security@portbay.app mailbox (or
-       GPG-enabled alias) is provisioned before the first public release. -->
+  <!-- Provisioned via Cloudflare Email Routing → the monitored Tribal House
+       support inbox (routing verified live 2026-06-04; details in the private
+       portbay-cloud repo, docs/dpa-register.md "Role mailboxes"). -->
 
 Include:
 
@@ -96,6 +97,28 @@ private key stays on your machine and is never uploaded. Removing PortBay's
 mkcert CA (`mkcert -uninstall`) revokes that local trust. Treat the local CA key
 like any other private key on your device.
 
+## Session Environment Override
+
+`PORTBAY_SESSION_JSON` lets headless/CI environments inject account session
+tokens through the environment instead of the OS keychain (lookup order:
+keychain → environment → `~/.config/PortBay/session.json` with `0600`
+permissions; see `src-tauri/src/auth/mod.rs`). Treat it as
+**security-sensitive**: anything that can read the process environment (shell
+history, CI logs, crash dumps, `ps e`) can read the tokens. Prefer the keychain
+on interactive machines; if you must use the override, scope it to the single
+process invocation and never persist it in dotfiles or CI variables shared
+across jobs. The app logs a warning whenever a session is loaded from the
+environment so its use is never silent.
+
 ## GPG
 
-A project GPG key is not published yet. Do not send secrets until one is listed here.
+Encrypted vulnerability reports are welcome. The project security key:
+
+- **Key:** `PortBay Security <security@portbay.app>`
+- **Fingerprint:** `608D 45E3 02D1 A94A 1C0F  710F 8B54 3B23 8488 57AD`
+- **Algorithms / expiry:** Ed25519 (sign) + Curve25519 (encrypt), expires 2028-06-04
+- **Download:** <https://portbay.app/pgp-key.txt> — also referenced from
+  <https://portbay.app/.well-known/security.txt> (RFC 9116)
+
+Encrypt to that key and email security@portbay.app. Plaintext reports remain
+fine when no sensitive details are involved.

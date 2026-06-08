@@ -126,6 +126,32 @@
     stageFilter = "all";
   }
 
+  function focusHostRow(index: number) {
+    const max = filtered.length - 1;
+    if (max < 0) return;
+    const next = Math.max(0, Math.min(max, index));
+    document.querySelector<HTMLElement>(`[data-host-row="${next}"]`)?.focus();
+  }
+
+  function onHostRowKeydown(e: KeyboardEvent, id: string, index: number) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      focusHostRow(index + 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      focusHostRow(index - 1);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      focusHostRow(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      focusHostRow(filtered.length - 1);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onselect(id);
+    }
+  }
+
   // ⌘K / Ctrl+K focuses the search box.
   function onWindowKey(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -329,7 +355,7 @@
           {query || activeFilterCount ? "No hosts match your filters." : "No hosts yet."}
         </p>
       {:else}
-        {#each filtered as c (c.id)}
+        {#each filtered as c, rowIndex (c.id)}
           {@const probe = sshProbe.get(c.id)}
           {@const stage = stageMeta(c.stage)}
           {@const health = healthMeta(probe?.health)}
@@ -339,13 +365,9 @@
           <div
             role="button"
             tabindex="0"
+            data-host-row={rowIndex}
             onclick={() => onselect(c.id)}
-            onkeydown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onselect(c.id);
-              }
-            }}
+            onkeydown={(e) => onHostRowKeydown(e, c.id, rowIndex)}
             class="grid w-full cursor-pointer grid-cols-[minmax(160px,2fr)_104px_minmax(130px,1.3fr)_110px_minmax(120px,1fr)_130px_36px]
                    items-center gap-2 border-b border-border/40 px-4 py-3 text-left transition-colors
                    last:border-b-0 hover:bg-surface-2/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40

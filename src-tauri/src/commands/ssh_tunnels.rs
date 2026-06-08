@@ -176,11 +176,18 @@ pub async fn ssh_tunnel_save(
     }
     save_registry(&state, &registry)?;
 
-    let statuses = {
+    // `list` is a blocking mutex + a `try_wait` syscall per tunnel — keep it
+    // off the async worker pool, same as `ssh_tunnel_list` above. Locking the
+    // manager directly here is the exact stall pattern that comment documents.
+    let app_for_task = app.clone();
+    let statuses = tokio::task::spawn_blocking(move || {
+        let state: State<AppState> = app_for_task.state();
         let effectives = resolve_all(&registry);
         let mut mgr = state.ssh_tunnels.lock().unwrap_or_else(|e| e.into_inner());
         mgr.list(&effectives)
-    };
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("SSH list task failed: {e}")))?;
     state.mirror_ssh_tunnels(&statuses);
     let _ = app.emit(SSH_STATE_CHANNEL, statuses.clone());
     statuses
@@ -196,10 +203,15 @@ pub async fn ssh_tunnel_delete(
     id: String,
 ) -> AppResult<()> {
     let tid = SshTunnelId::new(id.clone());
-    {
+    // `stop` drops the tunnel (SIGTERM→SIGKILL chain) — blocking work, keep it
+    // off the async worker pool.
+    let app_for_task = app.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let state: State<AppState> = app_for_task.state();
         let mut mgr = state.ssh_tunnels.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = mgr.stop(&id);
-    }
+        mgr.stop(&id)
+    })
+    .await;
     let mut registry = load_registry(&state)?;
     let removed = registry.remove_ssh_tunnel(&tid)?;
     // Drop the connection too once no other tunnel uses it, so transparently
@@ -209,7 +221,7 @@ pub async fn ssh_tunnel_delete(
         let _ = registry.remove_ssh_connection(&removed.connection_id);
     }
     save_registry(&state, &registry)?;
-    let statuses = snapshot_statuses(&state)?;
+    let statuses = snapshot_statuses(&app).await?;
     state.mirror_ssh_tunnels(&statuses);
     let _ = app.emit(SSH_STATE_CHANNEL, statuses);
     Ok(())
@@ -240,7 +252,7 @@ pub async fn ssh_tunnel_start(
     .await
     .map_err(|e| AppError::Internal(format!("SSH start task failed: {e}")))??;
 
-    let statuses = snapshot_statuses(&state)?;
+    let statuses = snapshot_statuses(&app).await?;
     state.mirror_ssh_tunnels(&statuses);
     let _ = app.emit(SSH_STATE_CHANNEL, statuses);
     Ok(status)
@@ -252,11 +264,17 @@ pub async fn ssh_tunnel_stop(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
-    {
+    // `stop` drops the tunnel (SIGTERM→SIGKILL chain) — blocking work, keep it
+    // off the async worker pool.
+    let app_for_task = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let state: State<AppState> = app_for_task.state();
         let mut mgr = state.ssh_tunnels.lock().unwrap_or_else(|e| e.into_inner());
-        mgr.stop(&id)?;
-    }
-    let statuses = snapshot_statuses(&state)?;
+        mgr.stop(&id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("SSH stop task failed: {e}")))??;
+    let statuses = snapshot_statuses(&app).await?;
     state.mirror_ssh_tunnels(&statuses);
     let _ = app.emit(SSH_STATE_CHANNEL, statuses);
     Ok(())
@@ -296,10 +314,15 @@ pub async fn ssh_tunnel_open_database(
     // The DB client connects to the tunnel's local port. If the tunnel isn't up
     // that's a connection-refused with no explanation — surface the real cause
     // and the fix instead.
-    let tunnel_up = {
+    let profile_id = profile.id.as_str().to_string();
+    let app_for_task = app.clone();
+    let tunnel_up = tokio::task::spawn_blocking(move || {
+        let state: State<AppState> = app_for_task.state();
         let mut mgr = state.ssh_tunnels.lock().unwrap_or_else(|e| e.into_inner());
-        mgr.is_running(profile.id.as_str())
-    };
+        mgr.is_running(&profile_id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("SSH status task failed: {e}")))?;
     if !tunnel_up {
         return Err(AppError::BadInput(format!(
             "Start the SSH tunnel `{}` before opening its database — it isn't connected yet.",
@@ -813,14 +836,19 @@ pub(crate) fn load_stored_key_passphrase(
     }
 }
 
-fn snapshot_statuses(state: &State<'_, AppState>) -> AppResult<Vec<SshTunnelRuntimeStatus>> {
-    let registry = load_registry(state)?;
-    let effectives = resolve_all(&registry);
-    let statuses = {
+/// Lock the manager and rebuild the full status list **off the async worker
+/// pool** — `list` is a blocking mutex plus a `try_wait` syscall per tunnel.
+async fn snapshot_statuses(app: &AppHandle) -> AppResult<Vec<SshTunnelRuntimeStatus>> {
+    let app_for_task = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let state: State<AppState> = app_for_task.state();
+        let registry = load_registry(&state)?;
+        let effectives = resolve_all(&registry);
         let mut mgr = state.ssh_tunnels.lock().unwrap_or_else(|e| e.into_inner());
-        mgr.list(&effectives)
-    };
-    Ok(statuses)
+        Ok(mgr.list(&effectives))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("SSH snapshot task failed: {e}")))?
 }
 
 fn ssh_database_data_dir(state: &State<'_, AppState>, id: &str) -> PathBuf {
@@ -930,5 +958,249 @@ mod tests {
         reg.add_ssh_tunnel(tunnel).unwrap();
         let next = allocate_local_port(&reg, 15432);
         assert_ne!(next, 15432);
+    }
+
+    // ── build_tunnel_and_connection validation ────────────────────────────────
+
+    #[test]
+    fn empty_name_is_rejected() {
+        let reg = Registry::new("test");
+        let err = build_tunnel_and_connection(&reg, input("", "host", "me", SshAuthKind::Key))
+            .unwrap_err();
+        assert!(err.to_string().contains("tunnel name is required"), "{err}");
+    }
+
+    #[test]
+    fn blank_whitespace_name_is_rejected() {
+        let reg = Registry::new("test");
+        let err = build_tunnel_and_connection(&reg, input("   ", "host", "me", SshAuthKind::Key))
+            .unwrap_err();
+        assert!(err.to_string().contains("tunnel name is required"), "{err}");
+    }
+
+    #[test]
+    fn empty_host_is_rejected() {
+        let reg = Registry::new("test");
+        let err = build_tunnel_and_connection(&reg, input("Tunnel", "", "me", SshAuthKind::Key))
+            .unwrap_err();
+        assert!(err.to_string().contains("SSH host is required"), "{err}");
+    }
+
+    #[test]
+    fn password_auth_with_non_local_forward_is_rejected() {
+        let reg = Registry::new("test");
+        let mut i = input("Reverse Tunnel", "host", "me", SshAuthKind::Password);
+        i.forward_kind = SshForwardKind::Reverse;
+        let err = build_tunnel_and_connection(&reg, i).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("password authentication supports local"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn password_auth_with_socks_forward_is_rejected() {
+        let reg = Registry::new("test");
+        let mut i = input("SOCKS Tunnel", "host", "me", SshAuthKind::Password);
+        i.forward_kind = SshForwardKind::Socks;
+        let err = build_tunnel_and_connection(&reg, i).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("password authentication supports local"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn remote_host_required_for_non_socks() {
+        let reg = Registry::new("test");
+        let mut i = input("Fwd", "host", "me", SshAuthKind::Key);
+        i.remote_host = "".into();
+        i.forward_kind = SshForwardKind::Local;
+        let err = build_tunnel_and_connection(&reg, i).unwrap_err();
+        assert!(err.to_string().contains("remote host is required"), "{err}");
+    }
+
+    #[test]
+    fn socks_does_not_require_remote_host() {
+        let reg = Registry::new("test");
+        let mut i = input("SOCKS", "host", "me", SshAuthKind::Key);
+        i.remote_host = "".into();
+        i.forward_kind = SshForwardKind::Socks;
+        // SOCKS forwards don't forward to a single remote; empty host is fine.
+        assert!(build_tunnel_and_connection(&reg, i).is_ok());
+    }
+
+    #[test]
+    fn remote_port_zero_is_rejected_for_local_forward() {
+        let reg = Registry::new("test");
+        let mut i = input("Fwd", "host", "me", SshAuthKind::Key);
+        i.remote_port = 0;
+        i.forward_kind = SshForwardKind::Local;
+        let err = build_tunnel_and_connection(&reg, i).unwrap_err();
+        assert!(err.to_string().contains("remote port is required"), "{err}");
+    }
+
+    #[test]
+    fn tunnel_id_collision_appends_counter() {
+        let mut reg = Registry::new("test");
+        let (c1, _, t1) =
+            build_tunnel_and_connection(&reg, input("My Tunnel", "h", "u", SshAuthKind::Key))
+                .unwrap();
+        let t1_id = t1.id.clone();
+        reg.add_ssh_connection(c1).unwrap();
+        reg.add_ssh_tunnel(t1).unwrap();
+
+        // Second tunnel with the same name gets a suffixed id.
+        let (c2, _, t2) =
+            build_tunnel_and_connection(&reg, input("My Tunnel", "h2", "u", SshAuthKind::Key))
+                .unwrap();
+        reg.add_ssh_connection(c2).unwrap();
+        // t1.id = "my-tunnel", t2.id must be different (e.g. "my-tunnel-2").
+        assert_ne!(t1_id, t2.id);
+        assert!(
+            t2.id.as_str().contains("my-tunnel"),
+            "id should still be based on slug: {}",
+            t2.id
+        );
+    }
+
+    #[test]
+    fn connection_id_collision_appends_counter() {
+        let mut reg = Registry::new("test");
+        // Build the same connection twice (different tunnel name, same host+user).
+        let (c1, is_new1, t1) =
+            build_tunnel_and_connection(&reg, input("Alpha", "myhost", "user", SshAuthKind::Key))
+                .unwrap();
+        assert!(is_new1);
+        reg.add_ssh_connection(c1.clone()).unwrap();
+        reg.add_ssh_tunnel(t1).unwrap();
+
+        // Changing auth_kind forces a *new* connection (different fingerprint).
+        // We use a different host to also force a different slug base so we can
+        // test the counter independently.
+        let slug = unique_connection_id(&reg, "user@myhost");
+        // The base "user-myhost" or similar isn't taken; adding a second with the same
+        // display name forces a collision suffix.
+        let slug2 = unique_connection_id(&reg, "user@myhost");
+        // They shouldn't collide — unique_connection_id is idempotent if the
+        // first slug was never inserted.
+        assert_eq!(slug, slug2);
+
+        // Now insert the first slug and verify the second call generates a different one.
+        let id1 = SshConnectionId::new(slug.clone());
+        // Synthesise a minimal connection at that id to pollute the registry.
+        let dummy = crate::registry::SshConnection {
+            id: id1,
+            name: "dummy".into(),
+            ssh_host: "dummy".into(),
+            ssh_port: 22,
+            ssh_user: "dummy".into(),
+            auth_kind: SshAuthKind::Key,
+            key_path: None,
+            proxy_jump: None,
+            identity_id: None,
+            proxy: None,
+            metadata: Default::default(),
+        };
+        reg.add_ssh_connection(dummy).unwrap();
+        let slug3 = unique_connection_id(&reg, "user@myhost");
+        assert_ne!(slug, slug3, "collision suffix must be appended");
+        assert!(
+            slug3.contains(&slug) || slug3.contains("user"),
+            "slug3 should be related to original slug: {slug3}"
+        );
+    }
+
+    // ── expand_tilde ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn expand_tilde_replaces_home_prefix_when_home_is_set() {
+        // Read the actual HOME rather than calling set_var (set_var is not
+        // safe in multi-threaded test runs and leaks global state).
+        if let Ok(home) = std::env::var("HOME") {
+            let expanded = expand_tilde("~/.ssh/id_rsa");
+            let expected = format!("{home}/.ssh/id_rsa");
+            assert_eq!(expanded, expected, "tilde prefix must expand to $HOME");
+        }
+        // If HOME is unset the function leaves the path unchanged; we can't
+        // assert the positive case but also can't fail here.
+    }
+
+    #[test]
+    fn expand_tilde_result_contains_rest_of_path() {
+        // Platform-neutral: whatever HOME is, the rest of the path is preserved.
+        let expanded = expand_tilde("~/.ssh/id_rsa");
+        assert!(
+            expanded.ends_with("/.ssh/id_rsa"),
+            "suffix must be preserved: {expanded}"
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_absolute_path_unchanged() {
+        let expanded = expand_tilde("/etc/ssh/id_rsa");
+        assert_eq!(expanded, "/etc/ssh/id_rsa");
+    }
+
+    #[test]
+    fn expand_tilde_leaves_relative_path_unchanged() {
+        let expanded = expand_tilde("relative/path");
+        assert_eq!(expanded, "relative/path");
+    }
+
+    #[test]
+    fn expand_tilde_only_expands_leading_tilde_slash() {
+        // A tilde not at the start must be left alone.
+        let expanded = expand_tilde("/path/with~/file");
+        assert_eq!(expanded, "/path/with~/file");
+    }
+
+    #[test]
+    fn expand_tilde_bare_tilde_without_slash_is_unchanged() {
+        // Just "~" alone (no slash) is not a home-relative path.
+        let expanded = expand_tilde("~");
+        assert_eq!(expanded, "~");
+    }
+
+    // ── proxy_keychain_account / passphrase_keychain_account isolation ────────
+
+    #[test]
+    fn proxy_and_host_keychain_accounts_are_distinct() {
+        let id = SshConnectionId::new("my-server");
+        let proxy_account = proxy_keychain_account(&id);
+        // The proxy account must carry a distinguishing prefix so it doesn't
+        // shadow the bare host-password entry.
+        assert!(
+            proxy_account.starts_with("proxy:"),
+            "proxy account: {proxy_account}"
+        );
+        assert!(proxy_account.contains("my-server"));
+        // And it must differ from the bare connection id string.
+        assert_ne!(proxy_account, id.as_str());
+    }
+
+    #[test]
+    fn passphrase_and_host_keychain_accounts_are_distinct() {
+        let id = SshConnectionId::new("my-server");
+        let pp_account = passphrase_keychain_account(&id);
+        assert!(
+            pp_account.starts_with("passphrase:"),
+            "passphrase account: {pp_account}"
+        );
+        assert!(pp_account.contains("my-server"));
+        assert_ne!(pp_account, id.as_str());
+    }
+
+    #[test]
+    fn all_three_keychain_accounts_are_distinct_from_each_other() {
+        let id = SshConnectionId::new("box");
+        let host = id.as_str().to_string();
+        let proxy = proxy_keychain_account(&id);
+        let pp = passphrase_keychain_account(&id);
+        assert_ne!(host, proxy);
+        assert_ne!(host, pp);
+        assert_ne!(proxy, pp);
     }
 }

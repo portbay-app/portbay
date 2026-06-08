@@ -29,7 +29,7 @@ const ORIGIN = "https://try.portbay.app";
 // The shared social image until per-page art lands (see the Obsidian image-gen
 // cards). Curated pages override `ogImage` with their own 1200x630 file under
 // /og/; everything else falls back to this existing hero.
-const DEFAULT_OG = "/og-image.png";
+const DEFAULT_OG = "/og-image.jpg";
 
 /**
  * Route → unfurl metadata. `path` is the URL path (no trailing slash except

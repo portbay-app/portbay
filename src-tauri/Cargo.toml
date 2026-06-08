@@ -1,9 +1,9 @@
 [package]
 name = "portbay"
-version = "0.1.2"
+version = "0.1.4"
 description = "PortBay — lightweight local development environment manager"
 authors = ["Tribal House"]
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 edition = "2021"
 default-run = "portbay-app"
 
@@ -69,7 +69,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "signal", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "signal", "process", "sync"] }
 async-trait = "0.1"
 russh = "0.43"
 russh-keys = "0.43"
@@ -139,9 +139,62 @@ rmcp = { version = "1.7", features = [
 # the AppKit call site is explicit. macOS-only.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+# PNG decode/resize for `crate::typing::icon_png_data_url` — bounds the
+# dictation-overlay app-icon payload to a small fixed size (already in the tree
+# transitively; png-only to stay lean).
+image = { version = "0.25", default-features = false, features = ["png"] }
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSData", "NSArray", "NSString", "NSProcessInfo"] }
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSAppearance"] }
+# NSNotification/NSDistributedNotificationCenter/NSOperation/block2:
+# `crate::dictation_session` observes DictationIM's distributed notifications
+# (StartedListening / DidExitDictationMode) to mirror the global macOS
+# dictation session state. NSUserDefaults + NSValue: read the system
+# "Dictation Enabled" pref (com.apple.assistant.support) without spawning
+# `defaults` on the mic-click hot path. NSDictionary + NSGeometry:
+# `crate::typing` (PNG encode properties dict) and `crate::overlay_window`
+# (NSRect/NSEdgeInsets for notch geometry).
+objc2-foundation = { version = "0.3", features = [
+  "NSData",
+  "NSArray",
+  "NSString",
+  "NSProcessInfo",
+  "NSNotification",
+  "NSDistributedNotificationCenter",
+  "NSOperation",
+  "NSUserDefaults",
+  "NSValue",
+  "NSDictionary",
+  "NSGeometry",
+  "block2",
+] }
+# Closure→ObjC-block bridge for the notification observers above.
+block2 = "0.6"
+# NSResponder: NSApplication's `sendAction:to:from:` lives in its NSResponder
+# category — system dictation is triggered by sending `startDictation:` down
+# the responder chain (the Edit ▸ "Start Dictation…" code path).
+# NSEvent + block2: push-to-talk watches the Fn (🌐) key via a local
+# flagsChanged monitor — Fn never reaches the WKWebView as a DOM event;
+# "dictate anywhere" adds a *global* monitor (other apps frontmost) on the
+# same mask. NSScreen/NSWindow: the notch dictation overlay window
+# (`crate::overlay_window`). NSPasteboard/NSWorkspace/NSRunningApplication/
+# NSBitmapImageRep: system-wide transcript insertion + target-app capture
+# (`crate::typing`).
+objc2-app-kit = { version = "0.3", features = [
+  "NSApplication",
+  "NSResponder",
+  "NSImage",
+  "NSImageRep",
+  "NSBitmapImageRep",
+  "NSAppearance",
+  "NSEvent",
+  "NSScreen",
+  "NSWindow",
+  "NSPanel",
+  "NSPasteboard",
+  "NSWorkspace",
+  "NSRunningApplication",
+  "NSGraphics",
+  "block2",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service"] }

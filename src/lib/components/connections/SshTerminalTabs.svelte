@@ -18,6 +18,7 @@
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import SshTerminalSession from "$lib/components/connections/SshTerminalSession.svelte";
+  import { terminalLaunch } from "$lib/stores/terminalLaunch.svelte";
   import { terminalPrefs } from "$lib/stores/sshWorkspacePrefs.svelte";
   import type { TerminalShortcut } from "$lib/ssh/pty";
 
@@ -28,6 +29,8 @@
     key: number;
     title: string;
     exited: boolean;
+    /** Run a program under the pty instead of a login shell (e.g. tmux attach). */
+    command?: string;
   }
   /** A tab: one or more panes laid out in a direction, sized by percentage. */
   interface Tab {
@@ -74,6 +77,36 @@
     tabs = [...tabs, tab];
     activeTabKey = tab.key;
   }
+
+  /** Open a new tab whose single pane runs `command` under the pty (instead of a
+      login shell) — used by the Jobs panel to attach a tmux/screen session or
+      wrap a shell in a fresh tmux. The pane is seeded with a recognizable title
+      until the program reports its own. */
+  function launchCommandTab(command: string, title: string) {
+    const pane: Pane = { key: nextKey++, title, exited: false, command };
+    const tab: Tab = {
+      key: nextKey++,
+      direction: "row",
+      panes: [pane],
+      sizes: [100],
+      activePane: pane.key,
+    };
+    tabs = [...tabs, tab];
+    activeTabKey = tab.key;
+  }
+
+  // Consume launch requests addressed to this host's workspace. The store bumps
+  // `seq` on every launch (so the same command twice still fires); we track the
+  // last seq we handled to open each request exactly once. The request also
+  // brings the Terminal panel forward (see terminalLaunch.launch).
+  let lastLaunchSeq = 0;
+  $effect(() => {
+    const req = terminalLaunch.request;
+    if (!req || req.connectionId !== connectionId || req.seq === lastLaunchSeq) return;
+    lastLaunchSeq = req.seq;
+    launchCommandTab(req.command, req.title);
+    terminalLaunch.clear();
+  });
 
   /** Split the active tab in `direction`, adding one pane. */
   function splitActive(direction: "row" | "col") {
@@ -274,8 +307,8 @@
             class="flex min-w-0 items-center gap-1.5"
             title={`Tab ${i + 1}: ${tabTitle(t)}`}
           >
-            <span class="w-1.5 h-1.5 rounded-full {tabExited(t) ? 'bg-status-stopped' : 'bg-status-running'}"></span>
-            <Icon name="terminal" size={12} class="shrink-0 text-fg-subtle" />
+            <!-- No status dot — the icon itself dims when the shell has exited. -->
+            <Icon name="terminal" size={12} class="shrink-0 {tabExited(t) ? 'text-status-stopped' : 'text-fg-subtle'}" />
             <span class="max-w-[160px] truncate font-mono text-[11.5px]">{tabTitle(t)}</span>
             {#if t.panes.length > 1}
               <span class="rounded bg-surface-2 px-1 text-[9px] font-semibold tabular-nums text-fg-subtle">
@@ -316,7 +349,7 @@
           aria-label="Decrease font size"
           title="Decrease font size"
         >
-          A<span class="text-[9px]">−</span>
+          <Icon name="minus" size={13} />
         </button>
         <button
           type="button"
@@ -326,7 +359,7 @@
           aria-label="Increase font size"
           title="Increase font size"
         >
-          A<span class="text-[11px]">+</span>
+          <Icon name="plus" size={13} />
         </button>
       </div>
       <button
@@ -383,6 +416,7 @@
                     bind:this={paneRefs[pane.key]}
                     {connectionId}
                     {label}
+                    command={pane.command}
                     active={paneActive}
                     onTitle={(title) => setTitle(t.key, pane.key, title)}
                     onExit={() => markExited(t.key, pane.key)}

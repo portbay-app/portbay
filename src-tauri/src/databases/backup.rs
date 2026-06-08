@@ -10,10 +10,10 @@
 //! different snapshot mechanics (RDB file swap, `mongodump`) and aren't covered
 //! here yet — `supports_backup` gates the UI accordingly.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -251,34 +251,42 @@ fn run_from_file(bin: &Path, args: &[&str], input: &Path) -> Result<(), String> 
     wait_checked(child, Duration::from_secs(600))
 }
 
-/// Poll a child to completion with a timeout; on failure return its stderr tail.
-fn wait_checked(mut child: std::process::Child, timeout: Duration) -> Result<(), String> {
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    return Ok(());
-                }
-                let mut err = String::new();
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut err);
-                }
-                let err = err.trim();
-                return Err(if err.is_empty() {
-                    format!("exit {status}")
-                } else {
-                    err.chars().take(800).collect()
-                });
+/// Wait for a child with a timeout; on failure return its stderr tail.
+fn wait_checked(child: std::process::Child, timeout: Duration) -> Result<(), String> {
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) if output.status.success() => Ok(()),
+        Ok(Ok(output)) => {
+            let err = String::from_utf8_lossy(&output.stderr);
+            let err = err.trim();
+            Err(if err.is_empty() {
+                format!("exit {}", output.status)
+            } else {
+                err.chars().take(800).collect()
+            })
+        }
+        Ok(Err(e)) => Err(format!("wait failed: {e}")),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
-            Ok(None) => {
-                if started.elapsed() > timeout {
-                    let _ = child.kill();
-                    return Err("timed out.".to_string());
-                }
-                std::thread::sleep(Duration::from_millis(100));
+            #[cfg(not(unix))]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .status();
             }
-            Err(e) => return Err(format!("wait failed: {e}")),
+            Err("timed out.".to_string())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("wait thread disconnected.".to_string())
         }
     }
 }

@@ -709,7 +709,7 @@ pub async fn stop_project(app: AppHandle, state: State<'_, AppState>, id: String
     // every visitor gets an error. Best-effort — NotRunning is fine. Done before
     // the static-project early return so it covers Caddy-served projects too.
     {
-        let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned");
+        let mut tunnels = state.tunnels.lock().unwrap_or_else(|e| e.into_inner());
         if tunnels.stop(&id).is_ok() {
             // Tunnel was actually sharing this project — flip its :80 route back
             // out of normalize-all mode now, rather than waiting for the periodic
@@ -814,7 +814,7 @@ pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
         let stopped = state
             .tunnels
             .lock()
-            .expect("tunnels mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .stop_all();
         if stopped > 0 {
             state.reconciler.mark_dirty();
@@ -882,6 +882,30 @@ pub async fn stop_all(state: State<'_, AppState>) -> AppResult<StopAllReport> {
         tokio::time::sleep(STOP_REAP_DELAY).await;
         for entry in &report.results {
             let _ = reap_owned_orphans(&state, &entry.id).await;
+        }
+    }
+
+    // Ollama is part of "everything": stop whatever serves the configured
+    // endpoint — the managed server, a recorded orphan, or an external one
+    // (Stop All means stop). Reported like any other entry so a failure is
+    // visible instead of silently leaving a server up.
+    match crate::commands::ollama::stop_any_server(&state).await {
+        Ok(true) => {
+            report.stopped += 1;
+            report.results.push(StopAllResultEntry {
+                id: "ollama".into(),
+                ok: true,
+                error: None,
+            });
+        }
+        Ok(false) => {}
+        Err(e) => {
+            report.failed += 1;
+            report.results.push(StopAllResultEntry {
+                id: "ollama".into(),
+                ok: false,
+                error: Some(e.to_string()),
+            });
         }
     }
 

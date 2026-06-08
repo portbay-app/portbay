@@ -1,0 +1,1 @@
+um so ask claude code to spin up an MCP server for the docs and uh wire it into cursor no wait into the claude desktop app instead

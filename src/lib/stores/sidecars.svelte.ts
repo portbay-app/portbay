@@ -34,6 +34,12 @@ function createSidecarsStore() {
   let loading = $state<boolean>(false);
   let lastErrorAt = $state<number | null>(null);
   let timer: ReturnType<typeof setInterval> | null = null;
+  // The poll is shared by several consumers (root layout, StatusCards,
+  // SidecarRow, /services, /web-servers), each calling start() on mount and
+  // stop() on unmount. Reference-count so one page's unmount can't kill the
+  // poll for everyone else — the root layout holds a ref for the whole
+  // session, so the setup banner never goes stale.
+  let refs = 0;
 
   async function refresh(): Promise<void> {
     if (!browser) return;
@@ -51,13 +57,16 @@ function createSidecarsStore() {
   }
 
   function start() {
-    if (!browser || timer !== null) return;
+    if (!browser) return;
+    refs += 1;
+    if (timer !== null) return;
     void refresh();
     timer = setInterval(() => void refresh(), POLL_INTERVAL_MS);
   }
 
   function stop() {
-    if (timer !== null) {
+    refs = Math.max(0, refs - 1);
+    if (refs === 0 && timer !== null) {
       clearInterval(timer);
       timer = null;
     }

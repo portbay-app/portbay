@@ -11,7 +11,7 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { trapFocus } from "$lib/actions/trapFocus";
-  import { Channel, invoke } from "@tauri-apps/api/core";
+  import { Channel } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
   import { Icon, StatusPill } from "$lib/components/atoms";
@@ -145,10 +145,9 @@
     followChannel = ch;
     // Fire-and-forget; the backend task runs until the channel is
     // dropped by stopFollow / unmount.
-    void invoke("subscribe_logs", { id, onLine: ch }).catch(() => {
-      // Backend refused (sidecar down, registry mismatch). Toast was
-      // already pushed by the safeInvoke wrapper if invoked through it;
-      // here we just unwind the follow toggle.
+    void safeInvoke("subscribe_logs", { id, onLine: ch }).catch(() => {
+      // Backend refused (sidecar down, registry mismatch). safeInvoke
+      // pushed the toast; here we just unwind the follow toggle.
       followChannel = null;
       follow = false;
     });

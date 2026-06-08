@@ -1,0 +1,1 @@
+okay step one stop the workers step two run the migration with a five minute timeout no wait make that ten minutes and step three restart the workers actually cancel step three the deploy script restarts them

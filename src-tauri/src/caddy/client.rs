@@ -6,6 +6,7 @@
 //! reload.
 
 use std::time::Duration;
+use tokio::time::sleep;
 
 use serde::Serialize;
 
@@ -41,19 +42,39 @@ impl CaddyClient {
 
     /// `POST /load` — replace the entire running config.
     pub async fn load(&self, config: &CaddyConfig) -> Result<()> {
+        self.load_with_retries(config, 3).await
+    }
+
+    async fn load_with_retries(&self, config: &CaddyConfig, attempts: usize) -> Result<()> {
         let url = self.url("/load");
-        let res = self
-            .http
-            .post(&url)
-            .json(config)
-            .send()
-            .await
-            .map_err(|e| CaddyError::Unreachable {
-                url: url.clone(),
-                source: e,
-            })?;
-        ensure_success(&url, res).await?;
-        Ok(())
+        let attempts = attempts.max(1);
+        let mut last_err = None;
+        for attempt in 0..attempts {
+            let result = async {
+                let res = self
+                    .http
+                    .post(&url)
+                    .json(config)
+                    .send()
+                    .await
+                    .map_err(|e| CaddyError::Unreachable {
+                        url: url.clone(),
+                        source: e,
+                    })?;
+                ensure_success(&url, res).await?;
+                Ok(())
+            }
+            .await;
+            match result {
+                Ok(()) => return Ok(()),
+                Err(err) if attempt + 1 < attempts => {
+                    last_err = Some(err);
+                    sleep(Duration::from_millis(150 * (attempt as u64 + 1))).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_err.expect("at least one load attempt ran"))
     }
 
     /// `GET /config/<path>` — fetch any subtree of the running config.

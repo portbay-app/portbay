@@ -1,0 +1,1 @@
+the ERP migration to net suite stalls on the open purchase orders so um export them as CSV first

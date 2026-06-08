@@ -19,7 +19,10 @@
   import { groups } from "$lib/stores/groups.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
-  import { addProjectWizard } from "$lib/stores/wizard.svelte";
+  import { entitlements } from "$lib/stores/entitlements.svelte";
+  import { account } from "$lib/stores/account.svelte";
+  import { trackEvent } from "$lib/telemetry";
+  import AddProjectForm from "$lib/components/wizard/AddProjectForm.svelte";
   import { dns } from "$lib/stores/dns.svelte";
   import { statusLabel } from "$lib/types/status";
   import {
@@ -81,6 +84,9 @@
   let saving = $state<boolean>(false);
   let busy = $state<boolean>(false);
   let deleteArmed = $state<boolean>(false);
+  // When true the right pane shows the inline "Add Domain" form instead of the
+  // per-domain editor — mirrors the Certificates page's add flow.
+  let adding = $state<boolean>(false);
 
   // ── Stats ────────────────────────────────────────────────────────────────
   const total = $derived(projects.value.length);
@@ -298,11 +304,22 @@
   });
 
   // ── Actions ────────────────────────────────────────────────────────────────
+  // Adding a domain creates a project (a domain is 1:1 with its project), so it
+  // goes through the same tier gate `addProjectWizard.requestAdd()` enforced:
+  // within the project cap, open the inline form; at the cap, open the
+  // sign-in / upgrade sheet instead.
   function addDomain() {
-    addProjectWizard.requestAdd();
+    const count = projects.value.length;
+    if (!entitlements.canAddProject(count)) {
+      trackEvent("project_limit_reached");
+      account.open({ intent: entitlements.upgradePromptAt(count) ?? "pro" });
+      return;
+    }
+    adding = true;
   }
 
   function select(id: string) {
+    adding = false;
     selectedId = id;
   }
 
@@ -683,9 +700,18 @@
       {/if}
     </aside>
 
-    <!-- Right pane — editor -->
+    <!-- Right pane — editor (or the inline Add Domain form while adding) -->
     <section class="flex-1 min-w-0 overflow-y-auto">
-      {#if !selected || !draft}
+      {#if adding}
+        <AddProjectForm
+          mode="project"
+          heading="New Domain"
+          onClose={(createdId) => {
+            adding = false;
+            if (createdId) selectedId = createdId;
+          }}
+        />
+      {:else if !selected || !draft}
         <div class="h-full grid place-items-center">
           <div class="text-center max-w-xs px-6">
             <span

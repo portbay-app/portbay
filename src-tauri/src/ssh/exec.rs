@@ -5,14 +5,19 @@
 //! code. A deploy runs an ordered list and **stops on the first non-zero exit**,
 //! so a failed `npm ci` doesn't proceed to `npm run build`.
 //!
-//! Output is captured per command (not streamed). For the typical
-//! sync-then-build flow each step's full output lands when it finishes; live
-//! streaming of long builds is a future refinement.
+//! Output is both captured per command (the returned `StepResult`s stay the
+//! source of truth) and, via the `_streaming` variants, forwarded chunk-by-chunk
+//! to a callback so the UI can show a long build live. A shared cancel flag
+//! stops a run between steps and best-effort kills the in-flight one (SIGTERM
+//! over the channel, then close — servers that ignore `signal` requests still
+//! free the channel, though the remote process may run on).
 
 use russh::ChannelMsg;
 use serde::Serialize;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::registry::SshConnection;
 use crate::ssh::backend::{Result, SshError};
@@ -38,6 +43,27 @@ pub struct StepResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+}
+
+/// Live progress from a streaming deploy run, forwarded to a caller-supplied
+/// callback (the command layer maps these onto Tauri events).
+#[derive(Debug, Clone)]
+pub enum DeployProgress {
+    /// Step `index` (0-based) has started executing.
+    StepStarted { index: usize, command: String },
+    /// A chunk of output from the running step. `stderr` flags the stream it
+    /// arrived on; chunks are lossy-UTF-8 and split on valid boundaries.
+    Output {
+        index: usize,
+        stderr: bool,
+        chunk: String,
+    },
+    /// Step `index` finished (or was cancelled mid-flight with exit code -1).
+    StepDone {
+        index: usize,
+        exit_code: i32,
+        duration_ms: u64,
+    },
 }
 
 /// Run a single command, optionally from a working directory. `interactor`
@@ -95,9 +121,45 @@ pub async fn run_deploy_on(
     steps: &[String],
     cwd: Option<&str>,
 ) -> Result<Vec<StepResult>> {
+    run_deploy_on_streaming(handle, steps, cwd, None, |_| {}).await
+}
+
+/// Like [`run_deploy_on`], but forwards [`DeployProgress`] to `progress` as the
+/// run executes and honours `cancel`: a set flag skips queued steps and
+/// best-effort kills the in-flight one (its partial output is still included,
+/// with exit code -1). The returned `StepResult`s stay the source of truth.
+pub async fn run_deploy_on_streaming(
+    handle: &SshSessionHandle,
+    steps: &[String],
+    cwd: Option<&str>,
+    cancel: Option<Arc<AtomicBool>>,
+    mut progress: impl FnMut(DeployProgress),
+) -> Result<Vec<StepResult>> {
+    let cancelled = |c: &Option<Arc<AtomicBool>>| c.as_ref().is_some_and(|f| f.load(Ordering::SeqCst));
     let mut results = Vec::with_capacity(steps.len());
-    for step in steps {
-        let r = exec_on(handle, step, cwd).await?;
+    for (index, step) in steps.iter().enumerate() {
+        if cancelled(&cancel) {
+            break;
+        }
+        progress(DeployProgress::StepStarted {
+            index,
+            command: step.clone(),
+        });
+        let started = Instant::now();
+        let r = exec_on_streaming(handle, step, cwd, cancel.clone(), |stderr, chunk| {
+            progress(DeployProgress::Output {
+                index,
+                stderr,
+                chunk,
+            });
+        })
+        .await?;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        progress(DeployProgress::StepDone {
+            index,
+            exit_code: r.exit_code,
+            duration_ms,
+        });
         let failed = r.exit_code != 0;
         results.push(StepResult {
             command: step.clone(),
@@ -105,7 +167,7 @@ pub async fn run_deploy_on(
             stderr: r.stderr,
             exit_code: r.exit_code,
         });
-        if failed {
+        if failed || cancelled(&cancel) {
             break;
         }
     }
@@ -118,6 +180,22 @@ pub async fn exec_on(
     handle: &SshSessionHandle,
     command: &str,
     cwd: Option<&str>,
+) -> Result<ExecResult> {
+    exec_on_streaming(handle, command, cwd, None, |_, _| {}).await
+}
+
+/// Streaming core under [`exec_on`]: drains the channel while forwarding
+/// output chunks to `on_output` (flushed every ~100 ms or 16 KiB, split on
+/// valid UTF-8 boundaries so a multi-byte char never tears across chunks).
+/// When `cancel` flips mid-run the remote process gets a best-effort SIGTERM
+/// and the channel is closed; whatever output arrived is returned with exit
+/// code -1 (servers don't report a status for a killed channel).
+pub async fn exec_on_streaming(
+    handle: &SshSessionHandle,
+    command: &str,
+    cwd: Option<&str>,
+    cancel: Option<Arc<AtomicBool>>,
+    mut on_output: impl FnMut(bool, String),
 ) -> Result<ExecResult> {
     let full = match cwd.map(str::trim).filter(|d| !d.is_empty()) {
         Some(dir) => format!("cd {} && {command}", shell_quote(dir)),
@@ -135,17 +213,75 @@ pub async fn exec_on(
 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
+    // Bytes accumulated since the last flush to `on_output`, per stream.
+    let mut pend_out: Vec<u8> = Vec::new();
+    let mut pend_err: Vec<u8> = Vec::new();
     let mut code: Option<u32> = None;
+    let mut closing = false;
     let mut channel = channel;
-    while let Some(msg) = channel.wait().await {
-        match msg {
-            ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
-            // ext type 1 is stderr (SSH_EXTENDED_DATA_STDERR).
-            ChannelMsg::ExtendedData { ref data, ext: 1 } => stderr.extend_from_slice(data),
-            ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
-            _ => {}
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // Flush the valid-UTF-8 prefix of `pend`, keeping any trailing incomplete
+    // multi-byte sequence buffered for the next flush.
+    fn flush(pend: &mut Vec<u8>, is_err: bool, on_output: &mut impl FnMut(bool, String)) {
+        if pend.is_empty() {
+            return;
+        }
+        let valid = match std::str::from_utf8(pend) {
+            Ok(_) => pend.len(),
+            Err(e) => e.valid_up_to(),
+        };
+        if valid == 0 {
+            return;
+        }
+        let chunk = String::from_utf8_lossy(&pend[..valid]).into_owned();
+        pend.drain(..valid);
+        on_output(is_err, chunk);
+    }
+
+    loop {
+        tokio::select! {
+            msg = channel.wait() => {
+                let Some(msg) = msg else { break };
+                match msg {
+                    ChannelMsg::Data { ref data } => {
+                        stdout.extend_from_slice(data);
+                        pend_out.extend_from_slice(data);
+                        if pend_out.len() >= 16 * 1024 {
+                            flush(&mut pend_out, false, &mut on_output);
+                        }
+                    }
+                    // ext type 1 is stderr (SSH_EXTENDED_DATA_STDERR).
+                    ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                        stderr.extend_from_slice(data);
+                        pend_err.extend_from_slice(data);
+                        if pend_err.len() >= 16 * 1024 {
+                            flush(&mut pend_err, true, &mut on_output);
+                        }
+                    }
+                    ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                    _ => {}
+                }
+            }
+            _ = tick.tick() => {
+                flush(&mut pend_out, false, &mut on_output);
+                flush(&mut pend_err, true, &mut on_output);
+                if closing {
+                    // Grace tick after the close went out — the server didn't
+                    // wrap up the channel, bail with what we have.
+                    break;
+                }
+                if cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
+                    closing = true;
+                    let _ = channel.signal(russh::Sig::TERM).await;
+                    let _ = channel.close().await;
+                }
+            }
         }
     }
+    flush(&mut pend_out, false, &mut on_output);
+    flush(&mut pend_err, true, &mut on_output);
 
     Ok(ExecResult {
         stdout: String::from_utf8_lossy(&stdout).into_owned(),

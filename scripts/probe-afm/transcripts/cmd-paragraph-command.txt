@@ -1,0 +1,1 @@
+The first section is done. New paragraph. The second section covers authentication.

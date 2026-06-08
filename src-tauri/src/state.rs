@@ -50,6 +50,13 @@ const CADDY_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// while staying nowhere near the daemon's startup cost.
 const CADDY_READINESS_POLL: Duration = Duration::from_millis(100);
 
+/// After reclaiming a stale dnsmasq orphan, how long `boot_dnsmasq` re-probes
+/// the preferred port before falling back to a scan. `kill_gracefully` returns
+/// on pid death, but the kernel can take a beat to tear the socket down;
+/// probing too eagerly would needlessly drift off the resolver file's port —
+/// the exact failure this reclaim exists to prevent.
+const DNSMASQ_RECLAIM_REBIND_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub struct AppState {
     /// On-disk path to the registry JSON. Resolved once at setup.
     pub registry_path: PathBuf,
@@ -128,6 +135,10 @@ pub struct AppState {
     /// can both read/write without crossing await points.
     pub preferences: Mutex<Preferences>,
 
+    /// PortBay-managed local Ollama server. Holds only a child process PortBay
+    /// spawned, so lifecycle commands can never stop an external server.
+    pub ollama: Mutex<crate::ollama::OllamaManager>,
+
     /// Menu-bar tray icon handle + change-gate metadata. `None` when the
     /// user has disabled the tray via preferences.
     pub tray: TrayState,
@@ -171,6 +182,17 @@ pub struct AppState {
     /// background scan ([`crate::notifications`]) fills this from each
     /// project's audit log; the `notifications_*` commands read/mutate it.
     pub notifications: Mutex<crate::notifications::NotificationCenter>,
+
+    /// Session-long set of canonicalized local paths the user approved via a
+    /// host-mediated dialog (file picker, save dialog) or a real OS drag-drop.
+    /// Consulted by SFTP transfer commands before reading or writing any local
+    /// path. Never persisted — the set is empty on every fresh app launch.
+    ///
+    /// Uses `std::sync::Mutex` (not tokio) because critical sections are short
+    /// (insert / lookup only; no I/O); the guard is always dropped before any
+    /// `.await` in a command. Poison recovery follows the project convention:
+    /// `.lock().unwrap_or_else(|e| e.into_inner())`.
+    pub sftp_approved_paths: Mutex<std::collections::HashSet<std::path::PathBuf>>,
 }
 
 /// How long after a Stop request a non-zero exit is still considered
@@ -206,6 +228,7 @@ impl AppState {
             agent: tokio::sync::Mutex::new(crate::ssh::AgentManager::new()),
             reconciler,
             preferences: Mutex::new(Preferences::load()),
+            ollama: Mutex::new(crate::ollama::OllamaManager::new()),
             tray: Mutex::new(Default::default()),
             stop_intents: Mutex::new(HashMap::new()),
             caddy_https_port: AtomicU16::new(DEFAULT_HTTPS_PORT),
@@ -213,6 +236,7 @@ impl AppState {
             pending_login: Mutex::new(None),
             icon_cache: Mutex::new(HashMap::new()),
             notifications: Mutex::new(crate::notifications::NotificationCenter::load()),
+            sftp_approved_paths: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -404,19 +428,64 @@ impl AppState {
         // first-run fallback. Reading it here means a suffix migration or a
         // settings change is picked up on the next boot/restart.
         let reg = store::load_or_default(&self.registry_path, &self.domain_suffix)?;
-        // Prefer re-binding the port the resolver file already points at, so
-        // wildcard DNS survives a restart with no re-point needed (the drift
-        // root cause). `find_free_port` returns this exact port when it's free,
-        // else scans upward from it; first run falls back to the default.
-        let scan_start = crate::dnsmasq::resolver::read_installed_port(&reg.domain_suffix)
+        // Prefer re-binding the EXACT port the resolver file already points at,
+        // so wildcard DNS survives a restart with no re-point needed (the drift
+        // root cause). First run (no resolver file) prefers the default.
+        let preferred = crate::dnsmasq::resolver::read_installed_port(&reg.domain_suffix)
             .unwrap_or(DNSMASQ_DEFAULT_PORT);
-        let port = dnsmasq::find_free_port(scan_start, DNSMASQ_PORT_SCAN_RANGE, &avoid)
-            .or_else(|| {
-                dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE, &avoid)
-            })
-            .ok_or(crate::dnsmasq::DnsmasqError::NoFreePort {
-                start: DNSMASQ_DEFAULT_PORT,
-            })?;
+        let mut port = dnsmasq::find_free_port(preferred, 1, &avoid);
+
+        // Preferred port busy? If the holder is a leaked dnsmasq of OURS — a
+        // previous session that crashed or was SIGKILLed before teardown — reap
+        // it and retake the port, keeping the installed resolver file valid
+        // with no privileged re-point. Same contract as the dev-server orphan
+        // reaper: `OrphansOnly` (PPID 1) plus the config-path signature means
+        // we never touch this app's own live daemon (it has a live parent) nor
+        // a foreign DNS server (ServBay, Homebrew). The short re-probe loop
+        // covers the beat between pid death and kernel socket teardown; it
+        // only ever runs in this rare reclaim case, so the blocking wait stays
+        // off the common path.
+        // (Skipped when a registered project pins the preferred port itself —
+        // `avoid` keeps it off-limits no matter who we reap, so a reclaim
+        // could only waste the rebind wait.)
+        if port.is_none()
+            && !avoid.contains(&preferred)
+            && crate::sidecar_reclaim::reclaim_stale(
+                crate::sidecar_reclaim::SidecarKind::Dnsmasq,
+                crate::sidecar_reclaim::SweepMode::OrphansOnly,
+            ) > 0
+        {
+            let deadline = std::time::Instant::now() + DNSMASQ_RECLAIM_REBIND_TIMEOUT;
+            loop {
+                port = dnsmasq::find_free_port(preferred, 1, &avoid);
+                if port.is_some() || std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+
+        // Still held → a foreign process owns it (often a transient ephemeral
+        // UDP socket squatting the legacy 53053 default, which sat inside the
+        // macOS ephemeral range). Never kill it; scan from the (non-ephemeral)
+        // DEFAULT instead of preferred+1 so the fallback escapes the ephemeral
+        // range for good. The drift guard below re-points the resolver file at
+        // whatever we bound.
+        let port = match port {
+            Some(p) => p,
+            None => dnsmasq::find_free_port(DNSMASQ_DEFAULT_PORT, DNSMASQ_PORT_SCAN_RANGE, &avoid)
+                .ok_or(crate::dnsmasq::DnsmasqError::NoFreePort {
+                    start: DNSMASQ_DEFAULT_PORT,
+                })?,
+        };
+        if port != preferred {
+            tracing::warn!(
+                preferred,
+                bound = port,
+                "dnsmasq preferred port unavailable — bound an alternate; \
+                 resolver file will be re-pointed if the privileged helper is reachable"
+            );
+        }
         let config_path = dnsmasq::write_config(&reg.domain_suffix, port, &reg.dnsmasq)?;
         self.dnsmasq
             .lock()
@@ -504,6 +573,19 @@ impl AppState {
         self.shutdown_caddy();
         self.shutdown_dnsmasq();
         self.shutdown_mailpit();
+        // The managed Ollama server is PortBay-spawned like every sidecar —
+        // nothing we started outlives the app. External servers are left
+        // alone; quitting PortBay must not take down a server another app
+        // owns.
+        crate::ollama::shutdown_managed(
+            &mut self.ollama.lock().unwrap_or_else(|e| e.into_inner()),
+            &self.logs_dir,
+        );
+        // Drop any live local speech-to-text capture: its `kill_on_drop`
+        // reaps the `portbay-stt` sidecar and releases the mic. Without this a
+        // quit mid-dictation leaves the sidecar holding the microphone (and
+        // its TCC grant) until the OS reaps the orphan.
+        crate::stt::shutdown_capture();
         // Replace the tunnel manager so its `Drop` kills every cloudflared
         // child — nothing PortBay spawned should outlive the app.
         *self.tunnels.lock().unwrap_or_else(|e| e.into_inner()) =

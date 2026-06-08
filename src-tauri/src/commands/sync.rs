@@ -40,7 +40,11 @@ pub struct SyncState {
     pub last_version: u64,
 }
 
-/// Current sync state for the Settings surface. No network.
+/// Current sync state for the Settings surface. No network — and no keychain:
+/// `enabled` comes from the non-secret meta flag, because reading the recovery
+/// key's secret can pop a macOS keychain prompt and opening Settings must never
+/// do that. (`last_version > 0` grandfathers devices that synced before the
+/// flag existed.)
 #[tauri::command]
 pub async fn sync_state() -> AppResult<SyncState> {
     let eff = crate::entitlements::current();
@@ -48,7 +52,7 @@ pub async fn sync_state() -> AppResult<SyncState> {
     Ok(SyncState {
         signed_in: eff.account.is_some(),
         is_pro: eff.entitlements.sync,
-        enabled: sync::has_key(),
+        enabled: meta.enabled || meta.last_version > 0,
         last_version: meta.last_version,
     })
 }
@@ -59,10 +63,12 @@ pub async fn sync_state() -> AppResult<SyncState> {
 pub async fn enable_sync() -> AppResult<String> {
     require_sync_entitlement()?;
     if let Some(k) = sync::load_key() {
+        sync::set_enabled_flag(true);
         return Ok(sync::key_to_string(&k));
     }
     let key = sync::generate_recovery_key();
     sync::store_key(&key).map_err(AppError::Internal)?;
+    sync::set_enabled_flag(true);
     Ok(sync::key_to_string(&key))
 }
 
@@ -79,7 +85,10 @@ pub async fn set_recovery_key(key: String) -> AppResult<()> {
         .ok_or_else(|| AppError::BadInput("That doesn't look like a valid recovery key.".into()))?;
     sync::store_key(&parsed).map_err(AppError::Internal)?;
     // Reset local version so the next pull is treated as authoritative.
-    let _ = sync::save_meta(&sync::SyncMeta::default());
+    let _ = sync::save_meta(&sync::SyncMeta {
+        enabled: true,
+        ..Default::default()
+    });
     Ok(())
 }
 

@@ -70,6 +70,18 @@
     project ? projects.displayStatusOf(project) : "stopped",
   );
 
+  // The run controls are a single Start↔Stop toggle keyed on whether the
+  // project is up: a stopped/crashed project only offers Start; an up one
+  // (running, starting, unhealthy, or optimistically stopping) offers Stop +
+  // Restart. Showing both Start and Stop at rest made no sense — there's
+  // nothing to stop until it's running.
+  const isUp = $derived(
+    displayStatus === "running" ||
+      displayStatus === "starting" ||
+      displayStatus === "unhealthy" ||
+      displayStatus === "stopping",
+  );
+
   // Editable form state — initialised on open / when target project changes.
   let nameDraft = $state<string>("");
   let hostnameDraft = $state<string>("");
@@ -707,13 +719,30 @@
         >
           <Icon name="folder" size={12} /> Folder
         </button>
-        <button
-          type="button"
-          onclick={() => run("start")}
-          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md text-status-running border border-status-running/40 hover:bg-status-running/10 transition-colors"
-        >
-          <Icon name="play" size={12} /> Start
-        </button>
+        {#if isUp}
+          <button
+            type="button"
+            onclick={() => run("stop")}
+            class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md text-status-crashed border border-status-crashed/40 hover:bg-status-crashed/10 transition-colors"
+          >
+            <Icon name="square" size={12} /> Stop
+          </button>
+          <button
+            type="button"
+            onclick={() => run("restart")}
+            class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md text-fg-muted border border-border hover:text-fg hover:bg-surface-2 transition-colors"
+          >
+            <Icon name="rotate-cw" size={12} /> Restart
+          </button>
+        {:else}
+          <button
+            type="button"
+            onclick={() => run("start")}
+            class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md text-status-running border border-status-running/40 hover:bg-status-running/10 transition-colors"
+          >
+            <Icon name="play" size={12} /> Start
+          </button>
+        {/if}
         <button
           type="button"
           onclick={project.sandboxed ? promoteToLocal : runSandboxed}
@@ -731,20 +760,6 @@
         >
           <Icon name="shield" size={12} />
           {project.sandboxed ? "Promote" : "Sandbox"}
-        </button>
-        <button
-          type="button"
-          onclick={() => run("stop")}
-          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md text-status-crashed border border-status-crashed/40 hover:bg-status-crashed/10 transition-colors"
-        >
-          <Icon name="square" size={12} /> Stop
-        </button>
-        <button
-          type="button"
-          onclick={() => run("restart")}
-          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md text-fg-muted border border-border hover:text-fg hover:bg-surface-2 transition-colors"
-        >
-          <Icon name="rotate-cw" size={12} /> Restart
         </button>
         <button
           type="button"

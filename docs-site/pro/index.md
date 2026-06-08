@@ -1,14 +1,14 @@
 ---
 title: PortBay Pro — Pricing, Features & How to Get Pro
-description: PortBay Pro is $59/yr — unlimited projects, encrypted multi-device sync (up to 2 devices), and early-access features. OSS contributors earn Pro by merging a pull request.
+description: PortBay Pro is $10/mo — unlimited projects, encrypted multi-device sync (up to 2 devices), and early-access features. OSS contributors earn Pro by merging a pull request.
 ---
 
 # PortBay Pro
 
 PortBay is free and open source under AGPL-3.0. **Pro is optional.** It is a
-**$59/yr subscription** that unlocks the hosted conveniences — a synced account
+**$10/mo subscription** that unlocks the hosted conveniences — a synced account
 across your machines, higher project limits, and a few power-user features.
-Pro activates on up to **2 devices**, renews annually, and you can cancel
+Pro activates on up to **2 devices**, renews monthly, and you can cancel
 anytime.
 
 We're up front about this because the alternative — quietly bolting a paywall
@@ -71,16 +71,17 @@ acquisition paths (see below). Pro activates on the next license refresh.
 
 ## How to get Pro
 
-### Buy Pro ($59/yr)
+### Buy Pro ($10/mo)
 
-> **Coming soon.** The checkout is not yet live. Join the waitlist at
-> [portbay.app/pro](https://portbay.app/pro) and you'll hear when it opens.
+> **Coming soon.** The checkout is not yet live — when it opens, the upgrade
+> sheet in the app will offer **"Get Pro — $10/mo"** directly.
 
-Pro is $59/yr, activates on up to 2 devices, renews annually, and you can
-cancel anytime. Once checkout is live:
+Pro is $10/mo with a 7-day free trial, activates on up to 2 devices, renews
+monthly, and you can cancel anytime — cancelling during the trial costs
+nothing. Once checkout is live:
 
 1. Sign in to PortBay (**Settings → Account**, or the user menu).
-2. Open the upgrade sheet and choose **"Get Pro — $59/yr"**.
+2. Open the upgrade sheet and choose **"Get Pro — $10/mo"**.
 3. Complete checkout in your browser; Pro activates on your next license refresh.
 
 ### Contribute
@@ -95,6 +96,24 @@ merged, Pro is issued to your GitHub account automatically.
 
 [Buy Me a Coffee](https://buymeacoffee.com/beiruti) remains open as a voluntary
 tip jar — tips are appreciated but do not grant Pro entitlements.
+
+## Managing your subscription
+
+Subscribers manage everything from **Settings → Account → Billing** in the app:
+
+- See your renewal date (or, after cancelling, the date Pro stays active until).
+- **Manage billing** opens the secure Paddle customer portal in your browser —
+  update your payment method, download invoices and receipts, or cancel.
+- **Cancel subscription** jumps straight to the cancellation form. Cancelling
+  stops the next renewal; Pro stays active until the end of the period you've
+  already paid for, then your account drops to the Free tier. Your projects are
+  never touched.
+- If a renewal payment fails, the Billing section shows a **payment past due**
+  notice with a shortcut to update your card.
+
+Purchases are processed by Paddle (our Merchant of Record), so invoices, taxes,
+and refunds are handled there. Pro granted for a merged contribution doesn't
+renew and has no billing to manage.
 
 ## Devices
 

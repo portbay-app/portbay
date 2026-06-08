@@ -1,0 +1,1 @@
+step one install the dependencies step two run the database migrations step three seed the test data actually cancel step three we don't need the seeding anymore step three should be restart the workers

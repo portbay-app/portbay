@@ -1,0 +1,1 @@
+okay so add a retry to the SFTP upload when the connection drops um use exponential backoff and uh max three attempts and no wait make that five attempts and show a toast when it finally gives up

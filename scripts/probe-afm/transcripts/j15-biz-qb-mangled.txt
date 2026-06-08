@@ -1,0 +1,1 @@
+import last month's expenses from quick books and flag anything over five hundred dollars

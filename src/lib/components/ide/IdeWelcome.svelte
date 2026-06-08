@@ -37,9 +37,12 @@
 
   let copied = $state<string | null>(null);
 
-  const stage = $derived(stageMeta(host.stage));
-  const auth = $derived(authSummary(host));
-  const prov = $derived(providerLabel(host.provider));
+  // Guard against a null `host` during a teardown flush (the workspace can
+  // re-evaluate these derived values for a beat while the host is being cleared,
+  // before the parent's `{#if host}` unmounts this) — otherwise they'd throw.
+  const stage = $derived(host ? stageMeta(host.stage) : null);
+  const auth = $derived(host ? authSummary(host) : { label: "—", detail: "" });
+  const prov = $derived(host ? providerLabel(host.provider) : null);
 
   const memPercent = $derived(
     snapshot?.memTotalMb && snapshot.memUsedMb != null
@@ -114,8 +117,9 @@
     {#if !snapshot}
       <p class="mt-2 text-[12px] text-fg-subtle leading-relaxed">
         Point-in-time only — runs <code class="font-mono text-fg-muted">uptime</code>,
-        <code class="font-mono text-fg-muted">free</code> and
-        <code class="font-mono text-fg-muted">df</code> once over SSH.
+        <code class="font-mono text-fg-muted">free</code>,
+        <code class="font-mono text-fg-muted">df</code> and
+        <code class="font-mono text-fg-muted">nvidia-smi</code> once over SSH.
       </p>
     {:else}
       <div class="mt-3 grid grid-cols-2 gap-3">
@@ -127,6 +131,55 @@
         {@render fact("OS", snapshot.os ?? host.detectedOs ?? "—")}
         {@render fact("Load (1m)", snapshot.load1 ?? "—")}
       </dl>
+      {#if snapshot.gpuCount}
+        <!-- GPU strip — the identity fact for the ML-box persona. Shown only
+             when nvidia-smi found hardware; ordinary hosts never see it. -->
+        <div class="mt-4 flex items-center gap-2.5 rounded-lg border border-border/60 bg-surface-2/40 px-3 py-2.5">
+          <Icon name="cpu" size={16} class="shrink-0 text-accent" />
+          <div class="min-w-0 flex-1">
+            <p class="truncate text-[12px] font-medium text-fg">
+              {snapshot.gpuCount > 1 ? `${snapshot.gpuCount}× ` : ""}{snapshot.gpuModel ?? "GPU"}
+            </p>
+            <p class="truncate text-[10.5px] text-fg-subtle">
+              {gb(snapshot.gpuTotalVramMb)} VRAM{snapshot.gpuCount > 1 ? " total" : ""}
+            </p>
+          </div>
+          {#if snapshot.driverVersion || snapshot.cudaVersion}
+            <div class="shrink-0 text-right font-mono text-[10.5px] leading-tight text-fg-subtle">
+              {#if snapshot.driverVersion}<div>Driver {snapshot.driverVersion}</div>{/if}
+              {#if snapshot.cudaVersion}<div>CUDA {snapshot.cudaVersion}</div>{/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
+      {#if snapshot.pythonVersion || snapshot.condaEnv || snapshot.virtualenv || snapshot.modules?.length}
+        <!-- Environment strip — the active Python / conda / module set the
+             researcher persona debugs against. Each row appears only when the
+             host reported it; a box with none of these never renders. -->
+        <div class="mt-4 rounded-lg border border-border/60 bg-surface-2/40 px-3 py-2.5">
+          <div class="flex items-center gap-2">
+            <Icon name="package" size={14} class="shrink-0 text-accent" />
+            <span class="text-[11.5px] font-medium text-fg">Environment</span>
+          </div>
+          {#if snapshot.pythonVersion || snapshot.condaEnv || snapshot.virtualenv}
+            <dl class="mt-2 grid grid-cols-3 gap-x-6 gap-y-2 text-[12px]">
+              {#if snapshot.pythonVersion}{@render fact("Python", snapshot.pythonVersion)}{/if}
+              {#if snapshot.condaEnv}{@render fact("Conda env", snapshot.condaEnv)}{/if}
+              {#if snapshot.virtualenv}{@render fact("Virtualenv", snapshot.virtualenv)}{/if}
+            </dl>
+          {/if}
+          {#if snapshot.modules?.length}
+            <div class="mt-2.5 flex items-start gap-1.5">
+              <Icon name="layers" size={12} class="mt-0.5 shrink-0 text-fg-subtle" />
+              <div class="flex flex-wrap gap-1">
+                {#each snapshot.modules as mod (mod)}
+                  <span class="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-fg-muted">{mod}</span>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
+      {/if}
     {/if}
   </section>
 

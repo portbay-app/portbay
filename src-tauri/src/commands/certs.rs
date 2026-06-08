@@ -49,6 +49,54 @@ pub enum CertStatus {
     Error,
 }
 
+/// CA trust state returned to the frontend so it can show the correct status
+/// and conditionally render the "Install / re-trust CA" action.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaStatusResult {
+    /// `"trusted"` | `"untrusted"` | `"missing"` | `"error"`
+    pub state: String,
+    pub detail: Option<String>,
+}
+
+/// `get_ca_status()` — returns the current mkcert CA trust state without
+/// running any privileged operation. Used by the Domains & HTTPS panel to
+/// decide whether to show the "Install / re-trust CA" button.
+#[tauri::command]
+pub async fn get_ca_status(state: State<'_, AppState>) -> AppResult<CaStatusResult> {
+    let mkcert = state
+        .mkcert
+        .as_ref()
+        .ok_or_else(|| AppError::BadInput("mkcert binary not bundled".into()))?;
+
+    match mkcert.ca_status() {
+        Ok(status) => match status.state {
+            CaTrustState::Trusted => Ok(CaStatusResult {
+                state: "trusted".into(),
+                detail: None,
+            }),
+            CaTrustState::Missing => Ok(CaStatusResult {
+                state: "missing".into(),
+                detail: Some(format!(
+                    "CA root not found at {}",
+                    status.root_path.display()
+                )),
+            }),
+            CaTrustState::Untrusted => Ok(CaStatusResult {
+                state: "untrusted".into(),
+                detail: Some(format!(
+                    "CA exists at {} but is not trusted by the system keychain",
+                    status.root_path.display()
+                )),
+            }),
+        },
+        Err(e) => Ok(CaStatusResult {
+            state: "error".into(),
+            detail: Some(e.to_string()),
+        }),
+    }
+}
+
 /// `install_mkcert_ca()` — runs the bundled mkcert's `-install` flow.
 /// The OS may prompt for authorization to add the CA to the system trust store.
 /// Idempotent — `mkcert -install` is safe to call when the CA is already
@@ -222,6 +270,159 @@ pub async fn reissue_cert(app: AppHandle, state: State<'_, AppState>, id: String
         )));
     }
     Ok(())
+}
+
+/// `export_cert_bundle(id, dest_dir)` — copy a project's leaf certificate +
+/// private key and the mkcert CA root into `<dest_dir>/<hostname>-cert/`,
+/// alongside a README describing how to install them on another machine or
+/// server. Returns the created folder path. Lets a PortBay-issued cert be
+/// reused outside the app the way you'd install a cert on a server.
+#[tauri::command]
+pub async fn export_cert_bundle(
+    state: State<'_, AppState>,
+    id: String,
+    dest_dir: String,
+) -> AppResult<String> {
+    let registry = crate::commands::projects::load_registry(&state)?;
+    let project = registry
+        .get_project(&ProjectId::new(id.clone()))
+        .cloned()
+        .ok_or_else(|| AppError::NotFound(format!("project '{id}' not found")))?;
+
+    // Resolve the leaf cert + key: custom mode uses the user-provided paths;
+    // every other mode uses the mkcert-issued pair under certs_root.
+    let (cert_src, key_src) =
+        if project.https && project.ssl_mode() == SslMode::CustomCertificate {
+            let (cert, key) = project.custom_cert_paths().ok_or_else(|| {
+                AppError::BadInput(
+                    "custom certificate mode requires certificate and key paths".into(),
+                )
+            })?;
+            (std::path::PathBuf::from(cert), std::path::PathBuf::from(key))
+        } else {
+            let mkcert = state
+                .mkcert
+                .as_ref()
+                .ok_or_else(|| AppError::BadInput("mkcert binary not bundled".into()))?;
+            let paths = mkcert.cert_paths(&id).ok_or_else(|| {
+                AppError::NotFound(format!("no certificate issued for project '{id}' yet"))
+            })?;
+            (paths.certificate, paths.key)
+        };
+
+    if !cert_src.exists() {
+        return Err(AppError::NotFound(format!(
+            "certificate file not found at {}",
+            cert_src.display()
+        )));
+    }
+    if !key_src.exists() {
+        return Err(AppError::NotFound(format!(
+            "private key file not found at {}",
+            key_src.display()
+        )));
+    }
+
+    // The mkcert CA root — needed for other machines to trust an automatic-local
+    // cert. Absent/optional for custom certs (their chain travels with them).
+    let ca_root = state
+        .mkcert
+        .as_ref()
+        .and_then(|m| m.ca_root().ok())
+        .map(|root| root.join("rootCA.pem"))
+        .filter(|p| p.exists());
+
+    let hostname = project.hostname.as_str();
+    let safe_host: String = hostname
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let out_dir = std::path::PathBuf::from(&dest_dir).join(format!("{safe_host}-cert"));
+    std::fs::create_dir_all(&out_dir).map_err(AppError::Io)?;
+
+    std::fs::copy(&cert_src, out_dir.join("cert.pem")).map_err(AppError::Io)?;
+    std::fs::copy(&key_src, out_dir.join("key.pem")).map_err(AppError::Io)?;
+    let has_ca = match ca_root.as_ref() {
+        Some(ca) => {
+            std::fs::copy(ca, out_dir.join("rootCA.pem")).map_err(AppError::Io)?;
+            true
+        }
+        None => false,
+    };
+
+    std::fs::write(out_dir.join("README.md"), export_readme(hostname, has_ca))
+        .map_err(AppError::Io)?;
+
+    Ok(out_dir.to_string_lossy().into_owned())
+}
+
+/// Human-readable install guide written into the exported bundle.
+fn export_readme(hostname: &str, has_ca: bool) -> String {
+    let ca_section = if has_ca {
+        "- `rootCA.pem` — PortBay's local mkcert Certificate Authority. Install this \
+in the trust store of any machine that must trust `cert.pem` (see below)."
+    } else {
+        "- (No CA root was exported — this certificate carries its own chain, or \
+mkcert is not configured on this machine.)"
+    };
+
+    format!(
+        "# {hostname} — certificate bundle
+
+Exported by PortBay.
+
+## Files
+
+- `cert.pem` — the leaf certificate (the public certificate for `{hostname}`).
+- `key.pem` — the matching private key. Keep this secret; never commit it.
+{ca_section}
+
+## Use it on a web server
+
+Point your server at `cert.pem` and `key.pem`:
+
+**nginx**
+```
+ssl_certificate     /path/to/cert.pem;
+ssl_certificate_key /path/to/key.pem;
+```
+
+**Apache**
+```
+SSLCertificateFile    /path/to/cert.pem
+SSLCertificateKeyFile /path/to/key.pem
+```
+
+**Caddy**
+```
+{hostname} {{
+    tls /path/to/cert.pem /path/to/key.pem
+}}
+```
+
+## Make other machines trust it
+
+This is a locally-issued certificate. Browsers and tools only trust it where
+PortBay's CA is installed. On another machine, install `rootCA.pem` into the
+system/browser trust store:
+
+- **macOS:** `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain rootCA.pem`
+- **Linux (Debian/Ubuntu):** copy `rootCA.pem` to `/usr/local/share/ca-certificates/` (rename it to end in `.crt`), then run `sudo update-ca-certificates`
+- **Windows:** import `rootCA.pem` into *Trusted Root Certification Authorities*.
+
+## Heads up
+
+A locally-trusted (mkcert) certificate is meant for local development. For a real
+public server with a public domain, issue a publicly-trusted certificate instead —
+in PortBay, set the project's SSL mode to **Public ACME / AutoSSL**.
+"
+    )
 }
 
 fn parse_cert_pem(

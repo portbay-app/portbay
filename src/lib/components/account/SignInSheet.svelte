@@ -206,8 +206,8 @@
           {/each}
         </ul>
         <p class="text-[12.5px] leading-relaxed text-fg-muted mb-4">
-          <span class="text-fg font-medium">$59/yr</span> — activates on up to 2 devices, renews annually, cancel
-          anytime. OSS contributors earn Pro by merging a pull request.
+          <span class="text-fg font-medium">$10/mo</span> with a 7-day free trial — activates on up to 2 devices,
+          renews monthly, cancel anytime.
         </p>
         <div class="flex flex-col gap-2.5">
           <div class="flex flex-col gap-1">
@@ -221,7 +221,7 @@
               {#if checkoutBusy}
                 <span class="spinner"></span> Opening checkout…
               {:else}
-                <Icon name="sparkles" size={15} /> Get Pro — $59/yr
+                <Icon name="sparkles" size={15} /> Get Pro — $10/mo
               {/if}
             </button>
             <div class="flex items-center justify-center">

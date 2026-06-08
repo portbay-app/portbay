@@ -1,0 +1,1 @@
+pie torch keeps throwing a CUDA out of memory error so halve the batch size no wait quarter it

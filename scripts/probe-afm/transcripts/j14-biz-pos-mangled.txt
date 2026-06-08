@@ -1,0 +1,1 @@
+the POS system double counted the weekend sales so um reconcile the inventory SKUs against shop if I

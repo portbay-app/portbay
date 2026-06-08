@@ -66,7 +66,7 @@
       title: "Accessibility access required",
       subtitle: "Grant in System Settings",
       description:
-        "Allow PortBay to use Accessibility features. If PortBay isn't in the list, drag the icon below into the Accessibility list.",
+        "Allow PortBay to use Accessibility features. macOS has added PortBay to the list — switch it on. Already on but still blocked? Remove PortBay with the − button and re-add it: an entry from an older build stops matching this one.",
       settingsName: "Accessibility",
       settingsKind: "accessibility",
       gesture: "drag",

@@ -85,6 +85,14 @@ impl ExecManager {
         self.sessions.remove(conn_id);
     }
 
+    /// Whether a still-open session is cached for this connection. Read-only —
+    /// doesn't bump `last_used`, so a status poll never keeps a session alive.
+    pub fn has_session(&self, conn_id: &str) -> bool {
+        self.sessions
+            .get(conn_id)
+            .is_some_and(|c| !c.session.is_closed())
+    }
+
     /// Drop every cached session (app shutdown / state reset).
     pub fn disconnect_all(&mut self) {
         self.sessions.clear();

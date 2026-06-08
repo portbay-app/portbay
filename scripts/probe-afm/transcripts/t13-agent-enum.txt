@@ -1,0 +1,1 @@
+okay three things first add a loading spinner to the deploy pane then fix the um the tooltip that overflows on small windows and third write a changelog entry for the zero point one point four release

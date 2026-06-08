@@ -12,6 +12,55 @@ incorporated into the PortBay Community work under that combined license.
 
 ================================================================================
 
+Bundled sidecar binaries (macOS DMG distribution)
+
+The PortBay app bundle ships the following unmodified third-party executables
+as sidecars. They are separate programs invoked as subprocesses — an aggregate
+distribution, not a combined work — and each remains under its own license.
+Binaries are fetched/built at pinned versions with SHA-256 verification by the
+scripts/fetch-*.sh scripts.
+
+  Caddy 2.10.2 (with caddy-dns/cloudflare v0.2.3)
+      License: Apache-2.0 — https://github.com/caddyserver/caddy
+
+  dnsmasq 2.92
+      License: GPL-2.0 or GPL-3.0 (dual-licensed; PortBay distributes it
+      under GPL-3.0). Upstream: https://thekelleys.org.uk/dnsmasq/
+      Complete corresponding source for the pinned version is available
+      from the upstream release archive; the build/fetch recipe is
+      scripts/fetch-dnsmasq.sh.
+
+  mkcert 1.4.4
+      License: BSD-3-Clause — https://github.com/FiloSottile/mkcert
+
+  Mailpit 1.30.0
+      License: MIT — https://github.com/axllent/mailpit
+
+  cloudflared 2025.11.1
+      License: Apache-2.0 — https://github.com/cloudflare/cloudflared
+
+  process-compose 1.110.0
+      License: Apache-2.0 — https://github.com/F1bonacc1/process-compose
+
+The portbay-hosts-helper and portbay-mcp sidecars are first-party PortBay
+code (AGPL-3.0-only, this repository). Optional managed runtimes (e.g.
+PHP-FPM) are downloaded on demand from the portbay-runtimes project, which
+carries its own license attribution.
+
+================================================================================
+
+Export compliance
+
+PortBay contains standard, published encryption (TLS via rustls, SSH via
+russh, locally generated development certificates). The notification for
+publicly available encryption source code required by 15 CFR §742.15(b) of
+the U.S. Export Administration Regulations was submitted to BIS
+(crypt@bis.doc.gov) and NSA (enc@nsa.gov) on 2026-06-05. Under
+15 CFR §734.3(b)(3) and §734.7(b), this source code and the binaries built
+from it are not subject to the EAR.
+
+================================================================================
+
 Lerd — https://github.com/geodro/lerd
 Copyright (c) Lerd contributors
 Licensed under the MIT License.

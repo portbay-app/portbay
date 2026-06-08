@@ -1,0 +1,1 @@
+um fix the sftp pane crash when you drag a folder onto it it was a null deref in the transfer queue oh and also bump the russh version

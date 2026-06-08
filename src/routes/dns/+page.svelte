@@ -514,59 +514,44 @@
       </header>
 
       <div class="px-8 py-6 space-y-4">
-        <!-- First-run setup / routing health -->
-        {#if dns.preflight}
+        <!-- First-run setup prompt — only shown while routing isn't ready;
+             once everything is green the card disappears entirely. -->
+        {#if dns.preflight && !dns.preflight.ready}
           {@const pf = dns.preflight}
           <article
-            class="rounded-2xl px-5 py-4 border {pf.ready
-              ? 'bg-status-running/5 border-status-running/30'
-              : 'bg-status-unhealthy/5 border-status-unhealthy/30'}"
+            class="rounded-2xl px-5 py-4 border bg-status-unhealthy/5 border-status-unhealthy/30"
           >
             <header class="flex items-center justify-between gap-3 mb-3">
               <div class="flex items-center gap-2 min-w-0">
                 <Icon
-                  name={pf.ready ? "circle-check" : "circle-alert"}
+                  name="circle-alert"
                   size={15}
-                  class={pf.ready ? "text-status-running" : "text-status-unhealthy"}
+                  class="text-status-unhealthy"
                 />
-                <h3 class="text-[13px] font-semibold text-fg">
-                  {pf.ready ? "Local DNS is set up" : "Set up local DNS"}
-                </h3>
+                <h3 class="text-[13px] font-semibold text-fg">Set up local DNS</h3>
               </div>
-              {#if !pf.ready}
-                <button
-                  type="button"
-                  onclick={() => (showDnsPermission = true)}
-                  disabled={dns.isBusy("setup")}
-                  class="shrink-0 inline-flex items-center gap-1.5 h-8 px-3.5 rounded-md text-[12px] font-medium
-                         text-on-accent bg-accent hover:brightness-110 active:brightness-95
-                         disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
-                >
-                  {#if dns.isBusy("setup")}
-                    <Icon name="refresh-cw" size={11} class="animate-spin" />
-                    Setting up…
-                  {:else}
-                    <Icon name="lock" size={11} />
-                    Set up local DNS
-                  {/if}
-                </button>
-              {/if}
+              <button
+                type="button"
+                onclick={() => (showDnsPermission = true)}
+                disabled={dns.isBusy("setup")}
+                class="shrink-0 inline-flex items-center gap-1.5 h-8 px-3.5 rounded-md text-[12px] font-medium
+                       text-on-accent bg-accent hover:brightness-110 active:brightness-95
+                       disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
+              >
+                {#if dns.isBusy("setup")}
+                  <Icon name="refresh-cw" size={11} class="animate-spin" />
+                  Setting up…
+                {:else}
+                  <Icon name="lock" size={11} />
+                  Set up local DNS
+                {/if}
+              </button>
             </header>
 
             <p class="text-[11.5px] text-fg-muted leading-relaxed mb-3">
-              {#if pf.ready}
-                Project hostnames under <code class="font-mono">.{pf.suffix}</code>
-                resolve to this machine via PortBay's managed
-                <code class="font-mono">/etc/hosts</code> entries.
-                {#if pf.dnsmasqRunning && pf.resolverInstalled}
-                  Arbitrary <code class="font-mono">*.{pf.suffix}</code> subdomains
-                  also resolve via dnsmasq on port {pf.dnsmasqPort}.
-                {/if}
-              {:else}
-                One OS authorization prompt installs PortBay's privileged helper; it
-                then writes your project hostnames into
-                <code class="font-mono">/etc/hosts</code> with no further prompts.
-              {/if}
+              One OS authorization prompt installs PortBay's privileged helper; it
+              then writes your project hostnames into
+              <code class="font-mono">/etc/hosts</code> with no further prompts.
             </p>
 
             {#snippet check(label: string, ok: boolean)}
@@ -586,7 +571,7 @@
               {@render check("Resolver installed", pf.resolverInstalled)}
             </div>
 
-            {#if !pf.ready && (pf.port80InUse || pf.port443InUse)}
+            {#if pf.port80InUse || pf.port443InUse}
               <p
                 class="mt-3 text-[11px] text-status-port-conflict leading-relaxed flex items-start gap-1.5"
               >

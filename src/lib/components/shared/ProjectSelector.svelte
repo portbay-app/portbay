@@ -10,6 +10,7 @@
     disabled       — disables the trigger button
     includeAllOption — prepend an "all" option (default true)
     allOptionLabel — label for the all option (default "All projects")
+    showStatusDot  — show each project's status dot in the list (default true)
     onselect       — callback(projectId: string | null)
 -->
 <script lang="ts">
@@ -22,6 +23,11 @@
     disabled?: boolean;
     includeAllOption?: boolean;
     allOptionLabel?: string;
+    showStatusDot?: boolean;
+    /** Stretch the trigger and dropdown to fill the parent's width. */
+    fullWidth?: boolean;
+    /** When set, render a "+ Add new project" row at the bottom of the list. */
+    onAddNew?: (() => void) | null;
     onselect: (projectId: string | null) => void;
   }
 
@@ -31,6 +37,9 @@
     disabled = false,
     includeAllOption = true,
     allOptionLabel = "All projects",
+    showStatusDot = true,
+    fullWidth = false,
+    onAddNew = null,
     onselect,
   }: Props = $props();
 
@@ -90,7 +99,7 @@
     {disabled}
     aria-haspopup="listbox"
     aria-expanded={open}
-    class="flex items-center gap-2 h-9 w-56 px-2.5 rounded-lg bg-surface-2
+    class="flex items-center gap-2 h-9 {fullWidth ? 'w-full' : 'w-56'} px-2.5 rounded-lg bg-surface-2
            border border-border text-left hover:border-border-strong
            disabled:opacity-50 disabled:cursor-not-allowed transition-colors
            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -120,7 +129,7 @@
     <div
       role="listbox"
       aria-label="Select a project"
-      class="absolute z-30 mt-1.5 w-64 rounded-lg bg-surface border border-border shadow-2xl p-1"
+      class="absolute z-30 mt-1.5 {fullWidth ? 'w-full' : 'w-64'} rounded-lg bg-surface border border-border shadow-2xl p-1"
     >
       <!-- Sticky search -->
       <div class="px-1 pb-1">
@@ -176,11 +185,35 @@
             >
               <ProjectAvatar id={p.id} name={p.name} type={p.type} size={20} />
               <span class="flex-1 truncate text-[13px] text-fg">{p.name}</span>
-              <StatusDot status={p.status} size="md" />
+              {#if showStatusDot}
+                <StatusDot status={p.status} size="md" />
+              {/if}
             </button>
           {/each}
         {/if}
       </div>
+
+      {#if onAddNew}
+        <div class="mt-1 pt-1 border-t border-border/60">
+          <button
+            type="button"
+            onclick={() => {
+              open = false;
+              onAddNew?.();
+            }}
+            class="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-left
+                   text-[13px] text-fg-muted hover:bg-surface-2 hover:text-fg
+                   transition-colors"
+          >
+            <span
+              class="grid place-items-center w-5 h-5 rounded-md bg-surface-2 text-fg-subtle shrink-0"
+            >
+              <Icon name="plus" size={13} />
+            </span>
+            <span class="flex-1 truncate">Add new project</span>
+          </button>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>

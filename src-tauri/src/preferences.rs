@@ -340,8 +340,8 @@ impl NotificationPrefs {
 /// All fields default to the most-conservative on-by-default values that
 /// make the tray feature unobtrusively useful out of the box. Fields are
 /// `#[serde(default)]` so adding a new toggle in a future build doesn't
-/// invalidate older prefs files.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+/// invalidate older prefs files. Not `Eq` — `DictationPrefs` carries an f64.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
     /// When true, install the tray icon on launch. When toggled off at
@@ -529,6 +529,340 @@ pub struct Preferences {
     /// every project type; honoured by both scan and clean.
     #[serde(default)]
     pub auto_clean_extra_dirs: Vec<String>,
+
+    // -------- AI / local Ollama --------
+    /// Local Ollama manager configuration. Owns the endpoint shared by local
+    /// AI consumers; `dictation.endpoint` is retained for older prefs files and
+    /// mirrored from this value during normalisation.
+    #[serde(default)]
+    pub ai: AiPrefs,
+
+    // -------- Dictation --------
+    /// Smart Dictation — the optional rewrite layer over macOS dictation.
+    /// macOS stays the recognizer; these settings only govern what happens
+    /// to the transcript text afterwards.
+    #[serde(default)]
+    pub dictation: DictationPrefs,
+
+    // -------- Local speech-to-text --------
+    /// Storage settings for the local STT engine's models (the `portbay-stt`
+    /// sidecar — Whisper/Parakeet). Which engine transcribes lives on
+    /// `dictation` (it's a dictation behavior); this is the models' home.
+    #[serde(default)]
+    pub stt: SttPrefs,
+}
+
+/// Local speech-to-text model storage. Mirrors `AiPrefs.models_dir`'s role
+/// for Ollama: one user-configurable directory the AI page manages.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SttPrefs {
+    /// Where downloaded STT models live. Each model owns one subdirectory
+    /// named by its catalog id (see stt/Sources/portbay-stt/main.swift).
+    #[serde(default = "default_stt_models_dir")]
+    pub models_dir: String,
+}
+
+impl Default for SttPrefs {
+    fn default() -> Self {
+        Self {
+            models_dir: default_stt_models_dir(),
+        }
+    }
+}
+
+/// Smart Dictation post-processing settings. Off by default: sending the
+/// transcript to a model — even a local one — is strictly opt-in, matching
+/// the telemetry posture. The backend stays stateless; the frontend passes
+/// these per rewrite call.
+///
+/// Not `Eq`: `overlay_noise_floor` is an f64 (nothing compares whole prefs
+/// structs anyway — only individual fields, see `commands::preferences`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationPrefs {
+    /// "off" | "light" | "smart". Unknown values read as "off".
+    #[serde(default = "default_dictation_mode")]
+    pub mode: String,
+
+    /// Rewrite provider id — `"ollama"` is the only one today. A string (not
+    /// an enum) so a prefs file written by a newer build with more providers
+    /// still parses here.
+    #[serde(default = "default_dictation_provider")]
+    pub provider: String,
+
+    /// Provider base URL. Defaults to the local Ollama server; transcript
+    /// text never leaves the machine unless the user points this elsewhere.
+    #[serde(default = "default_dictation_endpoint")]
+    pub endpoint: String,
+
+    /// Model name. Empty = auto-pick from the provider's installed models.
+    #[serde(default)]
+    pub model: String,
+
+    /// Push-to-talk: hold the Fn (🌐) key with a dictation field focused to
+    /// dictate; release to stop. On by default — it's only an alternate
+    /// trigger for the same mic, nothing leaves the machine.
+    #[serde(default = "default_true")]
+    pub push_to_talk: bool,
+
+    /// User-curated dictation terms ("refactor", "Tailwind", "Shopify") fed
+    /// into the rewrite vocabulary AHEAD of every automatic source — these
+    /// are the plain words and niche brands macOS dictation garbles that no
+    /// harvest can supply (the automatic sources only collect
+    /// identifier-shaped tokens by design). Stored backend-side like every
+    /// preference; the prompt takes the first few (see
+    /// `commands::dictation::CUSTOM_TERMS_CAP`).
+    #[serde(default)]
+    pub custom_terms: Vec<String>,
+
+    /// Transcription engine: `"macos"` (system dictation types into the
+    /// field, the default) or `"local"` (the `portbay-stt` sidecar captures
+    /// the mic and runs a downloaded Whisper/Parakeet model on-device). A
+    /// string for the same forward-compat reason as `provider`.
+    #[serde(default = "default_stt_engine")]
+    pub stt_engine: String,
+
+    /// Local STT model (catalog id, e.g. `"parakeet-tdt-v3"`). Only read
+    /// when `stt_engine == "local"`. Empty = no model chosen yet, which the
+    /// UI treats as "macOS engine until one is picked".
+    #[serde(default)]
+    pub stt_model: String,
+
+    /// "Dictate anywhere": hold Fn in ANY app and the local engine's
+    /// transcript is pasted into it (see `crate::dictation_anywhere`).
+    /// Off by default — it needs the Accessibility grant and a local model,
+    /// both explicit user choices. Only read when `stt_engine == "local"`.
+    #[serde(default)]
+    pub anywhere: bool,
+
+    /// Hands-free variant of "dictate anywhere": double-tap Fn to start a
+    /// session that stays live without holding the key; a single Fn tap (or
+    /// Esc) stops it. On by default within the anywhere opt-in — the gesture
+    /// mirrors macOS dictation's own double-press idiom. Off is the escape
+    /// hatch for users whose Fn key already double-taps into something else.
+    #[serde(default = "default_true")]
+    pub anywhere_double_tap: bool,
+
+    /// Where the recording overlay sits: `"notch"` (the camera-housing HUD,
+    /// the default) or `"bottom"` (a floating pill near the bottom of the
+    /// pointer's screen — the option for Macs without a notch, where the
+    /// virtual-notch fallback floats under the menu bar). A string for the
+    /// same forward-compat reason as `provider`; unknown values read as
+    /// notch.
+    #[serde(default = "default_overlay_position")]
+    pub overlay_position: String,
+
+    /// Raw mic-RMS floor below which the overlay's waveform stays flat —
+    /// FluidVoice's visualizer noise threshold, configurable so the bars
+    /// don't dance to a noisy room. Speech RMS sits ~0.01–0.3; the default
+    /// matches the previously hardcoded floor. Clamped to 0.0–0.05 on
+    /// load/save.
+    #[serde(default = "default_overlay_noise_floor")]
+    pub overlay_noise_floor: f64,
+
+    /// How much of the live transcript the overlay's preview keeps —
+    /// the last N characters (head-truncated, so the newest words are
+    /// always visible). FluidVoice's default is 150; clamped to 50–800 on
+    /// load/save.
+    #[serde(default = "default_overlay_preview_chars")]
+    pub overlay_preview_chars: u32,
+
+    /// "Polish dictation everywhere": run the Smart Dictation rewrite engine
+    /// over the system-wide ("anywhere") transcript before pasting it, so
+    /// rambly speech lands clean and paragraphed in any app — the same engine
+    /// (providers + sanitizer + no-invention guards) the in-app surfaces use.
+    /// Off by default and only read inside the anywhere opt-in; a failed or
+    /// timed-out rewrite degrades to the raw transcript (zero data loss).
+    #[serde(default)]
+    pub anywhere_polish: bool,
+
+    /// Per-app `RewriteContext` overrides for the polished anywhere path: the
+    /// frontmost app's bundle id → context. Resolution is user rule →
+    /// built-in default (terminals map to `terminal_command`) → `GeneralNote`,
+    /// so an empty list still does the right thing (see
+    /// `dictation_anywhere::resolve_context`). A list (not a map) so the
+    /// settings UI keeps the user's ordering.
+    #[serde(default)]
+    pub anywhere_app_contexts: Vec<AppContextRule>,
+}
+
+/// One per-app rewrite-context override: when this bundle id is frontmost,
+/// the anywhere rewrite uses `context` (a `RewriteContext` wire string —
+/// snake_case, e.g. `git_commit`). Unknown context strings fall back to the
+/// built-in resolution, so a newer build's context value never breaks here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppContextRule {
+    pub bundle_id: String,
+    pub context: String,
+}
+
+/// Local Ollama manager settings. These map directly to Ollama's supported
+/// environment variables when PortBay starts its own `ollama serve`.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPrefs {
+    #[serde(default = "default_dictation_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_ollama_models_dir")]
+    pub models_dir: String,
+    #[serde(default)]
+    pub binary_path: String,
+    #[serde(default = "default_ollama_keep_alive")]
+    pub keep_alive: String,
+    #[serde(default)]
+    pub flash_attention: bool,
+    #[serde(default = "default_ollama_origins")]
+    pub origins: String,
+    #[serde(default)]
+    pub num_parallel: Option<u32>,
+    #[serde(default)]
+    pub debug: bool,
+    #[serde(default)]
+    pub model_download_threads: Option<u32>,
+    #[serde(default)]
+    pub no_history: bool,
+    #[serde(default)]
+    pub no_prune: bool,
+    #[serde(default)]
+    pub schedule_spread: bool,
+    #[serde(default)]
+    pub multi_user_cache: bool,
+    #[serde(default)]
+    pub kv_cache_type: String,
+    #[serde(default)]
+    pub gpu_overhead: Option<u64>,
+    #[serde(default)]
+    pub load_timeout: String,
+    #[serde(default)]
+    pub max_loaded_models: Option<u32>,
+    #[serde(default)]
+    pub max_queue: Option<u32>,
+    #[serde(default)]
+    pub llm_library: String,
+    #[serde(default)]
+    pub http_proxy: String,
+    #[serde(default)]
+    pub https_proxy: String,
+    #[serde(default)]
+    pub no_proxy: String,
+}
+
+impl Default for AiPrefs {
+    fn default() -> Self {
+        Self {
+            endpoint: default_dictation_endpoint(),
+            models_dir: default_ollama_models_dir(),
+            binary_path: String::new(),
+            keep_alive: default_ollama_keep_alive(),
+            flash_attention: false,
+            origins: default_ollama_origins(),
+            num_parallel: None,
+            debug: false,
+            model_download_threads: None,
+            no_history: false,
+            no_prune: false,
+            schedule_spread: false,
+            multi_user_cache: false,
+            kv_cache_type: String::new(),
+            gpu_overhead: None,
+            load_timeout: String::new(),
+            max_loaded_models: None,
+            max_queue: None,
+            llm_library: String::new(),
+            http_proxy: String::new(),
+            https_proxy: String::new(),
+            no_proxy: String::new(),
+        }
+    }
+}
+
+impl Default for DictationPrefs {
+    fn default() -> Self {
+        Self {
+            mode: default_dictation_mode(),
+            provider: default_dictation_provider(),
+            endpoint: default_dictation_endpoint(),
+            model: String::new(),
+            push_to_talk: true,
+            custom_terms: Vec::new(),
+            stt_engine: default_stt_engine(),
+            stt_model: String::new(),
+            anywhere: false,
+            anywhere_double_tap: true,
+            overlay_position: default_overlay_position(),
+            overlay_noise_floor: default_overlay_noise_floor(),
+            overlay_preview_chars: default_overlay_preview_chars(),
+            anywhere_polish: false,
+            anywhere_app_contexts: Vec::new(),
+        }
+    }
+}
+
+// Smart by default via the Apple provider (matches DEFAULTS.dictation in
+// src/lib/stores/preferences.svelte.ts — the backend materializes these
+// serde defaults into `get_preferences`, so the frontend's defaults never
+// apply on their own). On machines without Apple Intelligence the rewrite
+// resolves `no_model` and the frontend latches the provider off for the
+// session, silently — dictation keeps working raw.
+fn default_dictation_mode() -> String {
+    "smart".to_string()
+}
+
+fn default_dictation_provider() -> String {
+    "apple".to_string()
+}
+
+fn default_dictation_endpoint() -> String {
+    "http://127.0.0.1:11434".to_string()
+}
+
+// One PortBay-recommended AI models root with per-engine subdirectories —
+// Ollama and speech-to-text downloads live side by side so a single
+// "Download location" knob (the AI page sets both prefs from one folder
+// pick) manages everything. Safe to brand: the AI manager ships first in
+// this release, so no existing install has models at an older default.
+fn default_ollama_models_dir() -> String {
+    dirs::data_dir()
+        .map(|p| p.join("PortBay/ai-models/ollama").to_string_lossy().into_owned())
+        .unwrap_or_else(|| "~/Library/Application Support/PortBay/ai-models/ollama".to_string())
+}
+
+// macOS dictation stays the transcription default: zero download, zero
+// setup, and the local engine needs a model installed before it can work.
+fn default_stt_engine() -> String {
+    "macos".to_string()
+}
+
+// The notch HUD is the overlay's identity; the bottom pill is the opt-in
+// for non-notch Macs.
+fn default_overlay_position() -> String {
+    "notch".to_string()
+}
+
+// The previously hardcoded RMS_FLOOR in the overlay webview.
+fn default_overlay_noise_floor() -> f64 {
+    0.01
+}
+
+// FluidVoice's preview tail default.
+fn default_overlay_preview_chars() -> u32 {
+    150
+}
+
+fn default_stt_models_dir() -> String {
+    dirs::data_dir()
+        .map(|p| p.join("PortBay/ai-models/speech").to_string_lossy().into_owned())
+        .unwrap_or_else(|| "~/Library/Application Support/PortBay/ai-models/speech".to_string())
+}
+
+fn default_ollama_keep_alive() -> String {
+    "5m".to_string()
+}
+
+fn default_ollama_origins() -> String {
+    "http://localhost,https://localhost,http://127.0.0.1,https://127.0.0.1".to_string()
 }
 
 fn default_true() -> bool {
@@ -661,11 +995,47 @@ impl Default for Preferences {
             auto_clean_schedule: default_auto_clean_schedule(),
             last_auto_clean: 0,
             auto_clean_extra_dirs: Vec::new(),
+            ai: AiPrefs::default(),
+            dictation: DictationPrefs::default(),
+            stt: SttPrefs::default(),
         }
     }
 }
 
 impl Preferences {
+    pub fn normalise_ai_endpoint(mut self) -> Self {
+        let default_endpoint = default_dictation_endpoint();
+        if self.ai.endpoint.trim().is_empty()
+            || (self.ai.endpoint == default_endpoint && self.dictation.endpoint != default_endpoint)
+        {
+            self.ai.endpoint = if self.dictation.endpoint.trim().is_empty() {
+                default_dictation_endpoint()
+            } else {
+                self.dictation.endpoint.clone()
+            };
+        }
+        self.dictation.endpoint = self.ai.endpoint.clone();
+        self
+    }
+
+    /// Clamp the dictation-overlay knobs into their documented ranges (a
+    /// hand-edited prefs file must not produce a permanently-flat waveform
+    /// or an unbounded preview). Applied on every load and save, like the
+    /// endpoint mirror.
+    pub fn normalise_dictation_overlay(mut self) -> Self {
+        if self.dictation.overlay_position != "bottom" {
+            self.dictation.overlay_position = default_overlay_position();
+        }
+        let floor = self.dictation.overlay_noise_floor;
+        self.dictation.overlay_noise_floor = if floor.is_finite() {
+            floor.clamp(0.0, 0.05)
+        } else {
+            default_overlay_noise_floor()
+        };
+        self.dictation.overlay_preview_chars = self.dictation.overlay_preview_chars.clamp(50, 800);
+        self
+    }
+
     /// Resolve the on-disk path. Creates the parent directory on first
     /// call so a subsequent `save()` can't fail on a missing folder.
     pub fn path() -> std::io::Result<PathBuf> {
@@ -700,7 +1070,7 @@ impl Preferences {
                 } else {
                     prefs.notifications.normalised()
                 };
-                prefs
+                prefs.normalise_ai_endpoint().normalise_dictation_overlay()
             }
             Err(e) => {
                 tracing::warn!(
@@ -719,7 +1089,8 @@ impl Preferences {
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path()?;
         let tmp = path.with_extension("json.tmp");
-        let serialised = serde_json::to_vec_pretty(self)
+        let serialised =
+            serde_json::to_vec_pretty(&self.clone().normalise_ai_endpoint().normalise_dictation_overlay())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         std::fs::write(&tmp, &serialised)?;
         std::fs::rename(&tmp, &path)?;
@@ -849,6 +1220,39 @@ mod tests {
             NotificationSeverityFloor::Everything
         );
         assert_eq!(p.accessibility.text_scale, AccessibilityTextScale::Normal);
+        // Custom dictation terms are new — old prefs files read as none.
+        assert!(p.dictation.custom_terms.is_empty());
+        // STT fields are new — old prefs files read as the macOS engine
+        // with the default models home.
+        assert_eq!(p.dictation.stt_engine, "macos");
+        assert!(p.dictation.stt_model.is_empty());
+        assert!(p.stt.models_dir.ends_with("PortBay/ai-models/speech"));
+        // Overlay knobs are new — old prefs files read as the previous
+        // hardcoded behavior (notch HUD, 0.01 floor, 150-char tail).
+        assert_eq!(p.dictation.overlay_position, "notch");
+        assert_eq!(p.dictation.overlay_noise_floor, 0.01);
+        assert_eq!(p.dictation.overlay_preview_chars, 150);
+    }
+
+    #[test]
+    fn overlay_knobs_clamp_on_normalise() {
+        let mut p = Preferences::default();
+        p.dictation.overlay_position = "sideways".to_string();
+        p.dictation.overlay_noise_floor = 7.5;
+        p.dictation.overlay_preview_chars = 12;
+        let p = p.normalise_dictation_overlay();
+        assert_eq!(p.dictation.overlay_position, "notch");
+        assert_eq!(p.dictation.overlay_noise_floor, 0.05);
+        assert_eq!(p.dictation.overlay_preview_chars, 50);
+
+        let mut p = Preferences::default();
+        p.dictation.overlay_position = "bottom".to_string();
+        p.dictation.overlay_noise_floor = f64::NAN;
+        p.dictation.overlay_preview_chars = 5000;
+        let p = p.normalise_dictation_overlay();
+        assert_eq!(p.dictation.overlay_position, "bottom");
+        assert_eq!(p.dictation.overlay_noise_floor, 0.01);
+        assert_eq!(p.dictation.overlay_preview_chars, 800);
     }
 
     #[test]
@@ -916,6 +1320,30 @@ mod tests {
             auto_clean_schedule: "weekly".to_string(),
             last_auto_clean: 1_700_000_000,
             auto_clean_extra_dirs: vec![".turbo".to_string(), ".cache".to_string()],
+            ai: AiPrefs::default(),
+            dictation: DictationPrefs {
+                mode: "smart".to_string(),
+                provider: "ollama".to_string(),
+                endpoint: "http://127.0.0.1:11434".to_string(),
+                model: "qwen2.5:3b".to_string(),
+                push_to_talk: false,
+                custom_terms: vec!["refactor".to_string(), "Tailwind".to_string()],
+                stt_engine: "local".to_string(),
+                stt_model: "parakeet-tdt-v3".to_string(),
+                anywhere: true,
+                anywhere_double_tap: true,
+                overlay_position: "bottom".to_string(),
+                overlay_noise_floor: 0.02,
+                overlay_preview_chars: 300,
+                anywhere_polish: true,
+                anywhere_app_contexts: vec![AppContextRule {
+                    bundle_id: "com.apple.Terminal".to_string(),
+                    context: "terminal_command".to_string(),
+                }],
+            },
+            stt: SttPrefs {
+                models_dir: "/Volumes/DevSSD/system/ai/stt".to_string(),
+            },
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"showTrayIcon\":false"));
@@ -937,6 +1365,14 @@ mod tests {
         assert!(json.contains("\"defaultWebServer\":\"nginx\""));
         assert!(json.contains("\"preferredTerminal\":\"warp\""));
         assert!(json.contains("\"preferredAgent\":\"codex\""));
+        assert!(json.contains("\"dictation\""));
+        assert!(json.contains("\"mode\":\"smart\""));
+        assert!(json.contains("\"pushToTalk\":false"));
+        assert!(json.contains("\"customTerms\":[\"refactor\",\"Tailwind\"]"));
+        assert!(json.contains("\"sttEngine\":\"local\""));
+        assert!(json.contains("\"sttModel\":\"parakeet-tdt-v3\""));
+        assert!(json.contains("\"stt\""));
+        assert!(json.contains("\"modelsDir\":\"/Volumes/DevSSD/system/ai/stt\""));
         assert!(json.contains("\"agentPaths\":{\"codex\":\"/Volumes/Ext/bin/codex\"}"));
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
@@ -948,6 +1384,28 @@ mod tests {
         assert_eq!(p.auto_clean_schedule, "off");
         assert_eq!(p.last_auto_clean, 0);
         assert!(p.auto_clean_extra_dirs.is_empty());
+    }
+
+    #[test]
+    fn ai_endpoint_is_single_source_for_dictation() {
+        let raw = r#"{
+          "dictation": {
+            "provider": "ollama",
+            "endpoint": "http://127.0.0.1:11500",
+            "model": "qwen2.5:7b"
+          }
+        }"#;
+        let p: Preferences = serde_json::from_str(raw).unwrap();
+        let normalised = p.normalise_ai_endpoint();
+        assert_eq!(normalised.ai.endpoint, "http://127.0.0.1:11500");
+        assert_eq!(normalised.dictation.endpoint, normalised.ai.endpoint);
+
+        let mut explicit = Preferences::default();
+        explicit.ai.endpoint = "http://127.0.0.1:11600".to_string();
+        explicit.dictation.endpoint = "http://127.0.0.1:11434".to_string();
+        let normalised = explicit.normalise_ai_endpoint();
+        assert_eq!(normalised.ai.endpoint, "http://127.0.0.1:11600");
+        assert_eq!(normalised.dictation.endpoint, "http://127.0.0.1:11600");
     }
 
     #[test]

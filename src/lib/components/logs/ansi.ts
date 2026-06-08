@@ -1,6 +1,7 @@
 import Convert from "ansi-to-html";
 
-const converter = new Convert({
+/** Theme-mapped ANSI palette shared by every converter in the app. */
+const CONVERT_OPTIONS = {
   escapeXML: true,
   fg: "var(--color-fg-muted)",
   bg: "transparent",
@@ -22,7 +23,35 @@ const converter = new Convert({
     14: "var(--color-status-starting)",
     15: "var(--color-fg)",
   },
-});
+};
+
+const converter = new Convert(CONVERT_OPTIONS);
+
+/**
+ * Incremental ANSI → HTML renderer for a growing output string (a streaming
+ * deploy step). Each `push(full)` converts only the appended suffix with a
+ * stateful converter (so a colour code that opened in an earlier chunk still
+ * applies), and returns the accumulated HTML. A shrinking input (output
+ * trimmed or replaced wholesale) resets and reconverts.
+ */
+export class AnsiAppender {
+  private conv = new Convert({ ...CONVERT_OPTIONS, stream: true });
+  private seen = "";
+  private html = "";
+
+  push(full: string): string {
+    if (!full.startsWith(this.seen)) {
+      this.conv = new Convert({ ...CONVERT_OPTIONS, stream: true });
+      this.seen = "";
+      this.html = "";
+    }
+    if (full.length > this.seen.length) {
+      this.html += this.conv.toHtml(full.slice(this.seen.length));
+      this.seen = full;
+    }
+    return this.html;
+  }
+}
 
 /**
  * Severity used for per-line color coding. `info` is the uncoloured default.

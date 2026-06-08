@@ -21,6 +21,7 @@
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
   import LighthouseLogo from "$lib/components/atoms/LighthouseLogo.svelte";
   import Toggle from "$lib/components/atoms/Toggle.svelte";
+  import PrivilegeExplainerCard from "$lib/components/setup/PrivilegeExplainerCard.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
@@ -30,6 +31,8 @@
     type ScaffoldEvent,
     type ScaffoldKind,
   } from "$lib/types/onboarding";
+  import type { DnsPreflight } from "$lib/types/dns";
+  import type { SidecarHealth } from "$lib/types/sidecars";
 
   type Step = "welcome" | "gallery" | "running";
 
@@ -62,11 +65,21 @@
   let logLines = $state<string[]>([]);
   let scrollerEl: HTMLDivElement | null = $state(null);
 
+  // Privilege-explainer card data. Fetched once on mount alongside the doctor
+  // call so the card knows whether each prompt is still pending. Both start as
+  // `undefined` (loading) so the card shows a skeleton rather than flickering
+  // from "pending" to "done" after the fetch lands.
+  let helperInstalled = $state<boolean | undefined>(undefined);
+  let caInstalled = $state<boolean | undefined>(undefined);
+
   onMount(async () => {
     // Onboarding can be the cold-boot landing route, so the consent toggle
     // needs prefs even if the layout hasn't loaded them yet.
     if (!preferences.loaded) void preferences.load();
-    await runDoctor();
+
+    // Run doctor + privilege-state fetches in parallel so neither blocks the
+    // other. The card needs both to populate correctly.
+    await Promise.all([runDoctor(), loadPrivilegeState()]);
   });
 
   async function runDoctor() {
@@ -77,6 +90,36 @@
       // safeInvoke already pushed a toast; render the warning state.
     } finally {
       doctorLoading = false;
+    }
+  }
+
+  /** Fetch `dns_preflight` (helper status) and `sidecar_status` (mkcert CA
+   *  status) so the privilege-explainer card can show which prompts are still
+   *  pending. Both calls are best-effort: a failure leaves each prop as
+   *  `undefined`, which the card treats as "conservatively pending" — it
+   *  never hides a row based on a missing or failed fetch. In the simulator
+   *  there is no Tauri backend, so we short-circuit to "all done". */
+  async function loadPrivilegeState() {
+    if (isSimulator) {
+      // The web demo has no backend. Treat everything as already installed so
+      // the card doesn't render in a context where it can't be acted on.
+      helperInstalled = true;
+      caInstalled = true;
+      return;
+    }
+    try {
+      const [preflight, sidecars] = await Promise.all([
+        safeInvoke<DnsPreflight>("dns_preflight"),
+        safeInvoke<SidecarHealth>("sidecar_status"),
+      ]);
+      helperInstalled = preflight.helperInstalled;
+      // "running" is the only mkcert-CA status that means the CA is trusted in
+      // the system Keychain. Any other value (stopped, not_installed, unreachable)
+      // means the Keychain prompt hasn't been answered yet.
+      caInstalled = sidecars.mkcertCa?.status === "running";
+    } catch {
+      // safeInvoke already pushed toasts. Leave helperInstalled / caInstalled
+      // as `undefined` so the card renders the conservative "both pending" view.
     }
   }
 
@@ -313,8 +356,16 @@
           </button>
         </div>
 
+        <!-- Privilege-prompt explainer. Surfaces what macOS will ask for
+             before either prompt appears, so users aren't surprised by an
+             unexpected admin-password dialog. The simulator guard matches
+             the telemetry card: no IPC available in the web demo context. -->
+        {#if !isSimulator}
+          <PrivilegeExplainerCard {helperInstalled} {caInstalled} />
+        {/if}
+
         <!-- Health check strip -->
-        <section class="mt-10 p-5 rounded-xl border border-border bg-surface">
+        <section class="mt-4 p-5 rounded-xl border border-border bg-surface">
           <div class="flex items-center justify-between mb-3">
             <div class="flex items-center gap-2">
               <span class="text-sm font-medium">System check</span>

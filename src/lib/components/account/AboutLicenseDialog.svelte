@@ -14,6 +14,7 @@
   import { licenseDialog } from "$lib/stores/licenseDialog.svelte";
   import { account } from "$lib/stores/account.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
+  import type { SubscriptionStatus } from "$lib/types/entitlements";
   import {
     PRO_FEATURES,
     DONATE_URL,
@@ -69,6 +70,41 @@
   }
 
   let checkoutBusy = $state(false);
+
+  // ── Billing (subscription-Pro): renewal/cancel state + Paddle portal ──
+  const hasBilling = $derived(entitlements.hasManagedBilling);
+  let subscription = $state<SubscriptionStatus | null>(null);
+  let portalBusy = $state(false);
+
+  // Fetch the renewal/cancel state when the dialog opens for a subscriber.
+  $effect(() => {
+    if (!licenseDialog.isOpen || !hasBilling) {
+      subscription = null;
+      return;
+    }
+    void entitlements.fetchSubscription().then((s) => (subscription = s));
+  });
+
+  const periodEnd = $derived.by(() => {
+    const iso = subscription?.currentPeriodEnd;
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+  });
+
+  async function manageBilling() {
+    portalBusy = true;
+    try {
+      await entitlements.openBillingPortal(
+        subscription?.status === "past_due" ? "payment" : "overview",
+      );
+    } catch {
+      /* safeInvoke toasted */
+    } finally {
+      portalBusy = false;
+    }
+  }
 
   /** "Get Pro" — checkout needs an account, so signed-out users sign in first
    *  (the sign-in sheet's pro step then opens checkout). Signed-in users go
@@ -153,8 +189,8 @@
 
       <!-- honest framing -->
       <p class="mt-4 text-[12.5px] leading-relaxed text-fg-muted">
-        <span class="text-fg font-medium">$59/yr</span>, activates on up to 2 devices, renews annually, cancel
-        anytime. Open source under AGPL-3.0 — you can always build any Pro feature yourself.
+        <span class="text-fg font-medium">$10/mo</span> with a 7-day free trial — activates on up to 2 devices,
+        renews monthly, cancel anytime.
       </p>
 
       <!-- acquisition / state -->
@@ -163,6 +199,33 @@
           <Icon name="sparkles" size={16} />
           <p class="text-[13px] font-medium">Pro is active — thank you for supporting PortBay.</p>
         </div>
+        {#if hasBilling}
+          <div class="mt-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+            <p class="text-[12px] text-fg-muted min-w-0">
+              {#if subscription?.status === "past_due"}
+                <span class="text-status-unhealthy">Payment past due — update your card to keep Pro.</span>
+              {:else if subscription?.cancelAtPeriodEnd && periodEnd}
+                Set to cancel — Pro stays active until <span class="text-fg">{periodEnd}</span>.
+              {:else if subscription?.status === "trialing" && periodEnd}
+                Free trial — first charge on <span class="text-fg">{periodEnd}</span> · $10/mo
+              {:else if subscription?.status === "active" && periodEnd}
+                Renews on <span class="text-fg">{periodEnd}</span> · $10/mo
+              {:else}
+                Manage your subscription, payment method, and invoices.
+              {/if}
+            </p>
+            <button
+              type="button"
+              onclick={manageBilling}
+              disabled={portalBusy || entitlements.state === "pro-grace"}
+              class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-border text-[12px] text-fg-muted
+                     hover:text-fg hover:bg-surface-2 transition-colors disabled:opacity-50"
+            >
+              <Icon name="credit-card" size={12} />
+              {portalBusy ? "Opening…" : "Manage billing"}
+            </button>
+          </div>
+        {/if}
       {:else}
         <div class="mt-4 flex flex-col gap-2.5">
           <div class="flex flex-col gap-1">
@@ -176,7 +239,7 @@
               {#if checkoutBusy}
                 <span class="spinner"></span> Opening checkout…
               {:else}
-                <Icon name="sparkles" size={14} /> Get Pro — $59/yr
+                <Icon name="sparkles" size={14} /> Get Pro — $10/mo
               {/if}
             </button>
             <div class="flex items-center justify-center">

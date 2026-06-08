@@ -66,11 +66,135 @@ pub async fn local_stat(path: String) -> AppResult<LocalEntry> {
     entry_for(&PathBuf::from(&path))
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSearchResult {
+    pub entries: Vec<LocalEntry>,
+    pub scanned: u64,
+    /// True when the walk stopped at a result/scan/depth cap.
+    pub truncated: bool,
+}
+
+const LOCAL_SEARCH_MAX_RESULTS: usize = 500;
+const LOCAL_SEARCH_MAX_SCANNED: u64 = 150_000;
+const LOCAL_SEARCH_MAX_DEPTH: usize = 24;
+
+/// Recursive name search under a local folder — the local twin of
+/// `sftp_search`, powering the file pane's deep-search toggle. Plain queries
+/// match as a case-insensitive substring; `*` / `?` switch to a glob over the
+/// whole name (`*.zip`). Hidden directories aren't descended into (they're
+/// mostly caches and would burn the scan budget), symlinked dirs are skipped
+/// (cycle guard), and the walk is bounded by result/scan/depth caps. Read-only
+/// metadata, same exposure class as [`local_list_dir`]; reading file contents
+/// still requires the SFTP approval flow.
+#[tauri::command]
+pub async fn local_search(root: String, query: String) -> AppResult<LocalSearchResult> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Ok(LocalSearchResult { entries: Vec::new(), scanned: 0, truncated: false });
+    }
+    let pattern = if q.contains('*') || q.contains('?') {
+        q
+    } else {
+        format!("*{q}*")
+    };
+    let root_path = PathBuf::from(&root);
+    if !root_path.is_dir() {
+        return Err(AppError::BadInput(format!("not a folder: {root}")));
+    }
+
+    // Plain blocking walk on a worker thread — local disks are fast and the
+    // caps keep worst cases (huge homedirs) bounded.
+    tokio::task::spawn_blocking(move || {
+        let mut queue: std::collections::VecDeque<(PathBuf, usize)> =
+            std::collections::VecDeque::new();
+        queue.push_back((root_path, 0));
+        let mut entries: Vec<LocalEntry> = Vec::new();
+        let mut scanned: u64 = 0;
+        let mut truncated = false;
+
+        'walk: while let Some((dir, depth)) = queue.pop_front() {
+            let Ok(read) = std::fs::read_dir(&dir) else {
+                continue; // unreadable directory — skip, not fatal
+            };
+            for entry in read.flatten() {
+                scanned += 1;
+                if scanned > LOCAL_SEARCH_MAX_SCANNED {
+                    truncated = true;
+                    break 'walk;
+                }
+                let path = entry.path();
+                let name = match path.file_name().and_then(|s| s.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                let Ok(meta) = entry.metadata() else { continue };
+                if crate::commands::sftp::glob_match(&pattern, &name.to_lowercase()) {
+                    entries.push(LocalEntry {
+                        name: name.clone(),
+                        path: path.display().to_string(),
+                        is_dir: meta.is_dir(),
+                        size: if meta.is_dir() { 0 } else { meta.len() },
+                    });
+                    if entries.len() >= LOCAL_SEARCH_MAX_RESULTS {
+                        truncated = true;
+                        break 'walk;
+                    }
+                }
+                let is_symlink = entry.file_type().map(|t| t.is_symlink()).unwrap_or(false);
+                if meta.is_dir()
+                    && !is_symlink
+                    && !name.starts_with('.')
+                    && depth < LOCAL_SEARCH_MAX_DEPTH
+                {
+                    queue.push_back((path, depth + 1));
+                }
+            }
+        }
+        Ok(LocalSearchResult { entries, scanned, truncated })
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("search task panicked: {e}")))?
+}
+
 /// A file to upload during a deploy: its absolute local path and the POSIX
 /// relative path it should land at under the remote root.
 pub struct WalkedFile {
     pub abs: PathBuf,
     pub rel: String,
+}
+
+/// Wire shape of one walked file for the frontend folder-upload flow.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkedLocalFile {
+    /// Absolute local path.
+    pub path: String,
+    /// POSIX-style path relative to the walked root (maps onto the remote side).
+    pub rel: String,
+    pub size: u64,
+}
+
+/// Recursively enumerate every file under a local folder, for uploading a
+/// whole directory over SFTP. Listing is read-only metadata (names + sizes),
+/// the same exposure class as [`local_list_dir`]; actually *reading* the files
+/// still requires the path to be in the SFTP approved set (the folder picker
+/// or the host-side access prompt put it there).
+#[tauri::command]
+pub async fn local_walk_files(root: String) -> AppResult<Vec<WalkedLocalFile>> {
+    let root_path = PathBuf::from(&root);
+    let files = walk_files(&root_path, &[])?;
+    Ok(files
+        .into_iter()
+        .map(|f| {
+            let size = std::fs::metadata(&f.abs).map(|m| m.len()).unwrap_or(0);
+            WalkedLocalFile {
+                path: f.abs.display().to_string(),
+                rel: f.rel,
+                size,
+            }
+        })
+        .collect())
 }
 
 /// Recursively collect every file under `root`, skipping any whose relative

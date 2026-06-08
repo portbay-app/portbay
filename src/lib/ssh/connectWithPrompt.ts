@@ -91,6 +91,21 @@ export async function connectWithPrompt<T>(
         throw err;
       }
 
+      // Before opening a prompt, re-check the per-host secret cache: a
+      // *concurrent* connect for this host (the workspace warms several at once
+      // — snapshot, shell, file tree, SFTP) may have just obtained this secret.
+      // The prompt store only coalesces requests that overlap while one is
+      // open, so without this a second subsystem that falls through to the
+      // password stage a beat later would pop its own duplicate prompt. Reuse
+      // the cached secret as long as it isn't the exact value we just tried
+      // (which would loop on a genuinely wrong secret).
+      const tried = cred?.kind === kind ? cred.secret : undefined;
+      const cached = recallSecret(hostId, kind);
+      if (cached !== undefined && cached !== tried) {
+        cred = { kind, secret: cached };
+        continue;
+      }
+
       const answer = await credentialPrompt.request({ kind, hostLabel });
       if (!answer) {
         // Cancelled (Escape / backdrop / Cancel): abort the action.

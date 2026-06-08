@@ -1,0 +1,1 @@
+okay so for the deploy we need to first update the readme and then maybe no sorry cancel that actually lets start with the changelog first then step two update the readme and step three push the release to github

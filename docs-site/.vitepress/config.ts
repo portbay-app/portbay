@@ -13,13 +13,13 @@ const FALLBACK_OG = "/screenshots/projects-dark.png";
 
 // First path segment of a page → its section Open Graph image (1200x630, under
 // docs-site/public/og/). Pages in any other section use the docs home image.
-const DEFAULT_DOCS_OG = "/og/docs-home.png";
+const DEFAULT_DOCS_OG = "/og/docs-home.jpg";
 const SECTION_OG: Record<string, string> = {
   "getting-started": "/og/docs-getting-started.png",
   guides: "/og/docs-guides.png",
   reference: "/og/docs-reference.png",
   agents: "/og/docs-agents.png",
-  comparisons: "/og/docs-comparisons.png",
+  comparisons: "/og/docs-comparisons.jpg",
 };
 
 /** Absolute image URL, falling back to a shipped image if the art isn't built yet. */
@@ -178,6 +178,8 @@ export default defineConfig({
           { text: "Cloudflare Tunnels", link: "/guides/tunnels" },
           { text: "SSH Workspace", link: "/guides/ssh-tunnels" },
           { text: "Sandboxed Projects", link: "/guides/sandbox" },
+          { text: "Local AI (Ollama)", link: "/guides/local-ai" },
+          { text: "Speech-to-Text", link: "/guides/smart-dictation" },
         ],
       },
       {

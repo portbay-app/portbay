@@ -2,10 +2,7 @@
   Projects route (/) — page heading, status cards row, projects table,
   and the table footer (count + sort + view toggle).
 
-  Sort + view-mode are local to this page (not persisted yet). The
-  grid view is a placeholder — for now flipping to grid keeps the same
-  table layout but reflows row density. A dedicated grid renderer
-  lands in a follow-up.
+  Sort + view-mode are local to this page (not persisted yet).
 -->
 <script lang="ts">
   import { ProjectsTable, type SortKey } from "$lib/components/projects";

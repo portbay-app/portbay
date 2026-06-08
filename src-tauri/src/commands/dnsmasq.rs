@@ -42,7 +42,11 @@ pub struct ResolverStatus {
 #[tauri::command]
 pub async fn dnsmasq_resolver_status(state: State<'_, AppState>) -> AppResult<ResolverStatus> {
     let suffix = current_suffix(&state);
-    let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
+    let port = state
+        .dnsmasq
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .port();
     Ok(ResolverStatus {
         path: resolver::resolver_file_path(&suffix)
             .to_string_lossy()
@@ -57,7 +61,11 @@ pub async fn dnsmasq_resolver_status(state: State<'_, AppState>) -> AppResult<Re
 #[tauri::command]
 pub async fn dnsmasq_install_resolver(state: State<'_, AppState>) -> AppResult<()> {
     let suffix = current_suffix(&state);
-    let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
+    let port = state
+        .dnsmasq
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .port();
 
     // Prefer PortBay's privileged helper (silent — no prompt). Only fall back
     // to the per-action OS authorization prompt when the helper isn't installed.
@@ -164,7 +172,11 @@ pub struct DnsRecord {
 pub async fn list_dns_records(state: State<'_, AppState>) -> AppResult<Vec<DnsRecord>> {
     let reg = store::load_or_default(&state.registry_path, &state.domain_suffix)?;
     let suffix = reg.domain_suffix.clone();
-    let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
+    let port = state
+        .dnsmasq
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .port();
     let dns_routing = resolver::is_installed(&suffix, port);
     let suffix_tail = format!(".{suffix}");
 
@@ -271,7 +283,7 @@ pub async fn dns_preflight(state: State<'_, AppState>) -> AppResult<DnsPreflight
     let reg = store::load_or_default(&state.registry_path, &state.domain_suffix)?;
     let suffix = reg.domain_suffix.clone();
     let (port, dnsmasq_running) = {
-        let guard = state.dnsmasq.lock().expect("dnsmasq mutex poisoned");
+        let guard = state.dnsmasq.lock().unwrap_or_else(|e| e.into_inner());
         (guard.port(), guard.is_running())
     };
     let helper_installed = HostsHelperClient::system().is_available();
@@ -387,7 +399,7 @@ pub async fn setup_local_dns(app: AppHandle, state: State<'_, AppState>) -> AppR
     //    re-pick a free port and strand the resolver file we just wrote.
     if state.boot_dnsmasq(&app).is_ok() {
         let (port, running) = {
-            let guard = state.dnsmasq.lock().expect("dnsmasq mutex poisoned");
+            let guard = state.dnsmasq.lock().unwrap_or_else(|e| e.into_inner());
             (guard.port(), guard.is_running())
         };
         if running {

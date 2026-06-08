@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Hardened-runtime entitlements (tauri.conf.json → bundle.macOS.entitlements).
+     Tauri signs with hardened runtime by default; without these the
+     corresponding capabilities are hard-blocked at runtime no matter what
+     Info.plist usage descriptions or TCC grants say. Same minimal set
+     iTerm2/kitty ship. -->
+<dict>
+	<!-- System dictation (mic button on task cards): audio capture is
+	     attributed to the app. Without this, a signed DMG build records
+	     nothing — silently. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<!-- Agent-task dispatch drives Terminal/Warp/iTerm via Apple Events
+	     (osascript). Pairs with NSAppleEventsUsageDescription in Info.plist. -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+</dict>
+</plist>

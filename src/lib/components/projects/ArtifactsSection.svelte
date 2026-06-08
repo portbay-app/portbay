@@ -163,9 +163,19 @@
                 {dir.label}
                 <span class="font-mono text-[10px] text-fg-subtle ml-1">{dir.rel}</span>
               </div>
-              <div class="text-[11px] text-fg-muted">
-                {dir.fileCount.toLocaleString()} file{dir.fileCount === 1 ? "" : "s"}
-                · modified {formatAge(dir.lastModified)}
+              <div class="text-[11px] text-fg-muted flex items-center gap-1.5">
+                <span>
+                  {dir.fileCount.toLocaleString()} file{dir.fileCount === 1 ? "" : "s"}
+                  · modified {formatAge(dir.lastModified)}
+                </span>
+                {#if !dir.autoClean}
+                  <span
+                    class="font-medium text-[10px] text-fg-subtle"
+                    title="Scheduled auto-clean never removes this — it needs a reinstall or rebuild. Clean it manually here if you want the space back."
+                  >
+                    · manual only
+                  </span>
+                {/if}
               </div>
             </div>
             <span class="font-mono text-fg tabular-nums shrink-0">

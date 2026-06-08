@@ -15,4 +15,6 @@ These guides cover day-to-day operations once PortBay is installed.
 | [Environment Variables](/guides/environment-variables) | A project needs runtime variables or shared templates. |
 | [Project Groups](/guides/project-groups) | Multiple projects should start, stop, or restart together. |
 | [SSH Tunnels](/guides/ssh-tunnels) | You need to forward a remote database, VPS/cPanel host, cloud VM, bastion-only service, or ML cluster dashboard onto localhost. |
+| [Local AI (Ollama)](/guides/local-ai) | You want local models running — for dictation, agents, or your own tools — without managing an Ollama server by hand. |
+| [Speech-to-Text](/guides/smart-dictation) | You'd rather speak a task card, commit message, or prompt than type it — and get clean text, on-device. |
 | [CLI Usage](/guides/cli-usage) | You want terminal parity with the app. |

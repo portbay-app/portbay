@@ -46,6 +46,12 @@ features:
   - title: A task board your agents work
     details: Move a card to To Do and the AI agent you assigned picks it up, works it in your repo, and writes a hand-off note for the next run.
     link: /guides/task-board
+  - title: Local AI, managed
+    details: PortBay installs, starts, and supervises a local Ollama server, and pulls models from the live catalog — nothing leaves your Mac.
+    link: /guides/local-ai
+  - title: Speech-to-Text
+    details: Hold Fn and talk — on-device speech-to-text plus a local AI rewrite turn spoken thoughts into text worth keeping. ⌘Z restores your exact words.
+    link: /guides/smart-dictation
 ---
 
 <ThemeImage name="projects" alt="PortBay managing local projects" />

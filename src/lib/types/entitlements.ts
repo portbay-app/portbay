@@ -34,8 +34,47 @@ export interface Entitlements {
 export interface EffectiveEntitlement {
   state: EntitlementState;
   tier: Tier;
+  /** How the entitlement was acquired (`"subscription"`, `"donate"`,
+   *  `"contribute"`, `"manual"`, `"signup"`, …) — from the signed document.
+   *  `null` for synthetic states (anonymous fallback, free floor). Billing
+   *  management only exists for `"subscription"`. */
+  source: string | null;
   entitlements: Entitlements;
   account: Account | null;
+}
+
+/** Pending-deletion state (`account_status` command). A deletion request
+ *  survives sign-in by design — Settings shows the countdown + cancel until
+ *  the user explicitly cancels (`cancel_account_deletion`) or the purge runs. */
+export interface AccountStatus {
+  /** When erasure was requested (cloud clock). `null` = nothing pending. */
+  deletion_requested_at: string | null;
+  /** ISO timestamp the purge cron erases everything. */
+  purge_after: string | null;
+  /** Length of the grace window in days, for copy. */
+  grace_days: number;
+}
+
+/** The account's paid-subscription state (`subscription_status` command).
+ *  `null` means no subscription exists — e.g. Pro from a contribution. */
+export interface SubscriptionStatus {
+  /** `trialing` | `active` | `past_due` | `canceled` | `refunded` —
+   *  `trialing` = free trial, first charge at `currentPeriodEnd`. */
+  status: string;
+  /** ISO timestamp the paid period ends — renewal date, or access-until date
+   *  when a cancellation is scheduled. */
+  currentPeriodEnd: string | null;
+  /** Cancellation scheduled; Pro stays active until `currentPeriodEnd`. */
+  cancelAtPeriodEnd: boolean;
+}
+
+/** Fresh short-lived Paddle customer-portal links (`billing_portal_url`
+ *  command). Auto-authenticating — request per click, never cache. */
+export interface BillingPortalUrls {
+  /** Portal home: payment method, invoices/receipts, cancel. */
+  overviewUrl: string;
+  cancelUrl: string | null;
+  updatePaymentUrl: string | null;
 }
 
 /** Pro-gated capabilities the gates check via `entitlements.allows(...)`. */
@@ -53,6 +92,7 @@ export type UpgradePrompt = "signup" | "pro";
 export const ANONYMOUS_FALLBACK: EffectiveEntitlement = {
   state: "anonymous",
   tier: "anonymous",
+  source: null,
   account: null,
   entitlements: {
     max_projects: 3,

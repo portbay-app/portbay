@@ -24,18 +24,62 @@
 </script>
 
 <div class="flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-border/60 bg-surface/30">
-  <!-- Pinned Welcome tab -->
-  <button
-    type="button"
-    onclick={() => ideEditor.showWelcome()}
-    aria-current={activeFile === null ? "page" : undefined}
-    class="inline-flex items-center gap-1.5 border-r border-border/50 px-3 text-[12px] transition-colors
-      {activeFile === null ? 'bg-surface text-fg' : 'text-fg-subtle hover:text-fg hover:bg-surface-2/50'}"
-    title="Welcome — host overview"
-  >
-    <Icon name="home" size={13} />
-    Welcome
-  </button>
+  <!-- Welcome tab — present until dismissed (Home toggle or this ×). -->
+  {#if ideEditor.welcomeOpen}
+    <div
+      class="group inline-flex items-center gap-1.5 border-r border-border/50 pl-3 pr-1.5 transition-colors
+        {activeFile === null ? 'bg-surface text-fg' : 'text-fg-subtle hover:text-fg hover:bg-surface-2/50'}"
+    >
+      <button
+        type="button"
+        onclick={() => ideEditor.showWelcome()}
+        aria-current={activeFile === null ? "page" : undefined}
+        class="inline-flex items-center gap-1.5 text-[12px]"
+        title="Welcome — host overview"
+      >
+        <Icon name="home" size={13} />
+        Welcome
+      </button>
+      <button
+        type="button"
+        onclick={() => ideEditor.closeWelcome()}
+        aria-label="Close Welcome"
+        title="Close"
+        class="grid h-4 w-4 place-items-center rounded text-fg-subtle hover:bg-surface-2 hover:text-fg"
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </div>
+  {/if}
+
+  <!-- Files tab — the Finder-style remote file manager (singleton, like
+       Welcome). Opened by clicking a folder in the Explorer/SFTP sidebar. -->
+  {#if ideEditor.filesOpen}
+    <div
+      class="group inline-flex items-center gap-1.5 border-r border-border/50 pl-3 pr-1.5 transition-colors
+        {ideEditor.filesActive ? 'bg-surface text-fg' : 'text-fg-subtle hover:text-fg hover:bg-surface-2/50'}"
+    >
+      <button
+        type="button"
+        onclick={() => ideEditor.openFiles()}
+        aria-current={ideEditor.filesActive ? "page" : undefined}
+        class="inline-flex items-center gap-1.5 text-[12px]"
+        title="Files — browse this host"
+      >
+        <Icon name="folder" size={13} />
+        Files
+      </button>
+      <button
+        type="button"
+        onclick={() => ideEditor.closeFiles()}
+        aria-label="Close Files"
+        title="Close"
+        class="grid h-4 w-4 place-items-center rounded text-fg-subtle hover:bg-surface-2 hover:text-fg"
+      >
+        <Icon name="x" size={12} />
+      </button>
+    </div>
+  {/if}
 
   {#each files as f (f.path)}
     {@const active = activeFile === f.path}

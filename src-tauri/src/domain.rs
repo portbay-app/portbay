@@ -73,7 +73,9 @@ pub fn normalise_domain_suffix(input: &str) -> Result<String> {
     // "don't hijack real DNS" protection (`app.com` → rejected) while
     // permitting local-safe two-label suffixes like `portbay.test`, whose
     // final label `test` is RFC 6761-reserved for local use.
-    let final_label = *labels.last().expect("non-empty after split");
+    let Some(final_label) = labels.last().copied() else {
+        return Err(DomainError::Empty);
+    };
     if RESERVED_SUFFIXES.contains(&final_label) {
         return Err(DomainError::Reserved(suffix));
     }

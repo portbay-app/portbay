@@ -1,0 +1,1 @@
+the model overfits after epoch twelve so um add dropout and early stopping then rerun the ablation

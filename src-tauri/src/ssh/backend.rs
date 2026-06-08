@@ -1,5 +1,4 @@
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -267,7 +266,8 @@ impl RusshClientHandler {
             // Replace: drop the stale entry, then record the accepted key so the
             // mismatch doesn't reappear on the next connect.
             HostKeyDecision::TrustAndSave => {
-                if let Err(e) = crate::ssh::known_hosts::remove_host(&self.ssh_host, self.ssh_port) {
+                if let Err(e) = crate::ssh::known_hosts::remove_host(&self.ssh_host, self.ssh_port)
+                {
                     tracing::warn!(
                         host = %self.ssh_host,
                         error = %e,
@@ -298,9 +298,11 @@ impl RusshClientHandler {
     fn prompt(&self, key: &key::PublicKey, state: HostKeyState) -> HostKeyPrompt {
         let key_type = key.name().to_string();
         let expected_fingerprint = match state {
-            HostKeyState::Changed => {
-                crate::ssh::known_hosts::stored_fingerprint(&self.ssh_host, self.ssh_port, &key_type)
-            }
+            HostKeyState::Changed => crate::ssh::known_hosts::stored_fingerprint(
+                &self.ssh_host,
+                self.ssh_port,
+                &key_type,
+            ),
             HostKeyState::New => None,
         };
         HostKeyPrompt {
@@ -751,11 +753,6 @@ fn shell_quote(arg: &str) -> String {
         return arg.to_string();
     }
     format!("'{}'", arg.replace('\'', "'\\''"))
-}
-
-#[allow(dead_code)]
-fn _path_exists(path: &str) -> bool {
-    Path::new(path).exists()
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@
   import DeployPane from "$lib/components/connections/DeployPane.svelte";
   import FileBrowserPane from "$lib/components/connections/FileBrowserPane.svelte";
   import HostTunnelsList from "$lib/components/connections/HostTunnelsList.svelte";
+  import MlDashboards from "$lib/components/connections/MlDashboards.svelte";
   import IdeFileTree from "$lib/components/ide/IdeFileTree.svelte";
   import type { ActivityView } from "$lib/stores/ideLayout.svelte";
   import type { SshTunnelRuntimeStatus } from "$lib/types/sshTunnels";
@@ -26,6 +27,11 @@
     onAddTunnel: () => void;
     onOpenFile: (path: string) => void;
     activeFilePath: string | null;
+    /** Open the agent panel pointed at a directory (from the Explorer tree). */
+    onOpenAgentHere?: (dir: string) => void;
+    /** Open a folder in the editor area's Files tab (Finder-style browser).
+        Wired to plain folder clicks in both the Explorer tree and SFTP view. */
+    onOpenFolder?: (path: string) => void;
     /** The project to deploy, when this host page was opened from one. */
     deployProjectId?: string | null;
   }
@@ -38,6 +44,8 @@
     onAddTunnel,
     onOpenFile,
     activeFilePath,
+    onOpenAgentHere,
+    onOpenFolder,
     deployProjectId = null,
   }: Props = $props();
 
@@ -67,17 +75,28 @@
 
   <div class="min-h-0 flex-1">
     <div class="h-full" class:hidden={activeView !== "explorer"}>
-      <IdeFileTree {connectionId} {label} {onOpenFile} activePath={activeFilePath} />
+      <IdeFileTree
+        {connectionId}
+        {label}
+        {onOpenFile}
+        activePath={activeFilePath}
+        {onOpenAgentHere}
+        {onOpenFolder}
+      />
     </div>
     <div class="h-full" class:hidden={activeView !== "deploy"}>
       <DeployPane {connectionId} {label} projectId={deployProjectId} />
     </div>
     <div class="h-full overflow-y-auto px-3 py-3" class:hidden={activeView !== "tunnels"}>
+      <MlDashboards {connectionId} {label} />
       <HostTunnelsList {tunnels} {onOpenTunnel} {onAddTunnel} />
     </div>
     {#if sftpMounted}
       <div class="h-full" class:hidden={activeView !== "sftp"}>
-        <FileBrowserPane {connectionId} {label} />
+        <!-- Sidebar variant: plain list, no toolbar — uploads, the Local
+             split, the icon-grid view and new-folder live in the Files tab
+             on the right (where folder clicks land). -->
+        <FileBrowserPane {connectionId} {label} {onOpenFile} {onOpenFolder} variant="sidebar" />
       </div>
     {/if}
   </div>

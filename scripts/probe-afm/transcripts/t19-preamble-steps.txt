@@ -1,0 +1,1 @@
+okay so this is the plan for the release tomorrow step one freeze the main branch step two run the full test suite and step three publish the build to the update server

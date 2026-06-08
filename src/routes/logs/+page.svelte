@@ -14,7 +14,7 @@
 -->
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { Channel, invoke } from "@tauri-apps/api/core";
+  import { Channel } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
   import { Icon, StatusPill } from "$lib/components/atoms";
@@ -169,8 +169,9 @@
     };
     followChannel = ch;
     // Fire-and-forget: the backend task runs until the channel is dropped by
-    // stopFollow / project switch / unmount.
-    void invoke("subscribe_logs", { id, onLine: ch }).catch(() => {
+    // stopFollow / project switch / unmount. safeInvoke toasts on failure so
+    // a refused subscription doesn't masquerade as an empty log.
+    void safeInvoke("subscribe_logs", { id, onLine: ch }).catch(() => {
       followChannel = null;
     });
   }

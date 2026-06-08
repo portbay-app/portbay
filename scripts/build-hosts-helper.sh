@@ -47,9 +47,11 @@ dest="${bin_dir}/portbay-hosts-helper-${triple}"
 # externalBin file exists at compile time. But building any of our own binaries
 # compiles that build.rs, which would fail on the others (and on this one)
 # before they exist. Seed empty placeholders for all of our own sidecars first
-# to satisfy the existence check; the real binary overwrites this one below, and
-# build-mcp.sh overwrites portbay-mcp.
-for ours in portbay-hosts-helper portbay-mcp; do
+# to satisfy the existence check; the real binary overwrites this one below,
+# build-mcp.sh overwrites portbay-mcp, and build-afm.sh overwrites portbay-afm
+# (macOS-only — on Linux the placeholder is harmless and never bundled, since
+# portbay-afm is listed only in tauri.macos.conf.json).
+for ours in portbay-hosts-helper portbay-mcp portbay-afm; do
   ph="${bin_dir}/${ours}-${triple}"
   [ -f "$ph" ] || : > "$ph"
 done

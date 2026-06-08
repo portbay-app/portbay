@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dictation-overlay",
+  "description": "Notch dictation HUD webview (dictate-anywhere). Render-only: it listens to `anywhere://state` / `stt://partial` / `stt://level` events and draws the recording overlay. The core baseline is all it needs — no shell, dialog, opener, window-mutation, or invoke surface beyond core; every native behavior (positioning, ordering, insertion) runs Rust-side in crate::overlay_window / crate::dictation_anywhere.",
+  "local": true,
+  "windows": ["dictation-overlay"],
+  "permissions": ["core:default"]
+}

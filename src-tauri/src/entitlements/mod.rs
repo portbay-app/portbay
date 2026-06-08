@@ -33,9 +33,10 @@ use serde_json::Value;
 /// **Production key, rotated 2026-05-24** (the earlier dev key is retired).
 const PUBLIC_KEY_B64: &str = "LvM9qZwq1tH0gv871R1qPCTIN9WsUyeKHWcacHLKs/w=";
 
-/// How long a freshly verified entitlement is trusted before a re-check is due.
-/// Mirrors the server's `RECHECK_DAYS` default.
-const RECHECK_SECS: u64 = 30 * 24 * 60 * 60;
+/// Fallback re-check window when an old or malformed entitlement lacks a
+/// parseable `recheck_after`. Fresh server documents carry their own signed
+/// absolute re-check timestamp, which is authoritative.
+const DEFAULT_RECHECK_SECS: u64 = 30 * 24 * 60 * 60;
 
 const CACHE_FILENAME: &str = "entitlement.json";
 
@@ -96,6 +97,12 @@ pub struct EntitlementPayload {
 pub struct EffectiveEntitlement {
     pub state: EntitlementState,
     pub tier: String,
+    /// How the entitlement was acquired (`"subscription"`, `"donate"`,
+    /// `"contribute"`, `"manual"`, `"signup"`, …) — straight from the signed
+    /// document. `None` for the synthetic states (anonymous fallback, free
+    /// floor after a lapsed/revoked Pro). The UI uses it to decide whether
+    /// there is a subscription to manage (billing portal) vs a perpetual grant.
+    pub source: Option<String>,
     pub entitlements: Entitlements,
     pub account: Option<Account>,
 }
@@ -157,6 +164,7 @@ pub fn anonymous_fallback() -> EffectiveEntitlement {
     EffectiveEntitlement {
         state: EntitlementState::Anonymous,
         tier: "anonymous".into(),
+        source: None,
         entitlements: anonymous_entitlements(),
         account: None,
     }
@@ -168,6 +176,8 @@ fn free_floor(account: Option<Account>) -> EffectiveEntitlement {
     EffectiveEntitlement {
         state: EntitlementState::Free,
         tier: "free".into(),
+        // Synthetic floor, not the signed document's tier — no source.
+        source: None,
         entitlements: free_entitlements(),
         account,
     }
@@ -262,6 +272,7 @@ pub fn effective_from(
             return EffectiveEntitlement {
                 state: EntitlementState::Anonymous,
                 tier: "anonymous".into(),
+                source: None,
                 entitlements: anonymous_entitlements(),
                 account,
             };
@@ -269,6 +280,7 @@ pub fn effective_from(
         return EffectiveEntitlement {
             state: EntitlementState::Free,
             tier: "free".into(),
+            source: payload.source.clone(),
             entitlements: free_entitlements(),
             account,
         };
@@ -284,11 +296,12 @@ pub fn effective_from(
     }
 
     let age = now.saturating_sub(fetched_at);
+    let recheck_secs = recheck_window_secs(payload, fetched_at);
     let grace_secs = payload.grace_days.max(0) as u64 * 24 * 60 * 60;
 
-    let state = if age <= RECHECK_SECS {
+    let state = if age <= recheck_secs {
         EntitlementState::Pro
-    } else if age <= RECHECK_SECS + grace_secs {
+    } else if age <= recheck_secs.saturating_add(grace_secs) {
         EntitlementState::ProGrace
     } else {
         // Grace expired — fall back to the signed-in free floor, never anonymous.
@@ -298,9 +311,18 @@ pub fn effective_from(
     EffectiveEntitlement {
         state,
         tier: "pro".into(),
+        source: payload.source.clone(),
         entitlements: payload.entitlements.clone(),
         account,
     }
+}
+
+fn recheck_window_secs(payload: &EntitlementPayload, fetched_at: u64) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(&payload.recheck_after)
+        .ok()
+        .and_then(|dt| u64::try_from(dt.timestamp()).ok())
+        .map(|recheck_at| recheck_at.saturating_sub(fetched_at))
+        .unwrap_or(DEFAULT_RECHECK_SECS)
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +436,13 @@ pub fn check_can_add(current_count: usize) -> Result<(), u32> {
 /// feature is usable without Pro; Pro lifts the cap entirely.
 pub const SANDBOX_COMMUNITY_CAP: u32 = 2;
 
+/// Per-file size cap for task-board attachments on the community tiers
+/// (anonymous and signed-in free): 10 MB.
+pub const TASK_ATTACHMENT_COMMUNITY_CAP_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Per-file size cap for task-board attachments on Pro: 250 MB.
+pub const TASK_ATTACHMENT_PRO_CAP_BYTES: u64 = 250 * 1024 * 1024;
+
 impl Entitlements {
     /// How many projects may have Sandboxed Run enabled at once. `None` =
     /// unlimited (Pro). Tied to the same "unlimited projects" signal as
@@ -424,6 +453,19 @@ impl Entitlements {
         // A capped project tier (anonymous/free) ⇒ the community sandbox cap;
         // unlimited projects (Pro) ⇒ unlimited sandboxed runs.
         self.max_projects.map(|_| SANDBOX_COMMUNITY_CAP)
+    }
+
+    /// Per-file size cap for task-board attachments. Tied to the same
+    /// "unlimited projects" signal as [`Entitlements::max_projects`] — a
+    /// capped project tier (anonymous/free) gets the 10 MB community cap,
+    /// Pro gets the 250 MB cap — so it tracks the paid tier without needing
+    /// a new field in the signed entitlement document. Enforced client-side,
+    /// consistent with the project cap (not DRM).
+    pub fn max_task_attachment_bytes(&self) -> u64 {
+        match self.max_projects {
+            Some(_) => TASK_ATTACHMENT_COMMUNITY_CAP_BYTES,
+            None => TASK_ATTACHMENT_PRO_CAP_BYTES,
+        }
     }
 }
 
@@ -436,6 +478,19 @@ pub fn check_can_sandbox(current_count: usize) -> Result<(), u32> {
     match current().entitlements.max_sandbox_projects() {
         Some(cap) if current_count as u32 >= cap => Err(cap),
         _ => Ok(()),
+    }
+}
+
+/// Defense-in-depth attachment-size check, mirroring [`check_can_add`].
+/// Returns `Err(cap_bytes)` when a `size_bytes` task-board attachment exceeds
+/// the current tier's per-file cap (community 10 MB, Pro 250 MB). Like the
+/// project cap, an honest limit, not DRM — it's bypassable by rebuilding.
+pub fn check_attachment_size(size_bytes: u64) -> Result<(), u64> {
+    let cap = current().entitlements.max_task_attachment_bytes();
+    if size_bytes > cap {
+        Err(cap)
+    } else {
+        Ok(())
     }
 }
 
@@ -596,6 +651,10 @@ mod tests {
         verify_signed(PRO_VECTOR).unwrap()
     }
 
+    fn unix(s: &str) -> u64 {
+        u64::try_from(chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp()).unwrap()
+    }
+
     #[test]
     fn no_cache_is_anonymous() {
         let e = anonymous_fallback();
@@ -629,22 +688,67 @@ mod tests {
         assert_eq!(e.state, EntitlementState::Pro);
         assert_eq!(e.tier, "pro");
         assert_eq!(e.entitlements.max_projects, None);
+        // The signed document's source passes through — the UI keys billing
+        // management ("subscription") vs perpetual grants ("donate", …) on it.
+        assert_eq!(e.source.as_deref(), Some("donate"));
+    }
+
+    #[test]
+    fn subscription_pro_surfaces_subscription_source() {
+        let p = verify_signed(PRO_V3_SUBSCRIPTION_VECTOR).unwrap();
+        let e = effective_from(&p, 1000, 1001);
+        assert_eq!(e.state, EntitlementState::Pro);
+        assert_eq!(e.source.as_deref(), Some("subscription"));
+    }
+
+    #[test]
+    fn synthetic_states_carry_no_source() {
+        // Anonymous fallback…
+        assert!(anonymous_fallback().source.is_none());
+        // …and the free floor after a lapsed Pro (synthetic, not the signed tier).
+        let p = pro_payload();
+        let fetched_at = unix("2026-05-24T00:00:00Z");
+        let now = unix("2026-07-23T00:00:00Z"); // past recheck + grace
+        let e = effective_from(&p, fetched_at, now);
+        assert_eq!(e.state, EntitlementState::Free);
+        assert!(e.source.is_none());
     }
 
     #[test]
     fn stale_pro_within_grace_is_pro_grace() {
         let p = pro_payload();
-        let now = 1000 + RECHECK_SECS + 5 * 24 * 60 * 60; // 5 days past recheck, grace is 21
-        let e = effective_from(&p, 1000, now);
+        let fetched_at = unix("2026-05-24T00:00:00Z");
+        let now = unix("2026-06-28T00:00:00Z"); // 5 days past signed recheck
+        let e = effective_from(&p, fetched_at, now);
         assert_eq!(e.state, EntitlementState::ProGrace);
         assert_eq!(e.tier, "pro"); // still entitled during grace
     }
 
     #[test]
+    fn pro_recheck_uses_signed_recheck_after_not_hardcoded_window() {
+        let mut p = pro_payload();
+        p.recheck_after = "2026-05-31T00:00:00.000Z".into();
+        let fetched_at = unix("2026-05-24T00:00:00Z");
+        let now = unix("2026-06-04T00:00:00Z"); // 4 days past signed recheck
+        let e = effective_from(&p, fetched_at, now);
+        assert_eq!(e.state, EntitlementState::ProGrace);
+    }
+
+    #[test]
+    fn malformed_recheck_after_falls_back_to_default_window() {
+        let mut p = pro_payload();
+        p.recheck_after = "not-a-date".into();
+        let now = 1000 + DEFAULT_RECHECK_SECS + 5 * 24 * 60 * 60;
+        let e = effective_from(&p, 1000, now);
+        assert_eq!(e.state, EntitlementState::ProGrace);
+    }
+
+    #[test]
     fn expired_grace_falls_back_to_free_not_anonymous() {
         let p = pro_payload();
-        let now = 1000 + RECHECK_SECS + 30 * 24 * 60 * 60; // past recheck + 21d grace
-        let e = effective_from(&p, 1000, now);
+        let fetched_at = unix("2026-05-24T00:00:00Z");
+        let now = unix("2026-07-23T00:00:00Z"); // past signed recheck + grace
+        let e = effective_from(&p, fetched_at, now);
         // Signed-in floor is Free(6), never Anonymous(3).
         assert_eq!(e.state, EntitlementState::Free);
         assert_eq!(e.entitlements.max_projects, Some(6));
@@ -668,6 +772,28 @@ mod tests {
         let e = effective_from(&p, 1000, 1001);
         assert_eq!(e.state, EntitlementState::Anonymous);
         assert_eq!(e.entitlements.max_projects, Some(3));
+    }
+
+    #[test]
+    fn community_tiers_get_10mb_attachments_pro_250mb() {
+        // Anonymous and free share the 10 MB per-file attachment cap …
+        assert_eq!(
+            anonymous_entitlements().max_task_attachment_bytes(),
+            TASK_ATTACHMENT_COMMUNITY_CAP_BYTES
+        );
+        assert_eq!(
+            free_entitlements().max_task_attachment_bytes(),
+            TASK_ATTACHMENT_COMMUNITY_CAP_BYTES
+        );
+        // … and Pro (unlimited projects) gets the 250 MB cap.
+        let pro = verify_signed(PRO_VECTOR).unwrap().entitlements;
+        assert_eq!(
+            pro.max_task_attachment_bytes(),
+            TASK_ATTACHMENT_PRO_CAP_BYTES
+        );
+        // Sanity on the advertised numbers themselves.
+        assert_eq!(TASK_ATTACHMENT_COMMUNITY_CAP_BYTES, 10 * 1024 * 1024);
+        assert_eq!(TASK_ATTACHMENT_PRO_CAP_BYTES, 250 * 1024 * 1024);
     }
 
     #[test]

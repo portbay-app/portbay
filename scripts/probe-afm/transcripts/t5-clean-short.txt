@@ -1,0 +1,1 @@
+restart nginx on port 8080 and check /var/log/nginx/error.log

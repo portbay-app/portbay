@@ -123,7 +123,7 @@ pub fn spawn_status_poller(app: AppHandle) {
 
             let state: tauri::State<AppState> = app.state();
             let client = {
-                let g = state.pc_client.lock().expect("pc_client mutex poisoned");
+                let g = state.pc_client.lock().unwrap_or_else(|e| e.into_inner());
                 match g.clone() {
                     Some(c) => c,
                     None => continue, // daemon not up yet

@@ -339,7 +339,7 @@ pub async fn ssh_connection_detect_os(
     };
     let proxy_password = load_stored_proxy_password(&conn.id)?;
 
-    let interactor: Option<Arc<dyn SshInteractor>> = Some(EventInteractor::new(app));
+    let interactor: Option<Arc<dyn SshInteractor>> = Some(EventInteractor::shared(app));
     let os = detect_os_string(
         &conn,
         password.as_deref(),
@@ -482,6 +482,37 @@ pub async fn ssh_connection_touch(state: State<'_, AppState>, id: String) -> App
     })
 }
 
+/// Tear down every live session for a host in one shot — cached exec/deploy,
+/// SFTP, agent, and any open terminal shells. This is the explicit "log out of
+/// this host" action: after it returns, nothing holds an authenticated
+/// connection, and the next action re-authenticates (silently from a stored
+/// credential, or with a one-shot prompt otherwise).
+#[tauri::command]
+pub async fn ssh_host_disconnect(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.exec.lock().await.disconnect(&id);
+    state.sftp.lock().await.disconnect(&id);
+    state.agent.lock().await.disconnect(&id);
+    state.pty.lock().await.disconnect_connection(&id);
+    Ok(())
+}
+
+/// Whether any authenticated session (exec, SFTP, agent, or a terminal shell)
+/// is currently open to this host. Read-only: never connects, and the checks
+/// don't bump idle timers, so polling this can't keep a session alive.
+#[tauri::command]
+pub async fn ssh_host_connected(state: State<'_, AppState>, id: String) -> AppResult<bool> {
+    if state.exec.lock().await.has_session(&id) {
+        return Ok(true);
+    }
+    if state.sftp.lock().await.has_session(&id) {
+        return Ok(true);
+    }
+    if state.agent.lock().await.has_session(&id) {
+        return Ok(true);
+    }
+    Ok(state.pty.lock().await.has_connection(&id))
+}
+
 /// Parse `~/.ssh/config` and return importable host candidates for the user to
 /// pick from. Read-only: it never writes the registry. The user's picks are
 /// saved through the normal [`ssh_connection_save`] path, which assigns fresh,
@@ -569,27 +600,48 @@ async fn detect_os_string(
 }
 
 /// Probe shell that prints exactly one environment token. Control-panel markers
-/// win first, then the cloud vendor (DMI), then the OS-release distro id, then a
-/// `generic` fallback. One round-trip; no side effects on the remote host.
+/// win first, then PaaS marker env vars (Heroku/Render/Fly/Railway), then the
+/// cloud vendor (DMI), then the OS-release distro id, then a `generic`
+/// fallback. One round-trip; no side effects on the remote host.
+///
+/// The cloud check reads several DMI fields, not just `sys_vendor`: Xen-era EC2
+/// instances report `sys_vendor=Xen` and only carry "amazon" in
+/// `bios_version`/`product_version`, and Oracle Cloud marks itself in
+/// `chassis_asset_tag`. The Xen-EC2 `/sys/hypervisor/uuid` check is
+/// prefix-anchored (`ec2*`) so a random uuid containing "ec2" can't match.
 const ENVIRONMENT_PROBE: &str = r#"
 if [ -e /usr/local/cpanel/version ]; then echo cpanel;
 elif [ -e /usr/local/psa/version ]; then echo plesk;
 elif [ -e /usr/local/directadmin ]; then echo directadmin;
 elif [ -e /usr/local/CyberCP ] || [ -e /usr/local/lscp ]; then echo cyberpanel;
+elif [ -e /etc/webmin/virtual-server ] || [ -e /usr/share/webmin/virtual-server ]; then echo virtualmin;
+elif [ -e /usr/local/ispconfig ]; then echo ispconfig;
 elif [ -e /etc/webmin ] || [ -e /usr/share/webmin ]; then echo webmin;
+elif [ -n "$DYNO" ]; then echo heroku;
+elif [ -n "$RENDER" ]; then echo render;
+elif [ -n "$FLY_APP_NAME" ]; then echo flyio;
+elif [ -n "$RAILWAY_ENVIRONMENT" ] || [ -n "$RAILWAY_PROJECT_ID" ]; then echo railway;
 else
-  v=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null);
+  d=/sys/class/dmi/id;
+  v=$(cat $d/sys_vendor $d/bios_vendor $d/bios_version $d/product_version $d/board_vendor $d/chassis_asset_tag 2>/dev/null);
+  h=$(cat /sys/hypervisor/uuid 2>/dev/null);
+  case "$h" in ec2*|EC2*) v="amazon $v";; esac;
   case "$v" in
-    *Amazon*) echo aws;;
+    *[Aa]mazon*|*EC2*) echo aws;;
     *DigitalOcean*) echo digitalocean;;
     *Google*) echo gcp;;
     *Microsoft*) echo azure;;
     *Hetzner*) echo hetzner;;
+    *Vultr*) echo vultr;;
+    *OVH*) echo ovh;;
+    *Contabo*) echo contabo;;
+    *OracleCloud*) echo oraclecloud;;
     *)
       id=$(. /etc/os-release 2>/dev/null; echo "$ID");
       case "$id" in
         ubuntu) echo ubuntu;; debian) echo debian;; alpine) echo alpine;;
-        rhel|rocky|almalinux) echo rhel;; centos) echo centos;; fedora) echo fedora;;
+        rhel) echo rhel;; rocky) echo rocky;; almalinux) echo almalinux;;
+        centos) echo centos;; fedora) echo fedora;; opensuse*) echo opensuse;;
         amzn) echo amazonlinux;; arch) echo arch;;
         *) echo generic;;
       esac;;
@@ -629,13 +681,31 @@ async fn detect_environment(
 /// known clouds, its **region** from that cloud's metadata endpoint. Prints one
 /// line: `<provider>\t<region>` (region may be blank). Network calls are capped
 /// at 2s each and fully best-effort — a non-cloud box just prints `generic\t`.
+///
+/// Same multi-field DMI read as [`ENVIRONMENT_PROBE`] (Xen-era EC2 hides
+/// "amazon" outside `sys_vendor`). AWS region speaks IMDSv2 (token PUT, then
+/// the v1 plain GET as a fallback) — IMDSv2-only instances reject tokenless
+/// reads. If DMI is unreadable entirely, a 1s IMDSv2 token probe is the last
+/// resort: only AWS answers a PUT on that link-local path.
 const PROVIDER_REGION_PROBE: &str = r#"
-v=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)
+d=/sys/class/dmi/id
+v=$(cat $d/sys_vendor $d/bios_vendor $d/bios_version $d/product_version $d/board_vendor $d/chassis_asset_tag 2>/dev/null)
+h=$(cat /sys/hypervisor/uuid 2>/dev/null)
+case "$h" in ec2*|EC2*) v="amazon $v";; esac
+if [ -z "$v" ]; then
+  t=$(curl -s -X PUT --max-time 1 -H "X-aws-ec2-metadata-token-ttl-seconds: 60" http://169.254.169.254/latest/api/token 2>/dev/null)
+  [ -n "$t" ] && v=amazon
+fi
 prov=generic; region=
 case "$v" in
-  *Amazon*|*EC2*)
+  *[Aa]mazon*|*EC2*)
     prov=aws
-    region=$(curl -s --max-time 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+    tok=$(curl -s -X PUT --max-time 2 -H "X-aws-ec2-metadata-token-ttl-seconds: 60" http://169.254.169.254/latest/api/token 2>/dev/null)
+    if [ -n "$tok" ]; then
+      region=$(curl -s --max-time 2 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+    else
+      region=$(curl -s --max-time 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+    fi
     ;;
   *DigitalOcean*)
     prov=digitalocean
@@ -653,7 +723,29 @@ case "$v" in
   *Hetzner*)
     prov=hetzner
     ;;
+  *Vultr*)
+    prov=vultr
+    region=$(curl -s --max-time 2 http://169.254.169.254/v1/region/regioncode 2>/dev/null)
+    ;;
+  *OVH*)
+    prov=ovh
+    ;;
+  *Contabo*)
+    prov=contabo
+    ;;
+  *OracleCloud*)
+    prov=oraclecloud
+    region=$(curl -s --max-time 2 -H "Authorization: Bearer Oracle" http://169.254.169.254/opc/v2/instance/region 2>/dev/null)
+    [ -n "$region" ] || region=$(curl -s --max-time 2 http://169.254.169.254/opc/v1/instance/region 2>/dev/null)
+    ;;
 esac
+if [ "$prov" = generic ]; then
+  if [ -n "$DYNO" ]; then prov=heroku;
+  elif [ -n "$RENDER" ]; then prov=render;
+  elif [ -n "$FLY_APP_NAME" ]; then prov=flyio; region=$FLY_REGION;
+  elif [ -n "$RAILWAY_ENVIRONMENT" ] || [ -n "$RAILWAY_PROJECT_ID" ]; then prov=railway; region=$RAILWAY_REPLICA_REGION;
+  fi
+fi
 printf '%s\t%s' "$prov" "$region"
 "#;
 

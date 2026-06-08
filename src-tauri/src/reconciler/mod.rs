@@ -195,7 +195,11 @@ fn reg_summary(reg: &Registry) -> String {
 }
 
 fn dns_resolver_installed(reg: &Registry, state: &AppState) -> bool {
-    let port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
+    let port = state
+        .dnsmasq
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .port();
     crate::dnsmasq::resolver::is_installed(&reg.domain_suffix, port)
 }
 

@@ -466,6 +466,7 @@ const SIDECARS: SidecarHealth = {
 const ENTITLEMENT: EffectiveEntitlement = {
   state: "pro",
   tier: "pro",
+  source: "subscription",
   account: { github_id: 24601, login: "acme-dev" },
   entitlements: {
     max_projects: null,
@@ -1314,6 +1315,8 @@ function snapshotOut(
 const NO_AGENT: AgentInfo = {
   hasCurl: true,
   hasWget: true,
+  hasClaude: false,
+  hasCodex: false,
   hasOllama: false,
   hasLlm: false,
   ollamaModels: [],
@@ -1975,6 +1978,8 @@ const SSH_HOSTS: Record<string, DemoSshHost> = {
     agent: {
       hasCurl: true,
       hasWget: true,
+      hasClaude: false,
+      hasCodex: false,
       hasOllama: true,
       hasLlm: false,
       ollamaModels: ["llama3.1:8b", "qwen2.5-coder:7b", "nomic-embed-text"],

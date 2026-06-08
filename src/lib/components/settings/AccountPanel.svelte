@@ -13,7 +13,7 @@
   } from "$lib/components/account";
 </script>
 
-<div class="max-w-3xl space-y-6">
+<div class="space-y-6">
   <AccountSection />
   <SyncSection />
   <EarlyAccessSection />

@@ -309,7 +309,7 @@ pub(crate) fn newest_entry(
     entries.into_iter().next()
 }
 
-fn runtime_dest_root() -> AppResult<PathBuf> {
+pub(crate) fn runtime_dest_root() -> AppResult<PathBuf> {
     let mut dir =
         dirs::data_dir().ok_or_else(|| AppError::Internal("no data directory available".into()))?;
     dir.push("PortBay");
@@ -403,7 +403,7 @@ fn probe_runtime(lang: &str, version: &str, bin: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn strip_quarantine(path: &Path) -> AppResult<()> {
+pub(crate) fn strip_quarantine(path: &Path) -> AppResult<()> {
     let status = Command::new("xattr")
         .args(["-dr", "com.apple.quarantine"])
         .arg(path)
@@ -420,7 +420,7 @@ fn strip_quarantine(path: &Path) -> AppResult<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn strip_quarantine(_path: &Path) -> AppResult<()> {
+pub(crate) fn strip_quarantine(_path: &Path) -> AppResult<()> {
     Ok(())
 }
 

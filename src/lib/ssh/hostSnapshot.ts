@@ -12,8 +12,6 @@
  * fabricate a number. The raw output is kept so the UI can fall back to showing
  * it verbatim.
  */
-import { invokeQuiet } from "$lib/ipc";
-import { connectWithPrompt } from "$lib/ssh/connectWithPrompt";
 import type { ExecResult } from "$lib/types/sshTunnels";
 
 export interface HostSnapshot {
@@ -32,6 +30,24 @@ export interface HostSnapshot {
   diskUsed: string | null;
   diskTotal: string | null;
   diskPercent: number | null;
+  /** Number of NVIDIA GPUs (`nvidia-smi`); 0 / null on non-GPU hosts. */
+  gpuCount: number | null;
+  /** GPU model, or "Mixed" when the box has more than one kind. */
+  gpuModel: string | null;
+  /** Sum of every GPU's total VRAM, in MiB. */
+  gpuTotalVramMb: number | null;
+  /** NVIDIA driver version, e.g. "535.183.01". */
+  driverVersion: string | null;
+  /** CUDA version from the `nvidia-smi` header, e.g. "12.2". */
+  cudaVersion: string | null;
+  /** Python interpreter version on the active PATH, e.g. "3.11.5". */
+  pythonVersion: string | null;
+  /** Active conda environment (`$CONDA_DEFAULT_ENV`), e.g. "ml-train" or "base". */
+  condaEnv: string | null;
+  /** Active virtualenv name — the basename of `$VIRTUAL_ENV`. */
+  virtualenv: string | null;
+  /** Loaded HPC environment modules (`module list`), e.g. ["cuda/12.4", …]. */
+  modules: string[] | null;
   /** Raw combined stdout, for verbatim fallback / debugging. */
   raw: string;
 }
@@ -44,6 +60,17 @@ const SNAPSHOT_COMMAND = [
   "echo '###UP'; uptime 2>/dev/null",
   "echo '###MEM'; free -m 2>/dev/null",
   "echo '###DISK'; df -h / 2>/dev/null",
+  "echo '###GPU'; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>/dev/null",
+  "echo '###GPUHDR'; nvidia-smi 2>/dev/null | head -5",
+  // Environment block. Run under a login shell (`bash -lc`) so HPC `module`
+  // init (/etc/profile.d) and conda/venv profile hooks are loaded — a plain
+  // non-login exec shell has none of them, so `$CONDA_DEFAULT_ENV` would be
+  // empty and `module` undefined. Internal `@@` markers keep it to a single
+  // login shell (less profile noise than three). `module` prints its listing
+  // to stderr by design, so that one is merged with `2>&1`; the outer
+  // `2>/dev/null` only hides bash's own startup errors (and "bash: not found"
+  // on hosts without bash, which degrades the whole block to empty).
+  "echo '###ENV'; bash -lc 'printf \"@@PY \"; { python3 --version || python --version; } 2>&1; printf \"@@CONDA \"; echo \"${CONDA_DEFAULT_ENV:-}\"; printf \"@@VENV \"; echo \"${VIRTUAL_ENV:-}\"; echo @@MODULE; module list 2>&1' 2>/dev/null",
 ].join("; ");
 
 /** Run the snapshot command on a host, prompting once for a credential if needed. */
@@ -51,6 +78,11 @@ export async function fetchHostSnapshot(
   connectionId: string,
   hostLabel: string,
 ): Promise<HostSnapshot> {
+  // Lazy-import the IPC layer so this module's parser (parseSnapshot) stays a
+  // pure, dependency-free import — matching portScan and keeping it unit-testable
+  // without booting SvelteKit's rune stores.
+  const { invokeQuiet } = await import("$lib/ipc");
+  const { connectWithPrompt } = await import("$lib/ssh/connectWithPrompt");
   const result = await connectWithPrompt(connectionId, hostLabel, (cred) =>
     invokeQuiet<ExecResult>("ssh_exec_run", {
       input: {
@@ -130,6 +162,70 @@ export function parseSnapshot(stdout: string): HostSnapshot {
     }
   }
 
+  // GPU summary: one `name, memTotalMiB, driver` row per GPU. Absent `nvidia-smi`
+  // → empty block → gpuCount 0 (a non-GPU host), never a fabricated number.
+  let gpuCount: number | null = null;
+  let gpuModel: string | null = null;
+  let gpuTotalVramMb: number | null = null;
+  let driverVersion: string | null = null;
+  const gpuRows = (b.GPU ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (gpuRows.length) {
+    const names: string[] = [];
+    let vramSum = 0;
+    let vramSeen = false;
+    for (const row of gpuRows) {
+      const cols = row.split(",").map((c) => c.trim());
+      if (cols[0]) names.push(cols[0]);
+      const mb = Number(cols[1]);
+      if (Number.isFinite(mb)) {
+        vramSum += mb;
+        vramSeen = true;
+      }
+      if (!driverVersion && cols[2]) driverVersion = cols[2];
+    }
+    gpuCount = gpuRows.length;
+    const uniq = [...new Set(names)];
+    gpuModel = uniq.length === 1 ? uniq[0] : uniq.length > 1 ? "Mixed" : null;
+    gpuTotalVramMb = vramSeen ? vramSum : null;
+  }
+  // CUDA version lives only in the nvidia-smi banner, not in any query field.
+  const cudaMatch = (b.GPUHDR ?? "").match(/CUDA Version:\s*([\d.]+)/i);
+  const cudaVersion = cudaMatch ? cudaMatch[1] : null;
+
+  // Environment block: one login shell with internal `@@` markers. Any leading
+  // profile/MOTD noise is ignored since we key off the `@@` prefixes.
+  const env = b.ENV ?? "";
+  let pythonVersion: string | null = null;
+  let condaEnv: string | null = null;
+  let virtualenv: string | null = null;
+  let modules: string[] | null = null;
+  if (env) {
+    for (const line of env.split("\n")) {
+      if (line.startsWith("@@PY")) {
+        const m = line.match(/Python\s+([\w.]+)/i);
+        if (m) pythonVersion = m[1];
+      } else if (line.startsWith("@@CONDA")) {
+        const v = line.slice("@@CONDA".length).trim();
+        if (v) condaEnv = v;
+      } else if (line.startsWith("@@VENV")) {
+        const v = line.slice("@@VENV".length).trim();
+        if (v) virtualenv = v.split("/").filter(Boolean).pop() ?? null;
+      }
+    }
+    // Modules: everything after the `@@MODULE` marker (kept last as it spans
+    // multiple lines). A host without `module` surfaces "command not found"
+    // here (stderr was merged), and an idle one says "No modules loaded" — both
+    // mean "nothing to show".
+    const modIdx = env.indexOf("@@MODULE");
+    if (modIdx >= 0) {
+      const modText = env.slice(modIdx + "@@MODULE".length);
+      if (!/command not found|not found|no modules|no modulefiles/i.test(modText)) {
+        const found = [...modText.matchAll(/\d+\)\s+(\S+)/g)].map((m) => m[1]);
+        if (found.length) modules = found;
+      }
+    }
+  }
+
   return {
     user: trimOrNull(b.USER),
     os: trimOrNull(b.OS),
@@ -140,6 +236,15 @@ export function parseSnapshot(stdout: string): HostSnapshot {
     diskUsed,
     diskTotal,
     diskPercent,
+    gpuCount,
+    gpuModel,
+    gpuTotalVramMb,
+    driverVersion,
+    cudaVersion,
+    pythonVersion,
+    condaEnv,
+    virtualenv,
+    modules,
     raw: stdout,
   };
 }

@@ -7,11 +7,13 @@
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
   import UserAvatar from "$lib/components/shell/UserAvatar.svelte";
+  import { invokeQuiet, safeInvoke } from "$lib/ipc";
   import { entitlements } from "$lib/stores/entitlements.svelte";
   import { account } from "$lib/stores/account.svelte";
   import { licenseDialog } from "$lib/stores/licenseDialog.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { confirmDialog } from "$lib/stores/confirm.svelte";
+  import type { AccountStatus, SubscriptionStatus } from "$lib/types/entitlements";
 
   const projectCount = $derived(projects.value.length);
   const cap = $derived(entitlements.maxProjects); // null = unlimited
@@ -97,6 +99,122 @@
       actions: [{ label: "Sign out", value: "out", tone: "destructive", icon: "log-out" }],
     });
     if (ok === "out") await entitlements.logout();
+  }
+
+  // ── Billing (subscription-Pro only: renewal/cancel state + Paddle portal) ──
+  const hasBilling = $derived(entitlements.hasManagedBilling);
+  let subscription = $state<SubscriptionStatus | null>(null);
+  let portalBusy = $state(false);
+
+  // Pull the renewal/cancel state whenever billing management applies (sign-in,
+  // upgrade, resync). Quiet — a fetch failure just leaves the status line off.
+  $effect(() => {
+    if (!hasBilling) {
+      subscription = null;
+      return;
+    }
+    void entitlements.fetchSubscription().then((s) => (subscription = s));
+  });
+
+  function periodEndLabel(iso: string | null): string | null {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+  }
+
+  async function openPortal(kind: "overview" | "cancel" | "payment") {
+    portalBusy = true;
+    try {
+      await entitlements.openBillingPortal(kind);
+    } catch {
+      /* safeInvoke toasted */
+    } finally {
+      portalBusy = false;
+    }
+  }
+
+  // ── Data & privacy (GDPR export + erasure) ──
+  let exportBusy = $state(false);
+  let exported = $state(false);
+  let deleteBusy = $state(false);
+  let cancelBusy = $state(false);
+
+  // Pending-deletion status. A deletion request survives sign-in by design,
+  // so after signing back in this card must show the erasure countdown and a
+  // "Cancel deletion" action — not pretend nothing happened. Quiet fetch:
+  // offline / signed-out just means no banner.
+  let accStatus = $state<AccountStatus | null>(null);
+  $effect(() => {
+    if (!entitlements.isSignedIn) {
+      accStatus = null;
+      return;
+    }
+    void acct?.login; // re-fetch when the signed-in identity changes
+    invokeQuiet<AccountStatus>("account_status")
+      .then((s) => (accStatus = s))
+      .catch(() => {});
+  });
+  const deletionPending = $derived(!!accStatus?.deletion_requested_at);
+  const purgeDate = $derived(accStatus?.purge_after ? new Date(accStatus.purge_after) : null);
+  // Whole days until the purge (floored at 0 — the cron may not have swept yet).
+  const purgeDaysLeft = $derived(
+    purgeDate ? Math.max(0, Math.ceil((purgeDate.getTime() - Date.now()) / 86_400_000)) : null,
+  );
+
+  async function cancelDeletion() {
+    cancelBusy = true;
+    try {
+      accStatus = await safeInvoke<AccountStatus>("cancel_account_deletion");
+    } catch {
+      /* safeInvoke toasted; banner stays up */
+    } finally {
+      cancelBusy = false;
+    }
+  }
+
+  async function exportData() {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const dest = await save({
+      title: "Export account data",
+      defaultPath: "portbay-account-export.json",
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (typeof dest !== "string") return;
+    exportBusy = true;
+    try {
+      await entitlements.exportAccountData(dest);
+      exported = true;
+      setTimeout(() => (exported = false), 2500);
+    } catch {
+      /* safeInvoke toasted */
+    } finally {
+      exportBusy = false;
+    }
+  }
+
+  async function deleteAccount() {
+    const ok = await confirmDialog.open({
+      title: "Delete your PortBay account?",
+      message:
+        "You'll be signed out everywhere now, and your account, license, devices, and encrypted sync data " +
+        "will be permanently erased from our servers 30 days from now. Changed your mind? Sign back in within " +
+        "those 30 days and choose Cancel deletion here in Settings. " +
+        "Your projects and everything on this Mac stay untouched — you'll just drop back to the anonymous 3-project tier. " +
+        "An active Pro subscription should be cancelled first (Billing → Manage billing, or the link in your Paddle receipt email), or it will keep renewing.",
+      actions: [
+        { label: "Delete my account", value: "delete", tone: "destructive", icon: "trash-2" },
+      ],
+    });
+    if (ok !== "delete") return;
+    deleteBusy = true;
+    try {
+      await entitlements.deleteAccount();
+    } catch {
+      /* safeInvoke toasted; still signed in */
+    } finally {
+      deleteBusy = false;
+    }
   }
 </script>
 
@@ -192,6 +310,42 @@
       </div>
     {/if}
 
+    {#if deletionPending}
+      <!-- Pending erasure: a deletion request survives sign-in, so show the
+           countdown and the explicit way out instead of a business-as-usual card. -->
+      <div class="rounded-xl border border-status-crashed/40 bg-status-crashed/10 p-3.5 space-y-2.5">
+        <div class="flex items-start gap-2">
+          <Icon name="trash-2" size={14} class="mt-0.5 shrink-0 text-status-crashed" />
+          <p class="min-w-0 text-[12.5px] leading-relaxed text-fg-muted">
+            <span class="font-semibold text-status-crashed">Account deletion scheduled.</span>
+            Your account, license, devices, and encrypted sync data will be permanently erased
+            {#if purgeDaysLeft !== null && purgeDate}
+              in <span class="font-semibold text-fg tabular-nums">{purgeDaysLeft}
+                {purgeDaysLeft === 1 ? "day" : "days"}</span>
+              — on {purgeDate.toLocaleDateString(undefined, {
+                year: "numeric",
+                month: "long",
+                day: "numeric",
+              })}.
+            {:else}
+              after the {accStatus?.grace_days ?? 30}-day grace window.
+            {/if}
+            Projects on this Mac are never touched.
+          </p>
+        </div>
+        <button
+          type="button"
+          onclick={cancelDeletion}
+          disabled={cancelBusy}
+          class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-accent text-on-accent text-[12px] font-semibold
+                 hover:brightness-110 active:brightness-95 transition shadow-sm disabled:opacity-50"
+        >
+          <Icon name="rotate-ccw" size={12} />
+          {cancelBusy ? "Cancelling…" : "Cancel deletion — keep my account"}
+        </button>
+      </div>
+    {/if}
+
     {#if isGrace}
       <p class="text-[12px] leading-relaxed text-status-unhealthy flex items-start gap-1.5">
         <Icon name="circle-alert" size={13} class="mt-px shrink-0" />
@@ -263,6 +417,133 @@
         </button>
       {/if}
     </div>
+
+    {#if hasBilling}
+      <!-- billing: subscription state + Paddle customer portal (MoR) -->
+      <div class="border-t border-border/60 pt-3">
+        <div class="text-[12px] font-medium text-fg-muted mb-2">Billing</div>
+        {#if subscription?.status === "past_due"}
+          <p class="text-[12px] leading-relaxed text-status-unhealthy flex items-start gap-1.5 mb-2">
+            <Icon name="circle-alert" size={13} class="mt-px shrink-0" />
+            <span>Payment past due — update your payment method to keep Pro.</span>
+          </p>
+        {:else if subscription?.cancelAtPeriodEnd}
+          <p class="text-[12px] text-fg-muted mb-2">
+            Your subscription is set to cancel{#if periodEndLabel(subscription.currentPeriodEnd)}
+              &nbsp;— Pro stays active until
+              <span class="text-fg">{periodEndLabel(subscription.currentPeriodEnd)}</span>{/if}.
+          </p>
+        {:else if subscription?.status === "trialing" && periodEndLabel(subscription.currentPeriodEnd)}
+          <p class="text-[12px] text-fg-muted mb-2">
+            Free trial — first charge on
+            <span class="text-fg">{periodEndLabel(subscription.currentPeriodEnd)}</span>
+            · $10/mo
+          </p>
+        {:else if subscription?.status === "active" && periodEndLabel(subscription.currentPeriodEnd)}
+          <p class="text-[12px] text-fg-muted mb-2">
+            Renews on <span class="text-fg">{periodEndLabel(subscription.currentPeriodEnd)}</span>
+            · $10/mo
+          </p>
+        {/if}
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+          {#if subscription?.status === "past_due"}
+            <button
+              type="button"
+              onclick={() => openPortal("payment")}
+              disabled={portalBusy || isGrace}
+              class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-accent text-on-accent text-[12px] font-semibold
+                     hover:brightness-110 active:brightness-95 transition shadow-sm disabled:opacity-50"
+            >
+              <Icon name="credit-card" size={12} /> Update payment method
+            </button>
+          {/if}
+          <button
+            type="button"
+            onclick={() => openPortal("overview")}
+            disabled={portalBusy || isGrace}
+            class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-border text-[12px] text-fg-muted
+                   hover:text-fg hover:bg-surface-2 transition-colors disabled:opacity-50"
+          >
+            <Icon name="credit-card" size={12} />
+            {portalBusy ? "Opening…" : "Manage billing"}
+          </button>
+          {#if !subscription?.cancelAtPeriodEnd}
+            <button
+              type="button"
+              onclick={() => openPortal("cancel")}
+              disabled={portalBusy || isGrace}
+              class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12px] text-fg-subtle
+                     hover:text-status-crashed transition-colors disabled:opacity-50"
+            >
+              Cancel subscription
+            </button>
+          {/if}
+        </div>
+        <p class="mt-1.5 text-[11px] text-fg-subtle">
+          {#if isGrace}
+            Billing needs a connection — reconnect to manage your subscription.
+          {:else}
+            Opens the secure Paddle portal in your browser — payment method, invoices, and
+            cancellation. Cancelling stops the next renewal; Pro stays active until the end of
+            the period you've paid for.
+          {/if}
+        </p>
+      </div>
+    {:else if tier === "pro" && entitlements.source && entitlements.source !== "subscription"}
+      <!-- perpetual Pro (contribute / donate / manual) — nothing to bill -->
+      <div class="border-t border-border/60 pt-3">
+        <div class="text-[12px] font-medium text-fg-muted mb-1">Billing</div>
+        <p class="text-[11.5px] text-fg-subtle">
+          Your Pro was granted
+          {entitlements.source === "contribute"
+            ? "for a merged contribution"
+            : entitlements.source === "donate"
+              ? "for a donation"
+              : "manually"} — it doesn't renew and there's no billing to manage.
+        </p>
+      </div>
+    {/if}
+
+    {#if entitlements.isSignedIn}
+      <!-- data & privacy: GDPR export (Art. 20) + account erasure (Art. 17) -->
+      <div class="border-t border-border/60 pt-3">
+        <div class="text-[12px] font-medium text-fg-muted mb-2">Data &amp; privacy</div>
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <button
+            type="button"
+            onclick={exportData}
+            disabled={exportBusy || deleteBusy}
+            class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-border text-[12px] text-fg-muted
+                   hover:text-fg hover:bg-surface-2 transition-colors disabled:opacity-50"
+          >
+            <Icon name={exported ? "check" : "save"} size={12} />
+            {exported ? "Exported" : exportBusy ? "Exporting…" : "Export my data"}
+          </button>
+          {#if !deletionPending}
+            <button
+              type="button"
+              onclick={deleteAccount}
+              disabled={exportBusy || deleteBusy}
+              class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12px] text-fg-subtle
+                     hover:text-status-crashed transition-colors disabled:opacity-50"
+            >
+              <Icon name="trash-2" size={12} />
+              {deleteBusy ? "Deleting…" : "Delete account"}
+            </button>
+          {/if}
+        </div>
+        <p class="mt-1.5 text-[11px] text-fg-subtle">
+          {#if deletionPending}
+            Export downloads everything we store about your account as JSON — still available
+            while the deletion above is pending.
+          {:else}
+            Export downloads everything we store about your account as JSON. Deleting signs you
+            out and erases it from our servers after a 30-day grace window — sign back in and
+            choose Cancel deletion here to keep it. Projects on this Mac are never touched.
+          {/if}
+        </p>
+      </div>
+    {/if}
 
     <!-- about the license -->
     <div class="border-t border-border/60 pt-3">

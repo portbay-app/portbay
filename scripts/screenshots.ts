@@ -44,6 +44,15 @@ interface Shot {
   title: string;
   /** Restrict to specific themes (default: both). */
   themes?: Theme[];
+  /** In-page setup after navigation (click a section, emit sim events). */
+  prepare?: (page: Page) => Promise<void>;
+  /** Skip the macOS window-frame composite (for non-window surfaces like
+   * the notch dictation overlay) and emit the raw capture instead. */
+  frameless?: boolean;
+  /** Override the capture viewport (frameless shots are usually smaller). */
+  viewport?: { width: number; height: number };
+  /** CSS background painted under a transparent page (frameless shots). */
+  backdrop?: string;
 }
 
 const SHOTS: Shot[] = [
@@ -66,6 +75,65 @@ const SHOTS: Shot[] = [
   { name: "tunnels", route: "/tunnels", title: "PortBay — Public Tunnels" },
   { name: "logs", route: "/logs", title: "PortBay — Logs" },
   { name: "settings", route: "/settings", title: "PortBay — Settings" },
+  // The AI page is one route with an internal section switcher (`activeView`,
+  // not URL-addressable) — prepare() clicks the section's nav button.
+  { name: "ai", route: "/ai", title: "PortBay — Local AI" },
+  {
+    name: "ai-models",
+    route: "/ai",
+    title: "PortBay — AI Model Catalog",
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Models", exact: true }).click();
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: "ai-dictation",
+    route: "/ai",
+    title: "PortBay — Smart Dictation",
+    prepare: async (page) => {
+      await page.getByRole("button", { name: "Smart Dictation", exact: true }).click();
+      await page.waitForTimeout(400);
+    },
+  },
+  // The notch dictation HUD is not a window — capture the overlay route
+  // frameless, driven into a live mid-dictation state via the simulator's
+  // event escape hatch, over a desktop-ish backdrop so the black notch
+  // shape reads in context.
+  {
+    name: "dictation-overlay",
+    route: "/dictation-overlay",
+    title: "PortBay — Dictation Overlay",
+    frameless: true,
+    viewport: { width: 720, height: 168 },
+    backdrop:
+      "linear-gradient(135deg, #1c2f5e 0%, #34306b 45%, #7a3a64 100%)",
+    prepare: async (page) => {
+      await page.evaluate(() => {
+        const emit = (window as any).__simEmit as (e: string, p: unknown) => void;
+        const notch = {
+          windowWidth: 720,
+          windowHeight: 168,
+          notchWidth: 200,
+          notchHeight: 32,
+          hasNotch: true,
+        };
+        emit("anywhere://state", {
+          phase: "arming",
+          appName: "Notes",
+          appIcon: null,
+          notch,
+          error: null,
+        });
+        emit("anywhere://state", { phase: "live", appName: "Notes", appIcon: null, notch: null, error: null });
+        emit("stt://level", { rms: 0.13 });
+        emit("stt://partial", {
+          text: "ship the staging build once the smoke test passes, then update the release notes",
+        });
+      });
+      await page.waitForTimeout(700); // expand animation settles
+    },
+  },
 ];
 
 /** Kill animations/transitions so captures are deterministic. */
@@ -85,15 +153,16 @@ async function dismissSetupBanner(page: Page): Promise<void> {
     .catch(() => {});
 }
 
-/** Capture a single route in a given theme; returns the raw PNG buffer. */
+/** Capture a single shot in a given theme; returns the raw PNG buffer. */
 async function capture(
   browser: Browser,
   baseURL: string,
-  route: string,
+  shot: Shot,
   theme: Theme,
 ): Promise<Buffer> {
+  const route = shot.route;
   const context = await browser.newContext({
-    viewport: VIEWPORT,
+    viewport: shot.viewport ?? VIEWPORT,
     deviceScaleFactor: SCALE,
   });
   const page = await context.newPage();
@@ -133,6 +202,12 @@ async function capture(
     await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => {});
   }
   await dismissSetupBanner(page);
+  if (shot.prepare) await shot.prepare(page);
+  if (shot.backdrop) {
+    await page.addStyleTag({
+      content: `html,body{background:${shot.backdrop}!important}`,
+    });
+  }
   await page.addStyleTag({ content: FREEZE_CSS });
   await page.waitForTimeout(500); // fonts + final layout settle
   const buf = await page.screenshot({ type: "png" });
@@ -193,8 +268,8 @@ test("generate screenshots", async ({ browser, baseURL }) => {
 
   for (const shot of shots) {
     for (const theme of shot.themes ?? (["light", "dark"] as Theme[])) {
-      const raw = await capture(browser, baseURL!, shot.route, theme);
-      const framed = await frame(browser, raw, shot.title, theme);
+      const raw = await capture(browser, baseURL!, shot, theme);
+      const framed = shot.frameless ? raw : await frame(browser, raw, shot.title, theme);
       const file = join(OUT_DIR, `${shot.name}${theme === "dark" ? "-dark" : ""}.png`);
       await writeFile(file, framed);
       // eslint-disable-next-line no-console

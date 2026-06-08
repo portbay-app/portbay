@@ -45,10 +45,7 @@ pub async fn set_notification_prefs(
     next.save()
         .map_err(|e| AppError::Internal(format!("failed to save preferences: {e}")))?;
     {
-        let mut guard = state
-            .preferences
-            .lock()
-            .expect("preferences mutex poisoned");
+        let mut guard = state.preferences.lock().unwrap_or_else(|e| e.into_inner());
         *guard = next;
     }
     Ok(prefs)
@@ -68,7 +65,9 @@ pub async fn set_preferences(
 ) -> AppResult<Preferences> {
     let previous = state.preferences_snapshot();
 
-    let mut prefs = prefs;
+    // Clamp the overlay knobs up front so the in-memory snapshot (and the
+    // snapshot returned to the frontend) matches what `save()` writes.
+    let mut prefs = prefs.normalise_dictation_overlay();
     prefs.notifications = prefs.notifications.normalised();
     // Starting (or restarting) the auto-clean clock: when the cadence flips on
     // from "off" — or was never stamped — anchor `last_auto_clean` to now so
@@ -90,10 +89,7 @@ pub async fn set_preferences(
         .map_err(|e| AppError::Internal(format!("failed to save preferences: {e}")))?;
 
     {
-        let mut guard = state
-            .preferences
-            .lock()
-            .expect("preferences mutex poisoned");
+        let mut guard = state.preferences.lock().unwrap_or_else(|e| e.into_inner());
         *guard = prefs.clone();
     }
 
@@ -291,7 +287,11 @@ pub async fn update_domain_suffix(
     // the privileged helper (no extra prompt). Only when one actually existed,
     // so a user who never installed the resolver isn't surprised by one now.
     if old_suffix != domain_suffix {
-        let old_port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
+        let old_port = state
+            .dnsmasq
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .port();
         let had_resolver = crate::dnsmasq::resolver::is_installed(&old_suffix, old_port);
 
         if let Err(e) = state.boot_dnsmasq(&app) {
@@ -301,7 +301,11 @@ pub async fn update_domain_suffix(
         if had_resolver {
             let helper = crate::hosts_helper::HostsHelperClient::system();
             if helper.is_available() {
-                let new_port = state.dnsmasq.lock().expect("dnsmasq mutex poisoned").port();
+                let new_port = state
+                    .dnsmasq
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .port();
                 let old = old_suffix.clone();
                 let new = domain_suffix.clone();
                 let _ = tokio::task::spawn_blocking(move || {
@@ -334,10 +338,7 @@ pub async fn mark_close_toast_seen(state: State<'_, AppState>) -> AppResult<()> 
     updated
         .save()
         .map_err(|e| AppError::Internal(format!("failed to save preferences: {e}")))?;
-    *state
-        .preferences
-        .lock()
-        .expect("preferences mutex poisoned") = updated;
+    *state.preferences.lock().unwrap_or_else(|e| e.into_inner()) = updated;
     Ok(())
 }
 
@@ -346,4 +347,107 @@ fn certs_root() -> Option<std::path::PathBuf> {
     dir.push("PortBay");
     dir.push("certs");
     Some(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::preferences::Preferences;
+
+    /// Telemetry must be opt-in (off by default). This is the invariant the
+    /// go-live assessment called out — we never send usage data unless the user
+    /// explicitly enables it.
+    #[test]
+    fn telemetry_is_off_by_default() {
+        let p = Preferences::default();
+        assert!(
+            !p.telemetry_enabled,
+            "telemetry_enabled must default to false"
+        );
+        assert!(
+            !p.telemetry_consent_prompted,
+            "consent must not be pre-granted"
+        );
+    }
+
+    /// Deserializing an old prefs file that has no `telemetryEnabled` key must
+    /// still land `false` (the `#[serde(default)]` path), not `true`.
+    #[test]
+    fn telemetry_stays_off_when_absent_from_old_prefs_file() {
+        let raw = r#"{ "showTrayIcon": true }"#;
+        let p: Preferences = serde_json::from_str(raw).unwrap();
+        assert!(!p.telemetry_enabled);
+        assert!(!p.telemetry_consent_prompted);
+    }
+
+    /// `auto_clean_schedule` defaults to `"off"` so no automated wipe ever
+    /// runs without explicit user opt-in.
+    #[test]
+    fn auto_clean_schedule_defaults_to_off() {
+        let p = Preferences::default();
+        assert_eq!(p.auto_clean_schedule, "off");
+        assert_eq!(p.last_auto_clean, 0, "never cleaned on a fresh install");
+    }
+
+    /// An old prefs file that doesn't mention `autoCleanSchedule` must not
+    /// silently acquire a non-`"off"` schedule (no surprise wipes on upgrade).
+    #[test]
+    fn auto_clean_absent_in_old_prefs_defaults_to_off() {
+        let raw = r#"{ "showTrayIcon": true }"#;
+        let p: Preferences = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.auto_clean_schedule, "off");
+        assert_eq!(p.last_auto_clean, 0);
+    }
+
+    /// `close_to_menu_bar` must default true — closing the window hides it
+    /// rather than quitting, so the user's services keep running.
+    #[test]
+    fn close_to_menu_bar_defaults_true() {
+        let p = Preferences::default();
+        assert!(p.close_to_menu_bar);
+        assert!(!p.close_to_menu_bar_toast_seen);
+    }
+
+    // ── desktop_exec_quote (Linux-only pure helper) ───────────────────────────
+    //
+    // Tested unconditionally (cfg gates on Linux apply only at link time; the
+    // fn is defined for Linux builds only). We call it directly on all
+    // platforms in the test module to stay cross-platform.
+
+    #[cfg(target_os = "linux")]
+    mod linux_exec_quote {
+        use super::super::desktop_exec_quote;
+
+        #[test]
+        fn simple_path_needs_no_quotes() {
+            assert_eq!(desktop_exec_quote("/usr/bin/portbay"), "/usr/bin/portbay");
+        }
+
+        #[test]
+        fn path_with_spaces_is_quoted() {
+            let q = desktop_exec_quote("/home/user/my apps/portbay");
+            assert!(q.starts_with('"'), "should be quoted: {q}");
+            assert!(q.ends_with('"'), "should be quoted: {q}");
+            assert!(q.contains("my apps"), "content preserved: {q}");
+        }
+
+        #[test]
+        fn embedded_double_quote_is_escaped() {
+            let q = desktop_exec_quote(r#"/path/with"quote/portbay"#);
+            // The quote is inside a quoted string, so it must be escaped as \".
+            assert!(q.contains(r#"\""#), "embedded quote must be escaped: {q}");
+        }
+
+        #[test]
+        fn embedded_backslash_is_escaped() {
+            let q = desktop_exec_quote(r"/path/with\backslash/portbay");
+            assert!(q.contains(r"\\"), "backslash must be escaped: {q}");
+        }
+
+        #[test]
+        fn alphanumeric_path_with_allowed_chars_not_quoted() {
+            // Chars explicitly in the safe set: /.-_:
+            let p = "/usr/local/bin/portbay-app_v1:2.0";
+            assert_eq!(desktop_exec_quote(p), p);
+        }
+    }
 }

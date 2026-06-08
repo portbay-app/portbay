@@ -20,7 +20,8 @@ PortBay is an open-source (AGPL-3.0), container-free local dev manager for macOS
 | Reverse proxy | Caddy (automatic) | Nginx (automatic) |
 | Footprint | Small (native) | Tiny (Nginx + PHP-FPM only) |
 | Platform | macOS (Apple Silicon) | macOS |
-| Automation | CLI + MCP | CLI (valet) |
+| Automation | CLI + MCP (69 tools) | CLI (valet) |
+| AI agent task board | ✅ Markdown cards + handoff memory | ❌ |
 
 ## What they share
 
@@ -31,6 +32,8 @@ Both tools are open source and container-free. Both use dnsmasq for local DNS re
 PortBay adds a **GUI and menu-bar mode** on top of the Valet-style model. You can see all projects, their status, logs, and metrics at a glance without typing commands. For teams with developers who are less comfortable in the terminal, this matters.
 
 PortBay uses **Caddy** as the reverse proxy instead of Nginx. Caddy's configuration model is simpler for multi-runtime routing and its admin API is what allows PortBay to manage routes programmatically. This is what enables the MCP server — every proxy and project action is available to AI agents and external scripts.
+
+The MCP server is half of the agent story; the **task board** is the other half. Every project gets one, and the cards are Markdown files in your repo — move a card to *To Do* and the coding agent you assigned (Claude Code, Codex, Cursor, Gemini, and more) picks it up, does the work on your machine, and appends a handoff brief the next run reads first. Valet manages requests into your projects; PortBay also manages the work queue on top of them.
 
 PortBay's runtime support is **genuinely multi-runtime**. A Next.js project and a Laravel API can run side by side with their own `.test` hostnames. Valet drivers exist for some non-PHP runtimes but PHP is clearly the primary citizen.
 
@@ -60,7 +63,7 @@ Valet's configuration being based on directory parking is familiar and simple. N
 - You mix Node, PHP, and static projects and need one tool to cover all of them.
 - A GUI and menu-bar visibility across projects matters for your team or workflow.
 - You want bundled database management (MySQL, Postgres, Redis) without a separate setup step.
-- MCP server support for AI-assisted development is on your list.
+- MCP server support for AI-assisted development is on your list — or a task board your agents work cards from.
 - Cloudflare tunnel integration for public sharing in one click is useful.
 - You want a JSON-based registry for portable, version-controlled project config.
 

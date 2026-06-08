@@ -50,7 +50,7 @@ pub(super) async fn reconcile(
     let admin_port = state
         .caddy
         .lock()
-        .expect("caddy mutex poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .admin_port();
     // Use the HTTPS port Caddy actually bound at boot (persisted in AppState),
     // NOT a fresh probe. Re-probing here is wrong: once Caddy holds :443 the
@@ -74,7 +74,7 @@ pub(super) async fn reconcile(
     // lock and immediately release it so we don't hold the mutex across the
     // subsequent async Caddy load.
     let shared_project_ids: HashSet<String> = {
-        let mgr = state.tunnels.lock().expect("tunnels mutex poisoned");
+        let mgr = state.tunnels.lock().unwrap_or_else(|e| e.into_inner());
         mgr.list()
             .into_iter()
             .filter(|t| t.running)
@@ -117,7 +117,7 @@ pub(super) async fn reconcile(
         // projects. Attribute it precisely — but never misreport our own Caddy
         // (which legitimately holds :80 after a prior successful load).
         if reg.list_projects().iter().any(|p| !p.https) {
-            let caddy_pid = state.caddy.lock().expect("caddy mutex poisoned").pid();
+            let caddy_pid = state.caddy.lock().unwrap_or_else(|e| e.into_inner()).pid();
             if let Some(holder) = crate::port_holder::find(http_port) {
                 let is_ours =
                     caddy_pid.is_some_and(|pid| holder.pid == pid || holder.descends_from(pid));

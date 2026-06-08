@@ -45,8 +45,9 @@ dest="${bin_dir}/portbay-mcp-${triple}"
 # dependency of crates/mcp) validates that EVERY externalBin file exists at
 # compile time. Seed empty placeholders for all of our own sidecars first to
 # satisfy the existence check; the real binary overwrites this one below, and
-# build-hosts-helper.sh overwrites portbay-hosts-helper.
-for ours in portbay-hosts-helper portbay-mcp; do
+# build-hosts-helper.sh overwrites portbay-hosts-helper (and build-afm.sh
+# overwrites portbay-afm on macOS; the Linux placeholder is never bundled).
+for ours in portbay-hosts-helper portbay-mcp portbay-afm; do
   ph="${bin_dir}/${ours}-${triple}"
   [ -f "$ph" ] || : > "$ph"
 done

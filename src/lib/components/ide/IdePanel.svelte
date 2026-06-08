@@ -7,8 +7,11 @@
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
   import type { IconName } from "$lib/components/atoms/Icon.svelte";
+  import SshGpu from "$lib/components/connections/SshGpu.svelte";
+  import SshJobs from "$lib/components/connections/SshJobs.svelte";
   import SshLogs from "$lib/components/connections/SshLogs.svelte";
   import SshPorts from "$lib/components/connections/SshPorts.svelte";
+  import SshProblems from "$lib/components/connections/SshProblems.svelte";
   import SshProcesses from "$lib/components/connections/SshProcesses.svelte";
   import SshTerminalTabs from "$lib/components/connections/SshTerminalTabs.svelte";
   import type { PanelTab } from "$lib/stores/ideLayout.svelte";
@@ -28,7 +31,10 @@
     { id: "terminal", label: "Terminal", icon: "terminal" },
     { id: "logs", label: "Logs", icon: "file-text" },
     { id: "processes", label: "Processes", icon: "list" },
+    { id: "gpu", label: "GPU", icon: "cpu" },
+    { id: "jobs", label: "Jobs", icon: "layers" },
     { id: "ports", label: "Ports", icon: "circle-dot" },
+    { id: "problems", label: "Problems", icon: "alert-triangle" },
   ];
 </script>
 
@@ -68,8 +74,17 @@
     <div class="h-full" class:hidden={panelTab !== "processes"}>
       <SshProcesses {connectionId} {label} active={panelTab === "processes"} />
     </div>
+    <div class="h-full" class:hidden={panelTab !== "gpu"}>
+      <SshGpu {connectionId} {label} active={panelTab === "gpu"} />
+    </div>
+    <div class="h-full" class:hidden={panelTab !== "jobs"}>
+      <SshJobs {connectionId} {label} active={panelTab === "jobs"} />
+    </div>
     <div class="h-full" class:hidden={panelTab !== "ports"}>
       <SshPorts {connectionId} {label} {host} active={panelTab === "ports"} />
+    </div>
+    <div class="h-full" class:hidden={panelTab !== "problems"}>
+      <SshProblems {connectionId} {label} active={panelTab === "problems"} />
     </div>
   </div>
 </section>

@@ -1,4 +1,4 @@
-<!-- DomainsPanel — default domain suffix (Pro), hosts management, CA, cert renew. -->
+<!-- DomainsPanel - default domain suffix (Pro), hosts management, CA, cert renew. -->
 <script lang="ts">
   import { onMount } from "svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
@@ -16,12 +16,23 @@
     domainSuffix: string;
     projectCount: number;
   }
+
+  type CaTrustState = "trusted" | "untrusted" | "missing" | "error";
+
+  interface CaStatus {
+    state: CaTrustState;
+    detail: string | null;
+  }
+
   let domainSettings = $state<DomainSettings | null>(null);
   let domainDraft = $state<string>("test");
   let domainBusy = $state<boolean>(false);
 
+  let caStatus = $state<CaStatus | null>(null);
+  let caInstalling = $state<boolean>(false);
+
   // Changing the default domain suffix is a Pro capability. The community tiers
-  // (anonymous / free) stay pinned to the configured suffix — important for the
+  // (anonymous / free) stay pinned to the configured suffix - important for the
   // beta, where every tester shares the same `.portbay.test` routing.
   const canEditDomainSuffix = $derived(entitlements.isPro);
 
@@ -31,6 +42,27 @@
       domainDraft = domainSettings.domainSuffix;
     } catch {
       domainSettings = null;
+    }
+  }
+
+  async function refreshCaStatus() {
+    try {
+      caStatus = await safeInvoke<CaStatus>("get_ca_status");
+    } catch {
+      caStatus = { state: "error", detail: null };
+    }
+  }
+
+  async function installCa() {
+    if (caInstalling) return;
+    caInstalling = true;
+    try {
+      await safeInvoke("install_mkcert_ca");
+      await refreshCaStatus();
+    } catch {
+      /* error toast handled by safeInvoke */
+    } finally {
+      caInstalling = false;
     }
   }
 
@@ -47,13 +79,13 @@
         code: "DOMAIN_SUFFIX_UPDATED",
         category: "infrastructure",
         whatHappened: `Domain suffix changed from .${migration.oldSuffix} to .${migration.newSuffix}.`,
-        whyItMatters: `${migration.changedProjects} project hostname(s) migrated and now resolve via /etc/hosts; Caddy + certificates update automatically. For wildcard *.${migration.newSuffix} subdomains, re-run “Set up local DNS” on the DNS page.`,
+        whyItMatters: `${migration.changedProjects} project hostname(s) migrated and now resolve via /etc/hosts; Caddy + certificates update automatically. For wildcard *.${migration.newSuffix} subdomains, re-run "Set up local DNS" on the DNS page.`,
         whoCausedIt: "system",
         severity: "success",
         actions: [],
       });
       // Reflect the migrated hostnames everywhere (project list, detail panel,
-      // domains page) — the registry changed under the running stores.
+      // domains page) - the registry changed under the running stores.
       await refreshDomainSettings();
       await projects.refresh();
     } catch {
@@ -65,6 +97,7 @@
 
   onMount(() => {
     void refreshDomainSettings();
+    void refreshCaStatus();
   });
 </script>
 
@@ -77,16 +110,16 @@
       <div class="min-w-0">
         <span class="text-[13px] text-fg">Default domain suffix</span>
         <p class="mt-1 text-[11px] text-fg-subtle leading-relaxed max-w-md">
-          Applies to every project — existing hostnames migrate automatically.
+          Applies to every project - existing hostnames migrate automatically.
           They resolve via <code class="font-mono">/etc/hosts</code> on any
           suffix; for wildcard <code class="font-mono">*.suffix</code>
-          subdomains, run “Set up local DNS” on the DNS page. Use a local-only
+          subdomains, run "Set up local DNS" on the DNS page. Use a local-only
           suffix like <code class="font-mono">test</code> or
-          <code class="font-mono">portbay.test</code> — public TLDs are rejected.
+          <code class="font-mono">portbay.test</code> - public TLDs are rejected.
         </p>
         {#if !canEditDomainSuffix}
           <p class="mt-1.5 text-[11px] text-accent/90">
-            Changing the suffix is a <span class="font-medium">Pro</span> feature — community
+            Changing the suffix is a <span class="font-medium">Pro</span> feature - community
             projects stay on
             <code class="font-mono">.{domainSettings?.domainSuffix ?? domainDraft}</code>.
           </p>
@@ -117,11 +150,11 @@
               domainDraft.trim().replace(/^\./, "") === domainSettings?.domainSuffix}
             class="h-8 px-3 rounded-md text-[12px] text-accent border border-accent/40 hover:bg-accent/10 transition-colors disabled:opacity-50"
           >
-            {domainBusy ? "Saving…" : "Apply"}
+            {domainBusy ? "Saving..." : "Apply"}
           </button>
         </div>
       {:else}
-        <!-- Community tiers can't change the suffix — show it read-only and
+        <!-- Community tiers can't change the suffix - show it read-only and
              offer an upgrade. Mirrors the Sync (Pro) upsell. -->
         <div class="flex items-center gap-2 shrink-0">
           <span
@@ -150,17 +183,60 @@
       />
     </div>
 
-    <div class="flex items-center justify-between gap-3 py-2.5">
-      <span class="text-[13px] text-fg">Trust local CA</span>
-      <span class="inline-flex items-center gap-1.5 text-[12px]">
-        <span
-          class="inline-flex items-center justify-center w-4 h-4 rounded-full
-                 bg-status-running/15 text-status-running"
-        >
-          <Icon name="check" size={10} />
-        </span>
-        <span class="text-status-running font-medium">Trusted</span>
-      </span>
+    <div class="flex items-start justify-between gap-3 py-2.5">
+      <div class="min-w-0">
+        <span class="text-[13px] text-fg">Trust local CA</span>
+        {#if caStatus?.state === "untrusted" || caStatus?.state === "missing"}
+          <p class="mt-1 text-[11px] text-status-unhealthy leading-relaxed max-w-md">
+            {caStatus.state === "missing"
+              ? "CA root not found - HTTPS certificates won't be trusted by browsers."
+              : "CA exists but is not trusted by the system keychain - HTTPS certificates will show warnings."}
+          </p>
+        {/if}
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        {#if caStatus === null}
+          <span class="text-[12px] text-fg-subtle">Checking...</span>
+        {:else if caStatus.state === "trusted"}
+          <span class="inline-flex items-center gap-1.5 text-[12px]">
+            <span
+              class="inline-flex items-center justify-center w-4 h-4 rounded-full
+                     bg-status-running/15 text-status-running"
+            >
+              <Icon name="check" size={10} />
+            </span>
+            <span class="text-status-running font-medium">Trusted</span>
+          </span>
+        {:else}
+          <span class="inline-flex items-center gap-1.5 text-[12px]">
+            <span
+              class="inline-flex items-center justify-center w-4 h-4 rounded-full
+                     bg-status-unhealthy/15 text-status-unhealthy"
+            >
+              <Icon name="alert-triangle" size={10} />
+            </span>
+            <span class="text-status-unhealthy font-medium">
+              {caStatus.state === "missing" ? "Not installed" : "Not trusted"}
+            </span>
+          </span>
+          <button
+            type="button"
+            onclick={installCa}
+            disabled={caInstalling}
+            class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12px] font-medium
+                   text-on-accent bg-accent hover:brightness-110 active:brightness-95
+                   disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
+          >
+            {#if caInstalling}
+              <Icon name="refresh-cw" size={11} class="animate-spin" />
+              Installing...
+            {:else}
+              <Icon name="lock" size={11} />
+              {caStatus.state === "missing" ? "Install CA" : "Re-trust CA"}
+            {/if}
+          </button>
+        {/if}
+      </div>
     </div>
 
     <div class="flex items-center justify-between gap-3 py-2.5 last:pb-0">

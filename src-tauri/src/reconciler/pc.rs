@@ -28,6 +28,11 @@ const PC_READINESS_POLL: Duration = Duration::from_millis(100);
 pub(super) struct PcCache {
     /// Hash of the last YAML successfully written + booted against.
     last_applied: Option<u64>,
+    /// Database skip-warnings already emitted, keyed `"<id>:<reason>"`, so a
+    /// persistent bad state (missing binary, unprovisioned data dir) logs once
+    /// instead of on every safety tick. Rebuilt each pass: an instance that
+    /// heals or is removed drops out, re-arming its warning.
+    db_skips_warned: std::collections::HashSet<String>,
 }
 
 impl PcCache {
@@ -51,7 +56,7 @@ pub(super) async fn reconcile(
     let mail_env = mail_env_from_state(state);
     let data_dir = data_dir_from_logs(logs_dir);
     let php_fpm_specs = php_fpm_specs_for(reg, data_dir);
-    let db_specs = db_daemon_specs_for(reg, data_dir);
+    let db_specs = db_daemon_specs_for(reg, data_dir, &mut cache.db_skips_warned);
     let web_specs = crate::webservers::specs_for(reg, data_dir, logs_dir);
     let yaml = match process_compose::config::to_yaml(
         reg,
@@ -287,12 +292,16 @@ fn managed_php_install(reg: &Registry, requested: &str) -> Option<crate::php::Ph
 ///
 /// Instances whose engine binary is missing, or whose data dir hasn't been
 /// provisioned, are skipped with a warning — PC would only fail to launch
-/// them, and a missing daemon shouldn't poison the whole YAML.
+/// them, and a missing daemon shouldn't poison the whole YAML. `warned`
+/// (from [`PcCache`]) dedupes those warnings across ticks: each skip state
+/// logs once, then stays quiet until the instance heals or regresses.
 fn db_daemon_specs_for(
     reg: &Registry,
     app_data: &Path,
+    warned: &mut std::collections::HashSet<String>,
 ) -> Vec<process_compose::config::DatabaseDaemonSpec> {
     let mut specs = Vec::new();
+    let mut still_skipped = std::collections::HashSet::new();
     for inst in reg.list_databases() {
         // File-based engines (SQLite) have no daemon to supervise — they're
         // never a Process Compose process. Their connection env is still
@@ -307,20 +316,28 @@ fn db_daemon_specs_for(
         let Some(daemon) =
             crate::databases::daemon_binary_resolved(inst.engine, managed_bin.as_deref())
         else {
-            tracing::warn!(
-                target: "reconciler",
-                "database `{}` ({}) skipped — daemon binary not found. Install the engine via the Databases panel.",
-                inst.id, inst.engine.label(),
-            );
+            let key = format!("{}:binary", inst.id);
+            if !warned.contains(&key) {
+                tracing::warn!(
+                    target: "reconciler",
+                    "database `{}` ({}) skipped — daemon binary not found. Install the engine via the Databases panel.",
+                    inst.id, inst.engine.label(),
+                );
+            }
+            still_skipped.insert(key);
             continue;
         };
         let data = crate::databases::data_dir(app_data, inst.id.as_str());
         if !crate::databases::is_initialized(inst.engine, &data) {
-            tracing::warn!(
-                target: "reconciler",
-                "database `{}` skipped — data dir {} not initialized yet.",
-                inst.id, data.display(),
-            );
+            let key = format!("{}:init", inst.id);
+            if !warned.contains(&key) {
+                tracing::warn!(
+                    target: "reconciler",
+                    "database `{}` skipped — data dir {} not initialized. Start it from the Databases panel to re-provision.",
+                    inst.id, data.display(),
+                );
+            }
+            still_skipped.insert(key);
             continue;
         }
         let command = crate::databases::run_command(inst, &daemon, app_data);
@@ -334,6 +351,7 @@ fn db_daemon_specs_for(
             auto_start: inst.auto_start,
         });
     }
+    *warned = still_skipped;
     specs.sort_by(|a, b| a.process_id.cmp(&b.process_id));
     specs
 }
@@ -343,7 +361,7 @@ fn db_daemon_specs_for(
 /// generator. Returns `None` when Mailpit isn't running (Mail* vars
 /// are absent from the generated YAML).
 fn mail_env_from_state(state: &AppState) -> Option<process_compose::config::MailpitEnv> {
-    let guard = state.mailpit.lock().expect("mailpit mutex poisoned");
+    let guard = state.mailpit.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_running() {
         Some(process_compose::config::MailpitEnv::with_smtp_port(
             guard.smtp_port(),

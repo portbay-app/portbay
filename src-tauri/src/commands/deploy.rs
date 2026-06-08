@@ -17,13 +17,17 @@ use tauri::{AppHandle, State};
 
 use crate::commands::localfs::walk_files;
 use crate::commands::projects::load_registry;
+use crate::commands::ssh_exec::{
+    emit_deploy_progress, DeployCancelGuard, DeployEvent, DEPLOY_CHANNEL,
+};
 use crate::commands::ssh_tunnels::{
     load_stored_key_passphrase, load_stored_password, load_stored_proxy_password,
 };
 use crate::error::{AppError, AppResult};
 use crate::registry::{ProjectId, SshConnection, SshConnectionId};
-use crate::ssh::exec::{run_deploy_on, StepResult};
+use crate::ssh::exec::{run_deploy_on_streaming, StepResult};
 use crate::state::AppState;
+use tauri::Emitter;
 use russh_sftp::client::SftpSession;
 use tokio::io::AsyncWriteExt;
 
@@ -35,6 +39,10 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDeployRunInput {
     pub project_id: String,
+    /// Caller-generated id for live progress events + cancellation. Absent →
+    /// no streaming (legacy await-the-result behaviour).
+    #[serde(default)]
+    pub run_id: Option<String>,
     /// One-shot password from the credential prompt; this run only, never stored.
     #[serde(default)]
     pub password: Option<String>,
@@ -57,6 +65,9 @@ pub struct DeployRunResult {
     pub remote_path: String,
     /// Per-step output from the configured build/release commands.
     pub steps: Vec<StepResult>,
+    /// True when the run was cancelled (sync stopped early and/or steps were
+    /// skipped); whatever completed is still reported above.
+    pub cancelled: bool,
 }
 
 /// Join a POSIX directory + relative child path (the remote side is POSIX).
@@ -139,7 +150,7 @@ pub async fn project_deploy_run(
 
     // One host-key interactor for both legs of the deploy (SFTP upload + exec
     // steps); only the first cold connect actually prompts.
-    let interactor = Some(crate::ssh::EventInteractor::new(app));
+    let interactor = Some(crate::ssh::EventInteractor::shared(app.clone()));
 
     // Open (or reuse) the cached SFTP session for the upload.
     let sftp = {
@@ -177,11 +188,40 @@ pub async fn project_deploy_run(
         let _ = sftp.create_dir(dir.clone()).await;
     }
 
+    // Live progress plumbing: with a run id the sync leg emits throttled
+    // upload-progress events and the steps stream their output; the cancel
+    // flag stops between files / steps. The guard deregisters the flag on any
+    // exit path; callers without a run id pay nothing.
+    let run_id = input.run_id.clone();
+    let guard = run_id.as_deref().map(DeployCancelGuard::new);
+    let is_cancelled = || guard.as_ref().is_some_and(|g| g.is_cancelled());
+    let total = files.len() as u32;
+    let emit_sync = |uploaded: u32, bytes: u64| {
+        if let Some(id) = run_id.as_deref() {
+            let _ = app.emit(
+                DEPLOY_CHANNEL,
+                DeployEvent::Sync {
+                    run_id: id.to_string(),
+                    uploaded,
+                    total,
+                    bytes,
+                },
+            );
+        }
+    };
+
     // Upload each file whole.
+    emit_sync(0, 0);
     let mut uploaded = 0u32;
     let mut bytes = 0u64;
     let mut skipped = Vec::new();
+    let mut cancelled = false;
+    let mut last_emit = std::time::Instant::now();
     for f in &files {
+        if is_cancelled() {
+            cancelled = true;
+            break;
+        }
         let meta = std::fs::metadata(&f.abs)?;
         if meta.len() > MAX_FILE_BYTES {
             skipped.push(f.rel.clone());
@@ -192,7 +232,13 @@ pub async fn project_deploy_run(
         write_remote(&sftp, remote, &data).await?;
         uploaded += 1;
         bytes += data.len() as u64;
+        // Throttle progress to ~10 Hz so a tree of tiny files doesn't flood IPC.
+        if last_emit.elapsed().as_millis() >= 100 {
+            emit_sync(uploaded, bytes);
+            last_emit = std::time::Instant::now();
+        }
     }
+    emit_sync(uploaded, bytes);
 
     // Run the build/release steps over the cached exec session, from the remote
     // root. No steps configured → sync-only deploy.
@@ -202,7 +248,7 @@ pub async fn project_deploy_run(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    let step_results = if steps.is_empty() {
+    let step_results = if steps.is_empty() || cancelled {
         Vec::new()
     } else {
         let session = {
@@ -217,10 +263,21 @@ pub async fn project_deploy_run(
             .await
             .map_err(AppError::Ssh)?
         };
-        run_deploy_on(&session, &steps, Some(&remote_root))
-            .await
-            .map_err(AppError::Ssh)?
+        run_deploy_on_streaming(
+            &session,
+            &steps,
+            Some(&remote_root),
+            guard.as_ref().map(|g| g.flag()),
+            |p| {
+                if let Some(id) = run_id.as_deref() {
+                    emit_deploy_progress(&app, id, p);
+                }
+            },
+        )
+        .await
+        .map_err(AppError::Ssh)?
     };
+    cancelled = cancelled || is_cancelled();
 
     Ok(DeployRunResult {
         uploaded,
@@ -228,6 +285,7 @@ pub async fn project_deploy_run(
         skipped,
         remote_path: remote_root,
         steps: step_results,
+        cancelled,
     })
 }
 

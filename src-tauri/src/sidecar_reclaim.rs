@@ -37,6 +37,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use sysinfo::System;
+
 pub use crate::process_compose::lifecycle::SweepMode;
 
 /// How long to let a reaped instance forward SIGTERM to anything it supervises
@@ -153,8 +155,13 @@ impl SidecarKind {
         match self {
             // 443 = HTTPS, 80 = HTTP, 2019 = admin API.
             SidecarKind::Caddy => &[443, 80, 2019],
-            // PortBay's dnsmasq runs on a high non-privileged port by default.
-            SidecarKind::Dnsmasq => &[53053],
+            // PortBay's dnsmasq runs on a non-privileged port below the
+            // ephemeral range; older installs' resolver files still point at
+            // the legacy default, so `doctor` watches both.
+            SidecarKind::Dnsmasq => &[
+                crate::dnsmasq::DEFAULT_PORT,
+                crate::dnsmasq::LEGACY_DEFAULT_PORT,
+            ],
             // 1025 = SMTP, 8025 = web UI.
             SidecarKind::Mailpit => &[1025, 8025],
             // php-fpm listens on a unix socket, not a TCP port — nothing for
@@ -262,10 +269,7 @@ pub fn reclaim_stale(kind: SidecarKind, mode: SweepMode) -> usize {
     let Some(sig) = kind.signature() else {
         return 0;
     };
-    let Some(ps) = ps_snapshot() else {
-        return 0;
-    };
-    let pids = matching_pids(&ps, &sig, &[], mode);
+    let pids = matching_pids_snapshot(&sig, &[], mode);
     let mut reaped = 0usize;
     for pid in pids {
         // PID-reuse guard: the `ps` snapshot is a moment old. Re-read this
@@ -350,17 +354,20 @@ impl StackReport {
 /// into all-owned vs orphaned-to-launchd. Read-only — kills nothing. Used by
 /// `portbay doctor` to flag duplicate/orphaned stacks.
 pub fn detect_all() -> Vec<StackReport> {
-    let Some(ps) = ps_snapshot() else {
-        return Vec::new();
-    };
+    let snapshot = process_snapshot();
     SidecarKind::ALL
         .iter()
         .filter_map(|&kind| {
             let sig = kind.signature()?;
             Some(StackReport {
                 kind,
-                owned_pids: matching_pids(&ps, &sig, &[], SweepMode::All),
-                orphan_pids: matching_pids(&ps, &sig, &[], SweepMode::OrphansOnly),
+                owned_pids: matching_pids_from_processes(&snapshot, &sig, &[], SweepMode::All),
+                orphan_pids: matching_pids_from_processes(
+                    &snapshot,
+                    &sig,
+                    &[],
+                    SweepMode::OrphansOnly,
+                ),
             })
         })
         .collect()
@@ -381,13 +388,17 @@ pub struct PortSquat {
 }
 
 /// Check each of `kind`'s canonical ports for a listener and classify it.
-/// Returns one entry per *held* port (free ports are omitted).
+/// Returns one entry per *held* port (free ports are omitted). Checks TCP
+/// first, then UDP — a DNS-port squatter is usually a *UDP-only* socket
+/// (often some app's transient ephemeral bind), which a TCP-only probe
+/// would miss entirely, leaving `doctor` blind to the squat.
 pub fn port_squatters(kind: SidecarKind) -> Vec<PortSquat> {
     let marker = kind.config_marker();
     kind.canonical_ports()
         .iter()
         .filter_map(|&port| {
-            let holder = crate::port_holder::find(port)?;
+            let holder =
+                crate::port_holder::find(port).or_else(|| crate::port_holder::find_udp(port))?;
             let portbay_owned = match (&marker, &holder.command_line) {
                 (Some(m), Some(cmd)) => cmd.contains(m),
                 _ => false,
@@ -451,43 +462,76 @@ pub fn app_running() -> Option<u32> {
 // Internals (pure where possible, so the safety-critical matcher is unit-tested)
 // ---------------------------------------------------------------------------
 
-/// Snapshot the process table as `pid ppid command` lines. `None` if `ps`
-/// is unavailable (then we reclaim nothing — fail safe).
-fn ps_snapshot() -> Option<String> {
-    let out = std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,command="])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+#[derive(Debug, Clone)]
+struct ProcessInfo {
+    pid: u32,
+    ppid: Option<u32>,
+    command_line: String,
 }
 
-/// Parse `ps -axo pid=,ppid=,command=` output and return the pids of every line
-/// matching `sig`, excluding the current process and anything in `exclude`, and
-/// honouring `mode`. Pure string work so it's unit-testable without spawning.
-fn matching_pids(ps_output: &str, sig: &Signature, exclude: &[u32], mode: SweepMode) -> Vec<u32> {
+fn process_snapshot() -> Vec<ProcessInfo> {
+    let mut system = System::new_all();
+    system.refresh_processes();
+    system
+        .processes()
+        .iter()
+        .map(|(pid, process)| ProcessInfo {
+            pid: pid.as_u32(),
+            ppid: process.parent().map(|p| p.as_u32()),
+            command_line: process.cmd().join(" "),
+        })
+        .filter(|p| !p.command_line.trim().is_empty())
+        .collect()
+}
+
+fn matching_pids_snapshot(sig: &Signature, exclude: &[u32], mode: SweepMode) -> Vec<u32> {
+    matching_pids_from_processes(&process_snapshot(), sig, exclude, mode)
+}
+
+fn matching_pids_from_processes(
+    processes: &[ProcessInfo],
+    sig: &Signature,
+    exclude: &[u32],
+    mode: SweepMode,
+) -> Vec<u32> {
     let me = std::process::id();
-    ps_output
-        .lines()
-        .filter_map(|line| {
-            let mut cols = line.split_whitespace();
-            let pid = cols.next()?.parse::<u32>().ok()?;
-            let ppid = cols.next()?.parse::<u32>().ok()?;
-            if pid == me || exclude.contains(&pid) {
+    processes
+        .iter()
+        .filter_map(|process| {
+            if process.pid == me || exclude.contains(&process.pid) {
                 return None;
             }
-            if mode == SweepMode::OrphansOnly && ppid != 1 {
+            if mode == SweepMode::OrphansOnly && process.ppid != Some(1) {
                 return None;
             }
-            if sig.matches(line) {
-                Some(pid)
+            if sig.matches(&process.command_line) {
+                Some(process.pid)
             } else {
                 None
             }
         })
         .collect()
+}
+
+/// Parse `ps -axo pid=,ppid=,command=` output and return the pids of every line
+/// matching `sig`, excluding the current process and anything in `exclude`, and
+/// honouring `mode`. Pure string work so it's unit-testable without spawning.
+#[cfg(test)]
+fn matching_pids(ps_output: &str, sig: &Signature, exclude: &[u32], mode: SweepMode) -> Vec<u32> {
+    let processes: Vec<ProcessInfo> = ps_output
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            let pid = cols.next()?.parse::<u32>().ok()?;
+            let ppid = cols.next()?.parse::<u32>().ok()?;
+            Some(ProcessInfo {
+                pid,
+                ppid: Some(ppid),
+                command_line: line.to_string(),
+            })
+        })
+        .collect();
+    matching_pids_from_processes(&processes, sig, exclude, mode)
 }
 
 /// Re-read a single pid's command line and confirm it still matches `sig`.
@@ -763,6 +807,14 @@ mod tests {
     fn canonical_ports_cover_the_incident_ports() {
         assert!(SidecarKind::Caddy.canonical_ports().contains(&443));
         assert!(SidecarKind::Mailpit.canonical_ports().contains(&1025));
+        // Both the current DNS default and the legacy one older installs'
+        // resolver files still point at — `doctor` must watch both.
+        assert!(SidecarKind::Dnsmasq
+            .canonical_ports()
+            .contains(&crate::dnsmasq::DEFAULT_PORT));
+        assert!(SidecarKind::Dnsmasq
+            .canonical_ports()
+            .contains(&crate::dnsmasq::LEGACY_DEFAULT_PORT));
         assert_eq!(SidecarKind::Caddy.rebind_gate_port(), Some(443));
         assert_eq!(SidecarKind::Mailpit.rebind_gate_port(), None);
     }

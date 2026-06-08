@@ -14,4 +14,10 @@ export interface ArtifactDir {
   fileCount: number;
   /** Newest file mtime as Unix seconds, or null for an empty dir. */
   lastModified: number | null;
+  /**
+   * Whether the background scheduler will auto-delete this dir. `true` only for
+   * regenerable caches (rebuild locally, no reinstall, no integrity risk);
+   * `false` for dependency stores and build output, which stay manual-only.
+   */
+  autoClean: boolean;
 }

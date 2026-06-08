@@ -150,14 +150,20 @@ mod tests {
     #[test]
     fn matches_plain_and_bracketed() {
         assert!(line_matches("example.com ssh-ed25519 AAAA", "example.com"));
-        assert!(line_matches("[example.com]:2222 ssh-rsa AAAA", "[example.com]:2222"));
+        assert!(line_matches(
+            "[example.com]:2222 ssh-rsa AAAA",
+            "[example.com]:2222"
+        ));
         assert!(!line_matches("other.com ssh-rsa AAAA", "example.com"));
     }
 
     #[test]
     fn matches_comma_list_and_markers() {
         assert!(line_matches("a.com,b.com ssh-rsa AAAA", "b.com"));
-        assert!(line_matches("@cert-authority *.example.com ssh-rsa AAAA", "*.example.com"));
+        assert!(line_matches(
+            "@cert-authority *.example.com ssh-rsa AAAA",
+            "*.example.com"
+        ));
         assert!(!line_matches("# a comment", "a.com"));
     }
 

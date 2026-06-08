@@ -1,0 +1,1 @@
+deploy the nginx config to staging then um run docker compose up dash d and check the postgres logs

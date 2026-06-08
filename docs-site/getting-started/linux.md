@@ -103,7 +103,7 @@ The helper checks the connecting process UID with Linux `SO_PEERCRED` and only a
 - AppImage auto-update is supported by the Tauri updater channel. deb, rpm,
   Snap, and AUR updates are expected to flow through their package managers.
 - Wayland compositors differ in transparency and tray behavior. PortBay uses an opaque Linux shell fallback instead of macOS vibrancy.
-- If Secret Service is missing, auth falls back to `PORTBAY_SESSION_JSON` or a local `~/.config/PortBay/session.json` file with `0600` permissions; sync recovery keys fall back to `PORTBAY_SYNC_KEY` or `~/.config/PortBay/sync.key` with `0600` permissions.
+- If Secret Service is missing, auth falls back to `PORTBAY_SESSION_JSON` or a local `~/.config/PortBay/session.json` file with `0600` permissions; sync recovery keys fall back to `PORTBAY_SYNC_KEY` or `~/.config/PortBay/sync.key` with `0600` permissions. Treat both environment overrides as security-sensitive — anything that can read the process environment can read the tokens (see the "Session Environment Override" section of [SECURITY.md](https://github.com/portbay-app/portbay/blob/main/SECURITY.md)); the app logs a warning whenever a session is loaded from the environment.
 - The single-instance plugin may require `xdotool` on X11; Wayland focus-stealing restrictions can prevent second-launch focus.
 
 ## Local Build

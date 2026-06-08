@@ -23,7 +23,7 @@ export interface ProFeature {
   perk: string;
 }
 
-export const PRO_PRICE = { amount: 59, currency: "USD", interval: "year", label: "$59/yr" };
+export const PRO_PRICE = { amount: 10, currency: "USD", interval: "month", label: "$10/mo" };
 export const PRO_DEVICES = 2;
 /** Pro marketing / pricing page — the "Learn more about Pro" link target. */
 export const PRICING_URL = "https://portbay.app/pro";

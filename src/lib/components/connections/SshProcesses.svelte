@@ -9,6 +9,7 @@
   import { invokeQuiet } from "$lib/ipc";
   import { connectWithPrompt } from "$lib/ssh/connectWithPrompt";
   import { confirmDialog } from "$lib/stores/confirm.svelte";
+  import { mlWatch } from "$lib/stores/mlWatch.svelte";
   import { relativeTime } from "$lib/ssh/hostFormat";
   import type { ExecResult } from "$lib/types/sshTunnels";
 
@@ -91,6 +92,10 @@
     }
   });
 
+  const watchingCount = $derived(
+    mlWatch.value.filter((w) => w.connectionId === connectionId && w.kind === "process").length,
+  );
+
   async function kill(p: Proc) {
     const choice = await confirmDialog.open({
       title: `End process ${p.pid}?`,
@@ -131,6 +136,7 @@
       <h2 class="text-[13px] font-semibold text-fg">Processes</h2>
       <p class="text-[11px] text-fg-subtle">
         {stampedAt ? `Snapshot · ${relativeTime(stampedAt)} · top by CPU` : "ps aux — point-in-time, not live"}
+        {#if watchingCount}<span class="text-accent"> · watching {watchingCount}</span>{/if}
       </p>
     </div>
     <button
@@ -175,6 +181,7 @@
         </thead>
         <tbody>
           {#each procs as p (p.pid)}
+            {@const watched = mlWatch.isWatched(connectionId, "process", p.pid)}
             <tr class="group border-b border-border/40 hover:bg-surface-2/50">
               <td class="px-4 py-1.5 font-mono text-fg-muted">{p.pid}</td>
               <td class="px-2 py-1.5 text-right font-mono tabular-nums {p.cpu >= 50 ? 'text-status-unhealthy' : 'text-fg'}">{p.cpu.toFixed(1)}</td>
@@ -184,15 +191,25 @@
                 <span class="block max-w-[420px] truncate font-mono text-fg" title={p.command}>{p.command}</span>
               </td>
               <td class="px-4 py-1.5 text-right">
-                <button
-                  type="button"
-                  onclick={() => kill(p)}
-                  disabled={killing === p.pid}
-                  class="inline-flex items-center gap-1 rounded p-1 text-fg-subtle opacity-0 hover:bg-status-crashed/10 hover:text-status-crashed group-hover:opacity-100 disabled:opacity-50"
-                  title="End process"
-                >
-                  <Icon name={killing === p.pid ? "refresh-cw" : "circle-stop"} size={13} class={killing === p.pid ? "animate-spin" : ""} />
-                </button>
+                <div class="inline-flex items-center gap-0.5">
+                  <button
+                    type="button"
+                    onclick={() => mlWatch.toggle({ connectionId, hostLabel: label, kind: "process", ref: p.pid, name: p.command })}
+                    class="inline-flex items-center gap-1 rounded p-1 hover:bg-surface-2 {watched ? 'text-accent opacity-100' : 'text-fg-subtle opacity-0 hover:text-fg group-hover:opacity-100'}"
+                    title={watched ? "Watching — you'll be notified when it exits" : "Notify me when this process exits"}
+                  >
+                    <Icon name="bell" size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    onclick={() => kill(p)}
+                    disabled={killing === p.pid}
+                    class="inline-flex items-center gap-1 rounded p-1 text-fg-subtle opacity-0 hover:bg-status-crashed/10 hover:text-status-crashed group-hover:opacity-100 disabled:opacity-50"
+                    title="End process"
+                  >
+                    <Icon name={killing === p.pid ? "refresh-cw" : "circle-stop"} size={13} class={killing === p.pid ? "animate-spin" : ""} />
+                  </button>
+                </div>
               </td>
             </tr>
           {/each}

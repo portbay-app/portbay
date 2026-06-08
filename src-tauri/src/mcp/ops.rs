@@ -3750,6 +3750,109 @@ mod tests {
             .unwrap();
         assert_eq!(dup["skipped"], true);
     }
+
+    // tasks_list defaults to compact summaries — bodies/checklists/etc. become
+    // sizes and counts so a board listing can't flood the agent's context
+    // window — while `full: true` keeps the verbose per-card shape, and
+    // task_get always returns the full card. Token-bloat regression guard:
+    // agents were pulling every card body on the board just to orient.
+    #[tokio::test]
+    async fn tasks_list_summarizes_by_default_and_inlines_bodies_only_on_full() {
+        let home = tempdir().unwrap();
+        let proj = tempdir().unwrap();
+        let ctx = ctx_in(home.path());
+        let id = ctx
+            .add_project(AddProjectArgs {
+                path: proj.path().to_string_lossy().to_string(),
+                name: Some("Blog".into()),
+                hostname: Some("blog.test".into()),
+                kind: Some(McpProjectKind::Static),
+                port: None,
+                start_command: None,
+                https: Some(true),
+                auto_start: Some(false),
+                php_version: None,
+                document_root: None,
+            })
+            .await
+            .unwrap()
+            .project
+            .unwrap()
+            .id;
+
+        let body = "A long root-cause write-up that must never ride along in a board listing.";
+        let created = ctx
+            .task_create(TaskCreateArgs {
+                project: id.clone(),
+                title: "Ship the feed".into(),
+                body: Some(body.into()),
+                status: Some("Todo".into()),
+                priority: Some("high".into()),
+                acceptance: Some("cargo test green".into()),
+                touchpoints: Some(vec!["src/feed.rs".into()]),
+                labels: None,
+                estimate: None,
+                template: None,
+            })
+            .unwrap();
+        let card_id = created["id"].as_str().unwrap().to_string();
+        ctx.task_checklist_add(TaskChecklistAddArgs {
+            project: id.clone(),
+            id: card_id.clone(),
+            items: vec!["write".into(), "verify".into()],
+            label: None,
+            run_id: None,
+        })
+        .unwrap();
+
+        // Default: a summary — workflow scalars intact, payloads as numbers.
+        let listed = ctx
+            .tasks_list(TasksListArgs {
+                project: id.clone(),
+                status: None,
+                full: None,
+            })
+            .unwrap();
+        let card = &listed["tasks"].as_array().unwrap()[0];
+        assert_eq!(card["id"], card_id.as_str());
+        assert_eq!(card["status"], "Todo");
+        assert_eq!(card["priority"], "high");
+        assert!(
+            card.get("body").is_none(),
+            "summary must not carry the body"
+        );
+        assert_eq!(card["bodyChars"], body.chars().count());
+        assert_eq!(
+            card["checklist"],
+            serde_json::json!({"done": 0, "total": 2})
+        );
+        assert!(
+            card.get("acceptance").is_none() && card.get("touchpoints").is_none(),
+            "working-a-card prose stays out of the listing"
+        );
+
+        // full: true → the verbose shape (body + checklist items) still exists.
+        let full = ctx
+            .tasks_list(TasksListArgs {
+                project: id.clone(),
+                status: None,
+                full: Some(true),
+            })
+            .unwrap();
+        let card = &full["tasks"].as_array().unwrap()[0];
+        assert_eq!(card["body"], body);
+        assert_eq!(card["checklist"]["items"].as_array().unwrap().len(), 2);
+
+        // task_get is the sanctioned per-card detail read — always full.
+        let got = ctx
+            .task_get(TaskGetArgs {
+                project: id.clone(),
+                id: card_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(got["body"], body);
+        assert_eq!(got["acceptance"], "cargo test green");
+    }
 }
 
 // ===========================================================================
@@ -3773,6 +3876,57 @@ fn card_json(pc: &ParsedCard) -> serde_json::Value {
     let mut v = serde_json::to_value(&pc.card).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
         obj.insert("body".into(), serde_json::Value::String(pc.body.clone()));
+    }
+    v
+}
+
+/// One card as a compact summary — what `tasks_list` returns by default.
+///
+/// A board listing exists so an agent can see the *plan* (what's queued,
+/// what's blocked, what's claimed); it does not need every card's markdown
+/// body, checklist text, attachment paths and link titles for that — on a
+/// real board those payloads dominate the response and silently eat the
+/// agent's context window on every orientation call. The heavy fields are
+/// replaced with sizes/counts, so an agent can still tell whether a follow-up
+/// `portbay_task_get` is worth it:
+///
+/// - `body`        → `bodyChars` (0 = no description)
+/// - `checklist`   → `{done, total}` progress
+/// - `attachments` → count
+/// - `links`       → count
+/// - `acceptance` / `touchpoints` / `custom` → omitted (working-a-card
+///   detail, not board state)
+///
+/// Scalar workflow fields (id/title/status/priority/agent/claim/…) pass
+/// through unchanged, so pick-next and filter logic needs nothing extra.
+#[cfg(feature = "tasks")]
+fn card_json_summary(pc: &ParsedCard) -> serde_json::Value {
+    let mut v = serde_json::to_value(&pc.card).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "bodyChars".into(),
+            serde_json::json!(pc.body.chars().count()),
+        );
+        if let Some(cl) = &pc.card.checklist {
+            let done = cl.items.iter().filter(|i| i.done).count();
+            obj.insert(
+                "checklist".into(),
+                serde_json::json!({ "done": done, "total": cl.items.len() }),
+            );
+        }
+        if let Some(n) = obj
+            .get("attachments")
+            .and_then(|a| a.as_array())
+            .map(Vec::len)
+        {
+            obj.insert("attachments".into(), serde_json::json!(n));
+        }
+        if let Some(n) = obj.get("links").and_then(|l| l.as_array()).map(Vec::len) {
+            obj.insert("links".into(), serde_json::json!(n));
+        }
+        obj.remove("acceptance");
+        obj.remove("touchpoints");
+        obj.remove("custom");
     }
     v
 }
@@ -3802,11 +3956,19 @@ impl McpContext {
             Some(s) => Some(BoardStatus::parse(s)?),
             None => None,
         };
+        // Summaries by default — full bodies for every card on the board is
+        // context-window bloat an agent almost never needs (see
+        // `card_json_summary`); `full: true` keeps the old shape available.
+        let render = if args.full.unwrap_or(false) {
+            card_json
+        } else {
+            card_json_summary
+        };
         let cards = board::list_cards(&path)?;
         let out: Vec<serde_json::Value> = cards
             .iter()
             .filter(|c| filter.is_none_or(|f| c.card.status == f))
-            .map(card_json)
+            .map(render)
             .collect();
         Ok(serde_json::json!({ "project": args.project, "tasks": out }))
     }

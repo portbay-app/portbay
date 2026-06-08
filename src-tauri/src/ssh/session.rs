@@ -213,9 +213,14 @@ pub async fn connect_session(
                         SshError::Russh(format!("failed to open tunnel channel: {e}")),
                     )
                 })?;
-            connect_over_stream(channel.into_stream(), &hop.host, hop.port, interactor.clone())
-                .await
-                .map_err(|e| jump_hop_error(i, total, hop, e))?
+            connect_over_stream(
+                channel.into_stream(),
+                &hop.host,
+                hop.port,
+                interactor.clone(),
+            )
+            .await
+            .map_err(|e| jump_hop_error(i, total, hop, e))?
         };
 
         let ok = authenticate_jump(&mut handle, conn, hop_user, passphrase)
@@ -435,8 +440,13 @@ async fn open_target_handle(
                         conn.ssh_host, conn.ssh_port
                     ))
                 })?;
-            connect_over_stream(channel.into_stream(), &conn.ssh_host, conn.ssh_port, interactor)
-                .await
+            connect_over_stream(
+                channel.into_stream(),
+                &conn.ssh_host,
+                conn.ssh_port,
+                interactor,
+            )
+            .await
         }
         None => match &conn.proxy {
             Some(proxy) => {
@@ -577,22 +587,31 @@ async fn authenticate_multiplexed(
                         // declined it (chose "Skip" → this key has no
                         // passphrase / can't be unlocked here), so we fall
                         // through to the password prompt instead of re-asking.
-                        if passphrase.is_none()
-                            && !passphrase_declined
-                            && matches!(e, russh_keys::Error::KeyIsEncrypted)
-                        {
+                        let encrypted = matches!(e, russh_keys::Error::KeyIsEncrypted);
+                        if passphrase.is_none() && !passphrase_declined && encrypted {
                             *needs_passphrase = true;
                         }
-                        // A key that won't load is the usual cause of an
-                        // otherwise-inexplicable auth dead-end (wrong passphrase,
-                        // or a key format/cipher russh 0.43 can't parse), so make
-                        // it visible rather than burying it at debug.
-                        tracing::warn!(
-                            key = %key_path,
-                            passphrase_supplied = passphrase.is_some(),
-                            error = %e,
-                            "SSH key could not be loaded; skipping to the next auth method"
-                        );
+                        // Split the expected probe from a real dead-end. Loading
+                        // an encrypted key with no passphrase yet is the normal
+                        // first pass — it's exactly how we detect we must prompt
+                        // — so it stays at debug (it fires on every encrypted-key
+                        // connect). A key that won't load *with* a passphrase
+                        // (wrong passphrase) or for any non-encryption reason (a
+                        // format/cipher russh 0.43 can't parse) is the usual cause
+                        // of an otherwise-inexplicable auth dead-end, so warn.
+                        if encrypted && passphrase.is_none() {
+                            tracing::debug!(
+                                key = %key_path,
+                                "SSH key is encrypted; will prompt for its passphrase"
+                            );
+                        } else {
+                            tracing::warn!(
+                                key = %key_path,
+                                passphrase_supplied = passphrase.is_some(),
+                                error = %e,
+                                "SSH key could not be loaded; skipping to the next auth method"
+                            );
+                        }
                         continue;
                     }
                 };

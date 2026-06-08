@@ -3,6 +3,11 @@
   card attribute. A `trigger` snippet renders the anchor (button/chip) and is
   given `(toggle, open)`; the `children` snippet renders the panel body and is
   given `(close)`. Closes on outside-click or Escape.
+
+  The panel is measured on open and kept on-screen (floating-ui's shift/flip,
+  same as AgentDropdown): it slides horizontally back into the viewport when
+  the anchor sits near a window edge, and flips above/below the trigger when
+  the preferred side would clip.
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
@@ -40,6 +45,36 @@
 
   let root = $state<HTMLElement | null>(null);
 
+  // Viewport correction, measured when the panel mounts: a horizontal slide
+  // (px) back on-screen, and a vertical flip when the preferred side clips.
+  let dx = $state(0);
+  let flip = $state(false);
+  const openUp = $derived(flip ? !up : up);
+
+  /** Action on the panel: measure once on open, shift/flip to stay visible. */
+  function place(el: HTMLElement) {
+    const pad = 8;
+    const r = el.getBoundingClientRect();
+    let shift = 0;
+    if (r.right > window.innerWidth - pad) shift = window.innerWidth - pad - r.right;
+    if (r.left + shift < pad) shift = pad - r.left;
+    dx = shift;
+    const anchor = root?.getBoundingClientRect();
+    if (anchor) {
+      if (!up && r.bottom > window.innerHeight - pad && anchor.top - r.height >= pad) {
+        flip = true;
+      } else if (up && r.top < pad && anchor.bottom + r.height <= window.innerHeight - pad) {
+        flip = true;
+      }
+    }
+    return {
+      destroy() {
+        dx = 0;
+        flip = false;
+      },
+    };
+  }
+
   function toggle() {
     open = !open;
   }
@@ -68,9 +103,13 @@
   {@render trigger(toggle, open)}
   {#if open}
     <div
+      use:place
       class="absolute z-30 rounded-lg border border-border bg-surface shadow-xl p-2.5
-             {align === 'right' ? 'right-0' : 'left-0'} {up ? 'bottom-full mb-1' : 'top-full mt-1'}"
+             {align === 'right' ? 'right-0' : 'left-0'} {openUp
+        ? 'bottom-full mb-1'
+        : 'top-full mt-1'}"
       style:width
+      style:transform={dx ? `translateX(${dx}px)` : undefined}
       role="dialog"
     >
       {#if title}

@@ -1,0 +1,1 @@
+so deploy the tribalhouse slash ssh access redesign branch to staging and um run cargo check in the src dash tauri folder and if it passes merge it into main

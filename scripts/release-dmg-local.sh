@@ -72,6 +72,7 @@ echo "==> Preparing sidecar binaries..."
 ./scripts/fetch-dnsmasq.sh
 TARGET_TRIPLE="$TARGET" ./scripts/build-hosts-helper.sh
 TARGET_TRIPLE="$TARGET" ./scripts/build-mcp.sh
+TARGET_TRIPLE="$TARGET" ./scripts/build-afm.sh
 
 # ---- macOS 26 Liquid Glass icon is wired statically via bundle.resources +
 # src-tauri/Info.plist (compiled/Assets.car is committed), so a plain build

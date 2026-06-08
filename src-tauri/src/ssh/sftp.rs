@@ -57,7 +57,8 @@ impl SftpManager {
             self.sessions.remove(conn.id.as_str());
         }
 
-        let session = connect_session(conn, password, proxy_password, passphrase, interactor).await?;
+        let session =
+            connect_session(conn, password, proxy_password, passphrase, interactor).await?;
         let channel = session
             .channel_open_session()
             .await
@@ -94,6 +95,14 @@ impl SftpManager {
     /// handle drops.
     pub fn disconnect(&mut self, conn_id: &str) {
         self.sessions.remove(conn_id);
+    }
+
+    /// Whether a still-open session is cached for this connection. Read-only —
+    /// doesn't bump `last_used`, so a status poll never keeps a session alive.
+    pub fn has_session(&self, conn_id: &str) -> bool {
+        self.sessions
+            .get(conn_id)
+            .is_some_and(|c| !c.session.is_closed())
     }
 
     /// Drop every cached session (app shutdown).

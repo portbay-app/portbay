@@ -76,26 +76,9 @@ export function sftpDisconnect(connectionId: string): Promise<void> {
   return safeInvoke<void>("sftp_disconnect", { connectionId });
 }
 
-/** Join a POSIX directory + child name (the remote side is always POSIX). */
-export function posixJoin(dir: string, name: string): string {
-  if (dir === "" || dir === "/") return `/${name}`.replace("//", "/");
-  return `${dir.replace(/\/+$/, "")}/${name}`;
-}
-
-/** Parent of a POSIX path (`/a/b/c` → `/a/b`; `/a` → `/`). */
-export function posixParent(path: string): string {
-  const trimmed = path.replace(/\/+$/, "");
-  const idx = trimmed.lastIndexOf("/");
-  if (idx <= 0) return "/";
-  return trimmed.slice(0, idx);
-}
-
-/** The last segment of a POSIX path. */
-export function posixBasename(path: string): string {
-  const trimmed = path.replace(/\/+$/, "");
-  const idx = trimmed.lastIndexOf("/");
-  return idx === -1 ? trimmed : trimmed.slice(idx + 1);
-}
+// Path helpers live in $lib/posixPath (IPC-free, so pure logic modules and
+// tests can use them); re-exported here for the existing import sites.
+export { posixJoin, posixParent, posixBasename } from "$lib/posixPath";
 
 /** Render mode bits as an `rwxr-xr-x`-style string (perms only, no type). */
 export function formatMode(mode: number | null): string {
@@ -104,6 +87,18 @@ export function formatMode(mode: number | null): string {
   const rwx = (n: number) =>
     `${n & 4 ? "r" : "-"}${n & 2 ? "w" : "-"}${n & 1 ? "x" : "-"}`;
   return `${rwx((bits >> 6) & 7)}${rwx((bits >> 3) & 7)}${rwx(bits & 7)}`;
+}
+
+/** "Jun 5, 2026, 14:32" — a listing/inspector date for an mtime, or "—". */
+export function formatMtime(secs: number | null): string {
+  if (!secs) return "—";
+  return new Date(secs * 1000).toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 /** Human-readable byte size. */

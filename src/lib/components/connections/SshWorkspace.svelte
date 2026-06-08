@@ -33,9 +33,9 @@
   import { ideLayout } from "$lib/stores/ideLayout.svelte";
   import {
     destination,
-    healthMeta,
     trustMeta,
   } from "$lib/ssh/hostFormat";
+  import { invokeQuiet, safeInvoke } from "$lib/ipc";
   import { fetchHostSnapshot, type HostSnapshot } from "$lib/ssh/hostSnapshot";
   import { confirmDialog } from "$lib/stores/confirm.svelte";
   import { sshConnections } from "$lib/stores/sshConnections.svelte";
@@ -68,23 +68,73 @@
   let menuOpen = $state(false);
 
   // Snapshot state. `connected` flips true once an authenticated command has
-  // succeeded this session — the only honest basis for a "Connected" badge.
+  // succeeded this session, then tracks the backend's live session registry
+  // (polled below) so the badge turns off when the idle reaper — or an
+  // explicit Disconnect — actually closes the host's sessions.
   let snapshot = $state<HostSnapshot | null>(null);
   let snapshotAt = $state<number | null>(null);
   let loadingSnapshot = $state(false);
   let connected = $state(false);
 
+  // Re-sync the badge with reality: ssh_host_connected reports whether ANY
+  // session (exec / SFTP / agent / shell) is still open, without touching
+  // idle timers — polling can't keep a session alive.
+  async function refreshConnected() {
+    try {
+      const live = await invokeQuiet<boolean | null>("ssh_host_connected", { id: host.id });
+      if (typeof live === "boolean") connected = live;
+    } catch {
+      /* backend unavailable (simulator) — leave the optimistic flag */
+    }
+  }
+
+  let disconnecting = $state(false);
+  async function disconnectHost() {
+    menuOpen = false;
+    const choice = await confirmDialog.open({
+      title: "Disconnect from this host?",
+      message:
+        `This closes every PortBay session to “${host.name}” — terminals, file browser, ` +
+        `deploys and the agent. Anything still running in an open terminal is terminated.\n\n` +
+        `Your next action reconnects (using the saved credential, or prompting if none is stored).`,
+      icon: "unplug",
+      actions: [{ label: "Disconnect", value: "disconnect", icon: "unplug" }],
+    });
+    if (choice !== "disconnect") return;
+    disconnecting = true;
+    try {
+      await safeInvoke<void>("ssh_host_disconnect", { id: host.id });
+      connected = false;
+      snapshot = null;
+      snapshotAt = null;
+    } catch {
+      /* safeInvoke already toasted */
+    } finally {
+      disconnecting = false;
+    }
+  }
+
   const dest = $derived(destination(host));
   const probe = $derived(sshProbe.get(host.id));
-  const health = $derived(healthMeta(probe?.health));
   const trust = $derived(trustMeta(probe?.trust));
 
-  const TRUST_TONE: Record<"ok" | "warn" | "danger" | "neutral", string> = {
-    ok: "text-status-running",
-    warn: "text-status-unhealthy",
-    danger: "text-status-crashed",
-    neutral: "text-fg-muted",
+  // Host-key chip, browser-padlock style: a quiet outline chip where only the
+  // small glyph carries tone — except "changed" (possible MITM), which is loud
+  // on purpose. Label + explanation live in the hover tooltip.
+  const TRUST_CHIP: Record<
+    "ok" | "warn" | "danger" | "neutral",
+    { icon: "shield-check" | "shield" | "shield-alert"; iconTone: string; chip: string }
+  > = {
+    ok: { icon: "shield-check", iconTone: "text-status-running", chip: "border-border/60 text-fg-muted" },
+    warn: { icon: "shield-alert", iconTone: "text-status-unhealthy", chip: "border-border/60 text-fg-muted" },
+    danger: {
+      icon: "shield-alert",
+      iconTone: "text-status-crashed",
+      chip: "border-status-crashed/40 bg-status-crashed/10 text-status-crashed",
+    },
+    neutral: { icon: "shield", iconTone: "text-fg-subtle", chip: "border-border/60 text-fg-muted" },
   };
+  const trustChip = $derived(TRUST_CHIP[trust.tone]);
 
   // Probe lazily if the table hasn't already (e.g. a deep link to ?host=…).
   $effect(() => {
@@ -109,6 +159,18 @@
   $effect(() => {
     if (ideLayout.agentVisible) agentMounted = true;
   });
+
+  // "Open agent here" from the Explorer tree: reveal the agent panel (mounting it
+  // on first use) and push the chosen directory into its working dir. The nonce
+  // makes the same folder re-applyable, and lets the agent override the cwd its
+  // restored thread loaded on first mount.
+  let agentCwdRequest = $state<{ path: string; nonce: number } | null>(null);
+  let agentCwdSeq = 0;
+  function openAgentAt(dir: string) {
+    agentMounted = true;
+    if (!ideLayout.agentVisible) ideLayout.toggleAgent();
+    agentCwdRequest = { path: dir, nonce: ++agentCwdSeq };
+  }
 
   // Run the one-shot snapshot command (prompting once for a credential if
   // needed). Success is also our proof the host is reachable + authenticating,
@@ -164,8 +226,12 @@
     // (via the coalesced prompt + secret cache) means the shell / file tree that
     // mount alongside don't ask again.
     void loadSnapshot();
+    // Keep the Connected badge honest while the workspace is open — the idle
+    // reaper closes sessions after 15 quiet minutes and the badge must follow.
+    const poll = setInterval(() => void refreshConnected(), 30_000);
     return () => {
       window.removeEventListener("keydown", onKey);
+      clearInterval(poll);
       ideEditor.reset();
     };
   });
@@ -181,8 +247,12 @@
         <h1 class="min-w-0 truncate text-[14px] font-semibold tracking-tight text-fg">{host.name}</h1>
         <span class="truncate font-mono text-[11.5px] text-fg-subtle">{dest}:{host.sshPort}</span>
         {#if probe}
-          <span class="inline-flex items-center gap-1 text-[11px] {TRUST_TONE[trust.tone]}" title={trust.description}>
-            <Icon name="shield" size={11} /> {trust.label}
+          <span
+            class="inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-[3px]
+                   text-[10.5px] font-medium leading-none {trustChip.chip}"
+          >
+            <Icon name={trustChip.icon} size={11} class={trustChip.iconTone} />
+            {trust.label}
           </span>
         {/if}
       </div>
@@ -217,6 +287,9 @@
               <button type="button" onclick={() => { menuOpen = false; void sshConnections.detectOs(host.id); }} disabled={sshConnections.isBusy(`${host.id}:os`)} class="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-50">
                 <Icon name="server-cog" size={13} /> Detect OS
               </button>
+              <button type="button" onclick={disconnectHost} disabled={!connected || disconnecting} title={connected ? "Close every PortBay session to this host" : "No open sessions"} class="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-50">
+                <Icon name="unplug" size={13} /> {disconnecting ? "Disconnecting…" : "Disconnect"}
+              </button>
               <button type="button" onclick={removeHost} disabled={host.inUse} title={host.inUse ? "Remove this host's tunnels first" : ""} class="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-status-crashed hover:bg-status-crashed/10 disabled:opacity-50">
                 <Icon name="trash-2" size={13} /> Remove
               </button>
@@ -236,9 +309,11 @@
         activeView={ideLayout.activeView}
         sidebarVisible={ideLayout.sidebarVisible}
         agentVisible={ideLayout.agentVisible}
+        homeActive={ideEditor.welcomeActive}
         terminalActive={ideLayout.panelVisible && ideLayout.panelTab === "terminal"}
         tunnelCount={tunnels.length}
         onSelect={(v) => ideLayout.selectView(v)}
+        onHome={() => ideEditor.toggleWelcome()}
         onToggleTerminal={() => {
           if (ideLayout.panelVisible && ideLayout.panelTab === "terminal") ideLayout.togglePanel();
           else ideLayout.showPanelTab("terminal");
@@ -258,6 +333,8 @@
             {onAddTunnel}
             onOpenFile={(path) => ideEditor.open(path)}
             activeFilePath={ideEditor.activeFile}
+            onOpenAgentHere={openAgentAt}
+            onOpenFolder={(path) => ideEditor.openFiles(path)}
             {deployProjectId}
           />
         </div>
@@ -328,7 +405,7 @@
           style="width: {ideLayout.agentWidth}px"
         >
           {#key host.id}
-            <SshAgent connectionId={host.id} label={dest} onClose={() => ideLayout.toggleAgent()} />
+            <SshAgent connectionId={host.id} label={dest} cwdRequest={agentCwdRequest} onClose={() => ideLayout.toggleAgent()} />
           {/key}
         </aside>
       {/if}
@@ -339,8 +416,7 @@
       {dest}
       port={host.sshPort}
       {connected}
-      healthLabel={health.label}
-      healthDotClass={health.dotClass}
+      health={probe?.health ?? "unknown"}
       tunnelCount={tunnels.length}
       panelVisible={ideLayout.panelVisible}
       onTogglePanel={() => ideLayout.togglePanel()}

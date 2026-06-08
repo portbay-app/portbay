@@ -55,6 +55,7 @@
 <a
   {href}
   data-active={active}
+  draggable="false"
   title={collapsed ? label : undefined}
   aria-label={collapsed ? label : undefined}
   class="group relative flex items-center rounded-md text-sm transition-colors

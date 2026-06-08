@@ -5,7 +5,8 @@ description: Install PortBay on macOS or Linux, download release bundles, or bui
 
 # Install
 
-PortBay ships as a signed macOS app today. Linux desktop builds are being added
+PortBay ships as a signed macOS app for **Apple Silicon (M-series)** today —
+there is no Intel macOS build. Linux desktop builds are being added
 as AppImage, deb, rpm, Snap, and AUR packages; see
 [Linux Support](/getting-started/linux) for the current requirements and
 limitations.
@@ -31,7 +32,7 @@ Source builds are for contributors. The app expects Node, pnpm, Rust, and Tauri 
 
 | Requirement | Notes |
 | --- | --- |
-| macOS | Signed DMG and Homebrew cask. |
+| macOS | Apple Silicon (arm64) only, macOS 11+. Signed DMG and Homebrew cask. |
 | Linux | AppImage, deb, rpm, Snap, and AUR package targets; requires WebKitGTK, GTK, libayatana-appindicator, libsecret/D-Bus, `dnsmasq`, polkit, and systemd-resolved for full DNS support. |
 | Node.js | Use the project’s supported local Node version. |
 | pnpm | The repo uses `pnpm-lock.yaml`. |

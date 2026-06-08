@@ -54,6 +54,7 @@ const WELL_KNOWN: Record<number, string> = {
   9090: "Prometheus",
   8888: "Jupyter",
   6006: "TensorBoard",
+  8265: "Ray dashboard",
 };
 
 /** Human label for a well-known port, or null when it isn't one we recognise. */

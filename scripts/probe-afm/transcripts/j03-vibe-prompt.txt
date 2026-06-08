@@ -1,0 +1,1 @@
+the system prompt keeps leaking into the output so uh pin the temperature to zero point two and rerun the eval

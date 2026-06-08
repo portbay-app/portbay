@@ -15,9 +15,11 @@ import { invalidateUserAvatar } from "$lib/userAvatar";
 import {
   ANONYMOUS_FALLBACK,
   type Account,
+  type BillingPortalUrls,
   type EffectiveEntitlement,
   type EntitlementState,
   type GatedFeature,
+  type SubscriptionStatus,
   type Tier,
   type UpgradePrompt,
 } from "$lib/types/entitlements";
@@ -154,6 +156,25 @@ function createEntitlementsStore() {
   }
 
   /**
+   * Permanently delete the account (GDPR erasure). Server-first: the backend
+   * only clears local state after the cloud confirms the deletion, so a
+   * failure (toasted by `safeInvoke`) leaves the user signed in. On success
+   * the store drops to anonymous.
+   */
+  async function deleteAccount(): Promise<void> {
+    value = await safeInvoke<EffectiveEntitlement>("delete_account");
+    invalidateUserAvatar();
+  }
+
+  /**
+   * Export the account's hosted data (GDPR portability) as JSON to
+   * `destPath`, a location the user picked via the save dialog.
+   */
+  async function exportAccountData(destPath: string): Promise<void> {
+    await safeInvoke<void>("export_account_data", { destPath });
+  }
+
+  /**
    * Set or clear the account display name (Pro/Free signed-in only). Re-pulls
    * the freshly signed entitlement, so `value.account.display_name` updates.
    */
@@ -182,6 +203,40 @@ function createEntitlementsStore() {
    */
   async function startCheckout(): Promise<void> {
     const url = await safeInvoke<string>("pro_checkout_url");
+    await openUrl(url);
+  }
+
+  /**
+   * Fetch the account's subscription state from the issuer (renewal date,
+   * scheduled cancellation, past-due). Quiet: `null` on no subscription
+   * (contribution-Pro) *and* on transient failures — the billing block simply
+   * doesn't render a status line it can't vouch for.
+   */
+  async function fetchSubscription(): Promise<SubscriptionStatus | null> {
+    if (!browser) return null;
+    try {
+      return await invokeQuiet<SubscriptionStatus | null>("subscription_status");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Open the Paddle customer portal (payment method, invoices, cancel) in the
+   * system browser. `kind` picks the deep link; missing deep links fall back
+   * to the portal overview. URLs are short-lived and fetched fresh per click.
+   * `safeInvoke` toasts when signed out or billing isn't configured.
+   */
+  async function openBillingPortal(
+    kind: "overview" | "cancel" | "payment" = "overview",
+  ): Promise<void> {
+    const urls = await safeInvoke<BillingPortalUrls>("billing_portal_url");
+    const url =
+      kind === "cancel"
+        ? (urls.cancelUrl ?? urls.overviewUrl)
+        : kind === "payment"
+          ? (urls.updatePaymentUrl ?? urls.overviewUrl)
+          : urls.overviewUrl;
     await openUrl(url);
   }
 
@@ -271,6 +326,19 @@ function createEntitlementsStore() {
     get account(): Account | null {
       return value.account;
     },
+    /** Entitlement acquisition source from the signed doc (`"subscription"`,
+     *  `"donate"`, …); `null` for synthetic states. */
+    get source(): string | null {
+      return value.source ?? null;
+    },
+    /** Whether this Pro came from a paid subscription — i.e. there is billing
+     *  to manage. Contribution/donation Pro returns false. */
+    get hasManagedBilling(): boolean {
+      return (
+        (value.state === "pro" || value.state === "pro-grace") &&
+        value.source === "subscription"
+      );
+    },
     load,
     refresh,
     resync,
@@ -281,7 +349,11 @@ function createEntitlementsStore() {
     cancelLogin,
     logout: clear,
     clear,
+    deleteAccount,
+    exportAccountData,
     startCheckout,
+    fetchSubscription,
+    openBillingPortal,
     allows,
     canAddProject,
     canSandbox,

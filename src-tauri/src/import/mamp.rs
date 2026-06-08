@@ -7,7 +7,7 @@
 //! from each. Apache's full grammar is rich; we ignore everything
 //! we don't recognise.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::import::error::{ImportError, Result};
 use crate::import::{DetectedSource, ImportSource, ImportedSite};
@@ -141,11 +141,6 @@ fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
-}
-
-#[allow(dead_code)]
-fn _typecheck_path_export() -> &'static Path {
-    Path::new(".")
 }
 
 #[cfg(test)]

@@ -109,6 +109,9 @@ The workflow produces and attaches to the GitHub Release:
 - `PortBay_vX.Y.Z_aarch64.dmg` — signed and notarized macOS disk image
 - `PortBay_vX.Y.Z_aarch64.app.tar.gz` — tarball of the `.app` bundle
 - `latest.json` — Tauri Updater manifest consumed by the auto-update mechanism
+- `latest.json` includes `min_version` (default `0.1.2`, override with
+  `PORTBAY_UPDATER_MIN_VERSION`) so maintainers can publish an explicit
+  minimum supported updater source version alongside every signed update.
 - `portbay-cargo-sbom.cdx.json` — CycloneDX SBOM for Rust dependencies
 
 ### 3.3 Homebrew cask update

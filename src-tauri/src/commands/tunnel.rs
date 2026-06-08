@@ -46,7 +46,7 @@ pub async fn start_tunnel(
                 crate::tunnel::write_named_config(project, cfg).map_err(AppError::Tunnel)?;
             let public_url = format!("https://{}", cfg.hostname);
             let status = {
-                let mut mgr = state.tunnels.lock().expect("tunnels mutex poisoned");
+                let mut mgr = state.tunnels.lock().unwrap_or_else(|e| e.into_inner());
                 mgr.start_custom(&app, &id, &config_path, &upstream_url, public_url)?
             };
             state.persist_tunnel_state();
@@ -67,7 +67,7 @@ pub async fn start_tunnel(
     // drop the lock before awaiting, because `MutexGuard` isn't `Send`
     // and Tauri requires the command future to be `Send`.
     let url_handle = {
-        let mut mgr = state.tunnels.lock().expect("tunnels mutex poisoned");
+        let mut mgr = state.tunnels.lock().unwrap_or_else(|e| e.into_inner());
         mgr.start(&app, &id, &hostname, &upstream_url)?;
         mgr.url_handle(&id)?
     };
@@ -86,7 +86,7 @@ pub async fn start_tunnel(
         let _ = state
             .tunnels
             .lock()
-            .expect("tunnels mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .stop(&id);
         state.reconciler.mark_dirty();
         state.persist_tunnel_state();
@@ -100,7 +100,7 @@ pub async fn start_tunnel(
     state
         .tunnels
         .lock()
-        .expect("tunnels mutex poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .status(&id)
         .ok_or_else(|| AppError::Internal("tunnel disappeared after start".into()))
 }
@@ -110,7 +110,7 @@ pub async fn stop_tunnel(state: State<'_, AppState>, id: String) -> AppResult<()
     state
         .tunnels
         .lock()
-        .expect("tunnels mutex poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .stop(&id)?;
 
     // Trigger a Caddy reconcile now that this project's tunnel is gone,
@@ -126,7 +126,11 @@ pub async fn stop_tunnel(state: State<'_, AppState>, id: String) -> AppResult<()
 pub async fn list_tunnels(state: State<'_, AppState>) -> AppResult<Vec<TunnelStatus>> {
     // `.list()` returns owned data; the guard drops at the end of this statement
     // so we never hold the mutex across the await below.
-    let mut tunnels = state.tunnels.lock().expect("tunnels mutex poisoned").list();
+    let mut tunnels = state
+        .tunnels
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .list();
     for t in &mut tunnels {
         if t.running {
             t.origin_reachable = Some(probe_origin(&t.upstream_url).await);
@@ -145,7 +149,7 @@ pub async fn tunnel_status(
     let mut status = state
         .tunnels
         .lock()
-        .expect("tunnels mutex poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .status(&id);
     if let Some(s) = status.as_mut() {
         if s.running {

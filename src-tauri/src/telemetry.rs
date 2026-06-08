@@ -400,11 +400,28 @@ fn scrub_paths(input: &str) -> String {
             if let Some(home) = home.as_deref() {
                 line = line.replace(home, "~");
             }
-            line = line.replace("/Volumes/DevSSD/projects/Clients/", "<workspace>/");
+            line = scrub_volume_roots(&line);
             line
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Replace every `/Volumes/<name>` prefix with `<volume>` so paths on
+/// external drives (whose names are often user-identifying) don't leak into
+/// crash reports. Derived at runtime — no machine-specific literals.
+fn scrub_volume_roots(line: &str) -> String {
+    const MARKER: &str = "/Volumes/";
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(idx) = rest.find(MARKER) {
+        out.push_str(&rest[..idx]);
+        out.push_str("<volume>");
+        let after = &rest[idx + MARKER.len()..];
+        rest = after.find('/').map_or("", |sep| &after[sep..]);
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -412,9 +429,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scrub_paths_removes_workspace_roots() {
-        let input = "/Volumes/DevSSD/projects/Clients/portbay/src/lib.rs";
-        assert_eq!(scrub_paths(input), "<workspace>/portbay/src/lib.rs");
+    fn scrub_paths_removes_volume_roots() {
+        let input = "/Volumes/SomeDrive/projects/portbay/src/lib.rs";
+        assert_eq!(scrub_paths(input), "<volume>/projects/portbay/src/lib.rs");
+    }
+
+    #[test]
+    fn scrub_paths_handles_bare_volume_and_mid_line() {
+        // A volume root with no trailing segment, and one embedded mid-line.
+        assert_eq!(scrub_paths("/Volumes/Backup"), "<volume>");
+        assert_eq!(
+            scrub_paths("at /Volumes/Work/app/main.rs:42"),
+            "at <volume>/app/main.rs:42",
+        );
+    }
+
+    #[test]
+    fn scrub_paths_replaces_home_with_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        let input = format!("{home}/projects/demo/src/main.rs");
+        assert_eq!(scrub_paths(&input), "~/projects/demo/src/main.rs");
     }
 
     #[test]

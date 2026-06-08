@@ -10,8 +10,10 @@
   session becomes active. xterm + addons are dynamically imported in onMount so
   nothing terminal-related touches SSR or the main bundle.
 
-  Theme is sampled from the app's own design tokens (bg-surface / text-fg /
-  text-accent) so the terminal matches light/dark without hard-coded colors.
+  The terminal keeps a fixed dark scheme (near-black background, light text) in
+  both app themes — like a real terminal — so its contents stay legible and
+  don't flip to dark-on-dark when the app is in light mode. Only the cursor
+  follows the (theme-independent) accent.
 -->
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
@@ -20,6 +22,13 @@
   import type { SearchAddon } from "@xterm/addon-search";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import {
+    registerScrollbackReader,
+    SCROLLBACK_VOCAB_LINES,
+  } from "$lib/dictation/terminalScrollback";
+  import { readTerminalTail } from "$lib/ide/terminal/terminalContext";
+  import { createTerminalGhost, type TerminalGhost } from "$lib/ide/terminal/terminalGhost";
+  import { openUrl } from "$lib/security/openUrl";
   import {
     openPty,
     ptyClose,
@@ -73,6 +82,11 @@
   let ptyId: string | null = null;
   let ro: ResizeObserver | null = null;
   let disposed = false;
+  // Inline next-command ghost (interactive shells only; not log/one-shot panes).
+  let ghost: TerminalGhost | null = null;
+  // Dictation vocabulary: this pane's buffer-tail reader, registered while
+  // the terminal lives (see $lib/dictation/terminalScrollback).
+  let unregisterScrollback: (() => void) | null = null;
 
   // Regex highlight rules, compiled once per change and read by the decoration
   // engine on every repaint (so live edits in Settings apply without re-attach).
@@ -106,6 +120,23 @@
     if (!m) return rgb;
     const [r, g, b] = m[1].split(",").map((s) => s.trim());
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  // Fixed dark terminal palette — kept stable across the app's light/dark theme
+  // so terminal text never ends up dark-on-dark.
+  const TERM_BG = "#0b0b0b";
+  const TERM_FG = "#e6e6e6";
+
+  /** The xterm theme: a stable dark scheme; only the cursor uses the accent. */
+  function themeColors() {
+    const accent = sample("text-accent", "color") || TERM_FG;
+    return {
+      background: TERM_BG,
+      foreground: TERM_FG,
+      cursor: accent,
+      cursorAccent: TERM_BG,
+      selectionBackground: translucent(accent, 0.3),
+    };
   }
 
   /** Fit the terminal to its container — but only when actually visible, since a
@@ -145,10 +176,6 @@
       await import("@xterm/xterm/css/xterm.css");
       if (disposed || !host) return;
 
-      const fg = sample("text-fg", "color") || "#e6e6e6";
-      const bg = sample("bg-surface", "backgroundColor") || "#0b0b0b";
-      const accent = sample("text-accent", "color") || fg;
-
       const prefs = terminalPrefs.value;
       term = new Terminal({
         fontFamily: sampleFont(),
@@ -159,13 +186,7 @@
         disableStdin: disableInput,
         allowProposedApi: true,
         macOptionIsMeta: true,
-        theme: {
-          background: bg,
-          foreground: fg,
-          cursor: accent,
-          cursorAccent: bg,
-          selectionBackground: translucent(accent, 0.3),
-        },
+        theme: themeColors(),
       });
 
       fit = new FitAddon();
@@ -174,7 +195,15 @@
       term.loadAddon(fit);
       term.loadAddon(search);
       term.loadAddon(unicode);
-      term.loadAddon(new WebLinksAddon());
+      // Route link clicks through the OS opener: xterm's default handler uses
+      // window.open, which is a no-op inside the Tauri webview (so links would
+      // silently do nothing — e.g. the agent sign-in OAuth URL).
+      term.loadAddon(
+        new WebLinksAddon((event, uri) => {
+          event.preventDefault();
+          void openUrl(uri);
+        }),
+      );
       term.unicode.activeVersion = "11";
 
       term.open(host);
@@ -191,6 +220,12 @@
       // xterm from sending the keystroke to the remote pty.
       term.attachCustomKeyEventHandler((e) => {
         if (e.type !== "keydown") return true;
+        // Let the ghost claim Tab / Esc / Cmd+→ when a suggestion is showing,
+        // before the shell sees them.
+        if (ghost?.handleKey(e)) {
+          e.preventDefault();
+          return false;
+        }
         const mod = e.metaKey || e.ctrlKey;
         if (!mod) return true;
         const key = e.key.toLowerCase();
@@ -268,6 +303,29 @@
           return;
         }
         status = "open";
+        // Inline next-command ghost — interactive shells only (skip the Logs
+        // tab's one-shot `command` panes and read-only follows).
+        if (!disableInput && !command && term) {
+          ghost = createTerminalGhost({
+            term,
+            connectionId,
+            label,
+            sendInput: (d) => {
+              if (ptyId) ptyInput(ptyId, d);
+            },
+            bufferContext: () => terminalPrefs.value.suggestBufferContext,
+            isActive: () => active,
+          });
+        }
+        // Dictation vocabulary harvest: the buffer holds exactly the
+        // identifiers the user dictates about (hostnames, paths, services).
+        // All pane kinds register — the Logs tab's output is as jargon-rich
+        // as a shell. Bounded tail; tokenized + secret-scrubbed downstream.
+        unregisterScrollback = registerScrollbackReader(connectionId, {
+          read: () =>
+            term && !disposed ? readTerminalTail(term, SCROLLBACK_VOCAB_LINES) : "",
+          isActive: () => active,
+        });
         // Re-assert size now that the shell is live (it opened at 80×24).
         fitNow();
         // A configured startup command runs once in a fresh interactive shell
@@ -293,6 +351,8 @@
 
   onDestroy(() => {
     disposed = true;
+    unregisterScrollback?.();
+    ghost?.dispose();
     ro?.disconnect();
     highlightEngine?.dispose();
     if (ptyId) ptyClose(ptyId);
@@ -316,7 +376,7 @@
     }
   });
 
-  // Live font-size: the toolbar's A−/A+ buttons write the global pref; every
+  // Live font-size: the toolbar's −/+ buttons write the global pref; every
   // mounted terminal re-renders at the new size and refits its grid.
   $effect(() => {
     const fontSize = terminalPrefs.value.fontSize;
@@ -347,7 +407,8 @@
 </script>
 
 <div
-  class="relative h-full w-full bg-surface"
+  class="relative h-full w-full"
+  style="background-color: {TERM_BG}"
   role="presentation"
   onkeydown={onKeydown}
   onfocusin={() => onFocus?.()}

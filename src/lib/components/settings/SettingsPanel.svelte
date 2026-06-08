@@ -4,7 +4,6 @@
   In the left-tab layout the nav supplies the category identity, so a panel
   doesn't repeat an icon+title column the way the old stacked cards did. It just
   leads with a title + optional one-line description, then renders its rows.
-  Width is capped so control rows don't sprawl on a wide window.
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
@@ -17,7 +16,7 @@
   let { title, description, children }: Props = $props();
 </script>
 
-<section class="max-w-3xl">
+<section>
   <header class="mb-5">
     <h2 class="text-[17px] font-semibold tracking-tight text-fg">{title}</h2>
     {#if description}

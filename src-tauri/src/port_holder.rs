@@ -166,6 +166,25 @@ pub fn find(port: u16) -> Option<PortHolder> {
     parse_lsof_first(&text)
 }
 
+/// Identify the process holding UDP `port` locally. UDP has no LISTEN state,
+/// so this finds any socket *bound* to the port — a DNS daemon, but equally a
+/// transient ephemeral socket some app opened by chance (the way the legacy
+/// dnsmasq default got squatted). Sockets merely *connected to* a remote
+/// `port` (`local:x->remote:port`) are excluded — they don't hold the local
+/// bind. Returns `None` when nothing is bound or `lsof` is unavailable.
+pub fn find_udp(port: u16) -> Option<PortHolder> {
+    let out = std::process::Command::new("lsof")
+        .args(["-nP"])
+        .arg(format!("-iUDP:{port}"))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_lsof_first_udp(&text, port)
+}
+
 /// Parse lsof's tabular output. Format:
 /// ```text
 /// COMMAND   PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
@@ -183,20 +202,58 @@ fn parse_lsof_first(text: &str) -> Option<PortHolder> {
         let command = cols.next()?.to_string();
         let pid_str = cols.next()?;
         let pid: u32 = pid_str.parse().ok()?;
-        // A parent of 0/1 (or one we can't read) means the process was
-        // reparented to launchd — i.e. orphaned.
-        let orphaned = !matches!(resolve_parent_pid(pid), Some(p) if p > 1);
-        return Some(PortHolder {
-            pid,
-            command: command.clone(),
-            binary: resolve_binary(pid),
-            command_line: resolve_command_line(pid),
-            cwd: resolve_cwd(pid),
-            ancestors: walk_ancestors(pid),
-            orphaned,
-        });
+        return Some(build_holder(pid, command));
     }
     None
+}
+
+/// Parse lsof output for UDP rows. UDP has no LISTEN state, so a row counts
+/// only when its NAME column shows a socket *bound locally* to `port`:
+/// `127.0.0.1:53053` or, for a connected socket, `local:53053->remote:x`.
+/// Rows where only the *remote* side is `port` (`local:x->remote:53053` —
+/// someone querying a server on that port) don't hold the local bind and
+/// are skipped.
+fn parse_lsof_first_udp(text: &str, port: u16) -> Option<PortHolder> {
+    let suffix = format!(":{port}");
+    for line in text.lines().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !trimmed.contains(" UDP ") {
+            continue;
+        }
+        let local = trimmed
+            .split_whitespace()
+            .last()
+            .unwrap_or_default()
+            .split("->")
+            .next()
+            .unwrap_or_default();
+        if !local.ends_with(&suffix) {
+            continue;
+        }
+        let mut cols = trimmed.split_whitespace();
+        let command = cols.next()?.to_string();
+        let pid_str = cols.next()?;
+        let pid: u32 = pid_str.parse().ok()?;
+        return Some(build_holder(pid, command));
+    }
+    None
+}
+
+/// Flesh a (pid, command) pair from an lsof row out into a full holder by
+/// resolving its attribution signals (binary, argv, cwd, ancestry).
+fn build_holder(pid: u32, command: String) -> PortHolder {
+    // A parent of 0/1 (or one we can't read) means the process was
+    // reparented to launchd — i.e. orphaned.
+    let orphaned = !matches!(resolve_parent_pid(pid), Some(p) if p > 1);
+    PortHolder {
+        pid,
+        command: command.clone(),
+        binary: resolve_binary(pid),
+        command_line: resolve_command_line(pid),
+        cwd: resolve_cwd(pid),
+        ancestors: walk_ancestors(pid),
+        orphaned,
+    }
 }
 
 /// Resolve a process's current working directory via
@@ -349,6 +406,57 @@ node    99887 nour   22u  IPv4 0xabc       0t0  TCP *:3010 (LISTEN)
         let h = parse_lsof_first(sample).expect("should parse");
         assert_eq!(h.pid, 99887);
         assert_eq!(h.command, "node");
+    }
+
+    #[test]
+    fn parse_lsof_udp_finds_locally_bound_socket() {
+        let sample = "\
+COMMAND   PID USER   FD   TYPE  DEVICE SIZE/OFF NODE NAME
+dnsmasq 72267 nour    4u  IPv4 0x8c8f      0t0  UDP 127.0.0.1:53053
+";
+        let h = parse_lsof_first_udp(sample, 53053).expect("should parse");
+        assert_eq!(h.pid, 72267);
+        assert_eq!(h.command, "dnsmasq");
+    }
+
+    #[test]
+    fn parse_lsof_udp_finds_connected_socket_bound_to_port() {
+        // A connected UDP socket whose LOCAL side is the port still holds the
+        // bind — exactly the transient ephemeral squatter we need to surface.
+        let sample = "\
+COMMAND   PID USER   FD   TYPE  DEVICE SIZE/OFF NODE NAME
+chrome  10001 nour   30u  IPv4 0xdef       0t0  UDP 192.168.1.5:53053->8.8.8.8:443
+";
+        let h = parse_lsof_first_udp(sample, 53053).expect("should parse");
+        assert_eq!(h.pid, 10001);
+    }
+
+    #[test]
+    fn parse_lsof_udp_skips_sockets_only_remote_on_port() {
+        // Someone QUERYING a server on the port doesn't hold the local bind.
+        let sample = "\
+COMMAND   PID USER   FD   TYPE  DEVICE SIZE/OFF NODE NAME
+curl    10002 nour   30u  IPv4 0xdef       0t0  UDP 192.168.1.5:60001->8.8.8.8:53053
+";
+        assert!(parse_lsof_first_udp(sample, 53053).is_none());
+        assert!(parse_lsof_first_udp("", 53053).is_none());
+    }
+
+    #[test]
+    fn parse_lsof_udp_handles_ipv6_and_wildcard_binds() {
+        let v6 = "\
+COMMAND   PID USER   FD   TYPE  DEVICE SIZE/OFF NODE NAME
+dnsmasq   501 nour    5u  IPv6 0xabc       0t0  UDP [::1]:53053
+";
+        assert_eq!(parse_lsof_first_udp(v6, 53053).map(|h| h.pid), Some(501));
+        let wild = "\
+COMMAND   PID USER   FD   TYPE  DEVICE SIZE/OFF NODE NAME
+mdns      502 nour    5u  IPv4 0xabc       0t0  UDP *:53053
+";
+        assert_eq!(parse_lsof_first_udp(wild, 53053).map(|h| h.pid), Some(502));
+        // A different port must never match on suffix overlap (…:153053? no —
+        // but :5305 vs :53053 shape bugs are easy; assert the exact-port gate).
+        assert!(parse_lsof_first_udp(wild, 5305).is_none());
     }
 
     #[test]

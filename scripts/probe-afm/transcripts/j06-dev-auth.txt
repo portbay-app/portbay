@@ -1,0 +1,1 @@
+the JWT expires too fast so bump the TTL to sixty minutes and um rotate the OAuth client secret

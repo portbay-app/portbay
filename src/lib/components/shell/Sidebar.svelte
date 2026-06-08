@@ -5,9 +5,9 @@
     1. Brand header — lighthouse mark + "PortBay" wordmark, with a "Pro"
        pill alongside it for Pro entitlements. The pt-9 padding keeps the
        macOS traffic lights (titleBarStyle: Overlay) clear of the brand row.
-    2. Nav — Projects, Groups (collapsible), Domains, Services, Logs,
-       Settings. Languages is reachable via the palette / Settings, not the
-       top-level nav.
+    2. Nav — Projects, Tasks, Groups (collapsible), AI, Domains, Services,
+       Logs, Settings. Languages is reachable via the palette / Settings,
+       not the top-level nav.
     3. System footer — overall sidecar pill ("All Systems Operational"),
        CPU / Memory / Disk meters, and a thin version row with a GitHub
        link. The footer used to live in the right rail; in the redesign
@@ -20,6 +20,7 @@
   import { getVersion } from "@tauri-apps/api/app";
 
   import SidebarItem from "./SidebarItem.svelte";
+  import SidebarNavList from "./SidebarNavList.svelte";
   import SidebarResizeHandle from "./SidebarResizeHandle.svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import StatusDot from "$lib/components/atoms/StatusDot.svelte";
@@ -34,6 +35,7 @@
   import { projects } from "$lib/stores/projects.svelte";
   import { databases } from "$lib/stores/databases.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
+  import { navOrder } from "$lib/stores/navOrder.svelte";
   import { SIDECAR_ORDER } from "$lib/types/sidecars";
   import type { SidecarState } from "$lib/types/sidecars";
   import type { PortbayStatus } from "$lib/types/status";
@@ -327,76 +329,15 @@
       {/if}
     </div>
 
-    <div class="pt-2 space-y-0.5">
-      <SidebarItem href="/domains" icon="link" label="Domains" matchPrefix {collapsed} />
-      <SidebarItem href="/dns" icon="globe" label="DNS" matchPrefix {collapsed} />
-      <SidebarItem href="/services" icon="server" label="Services" matchPrefix {collapsed} />
-      <SidebarItem
-        href="/web-servers"
-        icon="server-cog"
-        label="Web Server"
-        matchPrefix
-        {collapsed}
-      />
-      <SidebarItem
-        href="/certificates"
-        icon="shield"
-        label="Certificates"
-        matchPrefix
-        {collapsed}
-      />
-      <SidebarItem
-        href="/sandbox"
-        icon="package"
-        label="Sandbox"
-        matchPrefix
-        {collapsed}
-      />
-      <SidebarItem href="/logs" icon="file-text" label="Logs" matchPrefix {collapsed} />
-      <SidebarItem
-        href="/inspector"
-        icon="activity"
-        label="Inspector"
-        matchPrefix
-        {collapsed}
-      />
-      <SidebarItem
-        href="/languages"
-        icon="file-code"
-        label="Languages"
-        matchPrefix
-        {collapsed}
-      />
-      <SidebarItem
-        href="/databases"
-        icon="database"
-        label="Databases"
-        matchPrefix
-        badge={runningDbCount}
-        {collapsed}
-      />
-      <SidebarItem
-        href="/ssh"
-        icon="terminal"
-        label="SSH"
-        matchPrefix
-        {collapsed}
-      />
-      <SidebarItem
-        href="/tunnels"
-        icon="cloud"
-        label="Tunnels"
-        matchPrefix
-        {collapsed}
-      />
-      <SidebarItem
-        href="/settings"
-        icon="settings"
-        label="Settings"
-        matchPrefix
-        {collapsed}
-      />
-    </div>
+    <!-- Reorderable destinations (AI → Settings). Drag any row to arrange the
+         block; the order persists per user. The anchors above (Projects,
+         Tasks, Groups) and the footer below stay fixed. -->
+    <SidebarNavList
+      items={navOrder.items}
+      {collapsed}
+      {runningDbCount}
+      oncommit={(next) => navOrder.commit(next)}
+    />
   </nav>
 
   <!-- System footer — health pill, meters, version row -->

@@ -109,6 +109,14 @@ pub enum AppError {
     #[error("You've reached your {cap}-project Sandboxed Run limit")]
     SandboxCapReached { cap: u32 },
 
+    /// A task-board attachment exceeds the current tier's per-file size cap
+    /// (community 10 MB; Pro 250 MB). Checked before the file is copied, so
+    /// nothing is attached. Mirrors [`Self::SandboxCapReached`]. Board-only;
+    /// absent from the public OSS build (no `tasks` feature).
+    #[cfg(feature = "tasks")]
+    #[error("This file is over your {cap_mb} MB per-attachment limit")]
+    AttachmentTooLarge { cap_mb: u32 },
+
     /// A Pro-gated configuration was set or changed by a non-Pro session. The
     /// GUI locks these controls proactively; this is the core-side safety net
     /// for the CLI and hand-edited registries. Carries a human feature label.
@@ -164,6 +172,8 @@ impl AppError {
             Self::BadInput(_) => "BAD_INPUT",
             Self::ProjectCapReached { .. } => "PROJECT_CAP_REACHED",
             Self::SandboxCapReached { .. } => "SANDBOX_CAP_REACHED",
+            #[cfg(feature = "tasks")]
+            Self::AttachmentTooLarge { .. } => "ATTACHMENT_TOO_LARGE",
             Self::ProRequired { .. } => "PRO_REQUIRED",
             Self::Unsupported { .. } => "UNSUPPORTED",
             Self::DeviceLimitReached { .. } => "DEVICE_LIMIT_REACHED",
@@ -222,6 +232,15 @@ impl AppError {
             Self::SandboxCapReached { .. } => {
                 "Upgrade to PortBay Pro to sandbox more projects — your existing sandboxed projects are unchanged.".into()
             }
+            #[cfg(feature = "tasks")]
+            Self::AttachmentTooLarge { cap_mb } => {
+                let pro_mb = crate::entitlements::TASK_ATTACHMENT_PRO_CAP_BYTES / (1024 * 1024);
+                if u64::from(*cap_mb) < pro_mb {
+                    format!("Upgrade to PortBay Pro to attach files up to {pro_mb} MB — nothing was attached.")
+                } else {
+                    "Files this large can't be attached — nothing was attached.".into()
+                }
+            }
             Self::ProRequired { .. } => {
                 "Upgrade to PortBay Pro to use this — your existing settings are unchanged.".into()
             }
@@ -252,6 +271,8 @@ impl AppError {
             | Self::SandboxCapReached { .. }
             | Self::ProRequired { .. }
             | Self::DeviceLimitReached { .. } => "user",
+            #[cfg(feature = "tasks")]
+            Self::AttachmentTooLarge { .. } => "user",
             _ => "system",
         }
     }
@@ -281,7 +302,7 @@ impl AppError {
             Self::DeviceLimitReached { .. } => NotificationCategory::AccountSync,
             Self::Io(_) | Self::Internal(_) => NotificationCategory::Crash,
             #[cfg(feature = "tasks")]
-            Self::Context(_) => NotificationCategory::AgentBoard,
+            Self::Context(_) | Self::AttachmentTooLarge { .. } => NotificationCategory::AgentBoard,
             _ => NotificationCategory::ProjectError,
         }
     }

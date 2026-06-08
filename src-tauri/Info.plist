@@ -4,5 +4,18 @@
 <dict>
 	<key>CFBundleIconName</key>
 	<string>PortBay</string>
+	<!-- Required for the Automation (Apple Events) consent prompt: agent-task
+	     dispatch drives Terminal/Warp/iTerm via osascript. Without this key a
+	     packaged build is denied silently (error -1743), with no prompt. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>PortBay opens and drives your terminal app to launch agent tasks you dispatch from the board.</string>
+	<!-- System dictation (mic button on task cards): audio capture is
+	     attributed to the app when we send `startDictation:`. Hardened (DMG)
+	     builds without these keys are denied by TCC with no prompt — a missing
+	     mic key can kill the process outright on capture. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>PortBay uses the microphone when you dictate text into a task card via macOS Dictation.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>PortBay uses macOS speech recognition to turn your dictation into text on task cards.</string>
 </dict>
 </plist>

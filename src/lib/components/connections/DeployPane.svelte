@@ -15,8 +15,20 @@
   for executing on a remote host.
 -->
 <script lang="ts">
+  import { clampToViewport } from "$lib/actions/clampToViewport";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import ProjectDeploySection from "$lib/components/projects/ProjectDeploySection.svelte";
+  import DeployStepsView from "$lib/components/deploy/DeployStepsView.svelte";
+  import { cancelDeploy, listenDeploy } from "$lib/deploy";
+  import {
+    applyDeployEvent,
+    finalizeError,
+    formatDuration,
+    initLiveSteps,
+    reconcileResults,
+    summarize,
+    type LiveStep,
+  } from "$lib/deployLive";
   import { invokeQuiet } from "$lib/ipc";
   import { connectWithPrompt } from "$lib/ssh/connectWithPrompt";
   import { deploySnippets, type DeploySnippet } from "$lib/stores/deploySnippets.svelte";
@@ -41,7 +53,12 @@
   let cwd = $state("");
   let steps = $state<string[]>(["npm ci", "npm run build"]);
   let running = $state(false);
-  let results = $state<StepResult[]>([]);
+  // Live model of the current/last run: seeded on Run, fed by streamed
+  // events, settled against the returned results. Survives until Clear or
+  // the next Run so the user can read back the output.
+  let live = $state<LiveStep[]>([]);
+  let runId = $state<string | null>(null);
+  let cancelling = $state(false);
 
   // Mirror the in-flight flag onto the bindable prop so a modal wrapper can gate
   // its Escape / backdrop close while a deploy is mid-run.
@@ -55,6 +72,15 @@
   // so add/remove reflect immediately without a manual refresh.
   const snippets = $derived(deploySnippets.list(connectionId));
   let snippetsOpen = $state(false);
+  // Viewport anchor for the snippets dropdown: it renders `fixed` (escaping
+  // the pane's scroll-container clipping) right-aligned under the trigger,
+  // and clampToViewport nudges it fully on-screen in narrow layouts.
+  let snippetsAt = $state<{ x: number; y: number } | null>(null);
+  function toggleSnippets(ev: MouseEvent) {
+    const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+    snippetsAt = { x: r.right, y: r.bottom + 4 };
+    snippetsOpen = !snippetsOpen;
+  }
   let saving = $state(false);
   let saveName = $state("");
 
@@ -75,6 +101,14 @@
     deploySnippets.remove(connectionId, id);
   }
 
+  /** Cmd/Ctrl+Enter from the cwd or any command input starts the run. */
+  function runShortcut(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      void run();
+    }
+  }
+
   function addStep() {
     steps = [...steps, ""];
   }
@@ -85,31 +119,56 @@
 
   async function run() {
     if (allEmpty || running) return;
+    const kept = steps.map((s) => s.trim()).filter(Boolean);
     running = true;
-    results = [];
+    cancelling = false;
+    const id = crypto.randomUUID();
+    runId = id;
+    live = initLiveSteps(kept);
+    // Mutate through the $state proxy (reading `live` back), not the raw
+    // array — otherwise the streamed updates wouldn't be reactive.
+    const liveSteps = live;
+    const unlisten = await listenDeploy(id, (ev) => applyDeployEvent(liveSteps, ev));
     try {
       // Prompt once (VS Code-style) for a one-shot credential if the host needs
       // one; the secret is passed inline for this run and never stored.
-      results = await connectWithPrompt(connectionId, label, (cred) =>
+      const results = await connectWithPrompt(connectionId, label, (cred) =>
         invokeQuiet<StepResult[]>("ssh_deploy_run", {
           input: {
             connectionId,
-            steps,
+            steps: kept,
             cwd: cwd.trim() || null,
+            runId: id,
             password: cred?.kind === "password" ? cred.secret : undefined,
             passphrase: cred?.kind === "passphrase" ? cred.secret : undefined,
           },
         }),
       );
+      reconcileResults(liveSteps, results, cancelling);
     } catch {
-      /* connectWithPrompt already surfaced any real failure */
+      // connectWithPrompt already surfaced the real failure; if the run died
+      // before any step started there's nothing worth keeping on screen.
+      if (!finalizeError(liveSteps)) live = [];
     } finally {
+      unlisten();
       running = false;
+      cancelling = false;
+      runId = null;
     }
   }
 
-  const failedAt = $derived(results.findIndex((r) => r.exitCode !== 0));
-  const succeeded = $derived(results.length > 0 && failedAt === -1);
+  async function cancel() {
+    if (!runId || cancelling) return;
+    cancelling = true;
+    try {
+      await cancelDeploy(runId);
+    } catch {
+      cancelling = false; // toasted; the run keeps going
+    }
+  }
+
+  const summary = $derived(summarize(live));
+  const runningAt = $derived(live.findIndex((s) => s.status === "running"));
 </script>
 
 {#if projectId}
@@ -144,6 +203,7 @@
     <input
       id="deploy-cwd"
       bind:value={cwd}
+      onkeydown={runShortcut}
       placeholder="/var/www/myapp"
       class="mt-1 w-full rounded-md border border-border bg-surface-2 px-2 py-1.5 font-mono text-[12px] text-fg outline-none focus:border-accent"
     />
@@ -156,16 +216,20 @@
         <div class="relative">
           <button
             type="button"
-            onclick={() => (snippetsOpen = !snippetsOpen)}
+            onclick={toggleSnippets}
             class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-surface-2 hover:text-fg"
           >
             <Icon name="square-kanban" size={11} /> Snippets
             {#if snippets.length}<span class="text-fg-subtle">({snippets.length})</span>{/if}
             <Icon name="chevron-down" size={10} />
           </button>
-          {#if snippetsOpen}
+          {#if snippetsOpen && snippetsAt}
             <button type="button" class="fixed inset-0 z-40 cursor-default" aria-label="Close" onclick={() => (snippetsOpen = false)}></button>
-            <div class="absolute right-0 z-50 mt-1 w-64 overflow-hidden rounded-lg border border-border bg-surface shadow-2xl">
+            <div
+              use:clampToViewport
+              class="fixed z-50 w-64 overflow-hidden rounded-lg border border-border bg-surface shadow-2xl backdrop-blur-xl"
+              style="left: {snippetsAt.x - 256}px; top: {snippetsAt.y}px"
+            >
               {#if snippets.length === 0}
                 <p class="px-3 py-2.5 text-[11.5px] text-fg-subtle">No saved snippets yet. Build a command list, then “Save”.</p>
               {:else}
@@ -225,6 +289,7 @@
           <span class="w-5 shrink-0 text-right font-mono text-[11px] text-fg-subtle">{i + 1}</span>
           <input
             bind:value={steps[i]}
+            onkeydown={runShortcut}
             placeholder="e.g. npm run build"
             class="flex-1 rounded-md border border-border bg-surface-2 px-2 py-1.5 font-mono text-[12px] text-fg outline-none focus:border-accent"
           />
@@ -240,49 +305,60 @@
       {/each}
     </div>
 
-    <!-- Results -->
-    {#if results.length > 0}
-      <div class="mt-5 space-y-2">
-        {#each results as r, i (i)}
-          <div class="overflow-hidden rounded-md border border-border/70">
-            <div
-              class="flex items-center gap-2 px-3 py-1.5 text-[12px]
-                     {r.exitCode === 0 ? 'bg-status-running/10' : 'bg-status-crashed/10'}"
+    <!-- Run output: live while running, readable until cleared or re-run. -->
+    {#if live.length > 0}
+      <div class="mt-5">
+        <div class="mb-1.5 flex items-center justify-between">
+          <span class="text-[11px] font-medium uppercase text-fg-subtle">Run output</span>
+          {#if !running}
+            <button
+              type="button"
+              onclick={() => (live = [])}
+              class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-surface-2 hover:text-fg"
             >
-              <Icon
-                name={r.exitCode === 0 ? "circle-check" : "circle-alert"}
-                size={13}
-                class={r.exitCode === 0 ? "text-status-running" : "text-status-crashed"}
-              />
-              <code class="flex-1 truncate font-mono text-fg">{r.command}</code>
-              <span class="font-mono text-[11px] text-fg-subtle">exit {r.exitCode}</span>
-            </div>
-            {#if r.stdout || r.stderr}
-              <pre class="max-h-48 overflow-auto bg-surface-2/50 px-3 py-2 font-mono text-[11px] leading-relaxed text-fg">{r.stdout}{#if r.stderr}<span class="text-status-crashed">{r.stderr}</span>{/if}</pre>
-            {/if}
-          </div>
-        {/each}
-        {#if succeeded}
-          <p class="text-[12px] font-medium text-status-running">All steps succeeded.</p>
-        {:else if failedAt !== -1}
-          <p class="text-[12px] font-medium text-status-crashed">
-            Stopped at step {failedAt + 1} (non-zero exit). Later steps were skipped.
-          </p>
-        {/if}
+              <Icon name="eraser" size={11} /> Clear
+            </button>
+          {/if}
+        </div>
+        <DeployStepsView steps={live} />
       </div>
     {/if}
   </div>
 
-  <footer class="flex items-center justify-end gap-2 border-t border-border px-4 py-2.5">
-    <button
-      type="button"
-      onclick={run}
-      disabled={running || allEmpty}
-      class="inline-flex h-8 items-center gap-1.5 rounded-md bg-accent px-3 text-[12px] font-medium text-on-accent hover:brightness-110 disabled:opacity-50"
-    >
-      <Icon name={running ? "refresh-cw" : "play"} size={13} class={running ? "animate-spin" : ""} />
-      {running ? "Running…" : "Run"}
-    </button>
+  <footer class="flex items-center justify-between gap-2 border-t border-border px-4 py-2.5">
+    <span class="truncate text-[11px] text-fg-subtle">
+      {#if running}
+        {#if runningAt !== -1}
+          Running step {runningAt + 1} of {live.length}…
+        {:else}
+          Connecting…
+        {/if}
+      {:else if summary.allOk && summary.totalMs > 0}
+        Finished in {formatDuration(summary.totalMs)}.
+      {/if}
+    </span>
+    <div class="flex items-center gap-2">
+      {#if running}
+        <button
+          type="button"
+          onclick={cancel}
+          disabled={cancelling}
+          class="inline-flex h-8 items-center gap-1.5 rounded-md border border-status-crashed/40 px-3 text-[12px] font-medium text-status-crashed hover:bg-status-crashed/10 disabled:opacity-50"
+        >
+          <Icon name="circle-stop" size={13} />
+          {cancelling ? "Cancelling…" : "Cancel"}
+        </button>
+      {/if}
+      <button
+        type="button"
+        onclick={run}
+        disabled={running || allEmpty}
+        class="inline-flex h-8 items-center gap-1.5 rounded-md bg-accent px-3 text-[12px] font-medium text-on-accent hover:brightness-110 disabled:opacity-50"
+      >
+        <Icon name={running ? "refresh-cw" : "play"} size={13} class={running ? "animate-spin" : ""} />
+        {running ? "Running…" : "Run"}
+      </button>
+    </div>
   </footer>
 </div>
 {/if}

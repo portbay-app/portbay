@@ -24,7 +24,19 @@ export function normalizeUrl(raw: string): string {
 }
 
 export function assertSafeOpenUrl(raw: string): string {
-  const parsed = new URL(normalizeUrl(raw));
+  let parsed: URL;
+  try {
+    parsed = new URL(normalizeUrl(raw));
+  } catch (e) {
+    // Linkified text (chat markdown, xterm web-links) often drags trailing
+    // sentence punctuation into the URL — `http://localhost:1455.` from
+    // "…listening on http://localhost:1455." has an unparseable port. Only
+    // when the raw string fails to parse, retry once with that punctuation
+    // stripped; a still-broken URL rethrows the original error.
+    const trimmed = raw.trim().replace(/[.,;:!?)\]}>"'”’]+$/, "");
+    if (!trimmed || trimmed === raw.trim()) throw e;
+    parsed = new URL(normalizeUrl(trimmed));
+  }
   if (!ALLOWED_OPEN_SCHEMES.has(parsed.protocol)) {
     throw new Error(`Blocked unsupported URL scheme: ${parsed.protocol}`);
   }

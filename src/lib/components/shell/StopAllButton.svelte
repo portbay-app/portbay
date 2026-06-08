@@ -16,6 +16,9 @@
   import { errorBus } from "$lib/stores/errors.svelte";
   import { safeInvoke } from "$lib/ipc";
   import { projects } from "$lib/stores/projects.svelte";
+  import { tunnels } from "$lib/stores/tunnels.svelte";
+  import { sshTunnels } from "$lib/stores/sshTunnels.svelte";
+  import { ollamaService } from "$lib/stores/ollama.svelte";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import type { StopAllReport } from "$lib/types/stopAll";
 
@@ -23,10 +26,18 @@
   let state = $state<State>("idle");
   let confirmTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // The master kill switch counts every service Stop All shuts down across the
+  // sub-pages, not just projects: projects + their databases (process-compose),
+  // Cloudflare tunnels, SSH tunnels, and Ollama. The backend `stop_all` already
+  // stops all of these — this aggregate keeps the button's enabled state honest
+  // so it can never read "nothing to stop" while one of them is still running.
   const runningCount = $derived(
     projects.value.filter(
       (p) => p.status === "running" || p.status === "starting",
-    ).length,
+    ).length +
+      tunnels.value.filter((t) => t.running).length +
+      sshTunnels.value.filter((t) => t.running).length +
+      (ollamaService.running ? 1 : 0),
   );
 
   function clearConfirmTimer() {
@@ -44,7 +55,7 @@
         code: "NOTHING_TO_STOP",
         category: "lifecycle",
         whatHappened: "Nothing to stop.",
-        whyItMatters: "No projects are currently running.",
+        whyItMatters: "No services are currently running.",
         whoCausedIt: "user",
         actions: [],
       });
@@ -86,8 +97,8 @@
       errorBus.push({
         code: "STOP_ALL_OK",
         category: "lifecycle",
-        whatHappened: `Stopped ${report.stopped} project${report.stopped === 1 ? "" : "s"}.`,
-        whyItMatters: "All running projects were brought down cleanly.",
+        whatHappened: `Stopped ${report.stopped} service${report.stopped === 1 ? "" : "s"}.`,
+        whyItMatters: "All running services were brought down cleanly.",
         whoCausedIt: "system",
         severity: "success",
         actions: [],
@@ -172,8 +183,8 @@
     disabled={state === "running" || runningCount === 0}
     title={runningCount === 0
       ? "Nothing to stop"
-      : `Stop all ${runningCount} running projects (⇧⌘.)`}
-    aria-label="Stop all running projects"
+      : `Stop all ${runningCount} running services (⇧⌘.)`}
+    aria-label="Stop all running services"
     class="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg
            text-[13px] font-medium tracking-tight
            bg-status-crashed text-on-accent

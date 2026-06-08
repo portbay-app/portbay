@@ -25,10 +25,24 @@ use tauri_plugin_shell::ShellExt;
 
 use crate::dnsmasq::error::{DnsmasqError, Result};
 
-/// Default UDP port for dnsmasq. Picked high enough that any process
-/// running as the user can bind without sudo; low enough to stay clear
-/// of the ephemeral-port range.
-pub const DEFAULT_PORT: u16 = 53053;
+/// Default UDP port for dnsmasq. High enough that any process running as the
+/// user can bind without sudo; **below every platform's ephemeral-port range**
+/// (macOS hands out 49152–65535, Linux 32768–60999), so a random outbound UDP
+/// socket — a browser's QUIC connection, an NTP query — can never squat it.
+///
+/// The previous default, 53053, sat *inside* the macOS ephemeral range: any
+/// app's transient socket could land on it by chance at boot, forcing dnsmasq
+/// onto an alternate port while the root-owned `/etc/resolver/<suffix>` file
+/// kept pointing at the old one — wildcard `.test` DNS then silently died
+/// until the privileged helper re-pointed the file. Installs that already
+/// have a resolver file keep their installed port (boot prefers it — see
+/// `state::boot_dnsmasq`); the new default only applies on first install or
+/// when the installed port is genuinely unavailable.
+pub const DEFAULT_PORT: u16 = 25353;
+
+/// The pre-ephemeral-fix default. Kept so `doctor` / squat checks still
+/// recognise the port older installs' resolver files point at.
+pub const LEGACY_DEFAULT_PORT: u16 = 53053;
 
 /// Number of ports to scan if the default is taken.
 pub const PORT_SCAN_RANGE: u16 = 32;
@@ -226,11 +240,6 @@ pub fn binary_available(app: &AppHandle) -> bool {
         || which::which("dnsmasq").is_ok()
 }
 
-#[allow(dead_code)]
-fn _typecheck_pathbuf_export() -> PathBuf {
-    PathBuf::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +248,17 @@ mod tests {
     fn finds_a_free_port_near_default() {
         let port = find_free_port(DEFAULT_PORT, 32, &[]);
         assert!(port.is_some());
+    }
+
+    /// The whole point of the default: a port no platform hands out as an
+    /// ephemeral source port (macOS 49152–65535, Linux 32768–60999), so no
+    /// transient socket can ever squat it. The full scan range must stay
+    /// clear too, or a fallback port would re-enter the danger zone.
+    #[test]
+    fn default_port_range_is_outside_every_ephemeral_range() {
+        const {
+            assert!(DEFAULT_PORT > 1024);
+            assert!(DEFAULT_PORT as u32 + PORT_SCAN_RANGE as u32 <= 32768);
+        }
     }
 }

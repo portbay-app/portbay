@@ -17,7 +17,8 @@ pub mod resolver;
 pub use config::{build_config, default_config_path, write_config};
 pub use error::{DnsmasqError, Result};
 pub use lifecycle::{
-    binary_available, find_free_port, DnsmasqSidecar, DEFAULT_PORT, PORT_SCAN_RANGE,
+    binary_available, find_free_port, DnsmasqSidecar, DEFAULT_PORT, LEGACY_DEFAULT_PORT,
+    PORT_SCAN_RANGE,
 };
 pub use resolver::{
     install_via_osascript, is_installed, read_installed, resolver_file_content,

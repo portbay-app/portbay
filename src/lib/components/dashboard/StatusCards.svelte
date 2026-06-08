@@ -1,117 +1,211 @@
 <!--
   StatusCards — the four-up status row at the top of the dashboard.
 
-  Order matches the design reference:
-    1. Caddy        (reverse proxy)        — port + sparkline
-    2. HTTPS        (mkcert local CA)      — trust state + check icon
-    3. Hosts Helper (managed /etc/hosts)   — entry count + bar
-    4. Active       (running projects)     — count + CPU sparkline
+  Refactored from the old infra-centric row (Caddy / HTTPS / Hosts Helper /
+  Active) to a developer-centric one that answers "what's the state of my
+  local environment?" at a glance:
 
-  Compared with the old SidecarRow (six small cards):
-    - Removes processCompose, dnsmasq, mailpit from the dashboard.
-      Those still surface in the sidebar status pill and on /services.
-    - Promotes "Active Processes" (projects-derived, not a sidecar)
-      because that's the metric a developer hits the dashboard for.
+    1. Projects        — running / total, plus a live activity pulse that
+                          only appears while something is running
+    2. Local Access     — domains served, HTTPS trust, attention count
+    3. Services        — bundled sidecar health (the /services surface)
+    4. Local AI         — Ollama running-state + the loaded model, so the
+                          AI page isn't the only place to check
 
-  Each card is a tall, calm rectangle — icon top-left, title +
-  subtitle stacked, status content centered-bottom-left, visual
-  flourish bottom-right.
+  Each card is a tall, calm rectangle — icon top-left, title + subtitle
+  stacked, status content bottom-left, a meaningful flourish bottom-right
+  (the activity pulse, a trust badge, a health badge, an AI status badge).
+  The Projects pulse is the one real time-series (the device's CPU trace
+  while projects run); the others show a value we actually have.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import Sparkline from "$lib/components/atoms/Sparkline.svelte";
-  import StatusPill from "$lib/components/atoms/StatusPill.svelte";
 
   import { sidecars } from "$lib/stores/sidecars.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { metrics } from "$lib/stores/metrics.svelte";
-
-  import type { PortbayStatus } from "$lib/types/status";
+  import { ollamaService } from "$lib/stores/ollama.svelte";
 
   onMount(() => {
     sidecars.start();
-    return () => sidecars.stop();
+    metrics.start();
+    // ollamaService is started app-wide by the root layout — read-only here.
+    return () => {
+      sidecars.stop();
+      metrics.stop();
+    };
   });
 
-  // --- Card 1: Caddy ---
-  const caddyPill = $derived.by<PortbayStatus>(() => {
-    switch (sidecars.value.caddy.status) {
-      case "running":
-        return "running";
-      case "stopped":
-        return "stopped";
-      case "not_installed":
-        return "port_conflict";
-      case "unreachable":
-        return "crashed";
-    }
-  });
-
-  const caddyPort = $derived.by<string>(() => {
-    const m = sidecars.value.caddy.detail?.match(/(\d+)/);
-    return m ? m[1] : "—";
-  });
-
-  // --- Card 2: HTTPS (mkcert CA) ---
-  const mkcertTrusted = $derived(
-    sidecars.value.mkcertCa.status === "running",
-  );
-  const mkcertLabel = $derived.by(() => {
-    switch (sidecars.value.mkcertCa.status) {
-      case "running":
-        return "Trusted";
-      case "stopped":
-        return "Not Installed";
-      case "not_installed":
-        return "Missing";
-      case "unreachable":
-        return "Error";
-    }
-  });
-
-  // --- Card 3: Hosts Helper ---
-  const hostsEntries = $derived.by<number | null>(() => {
-    const detail = sidecars.value.hostsHelper.detail;
-    if (!detail) return null;
-    const m = detail.match(/(\d+)/);
-    return m ? Number(m[1]) : null;
-  });
-
-  const hostsPill = $derived.by<PortbayStatus>(() => {
-    switch (sidecars.value.hostsHelper.status) {
-      case "running":
-        return "running";
-      case "stopped":
-        return "stopped";
-      case "not_installed":
-        return "port_conflict";
-      case "unreachable":
-        return "crashed";
-    }
-  });
-
-  // --- Card 4: Active Processes ---
-  const activeCount = $derived(
+  // --- Card 1: Projects ---
+  const total = $derived(projects.value.length);
+  const runningCount = $derived(
     projects.value.filter(
       (p) => p.status === "running" || p.status === "starting",
     ).length,
   );
+  const stoppedCount = $derived(
+    projects.value.filter((p) => p.status === "stopped").length,
+  );
+  const attentionCount = $derived(
+    projects.value.filter(
+      (p) =>
+        p.status === "crashed" ||
+        p.status === "port_conflict" ||
+        p.status === "unhealthy",
+    ).length,
+  );
 
-  // The CPU history (60 samples × 2 min) is reused as the sparkline
-  // data source for cards 1 and 4. Caddy's spark is informational —
-  // we don't actually meter Caddy's per-process CPU, but the system
-  // pulse is a faithful visual indicator that "the app is alive."
+  // --- Card 2: Local Access ---
+  // A "domain" is a project's hostname (1:1). HTTPS is "trusted" only when the
+  // mkcert local CA is installed — otherwise the cert exists but browsers warn.
+  const httpsCount = $derived(
+    projects.value.filter((p) => p.https).length,
+  );
+  const mkcertTrusted = $derived(
+    sidecars.value.mkcertCa.status === "running",
+  );
+  const domainsAttention = $derived(
+    projects.value.filter(
+      (p) => p.status === "port_conflict" || p.status === "unhealthy",
+    ).length,
+  );
+
+  // --- Card 3: Services ---
+  // Health across the bundled sidecars — the same set the /services page
+  // expands. "Healthy" = running; "failing" = installed but unreachable.
+  const serviceList = $derived(Object.values(sidecars.value));
+  const servicesTotal = $derived(serviceList.length);
+  const servicesHealthy = $derived(
+    serviceList.filter((s) => s.status === "running").length,
+  );
+  const servicesFailing = $derived(
+    serviceList.filter((s) => s.status === "unreachable").length,
+  );
+
+  // --- Card 4: Local AI (Ollama) ---
+  // At-a-glance "is my local AI up, and what's loaded?" so the model doesn't
+  // have to be checked on the AI page. running + loaded come from the app-wide
+  // ollamaService store (cheap probes); loaded[] is empty while stopped.
+  const ollamaRunning = $derived(ollamaService.running);
+  const loadedCount = $derived(ollamaService.loaded.length);
+  const primaryModel = $derived(ollamaService.loaded[0]?.name ?? null);
+  const extraLoaded = $derived(Math.max(0, loadedCount - 1));
 </script>
 
 <div
   class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3"
   role="status"
   aria-live="polite"
-  aria-label="Service status"
+  aria-label="Local environment status"
 >
-  <!-- Card 1: Caddy -->
+  <!-- Card 1: Projects -->
+  <div
+    class="bg-surface border border-border rounded-2xl p-4
+           flex flex-col gap-3 min-h-[112px]"
+  >
+    <div class="flex items-start justify-between gap-2">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <span
+          class="inline-flex items-center justify-center w-8 h-8 rounded-lg
+                 bg-status-running/10 text-status-running shrink-0"
+        >
+          <Icon name="package" size={15} />
+        </span>
+        <div class="min-w-0 leading-tight">
+          <p class="text-[13px] font-semibold text-fg truncate">Projects</p>
+          <p class="text-[11px] text-fg-subtle truncate">Running now</p>
+        </div>
+      </div>
+    </div>
+    <div class="flex items-end justify-between gap-2">
+      <div class="leading-tight min-w-0">
+        <p class="text-[20px] font-semibold text-fg tabular-nums">
+          {runningCount}<span class="text-fg-subtle font-normal text-[15px]">
+            / {total}</span
+          >
+        </p>
+        <p class="text-[11px] truncate">
+          <span class="text-fg-subtle">{stoppedCount} stopped</span>
+          {#if attentionCount > 0}
+            <span class="text-status-unhealthy">
+              · {attentionCount} need attention</span
+            >
+          {/if}
+        </p>
+      </div>
+      <!-- Live activity pulse — the device's CPU trace while projects run.
+           Hidden entirely when nothing is running, so an idle dashboard
+           shows just the count, no flat line. -->
+      {#if runningCount > 0}
+        <div
+          class="w-20 h-8 shrink-0 text-status-running"
+          aria-hidden="true"
+        >
+          <Sparkline
+            data={metrics.cpuHistory}
+            color="var(--color-status-running)"
+            label="Activity while projects run"
+          />
+        </div>
+      {/if}
+    </div>
+  </div>
+
+  <!-- Card 2: Local Access -->
+  <div
+    class="bg-surface border border-border rounded-2xl p-4
+           flex flex-col gap-3 min-h-[112px]"
+  >
+    <div class="flex items-start justify-between gap-2">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <span
+          class="inline-flex items-center justify-center w-8 h-8 rounded-lg
+                 bg-status-starting/10 text-status-starting shrink-0"
+        >
+          <Icon name="globe" size={15} />
+        </span>
+        <div class="min-w-0 leading-tight">
+          <p class="text-[13px] font-semibold text-fg truncate">
+            Local Access
+          </p>
+          <p class="text-[11px] text-fg-subtle truncate">Domains &amp; URLs</p>
+        </div>
+      </div>
+    </div>
+    <div class="flex items-end justify-between gap-2">
+      <div class="leading-tight min-w-0">
+        <p class="text-[20px] font-semibold text-fg tabular-nums">
+          {total}<span class="text-fg-subtle font-normal text-[12px]">
+            {total === 1 ? "domain" : "domains"}</span
+          >
+        </p>
+        <p class="text-[11px] truncate">
+          <span class="text-fg-subtle">
+            {httpsCount} HTTPS{mkcertTrusted ? " trusted" : ""}
+          </span>
+          {#if domainsAttention > 0}
+            <span class="text-status-unhealthy">
+              · {domainsAttention} need attention</span
+            >
+          {/if}
+        </p>
+      </div>
+      <span
+        class="inline-flex items-center justify-center w-10 h-10 rounded-full
+               {mkcertTrusted
+          ? 'bg-status-running/15 text-status-running'
+          : 'bg-status-unhealthy/15 text-status-unhealthy'}"
+        aria-hidden="true"
+      >
+        <Icon name={mkcertTrusted ? "lock" : "circle-alert"} size={18} />
+      </span>
+    </div>
+  </div>
+
+  <!-- Card 3: Services -->
   <div
     class="bg-surface border border-border rounded-2xl p-4
            flex flex-col gap-3 min-h-[112px]"
@@ -122,70 +216,45 @@
           class="inline-flex items-center justify-center w-8 h-8 rounded-lg
                  bg-accent/10 text-accent shrink-0"
         >
-          <Icon name="layers" size={15} />
+          <Icon name="server" size={15} />
         </span>
         <div class="min-w-0 leading-tight">
-          <p class="text-[13px] font-semibold text-fg truncate">Caddy</p>
-          <p class="text-[11px] text-fg-subtle truncate">Reverse Proxy</p>
+          <p class="text-[13px] font-semibold text-fg truncate">Services</p>
+          <p class="text-[11px] text-fg-subtle truncate">Bundled sidecars</p>
         </div>
       </div>
     </div>
     <div class="flex items-end justify-between gap-2">
-      <div class="leading-tight">
+      <div class="leading-tight min-w-0">
         <p class="text-[20px] font-semibold text-fg tabular-nums">
-          {caddyPort}
+          {servicesHealthy}<span class="text-fg-subtle font-normal text-[15px]">
+            / {servicesTotal}</span
+          >
         </p>
-        <StatusPill status={caddyPill} />
-      </div>
-    </div>
-  </div>
-
-  <!-- Card 2: HTTPS / mkcert CA -->
-  <div
-    class="bg-surface border border-border rounded-2xl p-4
-           flex flex-col gap-3 min-h-[112px]"
-  >
-    <div class="flex items-start justify-between gap-2">
-      <div class="flex items-center gap-2.5 min-w-0">
-        <span
-          class="inline-flex items-center justify-center w-8 h-8 rounded-lg
-                 bg-status-running/10 text-status-running shrink-0"
-        >
-          <Icon name="lock" size={15} />
-        </span>
-        <div class="min-w-0 leading-tight">
-          <p class="text-[13px] font-semibold text-fg truncate">HTTPS</p>
-          <p class="text-[11px] text-fg-subtle truncate">Local CA</p>
-        </div>
-      </div>
-    </div>
-    <div class="flex items-end justify-between gap-2">
-      <div class="leading-tight">
-        <p
-          class="text-[15px] font-semibold tabular-nums {mkcertTrusted
-            ? 'text-status-running'
-            : 'text-status-unhealthy'}"
-        >
-          {mkcertLabel}
+        <p class="text-[11px] truncate">
+          {#if servicesFailing > 0}
+            <span class="text-status-crashed">{servicesFailing} failing</span>
+          {:else}
+            <span class="text-status-running">healthy</span>
+          {/if}
         </p>
-        <p class="text-[11px] text-fg-subtle">Certificate Authority</p>
       </div>
       <span
         class="inline-flex items-center justify-center w-10 h-10 rounded-full
-               {mkcertTrusted
-          ? 'bg-status-running/15 text-status-running'
-          : 'bg-status-unhealthy/15 text-status-unhealthy'}"
+               {servicesFailing > 0
+          ? 'bg-status-crashed/15 text-status-crashed'
+          : 'bg-status-running/15 text-status-running'}"
         aria-hidden="true"
       >
         <Icon
-          name={mkcertTrusted ? "check" : "circle-alert"}
+          name={servicesFailing > 0 ? "circle-alert" : "activity"}
           size={18}
         />
       </span>
     </div>
   </div>
 
-  <!-- Card 3: Hosts Helper -->
+  <!-- Card 4: Local AI -->
   <div
     class="bg-surface border border-border rounded-2xl p-4
            flex flex-col gap-3 min-h-[112px]"
@@ -194,71 +263,53 @@
       <div class="flex items-center gap-2.5 min-w-0">
         <span
           class="inline-flex items-center justify-center w-8 h-8 rounded-lg
-                 bg-fg-muted/10 text-fg-muted shrink-0"
+                 bg-accent/10 text-accent shrink-0"
         >
-          <Icon name="users" size={15} />
+          <Icon name="sparkles" size={15} />
         </span>
         <div class="min-w-0 leading-tight">
-          <p class="text-[13px] font-semibold text-fg truncate">
-            Hosts Helper
-          </p>
-          <p class="text-[11px] text-fg-subtle truncate">/etc/hosts entries</p>
+          <p class="text-[13px] font-semibold text-fg truncate">Local AI</p>
+          <p class="text-[11px] text-fg-subtle truncate">Ollama server</p>
         </div>
       </div>
     </div>
     <div class="flex items-end justify-between gap-2">
-      <div class="leading-tight">
-        <p class="text-[20px] font-semibold text-fg tabular-nums">
-          {hostsEntries ?? "—"}
-        </p>
-        <StatusPill status={hostsPill} />
-      </div>
-    </div>
-  </div>
-
-  <!-- Card 4: Active Processes -->
-  <div
-    class="bg-surface border border-border rounded-2xl p-4
-           flex flex-col gap-3 min-h-[112px]"
-  >
-    <div class="flex items-start justify-between gap-2">
-      <div class="flex items-center gap-2.5 min-w-0">
-        <span
-          class="inline-flex items-center justify-center w-8 h-8 rounded-lg
-                 bg-status-running/10 text-status-running shrink-0"
-        >
-          <Icon name="activity" size={15} />
-        </span>
-        <div class="min-w-0 leading-tight">
-          <p class="text-[13px] font-semibold text-fg truncate">
-            Active Processes
-          </p>
-          <p class="text-[11px] text-fg-subtle truncate">
-            Currently running
-          </p>
-        </div>
-      </div>
-    </div>
-    <div class="flex items-end justify-between gap-2">
-      <div class="leading-tight">
-        <p class="text-[20px] font-semibold text-fg tabular-nums">
-          {activeCount}
-        </p>
+      <div class="leading-tight min-w-0">
         <p
-          class="text-[11px] {activeCount > 0
-            ? 'text-status-running'
+          class="text-[20px] font-semibold tabular-nums {ollamaRunning
+            ? 'text-fg'
             : 'text-fg-subtle'}"
         >
-          {activeCount === 1 ? "project" : "projects"}
+          {loadedCount}<span class="text-fg-subtle font-normal text-[15px]">
+            {loadedCount === 1 ? "model" : "models"}</span
+          >
+        </p>
+        <p class="text-[11px] truncate">
+          {#if ollamaRunning}
+            {#if primaryModel}
+              <span class="text-status-running">{primaryModel}</span>
+              {#if extraLoaded > 0}
+                <span class="text-fg-subtle"> · +{extraLoaded} more</span>
+              {/if}
+            {:else}
+              <span class="text-fg-subtle">running · no model loaded</span>
+            {/if}
+          {:else}
+            <span class="text-fg-subtle">stopped</span>
+          {/if}
         </p>
       </div>
-      <div class="w-20 h-8 shrink-0 text-status-running">
-        <Sparkline
-          data={metrics.cpuHistory}
-          color="var(--color-status-running)"
-          label="System CPU"
-        />
-      </div>
+      <!-- Load line — the device CPU trace while the AI server runs; hidden
+           when stopped, mirroring the Projects pulse. -->
+      {#if ollamaRunning}
+        <div class="w-20 h-8 shrink-0 text-accent" aria-hidden="true">
+          <Sparkline
+            data={metrics.cpuHistory}
+            color="var(--color-accent)"
+            label="Local AI load"
+          />
+        </div>
+      {/if}
     </div>
   </div>
 </div>

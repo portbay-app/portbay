@@ -15,6 +15,11 @@ function createSshTunnelsStore() {
   let entries = $state<SshTunnelRuntimeStatus[]>([]);
   let busy = $state<Record<string, boolean>>({});
   let timer: ReturnType<typeof setInterval> | null = null;
+  // Ref-counted: the root layout starts polling app-wide (so the Stop-All
+  // button sees live SSH tunnels from any page), and the SSH page also starts
+  // it on mount. Counting starts/stops keeps the page's unmount from killing
+  // the layout's poll.
+  let refs = 0;
 
   async function refresh(): Promise<void> {
     if (!browser) return;
@@ -26,13 +31,16 @@ function createSshTunnelsStore() {
   }
 
   function startPolling() {
-    if (!browser || timer !== null) return;
+    if (!browser) return;
+    refs += 1;
+    if (timer !== null) return;
     void refresh();
     timer = setInterval(() => void refresh(), POLL_INTERVAL_MS);
   }
 
   function stopPolling() {
-    if (timer !== null) {
+    refs = Math.max(0, refs - 1);
+    if (refs === 0 && timer !== null) {
       clearInterval(timer);
       timer = null;
     }

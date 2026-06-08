@@ -72,6 +72,14 @@ export interface WorkspaceScan {
   apps: WorkspaceApp[];
 }
 
+export interface LanguageIntelligenceCapability {
+  language: string;
+  label: string;
+  files: string[];
+  features: string[];
+  setup: string;
+}
+
 /** One runnable monorepo app, pre-filled with standalone-project defaults. */
 export interface WorkspaceApp {
   package: string;
@@ -84,6 +92,7 @@ export interface WorkspaceApp {
   suggestedHostname: string;
   suggestedPort: number | null;
   suggestedStartCommand?: string;
+  languageIntelligence: LanguageIntelligenceCapability[];
 }
 
 export interface RuntimeInfo {
@@ -223,6 +232,8 @@ export interface DeployRunResult {
   skipped: string[];
   remotePath: string;
   steps: import("./sshTunnels").StepResult[];
+  /** True when the run was cancelled mid-sync or mid-steps. */
+  cancelled: boolean;
 }
 
 /** Defaults that match the Rust side — used when a project has no `domain`. */

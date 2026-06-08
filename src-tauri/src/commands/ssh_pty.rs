@@ -121,7 +121,7 @@ pub async fn ssh_pty_open(
             password.as_deref(),
             proxy_password.as_deref(),
             passphrase.as_deref(),
-            Some(crate::ssh::EventInteractor::new(app)),
+            Some(crate::ssh::EventInteractor::shared(app)),
         )
         .await
         .map_err(AppError::Ssh)?
@@ -134,7 +134,7 @@ pub async fn ssh_pty_open(
     let id = {
         let mut mgr = state.pty.lock().await;
         let id = mgr.next_id();
-        mgr.register(id.clone(), tx);
+        mgr.register(id.clone(), input.connection_id.clone(), tx);
         id
     };
 

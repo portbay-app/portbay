@@ -313,6 +313,21 @@ pub struct DetectedProject {
     pub suggested_php_version: Option<String>,
     pub suggested_web_server: Option<WebServer>,
     pub suggested_mobile_run: Option<MobileRunConfig>,
+    /// Curated editor help PortBay can provide without installing marketplace
+    /// extensions. This is detection metadata only; it does not mutate the
+    /// registry when the project is added.
+    pub language_intelligence: Vec<LanguageIntelligenceCapability>,
+}
+
+/// One built-in smart-editor capability inferred from project files.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageIntelligenceCapability {
+    pub language: String,
+    pub label: String,
+    pub files: Vec<String>,
+    pub features: Vec<String>,
+    pub setup: String,
 }
 
 /// Result of `detect_workspace_apps` — the monorepo apps a folder exposes that
@@ -348,6 +363,7 @@ pub struct WorkspaceAppDto {
     pub suggested_hostname: String,
     pub suggested_port: Option<u16>,
     pub suggested_start_command: Option<String>,
+    pub language_intelligence: Vec<LanguageIntelligenceCapability>,
 }
 
 /// Input for `update_project` — partial patch over the registry entry.

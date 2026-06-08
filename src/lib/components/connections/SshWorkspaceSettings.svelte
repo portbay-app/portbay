@@ -168,6 +168,24 @@
             class="mt-1.5 h-8 w-full rounded-md border border-border bg-surface px-2 font-mono text-[12px] text-fg outline-none focus:border-accent"
           />
         </label>
+
+        <label class="flex items-start justify-between gap-4">
+          <span class="min-w-0">
+            <span class="text-[12.5px] text-fg">Suggestions use terminal output</span>
+            <span class="mt-0.5 block text-[11px] text-fg-subtle">
+              Feed recent terminal output (not just typed commands) to the host's
+              model for the inline next-command suggestion. Off by default — the
+              buffer can hold secrets. When on it's capped and lightly redacted,
+              and only ever sent to the host's own model over SSH.
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={p.suggestBufferContext}
+            onchange={(e) => terminalPrefs.update({ suggestBufferContext: e.currentTarget.checked })}
+            class="mt-0.5 shrink-0 rounded border-border accent-accent"
+          />
+        </label>
       </div>
 
       <button

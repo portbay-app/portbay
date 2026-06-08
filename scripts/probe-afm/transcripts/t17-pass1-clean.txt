@@ -1,0 +1,4 @@
+1. Stop the workers.
+2. Run the migration with a ten-minute timeout.
+3. Deploy script restarts them.
+

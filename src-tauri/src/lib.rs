@@ -12,6 +12,14 @@ pub mod context;
 pub mod databases;
 pub mod db_approval;
 pub mod db_client;
+pub mod dictation;
+pub mod dictation_anywhere;
+pub mod dictation_commands;
+pub mod dictation_context;
+pub mod dictation_entities;
+pub mod dictation_history;
+pub mod dictation_session;
+pub mod dictation_vocab;
 pub mod dnsmasq;
 pub mod dock_icon;
 pub mod doctor;
@@ -29,6 +37,8 @@ pub mod mcp;
 pub mod mkcert;
 pub mod mobile;
 pub mod notifications;
+pub mod ollama;
+pub mod overlay_window;
 pub mod php;
 pub mod port_holder;
 pub mod portfile;
@@ -45,10 +55,12 @@ pub mod sidecar_reclaim;
 pub mod smoke;
 pub mod ssh;
 pub mod state;
+pub mod stt;
 pub mod sync;
 pub mod telemetry;
 pub mod tray;
 pub mod tunnel;
+pub mod typing;
 pub mod util;
 pub mod vibrancy;
 pub mod webservers;
@@ -84,22 +96,34 @@ const SSH_SUPERVISOR_PERIOD: Duration = Duration::from_secs(2);
 /// standard `PORTBAY_LOG` env var with an `info` default; the
 /// `tauri_plugin_shell` and `reqwest` crates are quieted to `warn` so the
 /// per-tick reconcile log isn't drowned in dependency noise.
+///
+/// `log_internal_errors(false)` matters: when a log write fails, the fmt
+/// layer's default is to report that failure via `eprintln!` — which PANICS
+/// with "failed printing to stderr: Broken pipe" once the stderr reader is
+/// gone (closed terminal, dead `tauri dev` wrapper mid-restart). A logging
+/// failure must never take the app down; the event is simply dropped.
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_env("PORTBAY_LOG")
         .unwrap_or_else(|_| EnvFilter::new("info,tauri_plugin_shell=warn,reqwest=warn,hyper=warn"));
-    let _ = fmt().with_env_filter(filter).try_init();
+    let _ = fmt()
+        .with_env_filter(filter)
+        .log_internal_errors(false)
+        .try_init();
 }
 
 /// Resolve the mkcert binary the reconciler should use. Tries, in order:
 ///
-/// 1. **Bundled sidecar** under the Tauri resource directory at
-///    `binaries/mkcert-<target-triple>`. This is the production path
-///    once the .app is built; in dev it picks up the binary the
-///    `scripts/fetch-mkcert.sh` script writes into `src-tauri/binaries`.
-/// 2. **Next to the running executable** (Tauri's shell plugin copies
-///    sidecars here for `cargo run`).
-/// 3. **PATH** via `which::which("mkcert")` — final fallback for users
+/// 1. **Next to the running executable** as plain `mkcert` — Tauri strips
+///    the target-triple suffix when bundling `externalBin` sidecars, so a
+///    packaged .app has `Contents/MacOS/mkcert` (and `tauri dev` copies it
+///    to `target/debug/mkcert`). This is the production path.
+/// 2. **Next to the running executable** with the triple suffix
+///    (`mkcert-<target-triple>`) — covers a bare `cargo run` where the
+///    Tauri CLI hasn't stripped the name.
+/// 3. **Tauri resource directory** at `binaries/mkcert-<target-triple>` —
+///    matches the `scripts/fetch-mkcert.sh` layout in `src-tauri/binaries`.
+/// 4. **PATH** via `which::which("mkcert")` — final fallback for users
 ///    who have mkcert installed via Homebrew and the bundle didn't ship
 ///    with one (e.g. a future Linux build).
 ///
@@ -118,19 +142,27 @@ fn resolve_mkcert_binary(app: &AppHandle) -> Option<PathBuf> {
         _ => None,
     };
 
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Bundled sidecar: Tauri strips the triple suffix at bundle time.
+            let candidate = dir.join("mkcert");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            if let Some(triple) = triple {
+                let candidate = dir.join(format!("mkcert-{triple}"));
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
     if let Some(triple) = triple {
         if let Ok(resource_dir) = app.path().resource_dir() {
             let candidate = resource_dir.join(format!("binaries/mkcert-{triple}"));
             if candidate.exists() {
                 return Some(candidate);
-            }
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let candidate = dir.join(format!("mkcert-{triple}"));
-                if candidate.exists() {
-                    return Some(candidate);
-                }
             }
         }
     }
@@ -154,12 +186,19 @@ pub fn run() {
     init_tracing();
     telemetry::install_panic_hook(env!("CARGO_PKG_VERSION"));
 
-    // Merge the user's login-shell PATH into the process environment
-    // before *anything* else spawns. GUI launches on macOS inherit a
-    // minimal PATH (no shell rc files run), so brew/asdf/mise/nvm
-    // installs are invisible until we ask the user's shell for its
-    // actual PATH. Must run before sidecar boot (which spawns
-    // process-compose) and before runtime detection.
+    // Enrich the process PATH from the user's login shell without
+    // blocking the UI thread. GUI launches on macOS inherit a minimal
+    // PATH (no shell rc files run), so brew/asdf/mise/nvm installs are
+    // invisible until we ask the user's shell for its PATH.
+    //
+    // Strategy: if a cache file exists from the previous run, apply it
+    // synchronously (microseconds). The live login-shell probe runs on a
+    // background thread and refreshes the cache when it completes. On a
+    // first-ever launch there is no cache, so the process PATH stays at
+    // the GUI-inherited minimum until the probe finishes in the
+    // background — features that need the enriched PATH (runtime
+    // detection, project spawn) are triggered by user action, which
+    // happens well after the probe completes.
     crate::runtimes::env::bootstrap_user_env();
 
     #[allow(unused_mut)]
@@ -400,6 +439,23 @@ pub fn run() {
             // lifetime of the app.
             commands::events::spawn_status_poller(app.handle().clone());
             commands::metrics::spawn_metrics_poller(app.handle().clone());
+            // Mirror the global macOS dictation session (DictationIM's
+            // distributed notifications) so start/stop_dictation can act on
+            // the real OS state instead of blind-toggling. Setup runs on the
+            // main thread, which the observer registration expects.
+            dictation_session::init(app.handle());
+            // "Dictate anywhere": make the notch overlay window inert
+            // (click-through, all Spaces, never key) and install the global
+            // Fn monitor when Accessibility trust already exists. Both are
+            // main-thread AppKit work — setup is the right place.
+            #[cfg(target_os = "macos")]
+            {
+                overlay_window::configure(app.handle());
+                dictation_anywhere::init(
+                    app.handle(),
+                    objc2::MainThreadMarker::new().expect("Tauri setup runs on the main thread"),
+                );
+            }
             // Watch every project's audit log for new agent activity (comments,
             // blocks, warnings) and surface it to the topbar bell + desktop.
             // Board-only: the bell shell ships in every build, but the scanner
@@ -434,11 +490,11 @@ pub fn run() {
             // inside the scheduler.
             commands::artifacts::spawn_auto_clean_scheduler(app.handle().clone());
 
-            // Reap idle SSH sessions. Cached exec/SFTP sessions keep a host
-            // authenticated so navigating the workspace doesn't re-prompt; this
-            // drops any idle longer than 15 minutes (next action re-auths) and
-            // any whose handle has already closed, so a host never holds an open
-            // connection forever.
+            // Reap idle SSH sessions. Cached exec/SFTP/agent sessions keep a
+            // host authenticated so navigating the workspace doesn't re-prompt;
+            // this drops any idle longer than 15 minutes (next action re-auths)
+            // and any whose handle has already closed, so a host never holds an
+            // open connection forever.
             {
                 let app_h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -449,6 +505,7 @@ pub fn run() {
                         let st: tauri::State<AppState> = app_h.state();
                         st.exec.lock().await.reap_idle(MAX_IDLE);
                         st.sftp.lock().await.reap_idle(MAX_IDLE);
+                        st.agent.lock().await.reap_idle(MAX_IDLE);
                     }
                 });
             }
@@ -569,6 +626,26 @@ pub fn run() {
             }
 
             match event {
+                // Native OS file drop → record each path in the SFTP approved
+                // set before the webview sees it. Drops are host-mediated (the
+                // OS handed them to us, not the renderer), so recording them
+                // here keeps drag-upload working under the dialog-approval
+                // policy without giving the renderer a way to approve arbitrary
+                // paths. The FileBrowserPane webview listener receives the same
+                // paths and calls sftp_transfer / upload, which will pass the
+                // ensure_local_path_approved check because we pre-inserted them.
+                tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                    let state: tauri::State<AppState> = window.state();
+                    let mut approved = state
+                        .sftp_approved_paths
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    for path in paths {
+                        if let Ok(canon) = std::fs::canonicalize(path) {
+                            approved.insert(canon);
+                        }
+                    }
+                }
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     // "Close to menu bar" semantics: when the toggle is on
                     // and the tray is installed, intercept the window's
@@ -643,9 +720,11 @@ pub fn run() {
             commands::sidecars::restart_pc,
             commands::sidecars::restart_caddy,
             commands::sidecars::reconcile_hosts,
+            commands::certs::get_ca_status,
             commands::certs::install_mkcert_ca,
             commands::certs::cert_info,
             commands::certs::reissue_cert,
+            commands::certs::export_cert_bundle,
             commands::webservers::webserver_overview,
             commands::system::doctor,
             commands::system::tail_logs,
@@ -656,6 +735,32 @@ pub fn run() {
             commands::artifacts::clean_all_artifacts,
             commands::system::quit_app,
             commands::system::open_main_window,
+            commands::system::start_dictation,
+            commands::system::stop_dictation,
+            commands::system::dictation_diagnostics,
+            commands::dictation::dictation_rewrite,
+            commands::dictation::dictation_edit,
+            commands::dictation::dictation_rewrite_cancel,
+            commands::dictation::dictation_trace,
+            commands::dictation::dictation_provider_status,
+            commands::dictation::dictation_prewarm,
+            commands::dictation::dictation_unlearn,
+            commands::dictation::dictation_reset_vocabulary,
+            commands::dictation::dictation_list_apps,
+            commands::stt::stt_status,
+            commands::stt::stt_overview,
+            commands::stt::stt_download_model,
+            commands::stt::stt_cancel_download,
+            commands::stt::stt_delete_model,
+            commands::stt::stt_start_capture,
+            commands::stt::stt_stop_capture,
+            commands::stt::stt_cancel_capture,
+            commands::stt::stt_prewarm,
+            commands::dictation_anywhere::dictation_anywhere_status,
+            commands::dictation_anywhere::dictation_anywhere_arm,
+            commands::dictation_anywhere::dictation_history_list,
+            commands::dictation_anywhere::dictation_history_clear,
+            commands::dictation_anywhere::dictation_overlay_stop,
             commands::log_stream::subscribe_logs,
             commands::http_inspector::recent_requests,
             commands::http_inspector::clear_requests,
@@ -704,16 +809,38 @@ pub fn run() {
             commands::sftp::sftp_upload,
             commands::sftp::sftp_download,
             commands::sftp::sftp_transfer,
+            commands::sftp::sftp_transfer_cancel,
             commands::sftp::sftp_disconnect,
+            commands::sftp::sftp_search,
+            commands::sftp::sftp_search_cancel,
+            // Host-side dialog pickers: the renderer calls these instead of the
+            // plugin-dialog JS API so local paths are chosen by the host and
+            // recorded in AppState::sftp_approved_paths before any transfer.
+            commands::sftp::sftp_pick_upload_files,
+            commands::sftp::sftp_pick_upload_dir,
+            commands::sftp::sftp_pick_download_dir,
+            commands::sftp::sftp_pick_save_path,
+            commands::sftp::sftp_request_local_access,
             commands::ssh_exec::ssh_exec_run,
             commands::ssh_exec::ssh_deploy_run,
+            commands::ssh_exec::ssh_deploy_cancel,
+            commands::ssh_exec::ssh_deploy_snippets_get,
+            commands::ssh_exec::ssh_deploy_snippets_set,
             commands::ssh_pty::ssh_pty_open,
             commands::ssh_pty::ssh_pty_input,
             commands::ssh_pty::ssh_pty_resize,
             commands::ssh_pty::ssh_pty_close,
             commands::ssh_agent::ssh_agent_open,
             commands::ssh_agent::ssh_agent_chat,
+            commands::ssh_agent::ssh_agent_cli_chat,
             commands::ssh_agent::ssh_agent_run,
+            commands::ssh_agent::ssh_ollama_complete,
+            commands::ssh_agent::ssh_agent_upload_bytes,
+            commands::ssh_agent::ssh_agent_upload_path,
+            commands::ssh_agent::ssh_agent_cleanup_attachments,
+            commands::ssh_agent::ssh_agent_forward_start,
+            commands::ssh_agent::ssh_agent_forward_stop,
+            commands::ssh_agent::ssh_agent_abort,
             commands::ssh_agent::ssh_agent_close,
             commands::ssh_connections::ssh_connections_list,
             commands::ssh_connections::ssh_connection_save,
@@ -724,6 +851,8 @@ pub fn run() {
             crate::ssh::interaction::ssh_interaction_respond,
             crate::ssh::interaction::ssh_interaction_cancel,
             commands::ssh_connections::ssh_connection_touch,
+            commands::ssh_connections::ssh_host_disconnect,
+            commands::ssh_connections::ssh_host_connected,
             commands::ssh_connections::ssh_set_credential,
             commands::ssh_connections::ssh_clear_credential,
             commands::ssh_connections::ssh_has_stored_credential,
@@ -749,6 +878,8 @@ pub fn run() {
             commands::deploy::project_deploy_run,
             commands::localfs::local_list_dir,
             commands::localfs::local_stat,
+            commands::localfs::local_walk_files,
+            commands::localfs::local_search,
             commands::metrics::system_metrics,
             commands::preferences::get_preferences,
             commands::preferences::set_preferences,
@@ -757,14 +888,39 @@ pub fn run() {
             commands::preferences::get_domain_settings,
             commands::preferences::update_domain_suffix,
             commands::preferences::mark_close_toast_seen,
+            commands::ollama::ollama_overview,
+            commands::ollama::ollama_running,
+            commands::ollama::ollama_loaded_models,
+            commands::ollama::ollama_start,
+            commands::ollama::ollama_stop,
+            commands::ollama::ollama_restart,
+            commands::ollama::ollama_show_model,
+            commands::ollama::ollama_delete_model,
+            commands::ollama::ollama_unload_model,
+            commands::ollama::ollama_smoke_test,
+            commands::ollama::ollama_test_stream,
+            commands::ollama::ollama_cancel_generate,
+            commands::ollama::ollama_pull_model,
+            commands::ollama::ollama_cancel_pull,
+            commands::ollama::ollama_dismiss_pull,
+            commands::ollama::ollama_install,
+            commands::ollama::ollama_update_check,
+            commands::ollama_library::ollama_library,
+            commands::ollama_library::ollama_library_tags,
             commands::entitlements::get_entitlement,
             commands::entitlements::refresh_entitlement,
             commands::entitlements::clear_entitlement,
             commands::entitlements::pro_checkout_url,
+            commands::entitlements::subscription_status,
+            commands::entitlements::billing_portal_url,
             commands::auth::begin_login,
             commands::auth::poll_login,
             commands::auth::cancel_login,
             commands::auth::logout,
+            commands::auth::delete_account,
+            commands::auth::account_status,
+            commands::auth::cancel_account_deletion,
+            commands::auth::export_account_data,
             commands::auth::account_resync,
             commands::auth::get_account_avatar,
             commands::profile::update_display_name,
@@ -894,9 +1050,9 @@ pub fn run() {
             #[cfg(feature = "tasks")]
             commands::tasks::task_attachment_data_url,
             #[cfg(feature = "tasks")]
-            commands::tasks::task_start_dictation,
+            commands::tasks::ollama_local_models,
             #[cfg(feature = "tasks")]
-            commands::tasks::open_accessibility_settings,
+            commands::tasks::agent_model_catalog,
             #[cfg(feature = "tasks")]
             commands::tasks::card_activity,
             #[cfg(feature = "tasks")]

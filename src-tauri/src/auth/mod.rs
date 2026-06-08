@@ -67,6 +67,10 @@ pub fn load_session() -> Option<Session> {
     }
     if let Ok(raw) = std::env::var(SESSION_ENV) {
         if let Ok(session) = serde_json::from_str(&raw) {
+            // Security-sensitive override (SECURITY.md "Session Environment
+            // Override"): the environment is readable by anything inspecting
+            // this process, so its use must never be silent.
+            tracing::warn!("loading account session from {SESSION_ENV} environment override");
             return Some(session);
         }
     }
@@ -133,8 +137,6 @@ pub struct PendingLogin {
 
 #[derive(Debug, Deserialize)]
 pub struct InitResponse {
-    #[allow(dead_code)]
-    pub flow_id: String,
     pub poll_token: String,
     /// Present for the GitHub method — the URL to open in the system browser.
     pub authorize_url: Option<String>,
@@ -297,4 +299,108 @@ pub async fn logout_remote(base_url: &str, access_token: &str) {
         .bearer_auth(access_token)
         .send()
         .await;
+}
+
+/// Server-side account deletion (GDPR erasure, deferred): the cloud schedules
+/// the purge 30 days out and revokes all sessions; the user can sign back in
+/// within the window and cancel explicitly from Settings (sign-in alone does
+/// not cancel). Unlike `logout_remote` this is NOT best-effort: the caller
+/// must only clear local state after the server has confirmed the scheduling,
+/// so a network failure never strands a "deleted" account that was never
+/// actually scheduled in the cloud.
+pub async fn delete_account_remote(base_url: &str, access_token: &str) -> Result<(), String> {
+    let url = format!("{}/account/delete", base_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("account deletion request failed: {e}"))?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "account deletion failed: the server answered HTTP {}",
+            resp.status()
+        ))
+    }
+}
+
+/// Pending-deletion state for the signed-in account, served by
+/// `GET /account/status`. All-`None` timestamps = no deletion pending.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AccountStatus {
+    /// When the user requested erasure (cloud clock). `None` = not pending.
+    pub deletion_requested_at: Option<String>,
+    /// When the purge cron will erase everything (ISO-8601).
+    pub purge_after: Option<String>,
+    /// Length of the grace window, for copy ("erased after N days").
+    pub grace_days: u32,
+}
+
+/// Fetch the pending-deletion status (`GET /account/status`) so Settings can
+/// show the countdown + cancel affordance after the user signs back in.
+pub async fn account_status_remote(
+    base_url: &str,
+    access_token: &str,
+) -> Result<AccountStatus, String> {
+    let url = format!("{}/account/status", base_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("account status request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "account status failed: the server answered HTTP {}",
+            resp.status()
+        ));
+    }
+    resp.json::<AccountStatus>()
+        .await
+        .map_err(|e| format!("account status could not be read: {e}"))
+}
+
+/// Cancel a pending account deletion (`POST /account/delete/cancel`) — the
+/// deliberate "keep my account" action from Settings. Server-first like
+/// `delete_account_remote`: the caller treats the deletion as still pending
+/// unless the server confirms the cancellation.
+pub async fn cancel_deletion_remote(base_url: &str, access_token: &str) -> Result<(), String> {
+    let url = format!("{}/account/delete/cancel", base_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("cancelling the deletion failed: {e}"))?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "cancelling the deletion failed: the server answered HTTP {}",
+            resp.status()
+        ))
+    }
+}
+
+/// Fetch the account's data export (GDPR portability) as the raw JSON string
+/// served by `GET /account/export`.
+pub async fn export_account_remote(base_url: &str, access_token: &str) -> Result<String, String> {
+    let url = format!("{}/account/export", base_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("account export request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "account export failed: the server answered HTTP {}",
+            resp.status()
+        ));
+    }
+    resp.text()
+        .await
+        .map_err(|e| format!("account export could not be read: {e}"))
 }

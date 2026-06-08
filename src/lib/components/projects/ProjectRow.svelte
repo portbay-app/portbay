@@ -26,6 +26,7 @@
   import { projects } from "$lib/stores/projects.svelte";
   import { dns } from "$lib/stores/dns.svelte";
   import { density } from "$lib/stores/density.svelte";
+  import { sidecars } from "$lib/stores/sidecars.svelte";
 
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView } from "$lib/types/projects";
@@ -46,6 +47,10 @@
   let { project }: Props = $props();
 
   let busy = $state<"start" | "stop" | "restart" | null>(null);
+  // Dismissible inline routing warning shown after a successful start when
+  // Caddy or dnsmasq is not running. Null means no warning / dismissed.
+  let routingWarning = $state<"caddy" | "dnsmasq" | "both" | null>(null);
+  let restartingRouting = $state(false);
 
   const isSelected = $derived(projects.selectedId === project.id);
   // The status the row *shows* — optimistic overlay while a Play/Stop is in
@@ -117,9 +122,21 @@
             break;
           }
           if (r.kind === "error") throw r.error;
+          // After a successful start, check if routing sidecars are up.
+          // Only warn when the project uses a .test (or https) hostname — a
+          // port-only project is reachable via localhost regardless.
+          if (project.hostname) {
+            const snap = sidecars.value;
+            const caddyDown = snap.caddy.status !== "running";
+            const dnsDown = snap.dnsmasq.status !== "running";
+            if (caddyDown && dnsDown) routingWarning = "both";
+            else if (caddyDown) routingWarning = "caddy";
+            else if (dnsDown) routingWarning = "dnsmasq";
+          }
           break;
         }
         case "stop":
+          routingWarning = null;
           await safeInvoke("stop_project", { id: project.id });
           break;
         case "restart":
@@ -132,6 +149,26 @@
       projects.setError(project.id, err as CommandError);
     } finally {
       busy = null;
+    }
+  }
+
+  /** Restart Caddy and/or dnsmasq to fix routing, then dismiss the warning. */
+  async function fixRouting() {
+    if (restartingRouting) return;
+    restartingRouting = true;
+    try {
+      if (routingWarning === "caddy" || routingWarning === "both") {
+        await safeInvoke("restart_caddy");
+      }
+      if (routingWarning === "dnsmasq" || routingWarning === "both") {
+        await safeInvoke("restart_dnsmasq");
+      }
+      await sidecars.refresh();
+      routingWarning = null;
+    } catch {
+      // safeInvoke already pushed a toast; leave the warning visible.
+    } finally {
+      restartingRouting = false;
     }
   }
 
@@ -366,6 +403,63 @@
   >
     <td colspan="6" class="px-4 py-2">
       <ErrorEnvelope envelope={webServerWarning} tone="inline" />
+    </td>
+  </tr>
+{/if}
+
+<!-- Routing warning: project started but Caddy/dnsmasq is down -->
+{#if routingWarning}
+  {@const svcLabel = routingWarning === "both"
+    ? "Caddy and dnsmasq are"
+    : routingWarning === "caddy"
+      ? "Caddy is"
+      : "dnsmasq is"}
+  <tr
+    class="bg-surface-2/50"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <td colspan="6" class="px-4 py-2">
+      <div class="flex items-start gap-2">
+        <div class="flex-1 min-w-0">
+          <ErrorEnvelope
+            envelope={{
+              code: "ROUTING_DOWN",
+              whatHappened: `Started, but ${svcLabel} down — ${project.hostname} won't resolve.`,
+              whyItMatters: "Your project is running but the local DNS or reverse proxy isn't, so the .test URL will time out in the browser.",
+              whoCausedIt: "system",
+              category: "infrastructure",
+              severity: "warning",
+              actions: [],
+            }}
+            tone="inline"
+          />
+        </div>
+        <div class="flex shrink-0 items-center gap-1.5 mt-1">
+          <button
+            type="button"
+            onclick={fixRouting}
+            disabled={restartingRouting}
+            class="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs
+                   border border-border text-fg hover:border-border-strong
+                   hover:bg-surface-2 disabled:opacity-50 transition-colors"
+          >
+            {#if restartingRouting}
+              <Icon name="refresh-cw" size={11} class="animate-spin" /> Restarting…
+            {:else}
+              <Icon name="refresh-cw" size={11} /> Restart {routingWarning === "caddy" ? "Caddy" : routingWarning === "dnsmasq" ? "dnsmasq" : "both"}
+            {/if}
+          </button>
+          <button
+            type="button"
+            onclick={() => (routingWarning = null)}
+            title="Dismiss"
+            aria-label="Dismiss routing warning"
+            class="p-1 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-2 transition-colors"
+          >
+            <Icon name="x" size={13} />
+          </button>
+        </div>
+      </div>
     </td>
   </tr>
 {/if}

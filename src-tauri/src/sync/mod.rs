@@ -106,10 +106,6 @@ pub fn clear_key() -> Result<(), String> {
     keyring_result.and(file_result)
 }
 
-pub fn has_key() -> bool {
-    load_key().is_some()
-}
-
 fn fallback_key_path() -> std::path::PathBuf {
     dirs::config_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -176,6 +172,21 @@ pub struct SyncMeta {
     /// the same slot rather than churning a new device each time.
     #[serde(default)]
     pub client_device_id: Option<String>,
+    /// The user explicitly set up sync on this device. Mirrors "a recovery key
+    /// exists" WITHOUT touching the keychain: reading the key's secret from the
+    /// OS credential store can pop a macOS password prompt (e.g. after a
+    /// re-sign), and merely opening Settings must never do that. The keychain
+    /// is only read on explicit user actions (sync, show key).
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Mark sync as set up / torn down in the non-secret meta file. Used by the
+/// enable/set-key paths so `sync_state` can answer "is sync on?" keychain-free.
+pub fn set_enabled_flag(enabled: bool) {
+    let mut meta = load_meta();
+    meta.enabled = enabled;
+    let _ = save_meta(&meta);
 }
 
 /// Return this install's stable `client_device_id`, generating + persisting one

@@ -34,6 +34,8 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { tunnels } from "$lib/stores/tunnels.svelte";
+  import { sshTunnels } from "$lib/stores/sshTunnels.svelte";
+  import { ollamaService } from "$lib/stores/ollama.svelte";
   import { onboarding } from "$lib/stores/onboarding.svelte";
   import { sidebar } from "$lib/stores/sidebar.svelte";
   import { sidecars } from "$lib/stores/sidecars.svelte";
@@ -73,10 +75,11 @@
         ? "macos"
         : "other";
 
-    // The tray popover renders in its own webview — it must not start
-    // tunnels, listen for nav, or redirect to onboarding. Those side
-    // effects belong to the main window's instance of this layout.
-    if (isTrayPanel) return;
+    // The tray popover and the dictation overlay render in their own
+    // webviews — they must not start tunnels, listen for nav, or redirect
+    // to onboarding. Those side effects belong to the main window's
+    // instance of this layout.
+    if (isTrayPanel || isDictationOverlay) return;
 
     // Reveal the main window only once the webview has painted the themed UI.
     // The window is created hidden (`visible: false` in tauri.conf.json); macOS
@@ -105,6 +108,12 @@
     // launch has settled, so it never fights the window reveal / onboarding.
     const crashTimer = setTimeout(() => void crashSurface.presentLatestPending(), 2500);
     tunnels.start();
+    // The Stop-All button is the master kill switch for every sub-page's
+    // services. Its enabled state must reflect SSH tunnels and Ollama too,
+    // not just projects — so their running-state polls run layout-wide
+    // (alongside tunnels) rather than only while their own page is open.
+    sshTunnels.startPolling();
+    ollamaService.start();
     dbApprovals.start();
     // The projects store has page-spanning lifetime — it's read by
     // /domains, /services, /logs, /languages, the right rail, the
@@ -133,7 +142,15 @@
     // Background update check. Surfaces a non-blocking toast when a newer
     // signed release is published; silent on failure (transient network
     // blips shouldn't nag) and a no-op in the hosted web demo.
-    void updater.check({ silent: true });
+    //
+    // Skipped under `tauri dev`: a dev build can't self-update, so the only
+    // effect of the boot check there is hitting GitHub on every reload — which
+    // logs a noisy plugin-level ERROR on any transient endpoint blip. Manual
+    // checks from Settings → Updates still work in dev. Production builds run
+    // it as before.
+    if (!import.meta.env.DEV) {
+      void updater.check({ silent: true });
+    }
 
     // Tray-driven nav: the menu-bar "Preferences…" item emits
     // `portbay://nav` with the target route. Same channel can be used
@@ -204,7 +221,10 @@
     return () => {
       clearTimeout(crashTimer);
       tunnels.stop();
+      sshTunnels.stopPolling();
+      ollamaService.stop();
       dbApprovals.stop();
+      sidecars.stop();
       unlistenNav?.();
       unlistenToast?.();
       unlistenClean?.();
@@ -220,6 +240,15 @@
    * window only. We detect it up front and short-circuit the layout.
    */
   const isTrayPanel = $derived(page.url.pathname.startsWith("/tray-panel"));
+
+  /**
+   * The notch dictation HUD also runs in its own webview window
+   * (`dictation-overlay`). Same contract as the tray popover: bare render,
+   * no shell, no global listeners — plus a fully transparent background
+   * (the window floats over other apps; the route draws only the notch
+   * shape).
+   */
+  const isDictationOverlay = $derived(page.url.pathname.startsWith("/dictation-overlay"));
 
   /** True when the current route owns the full window — hide the app shell. */
   const isFullscreen = $derived(page.url.pathname.startsWith("/onboarding"));
@@ -394,7 +423,16 @@
   {/if}
 {/snippet}
 
-{#if isTrayPanel}
+{#if isDictationOverlay}
+  <!--
+    Notch dictation HUD — its window floats transparent over other apps;
+    the route draws only the notch shape, so the layout contributes
+    nothing but a transparent stage.
+  -->
+  <div class="h-screen w-screen overflow-hidden bg-transparent">
+    {@render children()}
+  </div>
+{:else if isTrayPanel}
   <!--
     Tray popover — owns the whole webview, no shell, no chrome, no
     redirects. The route owns its own background (transparent).
@@ -473,7 +511,7 @@
   </div>
 {/if}
 
-{#if !isTrayPanel}
+{#if !isTrayPanel && !isDictationOverlay}
   <LogViewer />
   <CommandPalette />
   <ConfirmDialog />

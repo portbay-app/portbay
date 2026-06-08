@@ -1,0 +1,1 @@
+Add a new line to the config file right after the imports and save it

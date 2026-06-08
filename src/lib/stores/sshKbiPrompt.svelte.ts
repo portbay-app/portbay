@@ -16,7 +16,8 @@
 
 import { browser } from "$app/environment";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
+
+import { safeInvoke } from "$lib/ipc";
 
 /** A single field in a keyboard-interactive challenge. */
 export interface KbiPromptField {
@@ -104,7 +105,12 @@ function createSshKbiPromptStore() {
       const flowId = prompt?.flowId;
       if (!flowId) return;
       clear();
-      await invoke("ssh_interaction_respond", { flowId, action: "submit", responses });
+      try {
+        await safeInvoke("ssh_interaction_respond", { flowId, action: "submit", responses });
+      } catch {
+        // Toast pushed by safeInvoke — the user learns their answers never
+        // reached the backend (the connect aborts on the backend timeout).
+      }
     },
     /**
      * Dismiss the dialog (backdrop click / Esc / Cancel button). Sends
@@ -115,7 +121,11 @@ function createSshKbiPromptStore() {
       const flowId = prompt?.flowId;
       if (!flowId) return;
       clear();
-      await invoke("ssh_interaction_cancel", { flowId });
+      try {
+        await safeInvoke("ssh_interaction_cancel", { flowId });
+      } catch {
+        // Toast pushed by safeInvoke; the backend fails closed regardless.
+      }
     },
   };
 }

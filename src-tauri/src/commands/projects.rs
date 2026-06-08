@@ -17,8 +17,8 @@ use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 
 use crate::commands::dto::{
-    AddProjectInput, DetectedProject, ProjectView, UpdateProjectPatch, WorkspaceAppDto,
-    WorkspaceScan,
+    AddProjectInput, DetectedProject, LanguageIntelligenceCapability, ProjectView,
+    UpdateProjectPatch, WorkspaceAppDto, WorkspaceScan,
 };
 use crate::error::{AppError, AppResult};
 use crate::process_compose::{Process, ProjectStatus};
@@ -353,13 +353,26 @@ pub async fn provision_python_env(
                 &app,
                 &on_event,
                 "uv",
-                &["pip", "install", "-r", "requirements.txt", "--python", &venv_python],
+                &[
+                    "pip",
+                    "install",
+                    "-r",
+                    "requirements.txt",
+                    "--python",
+                    &venv_python,
+                ],
                 &dir,
             )
             .await?;
         } else {
-            run_streamed(&app, &on_event, &venv_pip, &["install", "-r", "requirements.txt"], &dir)
-                .await?;
+            run_streamed(
+                &app,
+                &on_event,
+                &venv_pip,
+                &["install", "-r", "requirements.txt"],
+                &dir,
+            )
+            .await?;
         }
     } else if dir.join("pyproject.toml").exists() || dir.join("setup.py").exists() {
         if use_uv {
@@ -376,8 +389,9 @@ pub async fn provision_python_env(
         }
     } else {
         let _ = on_event.send(ProvisionEvent::Log {
-            line: "No requirements.txt or pyproject.toml found — venv created with no extra packages"
-                .into(),
+            line:
+                "No requirements.txt or pyproject.toml found — venv created with no extra packages"
+                    .into(),
         });
     }
 
@@ -763,6 +777,7 @@ pub async fn detect_project(
         suggested_php_version: detected.php_version,
         suggested_web_server: detected.web_server,
         suggested_mobile_run: detected.mobile_run,
+        language_intelligence: detect_language_intelligence(&p, detected.kind),
     })
 }
 
@@ -814,6 +829,7 @@ pub async fn detect_workspace_apps(
                 suggested_name: leaf.to_string(),
                 suggested_port: detected.port,
                 suggested_start_command: start_command,
+                language_intelligence: detect_language_intelligence(&pkg.abs_dir, detected.kind),
             }
         })
         .collect();
@@ -1232,6 +1248,115 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
     detection(ProjectType::Custom, 3000, None)
 }
 
+fn detect_language_intelligence(
+    path: &Path,
+    kind: ProjectType,
+) -> Vec<LanguageIntelligenceCapability> {
+    let mut out = Vec::new();
+    let mut push = |language: &str, label: &str, files: Vec<String>, setup: &str| {
+        if files.is_empty() {
+            return;
+        }
+        out.push(LanguageIntelligenceCapability {
+            language: language.into(),
+            label: label.into(),
+            files,
+            features: vec![
+                "diagnostics".into(),
+                "completions".into(),
+                "hover_help".into(),
+            ],
+            setup: setup.into(),
+        });
+    };
+
+    let js_files = existing_files(
+        path,
+        &[
+            "package.json",
+            "tsconfig.json",
+            "jsconfig.json",
+            "vite.config.ts",
+            "vite.config.js",
+            "next.config.js",
+            "next.config.mjs",
+            "svelte.config.js",
+        ],
+    );
+    if !js_files.is_empty()
+        || matches!(
+            kind,
+            ProjectType::Next | ProjectType::Vite | ProjectType::Node | ProjectType::Expo
+        )
+    {
+        push(
+            "javascript_typescript",
+            "JavaScript / TypeScript",
+            ensure_marker(js_files, "package.json"),
+            "Built in: syntax checks, package/tsconfig key completions, JS/TS keyword help.",
+        );
+    }
+
+    push(
+        "php",
+        "PHP",
+        existing_files(path, &["composer.json", "index.php", "public/index.php"]),
+        "Built in: PHP keyword help and lightweight response-path diagnostics.",
+    );
+    push(
+        "python",
+        "Python",
+        existing_files(
+            path,
+            &["pyproject.toml", "requirements.txt", "Pipfile", "manage.py"],
+        ),
+        "Built in: indentation/block diagnostics and Python keyword help.",
+    );
+    push(
+        "sql",
+        "SQL",
+        existing_files(path, &["schema.sql", "database.sql", "dump.sql"]),
+        "Built in: SQL keyword help and destructive-query warnings. The database workbench adds schema-aware completion.",
+    );
+    push(
+        "config",
+        "JSON / YAML / TOML / env",
+        existing_files(
+            path,
+            &[
+                "package.json",
+                "tsconfig.json",
+                "composer.json",
+                "pyproject.toml",
+                "Cargo.toml",
+                "wrangler.toml",
+                "docker-compose.yml",
+                "docker-compose.yaml",
+                ".env",
+                ".env.local",
+            ],
+        ),
+        "Built in: parser/format diagnostics and common config key completions.",
+    );
+
+    out
+}
+
+fn existing_files(path: &Path, names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| path.join(name).exists())
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn ensure_marker(mut files: Vec<String>, marker: &str) -> Vec<String> {
+    if files.is_empty() {
+        files.push(marker.into());
+    }
+    files
+}
+
 fn detection(kind: ProjectType, port: u16, start_command: Option<String>) -> ProjectDetection {
     ProjectDetection {
         kind,
@@ -1311,7 +1436,11 @@ fn detect_python_project(path: &Path) -> ProjectDetection {
         );
     }
     if deps.contains("flask") {
-        return detection(ProjectType::Python, 8000, Some("flask run --port 8000".into()));
+        return detection(
+            ProjectType::Python,
+            8000,
+            Some("flask run --port 8000".into()),
+        );
     }
 
     // No web framework: a script / research / library project. No server, so no
@@ -1612,7 +1741,7 @@ pub(crate) fn save_registry(state: &AppState, reg: &Registry) -> AppResult<()> {
 pub(crate) async fn fetch_pc_state(state: &AppState) -> Option<HashMap<String, Process>> {
     // Take the client out of the mutex briefly, drop the guard, then await.
     let client = {
-        let g = state.pc_client.lock().expect("pc_client mutex poisoned");
+        let g = state.pc_client.lock().unwrap_or_else(|e| e.into_inner());
         g.clone()?
     };
     let processes = client.processes().await.ok()?;
@@ -1847,7 +1976,11 @@ mod tests {
         let detected = detect_kind(dir.path());
         assert_eq!(detected.kind, ProjectType::Python);
         assert_eq!(detected.port, Some(8000));
-        assert!(detected.start_command.as_deref().unwrap().contains("uvicorn"));
+        assert!(detected
+            .start_command
+            .as_deref()
+            .unwrap()
+            .contains("uvicorn"));
     }
 
     #[test]
@@ -1901,5 +2034,37 @@ mod tests {
         write_js_project(dir.path(), r#"{ "name": "app" }"#, None);
         let detected = detect_kind(dir.path());
         assert_eq!(detected.start_command.as_deref(), Some("pnpm dev"));
+    }
+
+    #[test]
+    fn language_intelligence_detects_mixed_web_project_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "app", "dependencies": { "vite": "5" } }"#,
+            None,
+        );
+        std::fs::write(dir.path().join(".env"), "PORT=5173\n").unwrap();
+        std::fs::write(dir.path().join("schema.sql"), "select 1;\n").unwrap();
+
+        let caps = detect_language_intelligence(dir.path(), ProjectType::Vite);
+        let langs: Vec<_> = caps.iter().map(|c| c.language.as_str()).collect();
+        assert!(langs.contains(&"javascript_typescript"));
+        assert!(langs.contains(&"config"));
+        assert!(langs.contains(&"sql"));
+        assert!(caps
+            .iter()
+            .all(|c| c.features.contains(&"diagnostics".to_string())));
+    }
+
+    #[test]
+    fn language_intelligence_uses_project_kind_when_marker_is_sparse() {
+        let dir = tempfile::tempdir().unwrap();
+        let caps = detect_language_intelligence(dir.path(), ProjectType::Next);
+        let js = caps
+            .iter()
+            .find(|c| c.language == "javascript_typescript")
+            .unwrap();
+        assert_eq!(js.files, vec!["package.json"]);
     }
 }

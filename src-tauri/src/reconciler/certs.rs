@@ -286,10 +286,10 @@ fn validate_public_acme_project(p: &crate::registry::Project) -> Result<(), Stri
         return Err("wildcard public ACME requires DNS-01; select a DNS API provider".into());
     }
     if acme.dns_provider == AcmeDnsProvider::Cloudflare
-        && !acme
+        && acme
             .dns_api_token
             .as_deref()
-            .is_some_and(|s| !s.trim().is_empty())
+            .is_none_or(|s| s.trim().is_empty())
     {
         return Err("Cloudflare DNS-01 requires a Cloudflare API token".into());
     }

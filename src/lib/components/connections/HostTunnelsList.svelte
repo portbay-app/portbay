@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import { openUrl } from "$lib/security/openUrl";
   import { sshTunnels } from "$lib/stores/sshTunnels.svelte";
   import type { SshTunnelRuntimeStatus } from "$lib/types/sshTunnels";
 
@@ -22,6 +23,12 @@
   function statusFor(t: SshTunnelRuntimeStatus): "running" | "stopped" | "starting" {
     if (sshTunnels.isBusy(t.id)) return "starting";
     return t.running ? "running" : "stopped";
+  }
+
+  // A running local forward is reachable at its local endpoint — offer to open
+  // it in the browser (covers Jupyter/TensorBoard/etc. and any web service).
+  function openLocal(t: SshTunnelRuntimeStatus) {
+    void openUrl(`http://${t.localHost}:${t.localPort}`);
   }
 </script>
 
@@ -51,6 +58,11 @@
           <span class="block truncate font-mono text-[10.5px] text-fg-subtle">{t.localHost}:{t.localPort} → {t.remoteHost}:{t.remotePort}</span>
         </button>
         {#if t.running}
+          {#if t.forwardKind === "local"}
+            <button type="button" onclick={() => openLocal(t)} title={`Open http://${t.localHost}:${t.localPort}`} class="shrink-0 inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11px] font-medium text-fg-muted border border-border hover:bg-surface-2 hover:text-fg">
+              <Icon name="external-link" size={11} /> Open
+            </button>
+          {/if}
           <button type="button" onclick={() => sshTunnels.stop(t.id)} disabled={busy} class="shrink-0 inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11px] font-medium text-status-crashed border border-status-crashed/40 hover:bg-status-crashed/10 disabled:opacity-50">
             <Icon name="circle-stop" size={11} /> Stop
           </button>

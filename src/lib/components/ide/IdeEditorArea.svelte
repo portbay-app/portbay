@@ -5,6 +5,8 @@
   history + scroll survive tab switches. Open-file state lives in `ideEditor`.
 -->
 <script lang="ts">
+  import FileBrowserPane from "$lib/components/connections/FileBrowserPane.svelte";
+  import Icon from "$lib/components/atoms/Icon.svelte";
   import IdeEditor from "$lib/components/ide/IdeEditor.svelte";
   import IdeEditorTabs from "$lib/components/ide/IdeEditorTabs.svelte";
   import IdeWelcome from "$lib/components/ide/IdeWelcome.svelte";
@@ -42,8 +44,8 @@
   <IdeEditorTabs files={ideEditor.files} activeFile={ideEditor.activeFile} />
 
   <div class="min-h-0 flex-1">
-    <!-- Welcome (pinned) -->
-    <div class="h-full overflow-y-auto" class:hidden={ideEditor.activeFile !== null}>
+    <!-- Welcome (dismissable via the Home toggle / its tab ×). -->
+    <div class="h-full overflow-y-auto" class:hidden={!ideEditor.welcomeActive}>
       <IdeWelcome
         {host}
         {dest}
@@ -57,10 +59,33 @@
       />
     </div>
 
+    <!-- Files — the Finder-style remote file manager, full-featured (browse,
+         upload/download, search, rename/chmod/delete) with its built-in
+         right-hand inspector column. Kept mounted while its tab is open so
+         the listing + navigation survive tab switches. -->
+    {#if ideEditor.filesOpen}
+      <div class="h-full" class:hidden={!ideEditor.filesActive}>
+        <FileBrowserPane
+          {connectionId}
+          label={dest}
+          onOpenFile={(p) => ideEditor.open(p)}
+          navigateRequest={ideEditor.filesRequest}
+        />
+      </div>
+    {/if}
+
+    <!-- Empty state: no file open and Welcome dismissed. -->
+    {#if ideEditor.activeFile === null && !ideEditor.welcomeOpen}
+      <div class="flex h-full flex-col items-center justify-center gap-2 text-center text-fg-subtle">
+        <Icon name="home" size={22} class="opacity-60" />
+        <p class="text-[12.5px]">No file open. Pick one from the Explorer, or open Home from the rail.</p>
+      </div>
+    {/if}
+
     <!-- Open files -->
     {#each ideEditor.files as f (f.path)}
       <div class="h-full" class:hidden={ideEditor.activeFile !== f.path}>
-        <IdeEditor {connectionId} path={f.path} name={f.name} active={ideEditor.activeFile === f.path} />
+        <IdeEditor {connectionId} path={f.path} name={f.name} active={ideEditor.activeFile === f.path} label={dest} />
       </div>
     {/each}
   </div>

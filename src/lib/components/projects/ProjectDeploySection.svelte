@@ -11,12 +11,22 @@
 -->
 <script lang="ts">
   import Icon from "$lib/components/atoms/Icon.svelte";
+  import DeployStepsView from "$lib/components/deploy/DeployStepsView.svelte";
   import { formatSize } from "$lib/sftp";
   import {
+    cancelDeploy,
+    listenDeploy,
     projectGetDeploy,
     projectSetDeploy,
     projectDeployRun,
   } from "$lib/deploy";
+  import {
+    applyDeployEvent,
+    finalizeError,
+    initLiveSteps,
+    reconcileResults,
+    type LiveStep,
+  } from "$lib/deployLive";
   import { sshConnections } from "$lib/stores/sshConnections.svelte";
   import { defaultProjectDeploy, type DeployRunResult, type ProjectDeploy } from "$lib/types/projects";
 
@@ -41,6 +51,11 @@
   let running = $state(false);
   let result = $state<DeployRunResult | null>(null);
   let excludeText = $state("node_modules, .git");
+  // Live run model: upload progress (the sync leg) + per-step streaming.
+  let live = $state<LiveStep[]>([]);
+  let sync = $state<{ uploaded: number; total: number; bytes: number } | null>(null);
+  let runId = $state<string | null>(null);
+  let cancelling = $state(false);
 
   const hosts = $derived(sshConnections.value);
   const selectedHost = $derived(hosts.find((h) => h.id === cfg.connectionId) ?? null);
@@ -133,18 +148,52 @@
       if (!ok) return;
     }
     running = true;
+    cancelling = false;
     result = null;
+    sync = null;
+    const id = crypto.randomUUID();
+    runId = id;
+    live = initLiveSteps(cfg.steps.map((s) => s.trim()).filter((s) => s !== ""));
+    // Mutate through the $state proxy (reading `live` back), not the raw
+    // array — otherwise the streamed updates wouldn't be reactive.
+    const liveSteps = live;
+    const unlisten = await listenDeploy(id, (ev) => {
+      if (ev.kind === "sync") {
+        sync = { uploaded: ev.uploaded, total: ev.total, bytes: ev.bytes };
+      } else {
+        applyDeployEvent(liveSteps, ev);
+      }
+    });
     try {
-      result = await projectDeployRun(projectId, cfg.connectionId, hostLabel);
+      result = await projectDeployRun(projectId, cfg.connectionId, hostLabel, id);
+      reconcileResults(liveSteps, result.steps, result.cancelled);
     } catch {
-      /* connectWithPrompt already surfaced any real failure */
+      // connectWithPrompt already surfaced the real failure; keep partial
+      // output only if the run got far enough to show something.
+      if (!finalizeError(liveSteps) && sync === null) live = [];
     } finally {
+      unlisten();
       running = false;
+      cancelling = false;
+      runId = null;
     }
   }
 
-  const failedAt = $derived(result ? result.steps.findIndex((r) => r.exitCode !== 0) : -1);
-  const stepsOk = $derived(!!result && result.steps.length > 0 && failedAt === -1);
+  async function cancel() {
+    if (!runId || cancelling) return;
+    cancelling = true;
+    try {
+      await cancelDeploy(runId);
+    } catch {
+      cancelling = false; // toasted; the run keeps going
+    }
+  }
+
+  function clear() {
+    result = null;
+    live = [];
+    sync = null;
+  }
 </script>
 
 <div class={embedded ? "flex flex-col" : "flex h-full min-h-0 flex-col"}>
@@ -258,44 +307,69 @@
         {syncPreview}
       </p>
 
-      <!-- Results -->
-      {#if result}
+      <!-- Run output: sync progress + live steps while running, summary after. -->
+      {#if sync !== null || live.length > 0 || result}
         <div class="mt-4 space-y-2">
-          <p class="text-[12px] text-fg-muted">
-            Uploaded <span class="font-medium text-fg">{result.uploaded}</span>
-            file{result.uploaded === 1 ? "" : "s"} ({formatSize(result.bytes)}) to
-            <span class="font-mono">{result.remotePath}</span>.
-          </p>
-          {#if result.skipped.length > 0}
-            <p class="text-[11px] text-status-unhealthy">
-              Skipped {result.skipped.length} file{result.skipped.length === 1 ? "" : "s"} over the 1 GiB limit.
-            </p>
-          {/if}
-          {#each result.steps as r, i (i)}
-            <div class="overflow-hidden rounded-md border border-border/70">
-              <div class="flex items-center gap-2 px-3 py-1.5 text-[12px] {r.exitCode === 0 ? 'bg-status-running/10' : 'bg-status-crashed/10'}">
-                <Icon name={r.exitCode === 0 ? "circle-check" : "circle-alert"} size={13} class={r.exitCode === 0 ? "text-status-running" : "text-status-crashed"} />
-                <code class="flex-1 truncate font-mono text-fg">{r.command}</code>
-                <span class="font-mono text-[11px] text-fg-subtle">exit {r.exitCode}</span>
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-medium uppercase text-fg-subtle">Run output</span>
+            {#if !running}
+              <button
+                type="button"
+                onclick={clear}
+                class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-fg-muted hover:bg-surface-2 hover:text-fg"
+              >
+                <Icon name="eraser" size={11} /> Clear
+              </button>
+            {/if}
+          </div>
+
+          {#if running && sync !== null}
+            <!-- Upload leg: live progress bar. -->
+            <div class="rounded-md border border-border/70 bg-surface-2/40 px-3 py-2">
+              <div class="flex items-center justify-between text-[11.5px] text-fg-muted">
+                <span>Uploading files…</span>
+                <span class="font-mono tabular-nums">
+                  {sync.uploaded}/{sync.total} · {formatSize(sync.bytes)}
+                </span>
               </div>
-              {#if r.stdout || r.stderr}
-                <pre class="max-h-48 overflow-auto bg-surface-2/50 px-3 py-2 font-mono text-[11px] leading-relaxed text-fg">{r.stdout}{#if r.stderr}<span class="text-status-crashed">{r.stderr}</span>{/if}</pre>
-              {/if}
+              <div class="mt-1.5 h-1 overflow-hidden rounded-full bg-surface-2">
+                <div
+                  class="h-full rounded-full bg-accent transition-[width] duration-200"
+                  style="width: {sync.total > 0 ? Math.round((sync.uploaded / sync.total) * 100) : 0}%"
+                ></div>
+              </div>
             </div>
-          {/each}
-          {#if stepsOk}
-            <p class="text-[12px] font-medium text-status-running">All steps succeeded.</p>
-          {:else if failedAt !== -1}
-            <p class="text-[12px] font-medium text-status-crashed">
-              Stopped at step {failedAt + 1} (non-zero exit). Later steps were skipped.
+          {:else if result}
+            <p class="text-[12px] text-fg-muted">
+              Uploaded <span class="font-medium text-fg">{result.uploaded}</span>
+              file{result.uploaded === 1 ? "" : "s"} ({formatSize(result.bytes)}) to
+              <span class="font-mono">{result.remotePath}</span>{result.cancelled ? " before the run was cancelled" : ""}.
             </p>
+            {#if result.skipped.length > 0}
+              <p class="text-[11px] text-status-unhealthy">
+                Skipped {result.skipped.length} file{result.skipped.length === 1 ? "" : "s"} over the 1 GiB limit.
+              </p>
+            {/if}
           {/if}
+
+          <DeployStepsView steps={live} />
         </div>
       {/if}
     {/if}
   </div>
 
   <footer class="flex items-center justify-end gap-2 border-t border-border px-4 py-2.5">
+    {#if running}
+      <button
+        type="button"
+        onclick={cancel}
+        disabled={cancelling}
+        class="inline-flex h-8 items-center gap-1.5 rounded-md border border-status-crashed/40 px-3 text-[12px] font-medium text-status-crashed hover:bg-status-crashed/10 disabled:opacity-50"
+      >
+        <Icon name="circle-stop" size={13} />
+        {cancelling ? "Cancelling…" : "Cancel"}
+      </button>
+    {/if}
     <button
       type="button"
       onclick={save}

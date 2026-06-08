@@ -1,0 +1,1 @@
+um we need to fix the thing where the file browser flickers when you scroll I think john said it happens mostly on the big repos so maybe test with the monorepo first oh and it should land before the friday release

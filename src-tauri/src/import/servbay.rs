@@ -304,11 +304,6 @@ fn strip_comments(input: &str) -> String {
         .join("\n")
 }
 
-#[allow(dead_code)]
-fn _typecheck_path_export() -> &'static Path {
-    Path::new(".")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

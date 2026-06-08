@@ -4095,11 +4095,12 @@ dependencies = [
 
 [[package]]
 name = "portbay"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "aes-gcm",
  "async-trait",
  "base64 0.22.1",
+ "block2 0.6.2",
  "chrono",
  "clap",
  "clap_complete",
@@ -4108,6 +4109,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hmac",
+ "image",
  "keyring",
  "libc",
  "minisign-verify",

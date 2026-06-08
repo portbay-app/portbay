@@ -583,6 +583,9 @@ pub async fn start_database_instance(
     if instance_is_file_based(&state, &id)? {
         return Ok(());
     }
+    // Heal an instance whose data dir vanished after creation — without
+    // this, the reconciler skips it from the YAML and the start 404s.
+    ensure_provisioned(&state, &id).await?;
     // Make sure the daemon process exists in PC's loaded YAML (a stale
     // reconcile could otherwise 404 the start).
     let _ = state.reconciler.tick(&app).await;
@@ -618,6 +621,7 @@ pub async fn restart_database_instance(
     if instance_is_file_based(&state, &id)? {
         return Ok(());
     }
+    ensure_provisioned(&state, &id).await?;
     let _ = state.reconciler.tick(&app).await;
     let client = state.pc_client()?;
     client
@@ -1195,6 +1199,44 @@ fn require_instance(state: &State<'_, AppState>, id: &str) -> AppResult<()> {
         return Err(AppError::BadInput(format!("database `{id}` not found")));
     }
     Ok(())
+}
+
+/// Re-provision a daemon instance whose data dir is missing or uninitialized.
+/// The create path provisions *before* registering, so this state only arises
+/// when the data dir vanished after the fact (deleted out-of-band, or the
+/// registry was restored from a backup). No-op when already initialized.
+/// Like create, the `initdb`/`--initialize-insecure` shell-out runs off the
+/// async runtime so IPC stays responsive.
+async fn ensure_provisioned(state: &State<'_, AppState>, id: &str) -> AppResult<()> {
+    let registry = load_registry(state)?;
+    let inst = registry
+        .get_database(&DatabaseInstanceId::new(id))
+        .ok_or_else(|| AppError::BadInput(format!("database `{id}` not found")))?;
+    let app_data = app_data_dir(state)?;
+    let data = engine::data_dir(&app_data, id);
+    if engine::is_initialized(inst.engine, &data) {
+        return Ok(());
+    }
+    let mb = managed_bin(&registry, inst.engine);
+    let daemon = engine::daemon_binary_resolved(inst.engine, mb.as_deref()).ok_or_else(|| {
+        AppError::BadInput(format!(
+            "{} isn't installed. Install it from the Databases page first.",
+            inst.engine.label()
+        ))
+    })?;
+    tracing::info!(
+        "database `{id}` data dir {} not initialized — re-provisioning before start",
+        data.display()
+    );
+    let eng = inst.engine;
+    let port = inst.port;
+    let provision_id = id.to_string();
+    tokio::task::spawn_blocking(move || {
+        engine::provision(eng, &daemon, &app_data, &provision_id, port, mb.as_deref())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("provision join: {e}")))?
+    .map_err(AppError::Internal)
 }
 
 /// Whether the instance uses a file-based engine (SQLite). File-based engines

@@ -67,7 +67,7 @@ impl MetricsState {
     }
 
     fn sample(&self) -> SystemMetrics {
-        let mut sys = self.system.lock().expect("system mutex poisoned");
+        let mut sys = self.system.lock().unwrap_or_else(|e| e.into_inner());
         // CPU usage requires two refreshes spaced apart. The poller calls
         // `sample` on a 2s cadence so the gap is already there.
         sys.refresh_cpu();
@@ -77,7 +77,7 @@ impl MetricsState {
         let total_bytes = sys.total_memory();
         drop(sys);
 
-        let mut disks = self.disks.lock().expect("disks mutex poisoned");
+        let mut disks = self.disks.lock().unwrap_or_else(|e| e.into_inner());
         disks.refresh();
         // Pick the mount with the largest total — on macOS that's the
         // root "Data" firmlink. If we ever support multi-volume hosts

@@ -80,7 +80,7 @@ impl Tunnel {
             public_url: self
                 .public_url
                 .lock()
-                .expect("public_url mutex poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .clone(),
             running: self.child.is_some(),
             origin_reachable: None,
@@ -199,7 +199,7 @@ impl TunnelManager {
                 if let Some(url) = parse_public_url(&line) {
                     let mut guard = public_url_for_task
                         .lock()
-                        .expect("public_url mutex poisoned");
+                        .unwrap_or_else(|e| e.into_inner());
                     if guard.is_none() {
                         *guard = Some(url);
                     }
@@ -269,7 +269,7 @@ impl TunnelManager {
 pub async fn wait_for_url(handle: Arc<Mutex<Option<String>>>) -> Result<String> {
     let deadline = Instant::now() + TUNNEL_URL_TIMEOUT;
     loop {
-        if let Some(url) = handle.lock().expect("public_url mutex poisoned").clone() {
+        if let Some(url) = handle.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Ok(url);
         }
         if Instant::now() >= deadline {

@@ -164,8 +164,9 @@ pub struct EventInteractor {
 }
 
 impl EventInteractor {
-    /// Build a UI-driven interactor from a command's `AppHandle`.
-    pub fn new(app: AppHandle) -> std::sync::Arc<dyn SshInteractor> {
+    /// Build a UI-driven interactor from a command's `AppHandle`, ready to
+    /// hand to the SSH layer as a shared trait object.
+    pub fn shared(app: AppHandle) -> std::sync::Arc<dyn SshInteractor> {
         std::sync::Arc::new(Self { app })
     }
 
@@ -178,10 +179,20 @@ impl EventInteractor {
         let (tx, rx) = oneshot::channel();
         PENDING
             .lock()
-            .expect("interaction registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(flow_id.clone(), tx);
 
-        if self.app.emit(event, &PromptEnvelope { flow_id: &flow_id, inner: payload }).is_err() {
+        if self
+            .app
+            .emit(
+                event,
+                &PromptEnvelope {
+                    flow_id: &flow_id,
+                    inner: payload,
+                },
+            )
+            .is_err()
+        {
             PENDING.lock().ok().and_then(|mut p| p.remove(&flow_id));
             return None;
         }
@@ -239,7 +250,7 @@ pub fn ssh_interaction_respond(
 ) -> AppResult<()> {
     if let Some(tx) = PENDING
         .lock()
-        .expect("interaction registry poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .remove(&flow_id)
     {
         let _ = tx.send(InteractionReply { action, responses });
@@ -253,7 +264,7 @@ pub fn ssh_interaction_respond(
 pub fn ssh_interaction_cancel(flow_id: String) -> AppResult<()> {
     PENDING
         .lock()
-        .expect("interaction registry poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .remove(&flow_id);
     Ok(())
 }

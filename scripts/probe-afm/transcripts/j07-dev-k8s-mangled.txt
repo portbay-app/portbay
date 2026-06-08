@@ -1,0 +1,1 @@
+kuber netties keeps evicting the pod so raise the memory limit to five twelve megs in the helm chart

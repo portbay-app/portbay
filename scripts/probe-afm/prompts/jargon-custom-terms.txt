@@ -1,0 +1,10 @@
+
+Workspace vocabulary. When the speech clearly refers to one of these terms, spell it EXACTLY as listed (these are real names in the user's workspace — dictation often mangles them). Never insert a term that was not spoken:
+- kubernetes
+- PyTorch
+- LoRA
+- Shopify
+- QuickBooks
+- Salesforce
+- HubSpot
+- NetSuite

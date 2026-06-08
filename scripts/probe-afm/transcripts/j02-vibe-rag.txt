@@ -1,0 +1,1 @@
+increase the context window to two hundred K tokens and um add a RAG step over the repo before the agent writes any code
