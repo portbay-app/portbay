@@ -69,7 +69,7 @@ to your editor and browser without being noticed.
 - **A built-in SSH workspace** — save your remote hosts and get an interactive terminal, an SFTP file browser with inline editing, local/reverse/SOCKS port-forward tunnels, and live processes/ports panels — for the servers your projects ship to, without opening a separate SSH app.
 - **A sandboxed runner** — run an untrusted or freshly-cloned project inside a macOS sandbox, inspect it, then promote it to a normal local run.
 - **A managed local AI server** — PortBay installs, starts, and supervises [Ollama](https://ollama.com), pulls models from the live catalog, and shares one local endpoint with dictation, agents, and your own tools. Nothing leaves your Mac.
-- **Smart Dictation** — hold Fn 🌐 and talk: on-device speech-to-text plus a local AI rewrite turn spoken thoughts into clean task cards, commits, and prompts. ⌘Z always restores your exact words — and with a local speech model it works in **any app on your Mac**, not just PortBay.
+- **Speech-to-Text** — hold Fn 🌐 and talk: an on-device speech model plus a local AI rewrite turn spoken thoughts into clean task cards, commits, and prompts. ⌘Z always restores your exact words — and with a local speech model it works in **any app on your Mac**, not just PortBay.
 - **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 69 agent tools.
 - **A declarative registry** — projects live in JSON; the daemon reconciles reality to match.
 - **Live logs, status, and metrics** per project, plus a macOS menu-bar mode.
@@ -156,8 +156,8 @@ machine.
 
 </div>
 
-And on top of it sits the feature you'll use twenty times a day: **Smart
-Dictation**. Hold **Fn 🌐** and talk — a speech model running on your Mac's
+And on top of it sits the feature you'll use twenty times a day:
+**Speech-to-Text**. Hold **Fn 🌐** and talk — a speech model running on your Mac's
 Neural Engine (Whisper or Parakeet, your pick) transcribes, a local AI model
 polishes the rambling into text you'd actually keep, and **⌘Z always restores
 your exact words**. Your jargon survives: custom terms, project names, and
@@ -178,7 +178,7 @@ whatever app you were in.
 </div>
 
 [Local AI guide](https://docs.portbay.app/guides/local-ai) ·
-[Smart Dictation guide](https://docs.portbay.app/guides/smart-dictation)
+[Speech-to-Text guide](https://docs.portbay.app/guides/speech-to-text)
 
 ## A look around
 
@@ -190,8 +190,8 @@ whatever app you were in.
 | ![PortBay web servers](docs-site/public/screenshots/web-servers-dark.png) | ![PortBay public tunnels](docs-site/public/screenshots/tunnels-dark.png) |
 | **Certificates** — locally-trusted HTTPS | **Local DNS** — wildcard `.test` resolution |
 | ![PortBay certificates](docs-site/public/screenshots/certificates-dark.png) | ![PortBay DNS](docs-site/public/screenshots/dns-dark.png) |
-| **Model catalog** — the live ollama.com library | **Smart Dictation** — on-device speech, local rewrites |
-| ![PortBay AI model catalog](docs-site/public/screenshots/ai-models-dark.png) | ![PortBay Smart Dictation](docs-site/public/screenshots/ai-dictation-dark.png) |
+| **Model catalog** — the live ollama.com library | **Speech-to-Text** — on-device speech, local rewrites |
+| ![PortBay AI model catalog](docs-site/public/screenshots/ai-models-dark.png) | ![PortBay Speech-to-Text](docs-site/public/screenshots/ai-dictation-dark.png) |
 
 ## How it compares
 
@@ -210,7 +210,7 @@ and worked on by AI agents.
 | AI agent task board — write a card, an agent does the work | ✅ | ❌ | ❌ | ❌ |
 | Agent handoff memory between runs | ✅ | ❌ | ❌ | ❌ |
 | Managed local LLM server (Ollama) | ✅ | ❌ | ✅ | Manual |
-| Voice dictation with on-device AI cleanup | ✅ | ❌ | ❌ | ❌ |
+| On-device Speech-to-Text with AI cleanup | ✅ | ❌ | ❌ | ❌ |
 | Built-in SSH / SFTP / tunnels | ✅ | ❌ | ❌ | ❌ |
 | Idle footprint | Small (native) | Small | Medium | Large |
 | Cross-platform | macOS (Linux/Windows planned) | macOS/Windows | macOS/Windows | All |
@@ -276,7 +276,7 @@ pnpm install
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, full CLI. *Shipped.*
 - **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, an SSH workspace (terminal, SFTP, port-forward tunnels), and one-step import from Herd / ServBay / MAMP. *Shipped.*
 - **AI & automation** — an MCP server (69 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed, and a per-project task board hands cards to the coding agent of your choice. *Shipped.*
-- **Local AI** — a managed Ollama server with a live model catalog, plus Smart Dictation: on-device speech-to-text (Whisper / Parakeet on the Neural Engine), local AI transcript rewrites, and system-wide dictation into any app. *Shipped.*
+- **Local AI** — a managed Ollama server with a live model catalog, plus Speech-to-Text: on-device transcription (Whisper / Parakeet on the Neural Engine), local AI transcript rewrites, and system-wide dictation into any app. *Shipped.*
 - **Release** — signed & notarized DMG, Homebrew cask, and in-app auto-update. *Shipped.*
 
 ### On the roadmap

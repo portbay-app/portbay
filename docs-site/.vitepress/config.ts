@@ -179,7 +179,7 @@ export default defineConfig({
           { text: "SSH Workspace", link: "/guides/ssh-tunnels" },
           { text: "Sandboxed Projects", link: "/guides/sandbox" },
           { text: "Local AI (Ollama)", link: "/guides/local-ai" },
-          { text: "Speech-to-Text", link: "/guides/smart-dictation" },
+          { text: "Speech-to-Text", link: "/guides/speech-to-text" },
         ],
       },
       {

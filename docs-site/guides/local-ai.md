@@ -63,7 +63,7 @@ Each family lists its variants with size, freshness from ollama.com, and a workl
 Every other model in the catalog runs on your Mac. Kimi K2 tags are pulled like local models, but they are stubs: inference runs on Ollama's cloud and requires an ollama.com sign-in — **prompts do leave the machine** for this family only. The catalog badges it `cloud` so you can't pick it by accident.
 :::
 
-Downloaded speech-to-text models (see [Speech-to-Text](/guides/smart-dictation)) appear in the same installed-models list — they're installed models too, just managed by the speech sidecar instead of Ollama.
+Downloaded speech-to-text models (see [Speech-to-Text](/guides/speech-to-text)) appear in the same installed-models list — they're installed models too, just managed by the speech sidecar instead of Ollama.
 
 <ThemeImage name="ai-models" alt="PortBay's model catalog — live ollama.com library grouped by family with variant sizes and freshness" />
 
@@ -92,7 +92,7 @@ Configuration maps directly onto Ollama's supported environment variables — se
 
 Everything in PortBay that wants a local model reads the same endpoint:
 
-- **[Speech-to-Text](/guides/smart-dictation)** — transcript rewrites on a local model.
+- **[Speech-to-Text](/guides/speech-to-text)** — transcript rewrites on a local model.
 - **[SSH workspace](/guides/ssh-tunnels)** — if a remote host runs Ollama, the on-host assistant uses it; locally, your own server powers agent workflows.
 - **[Task board](/guides/task-board)** — dispatch cards to agents backed by local models.
 

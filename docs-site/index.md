@@ -51,7 +51,7 @@ features:
     link: /guides/local-ai
   - title: Speech-to-Text
     details: Hold Fn and talk — on-device speech-to-text plus a local AI rewrite turn spoken thoughts into text worth keeping. ⌘Z restores your exact words.
-    link: /guides/smart-dictation
+    link: /guides/speech-to-text
 ---
 
 <ThemeImage name="projects" alt="PortBay managing local projects" />
