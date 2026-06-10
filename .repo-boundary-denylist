@@ -65,3 +65,15 @@ path:.dev.vars
 # Signed/unsigned distributables belong on Releases, not in git.
 path:*.dmg
 path:*.app.zip
+
+# --- Visual Preview Editor (Pro, private) — never in the public repo ---
+# The Rust side is cfg-gated behind the private `visual-editor` feature, but
+# the Svelte side ships in source — these paths must never land here.
+path:src-tauri/src/live_preview/*
+path:src/lib/components/live-preview/*
+path:src/routes/live-preview/*
+path:src/lib/stores/livePreview.svelte.ts
+path:src/lib/types/livePreview.ts
+path:src/lib/data/stylingHints.ts
+path:tests/e2e/visual-editor.spec.ts
+path:tests/stylingHints.test.ts
