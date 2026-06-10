@@ -10,18 +10,54 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# git passes the push target as: $1 = remote name, $2 = remote URL.
+remote_name="${1:-}"
+remote_url="${2:-${1:-}}"
+
 fail=0
 
-if ! bash scripts/check-repo-boundaries.sh; then
-  fail=1
-fi
+# The tree-wide boundary scan gates the PUBLIC repo only (its documented
+# intent). It scans untracked files too, so on a dev machine the private
+# overlay WIP (e.g. the visual editor) would otherwise block pushes to the
+# private `cloud` remote — where that code is exactly where it belongs.
+# Fail-closed: only the known private overlay repo skips the scan; any other
+# remote (origin or something new) is treated as public and gated.
+case "$remote_url" in
+  *portbay-cloud*) ;;
+  *)
+    if ! bash scripts/check-repo-boundaries.sh; then
+      fail=1
+    fi
+    ;;
+esac
 
-# Full secret scan of the commit range being pushed (if gitleaks is installed).
+# Secret scan scoped to the commits actually being pushed. The push range
+# arrives on stdin (one `<local ref> <local sha> <remote ref> <remote sha>`
+# line per ref). Scanning only the outgoing range matters in two ways: an
+# unscoped `gitleaks detect` walks EVERY ref in the object store — in a linked
+# worktree (the public graft) that's the whole private overlay, so unrelated
+# private-branch findings would false-block a clean public push — and a scoped
+# scan is what the "range being pushed" gate was always documented to be.
+zero=0000000000000000000000000000000000000000
 if command -v gitleaks >/dev/null 2>&1; then
-  if ! gitleaks detect --no-banner --config .gitleaks.toml; then
-    echo "✗ gitleaks found a secret in the working tree or history." >&2
-    fail=1
-  fi
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ -z "${local_sha:-}" ] && continue
+    [ "$local_sha" = "$zero" ] && continue # ref deletion — nothing outgoing
+    if [ "$remote_sha" = "$zero" ]; then
+      # New remote branch: scan what this remote doesn't already have.
+      if [ -n "$remote_name" ]; then
+        log_opts="$local_sha --not --remotes=$remote_name"
+      else
+        log_opts="$local_sha --not --remotes"
+      fi
+    else
+      log_opts="$remote_sha..$local_sha"
+    fi
+    if ! gitleaks git --no-banner --config .gitleaks.toml --log-opts="$log_opts" .; then
+      echo "✗ gitleaks found a secret in the outgoing commits ($log_opts)." >&2
+      fail=1
+    fi
+  done
 fi
 
 if [ "$fail" -ne 0 ]; then

@@ -77,3 +77,4 @@ path:src/lib/types/livePreview.ts
 path:src/lib/data/stylingHints.ts
 path:tests/e2e/visual-editor.spec.ts
 path:tests/stylingHints.test.ts
+path:docs/dpas/*
