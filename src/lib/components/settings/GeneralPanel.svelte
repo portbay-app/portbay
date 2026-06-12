@@ -1,5 +1,6 @@
 <!-- GeneralPanel — launch, Dock, reopen, stop-confirm, and the system-wide
-     dictation toggles. -->
+     dictation toggles. Everything screen-capture related (including the
+     recording behaviour) lives in Settings → Screen Capture. -->
 <script lang="ts">
   import { goto } from "$app/navigation";
 
@@ -7,6 +8,7 @@
   import DictateAnywhereControls from "$lib/components/ai/DictateAnywhereControls.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import SidebarCustomizer from "./SidebarCustomizer.svelte";
 </script>
 
 <SettingsPanel
@@ -57,16 +59,33 @@
     <!-- Dictation — system-wide speech controls. These affect the whole app
          (a global Fn hotkey that types into any window), so they live here as
          well as on the AI page next to the local-model setup; both bind the
-         same preference. Rendered flush (no card) to match the rows above. -->
-    <section class="divide-y divide-border/60">
-      <div class="py-2.5 first:pt-0">
-        <span class="text-[13px] font-medium text-fg">Dictation</span>
-        <p class="text-[12px] text-fg-subtle mt-0.5 leading-relaxed">
+         same preference. A full section header so the page reads as clearly
+         separated categories. -->
+    <section class="pt-5 border-t border-border/60">
+      <header class="mb-3">
+        <h3 class="text-[15px] font-semibold tracking-tight text-fg">Dictation</h3>
+        <p class="text-[13px] text-fg-muted mt-1 leading-relaxed">
           Hold the Fn key to dictate into any app on this Mac. Transcription runs
           on-device with a local speech model — set one up on the AI page.
         </p>
-      </div>
+      </header>
       <DictateAnywhereControls bordered={false} onManageModels={() => void goto("/ai")} />
+    </section>
+
+    <!-- Sidebar — arrange and pin the nav destinations. The Integrations page
+         links here; its capability cards carry quick per-tool pins, this is
+         the full manager. -->
+    <section class="pt-5 border-t border-border/60">
+      <header class="mb-3">
+        <h3 class="text-[15px] font-semibold tracking-tight text-fg">Sidebar</h3>
+        <p class="text-[13px] text-fg-muted mt-1 leading-relaxed">
+          Arrange the sidebar and choose which destinations are pinned. Hidden
+          destinations stay fully functional — reach them from the
+          <a href="/integrations" class="text-accent hover:underline">Integrations</a>
+          page or the command palette.
+        </p>
+      </header>
+      <SidebarCustomizer />
     </section>
   </div>
 </SettingsPanel>

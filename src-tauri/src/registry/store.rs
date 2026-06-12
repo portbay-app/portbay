@@ -95,6 +95,14 @@ fn back_up(path: &Path, from_version: u32) -> Result<()> {
     name.push(format!(".v{from_version}.bak"));
     backup.set_file_name(name);
     fs::copy(path, &backup).map_err(|e| RegistryError::io(&backup, e))?;
+    // `fs::copy` carries over the source's mode, which may predate the 0600
+    // hardening — backups hold the same key paths/hosts as the live registry.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o600))
+            .map_err(|e| RegistryError::io(&backup, e))?;
+    }
     Ok(())
 }
 
@@ -138,6 +146,14 @@ pub fn save_to(reg: &Registry, path: &Path) -> Result<()> {
             .map_err(|e| RegistryError::io(&tmp_path, e))?;
         f.write_all(&bytes)
             .map_err(|e| RegistryError::io(&tmp_path, e))?;
+        // Owner-only: the registry carries key paths, hosts/users, and proxy
+        // config — not for other local users.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|e| RegistryError::io(&tmp_path, e))?;
+        }
         f.sync_all().map_err(|e| RegistryError::io(&tmp_path, e))?;
     } // file closed here
 
@@ -195,6 +211,19 @@ mod tests {
         save_to(&reg, &path).unwrap();
         let loaded = load_from(&path).unwrap();
         assert_eq!(loaded, reg);
+    }
+
+    /// Pins the P2-2 fix from the 2026-06-10 SSH security assessment: the
+    /// registry (key paths, hosts/users, proxy config) is owner-only on disk.
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("registry.json");
+        save_to(&Registry::new("test"), &path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

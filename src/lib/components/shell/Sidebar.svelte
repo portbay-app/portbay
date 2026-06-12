@@ -330,10 +330,11 @@
     </div>
 
     <!-- Reorderable destinations (AI → Settings). Drag any row to arrange the
-         block; the order persists per user. The anchors above (Projects,
-         Tasks, Groups) and the footer below stay fixed. -->
+         block; the order persists per user. Only pinned items render — the
+         Integrations page is where entries are hidden/re-pinned. The anchors
+         above (Projects, Tasks, Groups) and the footer below stay fixed. -->
     <SidebarNavList
-      items={navOrder.items}
+      items={navOrder.visibleItems}
       {collapsed}
       {runningDbCount}
       oncommit={(next) => navOrder.commit(next)}

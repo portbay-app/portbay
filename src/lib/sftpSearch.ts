@@ -123,16 +123,22 @@ export async function startSftpSearch(
   const { listen } = await import("@tauri-apps/api/event");
   const hits: SftpEntry[] = [];
   let finished = false;
-  const unlisten = await listen<Batch>("portbay://sftp-search", (ev) => {
-    const p = ev.payload;
-    if (p.id !== id || finished) return;
-    hits.push(...p.hits);
-    onUpdate({ hits, scanned: p.scanned, done: p.done, truncated: p.truncated });
-    if (p.done) {
-      finished = true;
-      unlisten();
-    }
-  });
+  const unlisten = await listen<Batch>(
+    "portbay://sftp-search",
+    (ev) => {
+      const p = ev.payload;
+      if (p.id !== id || finished) return;
+      hits.push(...p.hits);
+      onUpdate({ hits, scanned: p.scanned, done: p.done, truncated: p.truncated });
+      if (p.done) {
+        finished = true;
+        unlisten();
+      }
+    },
+    // The backend emits search batches point-to-point to the main window
+    // (remote paths); a targeted emit skips untargeted listeners.
+    { target: "main" },
+  );
   invokeQuiet<void>("sftp_search", { input: { connectionId, id, root, query } }).catch(() => {
     // Transport/session failure — close out the search so the UI stops spinning.
     if (!finished) {

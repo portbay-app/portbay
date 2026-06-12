@@ -211,7 +211,10 @@ fn is_technical(token: &str) -> bool {
         return false;
     }
     // Pure numbers (incl. dotted/colon/comma-separated).
-    if token.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | ':')) {
+    if token
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | ':'))
+    {
         return false;
     }
     // Flags: -f, --force, --dry-run.
@@ -219,7 +222,9 @@ fn is_technical(token: &str) -> bool {
         let rest = rest.strip_prefix('-').unwrap_or(rest);
         let mut chars = rest.chars();
         if chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-            && rest.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
         {
             return true;
         }
@@ -282,7 +287,10 @@ pub(crate) fn extract_terms(text: &str, cap: usize) -> Vec<String> {
 
 fn with_store<R>(registry_path: &Path, f: impl FnOnce(&mut Store) -> R) -> R {
     let path = store_path(registry_path);
-    let mut cache = CACHE.lock().expect("dictation vocab cache poisoned");
+    // Recover from poisoning rather than panic: the store is re-validated on
+    // every access and a torn write at worst loses one learn event, while a
+    // sticky panic here would brick dictation for the process lifetime.
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let store = cache.entry(path.clone()).or_insert_with(|| {
         let mut store: Store = std::fs::read(&path)
             .ok()
@@ -367,12 +375,7 @@ pub fn learn(registry_path: &Path, context: RewriteContext, project: Option<&str
 /// a term with no occurrences left is dropped entirely. Unknown terms are
 /// no-ops (the store may have pruned them, or the rewrite never learned —
 /// over-unlearning degrades to a rank drop, never an error).
-pub fn unlearn(
-    registry_path: &Path,
-    context: RewriteContext,
-    project: Option<&str>,
-    text: &str,
-) {
+pub fn unlearn(registry_path: &Path, context: RewriteContext, project: Option<&str>, text: &str) {
     let terms = extract_terms(text, LEARN_BATCH_CAP);
     if terms.is_empty() {
         return;
@@ -416,7 +419,7 @@ pub fn reset(registry_path: &Path) {
     let path = store_path(registry_path);
     CACHE
         .lock()
-        .expect("dictation vocab cache poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .remove(&path);
     match std::fs::remove_file(&path) {
         Ok(()) => {}
@@ -473,7 +476,12 @@ mod tests {
         );
         assert_eq!(
             terms,
-            vec!["russh-sftp", "portbay-landing", "/var/log/app.log", "--dry-run"]
+            vec![
+                "russh-sftp",
+                "portbay-landing",
+                "/var/log/app.log",
+                "--dry-run"
+            ]
         );
         assert!(extract_terms("just plain words spoken here", 24).is_empty());
         assert!(extract_terms("8080 0.1.4 3,000", 24).is_empty());
@@ -484,9 +492,24 @@ mod tests {
         let reg = temp_registry();
         // "deploy-tool" used twice in terminal commands, "spec-term" once in
         // todo tasks.
-        learn(&reg, RewriteContext::TerminalCommand, None, "run deploy-tool now");
-        learn(&reg, RewriteContext::TerminalCommand, None, "run deploy-tool again");
-        learn(&reg, RewriteContext::TodoTask, None, "write the spec-term doc");
+        learn(
+            &reg,
+            RewriteContext::TerminalCommand,
+            None,
+            "run deploy-tool now",
+        );
+        learn(
+            &reg,
+            RewriteContext::TerminalCommand,
+            None,
+            "run deploy-tool again",
+        );
+        learn(
+            &reg,
+            RewriteContext::TodoTask,
+            None,
+            "write the spec-term doc",
+        );
 
         let terminal = top_terms(&reg, Some(RewriteContext::TerminalCommand), None);
         assert_eq!(terminal.first().map(String::as_str), Some("deploy-tool"));
@@ -505,11 +528,36 @@ mod tests {
     fn unlearn_demotes_and_drops_rejected_terms() {
         let reg = temp_registry();
         // deploy-tool: 2× terminal + 1× todo; spec-term: 2× todo.
-        learn(&reg, RewriteContext::TerminalCommand, None, "run deploy-tool now");
-        learn(&reg, RewriteContext::TerminalCommand, None, "run deploy-tool again");
-        learn(&reg, RewriteContext::TodoTask, None, "schedule deploy-tool today");
-        learn(&reg, RewriteContext::TodoTask, None, "write the spec-term doc");
-        learn(&reg, RewriteContext::TodoTask, None, "review the spec-term doc");
+        learn(
+            &reg,
+            RewriteContext::TerminalCommand,
+            None,
+            "run deploy-tool now",
+        );
+        learn(
+            &reg,
+            RewriteContext::TerminalCommand,
+            None,
+            "run deploy-tool again",
+        );
+        learn(
+            &reg,
+            RewriteContext::TodoTask,
+            None,
+            "schedule deploy-tool today",
+        );
+        learn(
+            &reg,
+            RewriteContext::TodoTask,
+            None,
+            "write the spec-term doc",
+        );
+        learn(
+            &reg,
+            RewriteContext::TodoTask,
+            None,
+            "review the spec-term doc",
+        );
         assert_eq!(
             top_terms(&reg, None, None).first().map(String::as_str),
             Some("deploy-tool")
@@ -517,8 +565,18 @@ mod tests {
 
         // Both terminal rewrites undone: their reinforcement must vanish —
         // rank drops strictly below the never-undone term.
-        unlearn(&reg, RewriteContext::TerminalCommand, None, "run deploy-tool now");
-        unlearn(&reg, RewriteContext::TerminalCommand, None, "run deploy-tool again");
+        unlearn(
+            &reg,
+            RewriteContext::TerminalCommand,
+            None,
+            "run deploy-tool now",
+        );
+        unlearn(
+            &reg,
+            RewriteContext::TerminalCommand,
+            None,
+            "run deploy-tool again",
+        );
         assert_eq!(
             top_terms(&reg, None, None).first().map(String::as_str),
             Some("spec-term"),
@@ -529,14 +587,35 @@ mod tests {
             .contains(&"deploy-tool".to_string()));
 
         // Undoing the last remaining use drops the term entirely.
-        unlearn(&reg, RewriteContext::TodoTask, None, "schedule deploy-tool today");
+        unlearn(
+            &reg,
+            RewriteContext::TodoTask,
+            None,
+            "schedule deploy-tool today",
+        );
         let all = top_terms(&reg, None, None);
-        assert!(!all.contains(&"deploy-tool".to_string()), "count hit zero → dropped");
-        assert!(all.contains(&"spec-term".to_string()), "other terms untouched");
+        assert!(
+            !all.contains(&"deploy-tool".to_string()),
+            "count hit zero → dropped"
+        );
+        assert!(
+            all.contains(&"spec-term".to_string()),
+            "other terms untouched"
+        );
 
         // Unknown terms / over-unlearning are no-ops, never errors.
-        unlearn(&reg, RewriteContext::TodoTask, None, "never-learned-term ghost-tool-9");
-        unlearn(&reg, RewriteContext::TodoTask, None, "schedule deploy-tool today");
+        unlearn(
+            &reg,
+            RewriteContext::TodoTask,
+            None,
+            "never-learned-term ghost-tool-9",
+        );
+        unlearn(
+            &reg,
+            RewriteContext::TodoTask,
+            None,
+            "schedule deploy-tool today",
+        );
         assert!(top_terms(&reg, None, None).contains(&"spec-term".to_string()));
     }
 
@@ -545,8 +624,18 @@ mod tests {
         let reg = temp_registry();
         // alpha-tool: 2 uses inside project A; beta-tool: 3 global uses with
         // no project (e.g. SSH surfaces).
-        learn(&reg, RewriteContext::TodoTask, Some("proj-a"), "ship alpha-tool v1");
-        learn(&reg, RewriteContext::TodoTask, Some("proj-a"), "test alpha-tool again");
+        learn(
+            &reg,
+            RewriteContext::TodoTask,
+            Some("proj-a"),
+            "ship alpha-tool v1",
+        );
+        learn(
+            &reg,
+            RewriteContext::TodoTask,
+            Some("proj-a"),
+            "test alpha-tool again",
+        );
         learn(&reg, RewriteContext::TodoTask, None, "run beta-tool now");
         learn(&reg, RewriteContext::TodoTask, None, "run beta-tool again");
         learn(&reg, RewriteContext::TodoTask, None, "run beta-tool more");
@@ -573,8 +662,18 @@ mod tests {
         );
 
         // Project counts unlearn symmetrically.
-        unlearn(&reg, RewriteContext::TodoTask, Some("proj-a"), "ship alpha-tool v1");
-        unlearn(&reg, RewriteContext::TodoTask, Some("proj-a"), "test alpha-tool again");
+        unlearn(
+            &reg,
+            RewriteContext::TodoTask,
+            Some("proj-a"),
+            "ship alpha-tool v1",
+        );
+        unlearn(
+            &reg,
+            RewriteContext::TodoTask,
+            Some("proj-a"),
+            "test alpha-tool again",
+        );
         assert!(
             !top_terms(&reg, Some(RewriteContext::TodoTask), Some("proj-a"))
                 .contains(&"alpha-tool".to_string()),
@@ -588,14 +687,20 @@ mod tests {
         for i in 0..20 {
             learn(
                 &reg,
-                RewriteContext::GeneralNote, None,
+                RewriteContext::GeneralNote,
+                None,
                 &format!("touch file-{i:02}.txt"),
             );
         }
         let terms = top_terms(&reg, Some(RewriteContext::GeneralNote), None);
         assert_eq!(terms.len(), LEARNED_CAP);
         // Prose-only learning is a no-op.
-        learn(&reg, RewriteContext::GeneralNote, None, "water the plants tomorrow");
+        learn(
+            &reg,
+            RewriteContext::GeneralNote,
+            None,
+            "water the plants tomorrow",
+        );
         assert!(!top_terms(&reg, None, None).iter().any(|t| t == "plants"));
     }
 
@@ -644,7 +749,10 @@ mod tests {
 
         // Reading through the normal path migrates in memory: the term ranks…
         let top = top_terms(&reg, Some(RewriteContext::GitCommit), None);
-        assert!(top.contains(&"russh-sftp".to_string()), "v1 term survives migration");
+        assert!(
+            top.contains(&"russh-sftp".to_string()),
+            "v1 term survives migration"
+        );
 
         // …and a subsequent write upgrades the on-disk shape to v2 with the
         // backfilled fields (first_seen ← last_used, weight ← salience(count)).
@@ -653,8 +761,14 @@ mod tests {
         let parsed: Store = serde_json::from_str(&on_disk).unwrap();
         assert_eq!(parsed.schema_version, CURRENT_SCHEMA_VERSION);
         let migrated = parsed.terms.get("russh-sftp").expect("kept");
-        assert_eq!(migrated.first_seen, last_used, "first_seen backfilled from last_used");
-        assert!((migrated.weight - salience(3)).abs() < 1e-6, "weight backfilled from count");
+        assert_eq!(
+            migrated.first_seen, last_used,
+            "first_seen backfilled from last_used"
+        );
+        assert!(
+            (migrated.weight - salience(3)).abs() < 1e-6,
+            "weight backfilled from count"
+        );
     }
 
     #[test]
@@ -667,9 +781,17 @@ mod tests {
         reset(&reg);
 
         assert!(!store_path(&reg).exists(), "store file deleted");
-        assert!(top_terms(&reg, None, None).is_empty(), "in-memory store cleared");
+        assert!(
+            top_terms(&reg, None, None).is_empty(),
+            "in-memory store cleared"
+        );
         // The store is usable again after a reset (re-created at current version).
-        learn(&reg, RewriteContext::GitCommit, None, "fresh after-reset-term");
+        learn(
+            &reg,
+            RewriteContext::GitCommit,
+            None,
+            "fresh after-reset-term",
+        );
         assert!(top_terms(&reg, None, None).contains(&"after-reset-term".to_string()));
     }
 }

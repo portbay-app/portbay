@@ -30,6 +30,8 @@
     AccessibilityPanel,
     WorkspacePanel,
     DomainsPanel,
+    NotificationsPanel,
+    IntegrationsPanel,
     AdvancedPanel,
   } from "$lib/components/settings";
 
@@ -38,6 +40,11 @@
     { key: "general", label: "General", icon: "settings" },
     { key: "workspace", label: "Workspace", icon: "folder" },
     { key: "domains", label: "Domains & HTTPS", icon: "globe" },
+    { key: "notifications", label: "Notifications", icon: "bell" },
+    // Named for what the panel holds (board agents + MCP snippets) — the
+    // top-level Integrations page owns the "Integrations" name. The key stays
+    // "ai" so existing ?tab=ai deep links keep working.
+    { key: "ai", label: "Agents & MCP", icon: "sparkles" },
     { key: "appearance", label: "Appearance", icon: "layers" },
     { key: "accessibility", label: "Accessibility", icon: "accessibility" },
     { key: "advanced", label: "Advanced", icon: "file-code" },
@@ -106,6 +113,10 @@
         <WorkspacePanel />
       {:else if active === "domains"}
         <DomainsPanel />
+      {:else if active === "notifications"}
+        <NotificationsPanel />
+      {:else if active === "ai"}
+        <IntegrationsPanel />
       {:else}
         <AdvancedPanel />
       {/if}

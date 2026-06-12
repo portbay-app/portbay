@@ -10,8 +10,9 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
+use crate::commands::events::emit_to_main;
 use crate::commands::projects::{load_registry, save_registry};
 use crate::error::{AppError, AppResult};
 use crate::registry::{
@@ -19,8 +20,20 @@ use crate::registry::{
     SshConnectionId, SshForwardKind, SshProxyConfig, SshTunnelConnection, SshTunnelId,
 };
 use crate::ssh::backend::{test_connection, EffectiveSshTunnel, SshError};
-use crate::ssh::{SshTunnelRuntimeStatus, SSH_STATE_CHANNEL};
+use crate::ssh::interaction::EventInteractor;
+use crate::ssh::secret::{nonblank_secret, secret_str, SecretString};
+use crate::ssh::{SshTunnelEventStatus, SshTunnelRuntimeStatus, SSH_STATE_CHANNEL};
 use crate::state::AppState;
+
+/// Emit the live tunnel-status list on [`SSH_STATE_CHANNEL`] — point-to-point
+/// to the main window, with the key path and equivalent command line projected
+/// out (see [`SshTunnelEventStatus`]). Never broadcast: the payload describes
+/// the user's hosts and forwards, and secondary webviews can hold
+/// `event:allow-listen`.
+fn emit_tunnel_state(app: &AppHandle, statuses: &[SshTunnelRuntimeStatus]) {
+    let payload: Vec<SshTunnelEventStatus> = statuses.iter().map(Into::into).collect();
+    let _ = emit_to_main(app, SSH_STATE_CHANNEL, payload);
+}
 
 const SSH_KEYCHAIN_SERVICE: &str = "PortBay SSH";
 
@@ -53,6 +66,14 @@ pub struct SaveSshTunnelInput {
     pub keep_alive: bool,
     #[serde(default)]
     pub auto_reconnect: bool,
+    /// Explicit confirmation that `local_host` may be a non-loopback bind
+    /// address (e.g. `0.0.0.0`), exposing the listener beyond this machine
+    /// (-L/-D) or requesting a wide server-side bind (-R). Without it, saves
+    /// are restricted to the loopback allowlist — the forwarded service has
+    /// no auth of its own, so a wide bind must be a deliberate choice, never
+    /// a default or a typo.
+    #[serde(default)]
+    pub allow_wide_bind: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +89,12 @@ fn default_ssh_port() -> u16 {
 
 fn default_local_host() -> String {
     "127.0.0.1".into()
+}
+
+/// Loopback-only allowlist for tunnel listen-bind addresses. Everything else
+/// (`0.0.0.0`, `::`, a LAN IP, …) needs the explicit wide-bind confirmation.
+fn is_loopback_host(host: &str) -> bool {
+    host == "127.0.0.1" || host == "::1" || host.eq_ignore_ascii_case("localhost")
 }
 
 use crate::ssh::resolve_tunnels as resolve_all;
@@ -108,7 +135,7 @@ pub async fn ssh_tunnel_list(
     .await
     .map_err(|e| AppError::Internal(format!("SSH list task failed: {e}")))?;
     state.mirror_ssh_tunnels(&statuses);
-    let _ = app.emit(SSH_STATE_CHANNEL, statuses.clone());
+    emit_tunnel_state(&app, &statuses);
     Ok(statuses)
 }
 
@@ -142,7 +169,7 @@ pub fn spawn_ssh_supervisor(app: AppHandle, period: std::time::Duration) {
             if let Some(statuses) = refreshed {
                 let state: State<AppState> = app.state();
                 state.mirror_ssh_tunnels(&statuses);
-                let _ = app.emit(SSH_STATE_CHANNEL, statuses);
+                emit_tunnel_state(&app, &statuses);
             }
         }
     });
@@ -154,17 +181,12 @@ pub async fn ssh_tunnel_save(
     state: State<'_, AppState>,
     input: SaveSshTunnelInput,
 ) -> AppResult<SshTunnelRuntimeStatus> {
-    let password = input
-        .password
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned);
+    let password = nonblank_secret(input.password.clone());
     let mut registry = load_registry(&state)?;
     let (connection, connection_is_new, tunnel) = build_tunnel_and_connection(&registry, input)?;
 
     // Password belongs to the connection (the owner of auth), keyed by its id.
-    store_password_if_present(connection.auth_kind, &connection.id, password.as_deref())?;
+    store_password_if_present(connection.auth_kind, &connection.id, secret_str(&password))?;
 
     if connection_is_new {
         registry.add_ssh_connection(connection.clone())?;
@@ -189,7 +211,7 @@ pub async fn ssh_tunnel_save(
     .await
     .map_err(|e| AppError::Internal(format!("SSH list task failed: {e}")))?;
     state.mirror_ssh_tunnels(&statuses);
-    let _ = app.emit(SSH_STATE_CHANNEL, statuses.clone());
+    emit_tunnel_state(&app, &statuses);
     statuses
         .into_iter()
         .find(|s| s.id == tunnel.id.as_str())
@@ -223,7 +245,7 @@ pub async fn ssh_tunnel_delete(
     save_registry(&state, &registry)?;
     let statuses = snapshot_statuses(&app).await?;
     state.mirror_ssh_tunnels(&statuses);
-    let _ = app.emit(SSH_STATE_CHANNEL, statuses);
+    emit_tunnel_state(&app, &statuses);
     Ok(())
 }
 
@@ -238,23 +260,24 @@ pub async fn ssh_tunnel_start(
 ) -> AppResult<SshTunnelRuntimeStatus> {
     let registry = load_registry(&state)?;
     let effective = resolve_one(&registry, &id)?;
-    let password = match password.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(p) => Some(p.to_string()),
+    let password = match nonblank_secret(password) {
+        Some(p) => Some(p),
         None => load_password_if_needed(effective.auth_kind, &effective.connection_id)?,
     };
 
     let app_for_task = app.clone();
     let status = tokio::task::spawn_blocking(move || {
+        let interactor = EventInteractor::shared(app_for_task.clone());
         let state: State<AppState> = app_for_task.state();
         let mut mgr = state.ssh_tunnels.lock().unwrap_or_else(|e| e.into_inner());
-        mgr.start(effective, password)
+        mgr.start(effective, password, Some(interactor))
     })
     .await
     .map_err(|e| AppError::Internal(format!("SSH start task failed: {e}")))??;
 
     let statuses = snapshot_statuses(&app).await?;
     state.mirror_ssh_tunnels(&statuses);
-    let _ = app.emit(SSH_STATE_CHANNEL, statuses);
+    emit_tunnel_state(&app, &statuses);
     Ok(status)
 }
 
@@ -276,19 +299,26 @@ pub async fn ssh_tunnel_stop(
     .map_err(|e| AppError::Internal(format!("SSH stop task failed: {e}")))??;
     let statuses = snapshot_statuses(&app).await?;
     state.mirror_ssh_tunnels(&statuses);
-    let _ = app.emit(SSH_STATE_CHANNEL, statuses);
+    emit_tunnel_state(&app, &statuses);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn ssh_tunnel_test(state: State<'_, AppState>, id: String) -> AppResult<()> {
+pub async fn ssh_tunnel_test(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<()> {
     let registry = load_registry(&state)?;
     let effective = resolve_one(&registry, &id)?;
     let password = load_password_if_needed(effective.auth_kind, &effective.connection_id)?;
-    tokio::task::spawn_blocking(move || test_connection(&effective, password.as_deref()))
-        .await
-        .map_err(|e| AppError::Internal(format!("SSH test task failed: {e}")))?
-        .map_err(AppError::Ssh)
+    let interactor = EventInteractor::shared(app);
+    tokio::task::spawn_blocking(move || {
+        test_connection(&effective, secret_str(&password), Some(interactor))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("SSH test task failed: {e}")))?
+    .map_err(AppError::Ssh)
 }
 
 #[tauri::command]
@@ -466,15 +496,39 @@ fn build_tunnel_and_connection(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| unique_tunnel_id(registry, name));
 
+    let local_host = if input.local_host.trim().is_empty() {
+        default_local_host()
+    } else {
+        input.local_host.trim().to_owned()
+    };
+    // `local_host` is the listen-bind address (-L/-D bind it locally; -R
+    // requests it server-side). The listener has no auth of its own, so a
+    // non-loopback bind exposes the forwarded service to the network — only
+    // allowed with the explicit `allow_wide_bind` confirmation.
+    if !is_loopback_host(&local_host) && !input.allow_wide_bind {
+        return Err(AppError::BadInput(format!(
+            "local host `{local_host}` would expose the forwarded service beyond this machine; \
+             use 127.0.0.1, ::1, or localhost (wider binds require explicit confirmation)"
+        )));
+    }
+    // Ports 1-1023 need root to bind. Catch them at save time with a clear
+    // message instead of letting the start fail with a raw bind error ~10s
+    // later. Reverse forwards request the port on the *server*, where its own
+    // sshd policy decides — only the locally-bound kinds are checked.
+    if !matches!(input.forward_kind, SshForwardKind::Reverse) {
+        if let Some(port) = input.local_port.filter(|p| (1..1024).contains(p)) {
+            return Err(AppError::BadInput(format!(
+                "local port {port} is privileged (ports 1-1023 need root to bind); \
+                 choose 1024 or higher, or leave it blank to auto-assign"
+            )));
+        }
+    }
+
     let tunnel = SshTunnelConnection {
         id: SshTunnelId::new(tunnel_id),
         name: name.into(),
         connection_id: connection.id.clone(),
-        local_host: if input.local_host.trim().is_empty() {
-            default_local_host()
-        } else {
-            input.local_host.trim().into()
-        },
+        local_host,
         local_port: input
             .local_port
             .filter(|p| *p > 0)
@@ -653,14 +707,14 @@ pub(crate) fn store_password_if_present(
 pub(crate) fn load_password_if_needed(
     auth_kind: SshAuthKind,
     connection_id: &SshConnectionId,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<SecretString>> {
     if !matches!(auth_kind, SshAuthKind::Password) {
         return Ok(None);
     }
     let entry = keyring::Entry::new(SSH_KEYCHAIN_SERVICE, connection_id.as_str())
         .map_err(|e| AppError::Internal(format!("couldn't open SSH keychain entry: {e}")))?;
     match entry.get_password() {
-        Ok(password) if !password.trim().is_empty() => Ok(Some(password)),
+        Ok(password) if !password.trim().is_empty() => Ok(Some(SecretString::new(password))),
         // No usable password stored (empty, missing, or unreadable): surface a
         // typed signal so the UI prompts for it (VS Code-style) rather than a
         // dead-end error. The connection id stands in as the host label; the
@@ -693,11 +747,13 @@ pub(crate) fn clear_stored_password(connection_id: &SshConnectionId) {
     }
 }
 
-pub(crate) fn load_stored_password(connection_id: &SshConnectionId) -> AppResult<Option<String>> {
+pub(crate) fn load_stored_password(
+    connection_id: &SshConnectionId,
+) -> AppResult<Option<SecretString>> {
     let entry = keyring::Entry::new(SSH_KEYCHAIN_SERVICE, connection_id.as_str())
         .map_err(|e| AppError::Internal(format!("couldn't open SSH keychain entry: {e}")))?;
     match entry.get_password() {
-        Ok(password) if !password.trim().is_empty() => Ok(Some(password)),
+        Ok(password) if !password.trim().is_empty() => Ok(Some(SecretString::new(password))),
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => {
             // A locked/erroring keychain shouldn't sink an otherwise-valid key or
@@ -763,12 +819,12 @@ pub(crate) fn clear_stored_proxy_password(connection_id: &SshConnectionId) {
 /// keychain failure) never blocks the connect path.
 pub(crate) fn load_stored_proxy_password(
     connection_id: &SshConnectionId,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<SecretString>> {
     let entry =
         keyring::Entry::new(SSH_KEYCHAIN_SERVICE, &proxy_keychain_account(connection_id))
             .map_err(|e| AppError::Internal(format!("couldn't open proxy keychain entry: {e}")))?;
     match entry.get_password() {
-        Ok(password) if !password.trim().is_empty() => Ok(Some(password)),
+        Ok(password) if !password.trim().is_empty() => Ok(Some(SecretString::new(password))),
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => {
             tracing::debug!(error = %e, "proxy keychain lookup failed; continuing without a proxy password");
@@ -820,14 +876,14 @@ pub(crate) fn clear_stored_key_passphrase(connection_id: &SshConnectionId) {
 /// keychain failure) never blocks the connect path.
 pub(crate) fn load_stored_key_passphrase(
     connection_id: &SshConnectionId,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<SecretString>> {
     let entry = keyring::Entry::new(
         SSH_KEYCHAIN_SERVICE,
         &passphrase_keychain_account(connection_id),
     )
     .map_err(|e| AppError::Internal(format!("couldn't open passphrase keychain entry: {e}")))?;
     match entry.get_password() {
-        Ok(secret) if !secret.is_empty() => Ok(Some(secret)),
+        Ok(secret) if !secret.is_empty() => Ok(Some(SecretString::new(secret))),
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => {
             tracing::debug!(error = %e, "passphrase keychain lookup failed; continuing without it");
@@ -883,6 +939,46 @@ mod tests {
             proxy_jump: None,
             keep_alive: false,
             auto_reconnect: false,
+            allow_wide_bind: false,
+        }
+    }
+
+    // ── local_host bind allowlist (P1-2/P2-1, 2026-06-10 assessment) ─────────
+
+    #[test]
+    fn wide_local_host_is_rejected_without_confirmation() {
+        let reg = Registry::new("test");
+        for host in ["0.0.0.0", "::", "192.168.1.20"] {
+            let mut i = input("DB", "host", "me", SshAuthKind::Key);
+            i.local_host = host.into();
+            let err = build_tunnel_and_connection(&reg, i).unwrap_err();
+            assert!(
+                err.to_string().contains("expose"),
+                "`{host}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_local_host_is_accepted_with_explicit_confirmation() {
+        let reg = Registry::new("test");
+        let mut i = input("DB", "host", "me", SshAuthKind::Key);
+        i.local_host = "0.0.0.0".into();
+        i.allow_wide_bind = true;
+        let (_, _, tunnel) = build_tunnel_and_connection(&reg, i).unwrap();
+        assert_eq!(tunnel.local_host, "0.0.0.0");
+    }
+
+    #[test]
+    fn loopback_local_hosts_save_without_confirmation() {
+        let reg = Registry::new("test");
+        for host in ["127.0.0.1", "::1", "localhost", "LocalHost", ""] {
+            let mut i = input("DB", "host", "me", SshAuthKind::Key);
+            i.local_host = host.into();
+            assert!(
+                build_tunnel_and_connection(&reg, i).is_ok(),
+                "`{host}` must be accepted"
+            );
         }
     }
 
@@ -958,6 +1054,51 @@ mod tests {
         reg.add_ssh_tunnel(tunnel).unwrap();
         let next = allocate_local_port(&reg, 15432);
         assert_ne!(next, 15432);
+    }
+
+    // ── privileged local ports (P3, 2026-06-10 assessment) ───────────────────
+
+    #[test]
+    fn privileged_local_port_is_rejected_with_clear_message() {
+        let reg = Registry::new("test");
+        for port in [1u16, 80, 443, 1023] {
+            let mut i = input("Web", "host", "me", SshAuthKind::Key);
+            i.local_port = Some(port);
+            let err = build_tunnel_and_connection(&reg, i).unwrap_err();
+            assert!(
+                err.to_string().contains("privileged"),
+                "port {port} must be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn unprivileged_and_reverse_local_ports_are_accepted() {
+        let reg = Registry::new("test");
+        // 1024 is the first unprivileged port.
+        let mut i = input("DB", "host", "me", SshAuthKind::Key);
+        i.local_port = Some(1024);
+        assert!(build_tunnel_and_connection(&reg, i).is_ok());
+
+        // A reverse forward's "local port" binds on the server — the server's
+        // sshd policy governs it, so the privileged check must not fire. (The
+        // save may still be vetoed by the reverse-tunnels Pro gate depending on
+        // the machine's entitlement cache; only the port check is pinned here.)
+        let mut i = input("Reverse Web", "host", "me", SshAuthKind::Key);
+        i.forward_kind = SshForwardKind::Reverse;
+        i.local_port = Some(80);
+        if let Err(e) = build_tunnel_and_connection(&reg, i) {
+            assert!(
+                !e.to_string().contains("privileged"),
+                "reverse forwards must skip the privileged-port check, got: {e}"
+            );
+        }
+
+        // Blank auto-assigns (allocator starts at >=1024) — never rejected.
+        let mut i = input("Auto", "host", "me", SshAuthKind::Key);
+        i.local_port = None;
+        let (_, _, tunnel) = build_tunnel_and_connection(&reg, i).unwrap();
+        assert!(tunnel.local_port >= 1024);
     }
 
     // ── build_tunnel_and_connection validation ────────────────────────────────

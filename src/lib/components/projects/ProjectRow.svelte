@@ -26,11 +26,18 @@
   import { projects } from "$lib/stores/projects.svelte";
   import { dns } from "$lib/stores/dns.svelte";
   import { density } from "$lib/stores/density.svelte";
+  import { mobileDeviceNames } from "$lib/stores/mobileDeviceNames.svelte";
+  import { mobilePhase } from "$lib/stores/mobilePhase.svelte";
   import { sidecars } from "$lib/stores/sidecars.svelte";
 
   import type { CommandError } from "$lib/types/error";
   import type { ProjectView } from "$lib/types/projects";
   import { displayStatusLabel } from "$lib/types/status";
+  import {
+    isMobileType,
+    mobilePhaseDisplay,
+    mobilePhaseLabel,
+  } from "$lib/types/mobile";
   import {
     typeLabel,
     effectiveWebServer,
@@ -96,7 +103,30 @@
     return g ? g.name : null;
   });
 
-  const statusText = $derived(displayStatusLabel(display));
+  // Mobile sub-state overlay: while a run is in flight (or its build failed),
+  // the row shows the truthful phase ("Building…", "Connected") instead of
+  // the process-readiness "Running" that lies during compiles. Additive — the
+  // base status still drives Play/Stop.
+  const isMobile = $derived(isMobileType(project.type));
+  const phaseEntry = $derived(isMobile ? mobilePhase.get(project.id) : null);
+  const phaseOverlay = $derived(
+    phaseEntry !== null &&
+      (display === "running" ||
+        display === "starting" ||
+        display === "crashed" ||
+        phaseEntry.phase === "build_failed")
+      ? phaseEntry.phase
+      : null,
+  );
+
+  const statusText = $derived(
+    phaseOverlay !== null
+      ? mobilePhaseLabel[phaseOverlay]
+      : displayStatusLabel(display),
+  );
+  const dotStatus = $derived(
+    phaseOverlay !== null ? mobilePhaseDisplay(phaseOverlay) : display,
+  );
 
   // The web server actually fronting this project (PHP doc-root projects
   // only); null when the choice doesn't apply, so we don't mislabel a Node
@@ -124,8 +154,9 @@
           if (r.kind === "error") throw r.error;
           // After a successful start, check if routing sidecars are up.
           // Only warn when the project uses a .test (or https) hostname — a
-          // port-only project is reachable via localhost regardless.
-          if (project.hostname) {
+          // port-only project is reachable via localhost regardless, and a
+          // mobile run doesn't route through Caddy/dnsmasq at all.
+          if (project.hostname && !isMobile) {
             const snap = sidecars.value;
             const caddyDown = snap.caddy.status !== "running";
             const dnsDown = snap.dnsmasq.status !== "running";
@@ -251,18 +282,30 @@
     </div>
   </td>
 
-  <!-- URL -->
+  <!-- URL — or the run destination for mobile kinds (no URL to open). -->
   <td class={cellClass}>
-    <button
-      type="button"
-      onclick={openUrl}
-      class="inline-flex items-center gap-1 text-[12px] text-accent
-             hover:text-accent-hover hover:underline truncate"
-      title="Open {project.url}"
-    >
-      <span class="truncate">{project.url}</span>
-      <Icon name="external-link" size={11} class="shrink-0 opacity-70" />
-    </button>
+    {#if isMobile}
+      <span
+        class="inline-flex items-center gap-1.5 text-[12px] text-fg-muted"
+        title="Run destination — pick in the detail rail"
+      >
+        <Icon name="smartphone" size={11} class="shrink-0 opacity-70" />
+        <span class="truncate">
+          {mobileDeviceNames.label(project.mobileRun?.device)}
+        </span>
+      </span>
+    {:else}
+      <button
+        type="button"
+        onclick={openUrl}
+        class="inline-flex items-center gap-1 text-[12px] text-accent
+               hover:text-accent-hover hover:underline truncate"
+        title="Open {project.url}"
+      >
+        <span class="truncate">{project.url}</span>
+        <Icon name="external-link" size={11} class="shrink-0 opacity-70" />
+      </button>
+    {/if}
   </td>
 
   <!-- Port -->
@@ -273,13 +316,13 @@
   <!-- Status -->
   <td class={cellClass}>
     <span class="inline-flex items-center gap-1.5 text-[12px]">
-      <StatusDot status={display} size="md" />
+      <StatusDot status={dotStatus} size="md" />
       <span
         class="text-fg-muted"
-        class:text-status-running={display === "running"}
-        class:text-status-unhealthy={display === "unhealthy" ||
-          display === "port_conflict"}
-        class:text-status-crashed={display === "crashed"}
+        class:text-status-running={dotStatus === "running"}
+        class:text-status-unhealthy={dotStatus === "unhealthy" ||
+          dotStatus === "port_conflict"}
+        class:text-status-crashed={dotStatus === "crashed"}
       >
         {statusText}
       </span>
@@ -295,16 +338,18 @@
   -->
   <td class={cellClass}>
     <div class="flex items-center gap-0.5 justify-end">
-      <button
-        type="button"
-        onclick={openUrl}
-        title="Open in browser"
-        aria-label="Open {project.url} in browser"
-        class="inline-flex items-center justify-center w-7 h-7 rounded-md
-               text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
-      >
-        <Icon name="globe" size={13} />
-      </button>
+      {#if !isMobile}
+        <button
+          type="button"
+          onclick={openUrl}
+          title="Open in browser"
+          aria-label="Open {project.url} in browser"
+          class="inline-flex items-center justify-center w-7 h-7 rounded-md
+                 text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
+        >
+          <Icon name="globe" size={13} />
+        </button>
+      {/if}
 
       <button
         type="button"

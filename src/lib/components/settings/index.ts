@@ -7,4 +7,6 @@ export { default as AppearancePanel } from "./AppearancePanel.svelte";
 export { default as AccessibilityPanel } from "./AccessibilityPanel.svelte";
 export { default as WorkspacePanel } from "./WorkspacePanel.svelte";
 export { default as DomainsPanel } from "./DomainsPanel.svelte";
+export { default as NotificationsPanel } from "./NotificationsPanel.svelte";
+export { default as IntegrationsPanel } from "./IntegrationsPanel.svelte";
 export { default as AdvancedPanel } from "./AdvancedPanel.svelte";

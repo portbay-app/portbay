@@ -241,8 +241,10 @@
       patch.phpVersion = phpVersionDraft.trim();
     }
     if (isMobile && mobileDirty) {
+      // The backend regenerates the full launch script from this config
+      // (update_project re-stamps start_command) — sending the simplified
+      // preview command here would replace the real multi-step script.
       patch.mobileRun = mobileDraft;
-      patch.startCommand = mobileCommand;
     }
     if (!corsLocked && corsDirty) {
       patch.cors = {
@@ -673,6 +675,11 @@
       <div class="rounded-md border border-border bg-bg px-2.5 py-1.5">
         <code class="block text-[11px] text-fg-muted break-all">{mobileCommand}</code>
       </div>
+      <p class="text-[10.5px] text-fg-subtle">
+        Simplified preview — on save PortBay generates the full
+        boot&nbsp;→&nbsp;build&nbsp;→&nbsp;install&nbsp;→&nbsp;launch script.
+        Tip: pick the device from the destination chip in the project rail.
+      </p>
     </section>
   {/if}
 

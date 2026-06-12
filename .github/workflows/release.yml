@@ -83,6 +83,52 @@ jobs:
           TARGET_TRIPLE: aarch64-apple-darwin
         run: ./scripts/build-mcp.sh
 
+      - name: Build Apple Intelligence bridge (bundled sidecar)
+        env:
+          # tauri.macos.conf.json lists binaries/portbay-afm as a macOS-only
+          # externalBin (Smart Dictation's on-device rewrite provider). NOTE:
+          # the sidecar only gains FoundationModels support when the runner's
+          # SDK is macOS 26+; on an older SDK it still builds and cleanly
+          # reports "built_without_sdk" at runtime.
+          TARGET_TRIPLE: aarch64-apple-darwin
+        run: ./scripts/build-afm.sh
+
+      - name: Cache SwiftPM build (speech-to-text sidecar)
+        uses: actions/cache@v5
+        with:
+          path: src-tauri/stt/.build
+          key: ${{ runner.os }}-swiftpm-stt-${{ hashFiles('src-tauri/stt/Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-stt-
+
+      - name: Build speech-to-text sidecar (bundled sidecar)
+        env:
+          # tauri.macos.conf.json lists binaries/portbay-stt as a macOS-only
+          # externalBin — Smart Dictation's local transcription engine
+          # (Whisper via WhisperKit + Parakeet via FluidAudio, SwiftPM
+          # package at src-tauri/stt). Needs a macOS 14+ SDK.
+          TARGET_TRIPLE: aarch64-apple-darwin
+        run: ./scripts/build-stt.sh
+
+      - name: Cache SwiftPM build (image-generation sidecar)
+        uses: actions/cache@v5
+        with:
+          path: src-tauri/imagegen/.build
+          key: ${{ runner.os }}-swiftpm-imagegen-${{ hashFiles('src-tauri/imagegen/Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-imagegen-
+
+      - name: Build image-generation sidecar (bundled sidecar)
+        env:
+          # tauri.macos.conf.json lists binaries/portbay-imagegen as a
+          # macOS-only externalBin (on-device diffusion via
+          # apple/ml-stable-diffusion). WITHOUT this step the zero-byte
+          # placeholder build-stt.sh seeds for the bundler's existence check
+          # ships as-is — the app degrades to "sidecar_missing" and every
+          # auto-updating user silently loses image generation.
+          TARGET_TRIPLE: aarch64-apple-darwin
+        run: ./scripts/build-imagegen.sh
+
       - name: Generate Cargo SBOM
         run: |
           cargo install cargo-cyclonedx --locked
@@ -155,12 +201,14 @@ jobs:
           xcrun stapler validate "$dmg"
           spctl -a -t open --context context:primary-signature -vv "$dmg"
 
-      # Guards the "<100 MB installer" positioning claim (docs/ARCHITECTURE.md
-      # bundle-size budget; baseline ~77 MB). A regression — a stray dependency,
-      # an un-stripped binary, an extra bundled sidecar — fails the release here
-      # instead of surfacing as a user complaint. Budget is the compressed DMG,
-      # not the uncompressed .app. See docs/PERFORMANCE.md.
-      - name: Guard DMG size budget (<100 MB)
+      # Guards the installer-size positioning claim (docs/ARCHITECTURE.md
+      # bundle-size budget). A regression — a stray dependency, an un-stripped
+      # binary, an extra bundled sidecar — fails the release here instead of
+      # surfacing as a user complaint. Budget is the compressed DMG, not the
+      # uncompressed .app. Raised from 100 MB to 130 MB when the AI sidecars
+      # (portbay-stt, portbay-imagegen) joined the bundle (~114 MB observed);
+      # see docs/PERFORMANCE.md for the claw-back levers.
+      - name: Guard DMG size budget (<130 MB)
         run: |
           dmg="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' | head -n 1)"
           if [ -z "$dmg" ]; then
@@ -168,14 +216,14 @@ jobs:
             exit 1
           fi
           bytes=$(stat -f%z "$dmg")
-          budget=$((100 * 1024 * 1024))
+          budget=$((130 * 1024 * 1024))
           mb=$(echo "scale=1; $bytes / 1048576" | bc)
-          echo "DMG: $(basename "$dmg") — ${mb} MB (budget 100 MB, baseline ~77 MB)"
+          echo "DMG: $(basename "$dmg") — ${mb} MB (budget 130 MB, baseline ~114 MB with AI sidecars)"
           if [ "$bytes" -gt "$budget" ]; then
-            echo "::error::DMG installer is ${mb} MB, over the 100 MB budget. See docs/PERFORMANCE.md for the levers to claw it back."
+            echo "::error::DMG installer is ${mb} MB, over the 130 MB budget. See docs/PERFORMANCE.md for the levers to claw it back."
             exit 1
           fi
-          echo "::notice::DMG installer ${mb} MB — under the 100 MB budget."
+          echo "::notice::DMG installer ${mb} MB — under the 130 MB budget."
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -308,6 +356,9 @@ jobs:
           if-no-files-found: error
 
       - name: Attach snap to draft release
+        # Same manual-release guard as publish-release: never attach a
+        # main-built snap to a release the maintainer published by hand.
+        if: needs.publish-release.outputs.skipped != 'true'
         uses: softprops/action-gh-release@v3
         with:
           files: "*.snap"
@@ -355,6 +406,26 @@ jobs:
         with:
           path: artifacts/
 
+      # Tauri emits the macOS updater tarball as an unversioned
+      # `PortBay.app.tar.gz` — rename it (and its .sig) so the asset a user
+      # downloads identifies its version (v0.1.4 shipped versionless). Runs
+      # BEFORE latest.json assembly so the manifest references the new name.
+      - name: Version-name macOS updater tarball
+        if: steps.manual.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          tarball="$(find artifacts -type f -name '*.app.tar.gz' | head -n 1)"
+          if [ -n "$tarball" ] && [[ "$(basename "$tarball")" != *"$version"* ]]; then
+            dir="$(dirname "$tarball")"
+            mv "$tarball" "${dir}/PortBay_${version}_aarch64.app.tar.gz"
+            if [ -f "${tarball}.sig" ]; then
+              mv "${tarball}.sig" "${dir}/PortBay_${version}_aarch64.app.tar.gz.sig"
+            fi
+            echo "Renamed $(basename "$tarball") -> PortBay_${version}_aarch64.app.tar.gz"
+          fi
+
       # Assemble the Tauri Updater manifest (`latest.json`) the in-app updater
       # reads from `releases/latest/download/latest.json`. The `signature`
       # field is the verbatim contents of the `.app.tar.gz.sig` minisign file
@@ -379,12 +450,14 @@ jobs:
           mac_signature="$(cat "$mac_sig")"
           mac_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${mac_asset}"
           pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          min_version="${PORTBAY_UPDATER_MIN_VERSION:-0.1.2}"
           if [ -n "$linux_tarball" ] && [ -n "$linux_sig" ]; then
             linux_asset="$(basename "$linux_tarball")"
             linux_signature="$(cat "$linux_sig")"
             linux_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${linux_asset}"
             jq -n \
               --arg version "$version" \
+              --arg min_version "$min_version" \
               --arg pub_date "$pub_date" \
               --arg mac_signature "$mac_signature" \
               --arg mac_url "$mac_url" \
@@ -392,6 +465,7 @@ jobs:
               --arg linux_url "$linux_url" \
               '{
                 version: $version,
+                min_version: $min_version,
                 notes: "See the release notes on GitHub.",
                 pub_date: $pub_date,
                 platforms: {
@@ -402,11 +476,13 @@ jobs:
           else
             jq -n \
             --arg version "$version" \
+            --arg min_version "$min_version" \
             --arg pub_date "$pub_date" \
             --arg signature "$mac_signature" \
             --arg url "$mac_url" \
             '{
               version: $version,
+              min_version: $min_version,
               notes: "See the release notes on GitHub.",
               pub_date: $pub_date,
               platforms: {
@@ -533,6 +609,13 @@ jobs:
 
             url "https://github.com/portbay-app/portbay/releases/download/v#{version}/__ASSET__"
             name "PortBay"
+
+            depends_on arch: :arm64
+            # Matches tauri.conf.json minimumSystemVersion (11.0). The AI
+            # features (dictation/STT/image generation) need macOS 14+, but
+            # the app itself runs on Big Sur — don't gate the whole install
+            # on the AI floor.
+            depends_on macos: ">= :big_sur"
             desc "Lightweight local development environment manager"
             homepage "https://portbay.app"
 

@@ -47,6 +47,74 @@
   let restoreArmed = $state<boolean>(false);
   let resetArmed = $state<boolean>(false);
 
+  // ---- Command-line tool install ----
+  type CliStatus = {
+    bundleFound: boolean;
+    bundlePath: string | null;
+    installed: boolean;
+    pointsToBundle: boolean;
+    onPath: boolean;
+  };
+  let cliStatus = $state<CliStatus | null>(null);
+  let cliBusy = $state<boolean>(false);
+
+  async function refreshCliStatus() {
+    try {
+      cliStatus = await safeInvoke<CliStatus>("cli_status", {
+        installPath: preferences.value.cliPath,
+      });
+    } catch {
+      cliStatus = null;
+    }
+  }
+
+  async function installCli() {
+    cliBusy = true;
+    try {
+      await safeInvoke<string>("cli_install_tool", {
+        installPath: preferences.value.cliPath,
+      });
+      errorBus.push({
+        code: "CLI_INSTALLED",
+        category: "lifecycle",
+        whatHappened: `Installed the portbay command at ${preferences.value.cliPath}.`,
+        whyItMatters:
+          "Open a new terminal and run `portbay` to manage projects from the command line.",
+        whoCausedIt: "system",
+        severity: "success",
+        actions: [],
+      });
+      await refreshCliStatus();
+    } catch {
+      /* safeInvoke surfaces the error toast */
+    } finally {
+      cliBusy = false;
+    }
+  }
+
+  async function uninstallCli() {
+    cliBusy = true;
+    try {
+      await safeInvoke("cli_uninstall_tool", {
+        installPath: preferences.value.cliPath,
+      });
+      errorBus.push({
+        code: "CLI_REMOVED",
+        category: "lifecycle",
+        whatHappened: "Removed the portbay command-line tool.",
+        whyItMatters: "The app and your projects are unaffected.",
+        whoCausedIt: "system",
+        severity: "info",
+        actions: [],
+      });
+      await refreshCliStatus();
+    } catch {
+      /* safeInvoke surfaces the error toast */
+    } finally {
+      cliBusy = false;
+    }
+  }
+
   async function refreshTelemetry() {
     try {
       telemetryInfo = await safeInvoke<TelemetrySettings>("telemetry_settings");
@@ -268,6 +336,7 @@
   onMount(() => {
     void refreshTelemetry();
     void refreshDnsStatus();
+    void refreshCliStatus();
     void (async () => {
       try {
         appVersion = await getVersion();
@@ -373,9 +442,66 @@
           </select>
         </div>
 
-        <div class="flex items-center justify-between gap-3 py-2.5 last:pb-0">
-          <span class="text-[13px] text-fg">PortBay CLI path</span>
-          <div class="flex items-center gap-2">
+        <div class="py-2.5 last:pb-0">
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex flex-col">
+              <span class="text-[13px] text-fg">Command-line tool</span>
+              <span class="text-[11.5px] text-fg-muted max-w-md">
+                Run <code class="font-mono text-[11px]">portbay</code> in any
+                terminal to list, start, and stop your projects. Installs a link
+                at the path below.
+              </span>
+              {#if cliStatus}
+                <span class="mt-1 text-[11.5px] flex items-center gap-1.5">
+                  <span class="text-fg-subtle">Status:</span>
+                  {#if cliStatus.installed && cliStatus.pointsToBundle}
+                    <span class="text-status-running font-medium">Installed</span>
+                    {#if !cliStatus.onPath}
+                      <span class="text-status-unhealthy"
+                        >— but its folder isn't on your PATH</span
+                      >
+                    {/if}
+                  {:else if cliStatus.installed}
+                    <span class="text-status-unhealthy font-medium"
+                      >A different `portbay` is installed here</span
+                    >
+                  {:else if !cliStatus.bundleFound}
+                    <span class="text-fg-subtle"
+                      >Unavailable — bundled binary not found</span
+                    >
+                  {:else}
+                    <span class="text-fg-subtle">Not installed</span>
+                  {/if}
+                </span>
+              {/if}
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              {#if cliStatus?.installed && cliStatus?.pointsToBundle}
+                <button
+                  type="button"
+                  onclick={uninstallCli}
+                  disabled={cliBusy}
+                  class="h-7 px-3 text-[11.5px] rounded-md border border-border text-fg-muted hover:text-fg hover:border-border-strong transition-colors disabled:opacity-50"
+                >
+                  {cliBusy ? "Working…" : "Remove"}
+                </button>
+              {:else}
+                <button
+                  type="button"
+                  onclick={installCli}
+                  disabled={cliBusy || cliStatus?.bundleFound === false}
+                  class="h-7 px-3 text-[11.5px] rounded-md text-accent border border-accent/40 hover:bg-accent/10 transition-colors disabled:opacity-50"
+                >
+                  {cliBusy
+                    ? "Installing…"
+                    : cliStatus?.installed
+                      ? "Reinstall"
+                      : "Install"}
+                </button>
+              {/if}
+            </div>
+          </div>
+          <div class="flex items-center gap-2 mt-2">
             <input
               type="text"
               value={preferences.value.cliPath}
@@ -383,6 +509,7 @@
                 preferences.update({
                   cliPath: (e.currentTarget as HTMLInputElement).value,
                 })}
+              onchange={refreshCliStatus}
               class="h-8 w-72 rounded-md bg-bg border border-border px-2.5 text-[12px] text-fg font-mono focus:outline-none focus:border-accent/60"
             />
             <button

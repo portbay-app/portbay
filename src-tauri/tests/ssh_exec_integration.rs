@@ -10,10 +10,9 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use russh::keys::{key::safe_rng, Algorithm, PrivateKey};
 use russh::server::{Auth, Handler as SshHandler, Msg, Server as _, Session};
-use russh::{Channel, ChannelId, CryptoVec};
-use russh_keys::key::KeyPair;
+use russh::{Channel, ChannelId};
 
 use portbay_lib::registry::{SshAuthKind, SshConnection, SshConnectionId};
 use portbay_lib::ssh::exec::{run_command, run_deploy};
@@ -32,7 +31,6 @@ impl russh::server::Server for ExecServer {
 
 struct ExecConn;
 
-#[async_trait]
 impl SshHandler for ExecConn {
     type Error = russh::Error;
 
@@ -40,9 +38,7 @@ impl SshHandler for ExecConn {
         if password == PASSWORD {
             Ok(Auth::Accept)
         } else {
-            Ok(Auth::Reject {
-                proceed_with_methods: None,
-            })
+            Ok(Auth::reject())
         }
     }
 
@@ -62,17 +58,14 @@ impl SshHandler for ExecConn {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).to_string();
         if command.contains("fail") {
-            session.extended_data(channel, 1, CryptoVec::from("boom\n".as_bytes().to_vec()));
-            session.exit_status_request(channel, 1);
+            session.extended_data(channel, 1, "boom\n".as_bytes().to_vec())?;
+            session.exit_status_request(channel, 1)?;
         } else {
-            session.data(
-                channel,
-                CryptoVec::from(format!("ran: {command}\n").into_bytes()),
-            );
-            session.exit_status_request(channel, 0);
+            session.data(channel, format!("ran: {command}\n").into_bytes())?;
+            session.exit_status_request(channel, 0)?;
         }
-        session.eof(channel);
-        session.close(channel);
+        session.eof(channel)?;
+        session.close(channel)?;
         Ok(())
     }
 }
@@ -81,7 +74,7 @@ async fn start_server() -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(russh::server::Config {
-        keys: vec![KeyPair::generate_ed25519().unwrap()],
+        keys: vec![PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap()],
         ..Default::default()
     });
     let mut server = ExecServer;

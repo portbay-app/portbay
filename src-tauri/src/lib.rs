@@ -1,9 +1,11 @@
 // PortBay — Tauri 2 + Rust core.
 
+pub mod adb_pair;
 pub mod agents;
 pub mod auth;
 pub mod avatar;
 pub mod caddy;
+pub mod cli_install;
 pub mod commands;
 // Proprietary task board. Source injected from `portbay-cloud/desktop-pro` for
 // official builds; absent from the public OSS tree (no `tasks` feature).
@@ -26,16 +28,26 @@ pub mod doctor;
 pub mod domain;
 pub mod entitlements;
 pub mod error;
+pub mod favicon;
 pub mod flags;
 pub mod hosts;
 pub mod hosts_helper;
+pub mod imagegen;
+pub mod imageplayground;
 pub mod import;
+// Visual Preview Editor (Pro) — embedded live-preview webview. Shipped only
+// in official builds; absent from the public OSS tree (no `visual-editor`
+// feature).
 pub mod install_proxy;
+#[cfg(feature = "visual-editor")]
+pub mod live_preview;
 pub mod mailpit;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod mkcert;
 pub mod mobile;
+pub mod mobile_phase;
+pub mod mobile_targets;
 pub mod notifications;
 pub mod ollama;
 pub mod overlay_window;
@@ -48,6 +60,8 @@ pub mod project_icon;
 pub mod project_runtime;
 pub mod reconciler;
 pub mod registry;
+#[cfg(feature = "tasks")]
+pub mod run_stream;
 pub mod runtimes;
 pub mod sandbox;
 pub mod sidecar_probe;
@@ -172,17 +186,54 @@ fn resolve_mkcert_binary(app: &AppHandle) -> Option<PathBuf> {
 
 /// Default location for per-process logs. `<data_dir>/PortBay/logs/`.
 /// Created idempotently at setup; PC writes one file per project here.
+/// Owner-only: project logs can carry request lines, hostnames, and env
+/// echoes — other local users have no business reading them (0755 under
+/// the default umask otherwise).
 fn resolve_logs_dir() -> std::io::Result<PathBuf> {
     let mut dir = dirs::data_dir()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no data dir"))?;
     dir.push("PortBay");
     dir.push("logs");
     std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
     Ok(dir)
+}
+
+/// Harden the `PortBay/` data dir at startup: owner-only on the directory
+/// itself, and a sweep that fixes the mode of state files written by builds
+/// that predate per-write 0600 (the registry + its migration backups carry
+/// key paths, hosts/users, and proxy config; the tunnel state mirror carries
+/// the full equivalent ssh command line). Best-effort — a failed chmod must
+/// never block boot, and the per-write hardening still applies on next save.
+#[cfg(unix)]
+fn harden_data_dir(data_dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700));
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("registry.json") || name == "ssh-tunnels-state.json" {
+            let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o600));
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Strip PORTBAY_SESSION_JSON from the process environment before any
+    // async workers or child processes are spawned. The value is captured
+    // into a `OnceCell` in `auth` so `load_session()` can still honour it;
+    // after this call the env var is gone from the live environment and every
+    // child (process-compose, mkcert, node, project scripts) can't read it.
+    crate::auth::capture_and_strip_session_env();
+
     init_tracing();
     telemetry::install_panic_hook(env!("CARGO_PKG_VERSION"));
 
@@ -223,7 +274,7 @@ pub fn run() {
         }));
     }
 
-    builder
+    let builder = builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -231,7 +282,25 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         // Native file-drag-out for the permission sheet's drag-to-grant gesture.
-        .plugin(tauri_plugin_drag::init())
+        .plugin(tauri_plugin_drag::init());
+
+    // pb-agent:// — the live-preview inspection agent's event channel
+    // (agent.js fetch → Rust). Registered app-wide; only the preview child
+    // webview ever loads the agent, so the surface stays inert elsewhere.
+    #[cfg(feature = "visual-editor")]
+    let builder = builder.register_uri_scheme_protocol("pb-agent", |ctx, request| {
+        let app = ctx.app_handle().clone();
+        live_preview::handle_agent_batch(&app, request.body());
+        tauri::http::Response::builder()
+            .status(200)
+            .header("access-control-allow-origin", "*")
+            .header("access-control-allow-headers", "content-type")
+            .header("access-control-allow-methods", "POST, OPTIONS")
+            .body(Vec::new())
+            .expect("static response")
+    });
+
+    builder
         .setup(|app| {
             // Box-the-error helper — most fallible setup steps just
             // need their error stringified for Tauri's setup signature.
@@ -242,6 +311,13 @@ pub fn run() {
             let registry_path = store::default_path().map_err(boxed)?;
             let logs_dir = resolve_logs_dir().map_err(boxed)?;
             let yaml_path = reconciler::default_yaml_path().map_err(boxed)?;
+
+            // Owner-only data dir + fix modes of state files from older
+            // builds (they were world-readable in a 0755 dir).
+            #[cfg(unix)]
+            if let Some(data_dir) = registry_path.parent() {
+                harden_data_dir(data_dir);
+            }
 
             // First run = the registry file doesn't exist yet. Detect it
             // before the load (which would create an in-memory default).
@@ -295,136 +371,125 @@ pub fn run() {
                 reconciler,
             ));
             app.manage(commands::metrics::MetricsState::new());
+            #[cfg(feature = "visual-editor")]
+            app.manage(live_preview::LivePreviewState::default());
+            #[cfg(feature = "visual-editor")]
+            app.manage(live_preview::edit_proxy::EditModeState::default());
 
             // Boot the sidecars. PC against the just-written registry-
             // derived YAML; Caddy against its admin-only bootstrap.
             // `boot_caddy` is async (it polls the admin endpoint for
             // readiness) so we drive it with a block_on; the wait is
             // bounded by `CADDY_READINESS_TIMEOUT`.
-            let state: tauri::State<AppState> = app.state();
-
-            // Reap any process-compose left over from a previous run before we
-            // boot our own. A crash or force-quit can orphan PC (and the dev
-            // servers it supervised) to launchd; on a clean boot none of ours
-            // should be running yet, so anything carrying our config path is
-            // stale. Without this, stale instances accumulate across sessions
-            // and squat on the PC admin port. SIGTERM-shutdown on quit handles
-            // the prevent-leak half; this is the recover-on-boot half.
-            let reaped = process_compose::lifecycle::sweep_stale(
-                &yaml_path,
-                None,
-                process_compose::lifecycle::SweepMode::All,
-            );
-            if reaped > 0 {
-                tracing::info!(
-                    count = reaped,
-                    "reaped stale process-compose instances at boot"
-                );
-            }
-
-            // Same recover-on-boot half for cloudflared: a crash / SIGKILL runs
-            // no `Drop`, so a quick tunnel can outlive the app — orphaned to
-            // launchd and still tunneling a dead origin. Nothing of ours is up
-            // yet at boot, so any cloudflared on our `--config` marker is a
-            // leftover; reap it before the user starts a fresh share.
-            let tunnels_reaped = tunnel::sweep_stale_cloudflared();
-            if tunnels_reaped > 0 {
-                tracing::info!(
-                    count = tunnels_reaped,
-                    "reaped stale cloudflared tunnels at boot"
-                );
-            }
-            // Clear the cross-process tunnel mirror: nothing of ours is tunneling
-            // at boot, so a stale file from a crashed prior run must not make the
-            // CLI / MCP server report phantom tunnels.
-            state.persist_tunnel_state();
-            state.persist_ssh_tunnel_state();
-
-            // Recover-on-boot for the three sidecars spawned *directly* as app
-            // children — caddy, dnsmasq, mailpit. Unlike process-compose (swept
-            // above) these had no boot reclamation, so a crash / `tauri dev`
-            // rebuild left them orphaned to launchd, still holding :443 / the DNS
-            // port / the SMTP port. The fresh stack then couldn't bind :443 and
-            // silently fell back to an alternate port, serving no TLS for the
-            // canonical host (the ERR_SSL_PROTOCOL_ERROR incident). Reaping them
-            // here — before we boot our own — frees the canonical ports so the
-            // fresh Caddy binds :443. `All` mode is safe: none of ours is up yet,
-            // so any match is by definition stale. For Caddy the reclaim also
-            // waits for :443 to actually release before returning, closing the
-            // kill→rebind race. Foreign caddy/dnsmasq/mailpit (ServBay, Homebrew)
-            // never match — the signature keys on PortBay's own config paths.
+            // Infra boot runs OFF the main thread (P0-3). The reclaim sweep
+            // (`kill_gracefully` + `wait_port_released`, up to ~9 s if a crash
+            // left stale sidecars) plus the Caddy readiness poll (up to 5 s) are
+            // all synchronous; run inline in `setup()` they park the main thread,
+            // which on a contended cold boot delays the first webview paint into
+            // seconds of grey. Hoisting the whole sequence into a background task
+            // lets the window paint immediately (the frontend's paint-aware
+            // reveal then fires on time) while infra comes up behind it.
             //
-            // php-fpm is reaped here too — it's a process-compose child, so the
-            // stale-PC sweep above orphans it (PC gets SIGKILLed before it can
-            // drain a 5 s FPM shutdown), and an orphaned FPM master keeps its
-            // unix socket bound. The fresh build's php-fpm then fails to start
-            // ("Another FPM instance seems to already listen…") and surfaces as a
-            // spurious "php-fpm crashed" notification. Reaping it now — after the
-            // PC sweep, before we boot our own PC — frees the socket.
-            for kind in [
-                sidecar_reclaim::SidecarKind::Caddy,
-                sidecar_reclaim::SidecarKind::Dnsmasq,
-                sidecar_reclaim::SidecarKind::Mailpit,
-                sidecar_reclaim::SidecarKind::PhpFpm,
-            ] {
-                sidecar_reclaim::reclaim_stale(kind, sidecar_reclaim::SweepMode::All);
-            }
+            // The INTERNAL ORDER is unchanged — every step still `.await`s the
+            // previous one inside this single task, so every incident-prevention
+            // invariant still holds: reclaim frees :443 before Caddy binds; the
+            // php-fpm socket is freed before PC reboots; the PC cache is primed
+            // before the reconciler's first tick. Nothing after this in `setup()`
+            // depends on boot having finished (the pollers poll over time, and
+            // reopen-previous-projects already waits up to 15 s for the daemon).
+            let boot_handle = app.handle().clone();
+            let boot_yaml_path = yaml_path.clone();
+            let boot_initial_yaml = initial_yaml.clone();
+            tauri::async_runtime::spawn(async move {
+                let state: tauri::State<AppState> = boot_handle.state();
 
-            // Advisory pidfile so the CLI / `portbay doctor` can tell the app is
-            // live (and reclaim only orphans, never the live app's children).
-            // The single-instance plugin is the real double-spawn guard; this is
-            // just out-of-process visibility. Removed on graceful shutdown;
-            // `app_running` re-checks PID liveness so a crash-leftover is ignored.
-            sidecar_reclaim::write_pidfile();
+                // Reap any process-compose left over from a previous run before
+                // we boot our own. A crash or force-quit can orphan PC (and the
+                // dev servers it supervised) to launchd; on a clean boot none of
+                // ours should be running yet, so anything carrying our config
+                // path is stale. SIGTERM-shutdown on quit handles the
+                // prevent-leak half; this is the recover-on-boot half.
+                let reaped = process_compose::lifecycle::sweep_stale(
+                    &boot_yaml_path,
+                    None,
+                    process_compose::lifecycle::SweepMode::All,
+                );
+                if reaped > 0 {
+                    tracing::info!(count = reaped, "reaped stale process-compose instances at boot");
+                }
 
-            state.boot_pc(app.handle(), &yaml_path).map_err(boxed)?;
+                // Same recover-on-boot half for cloudflared: a crash / SIGKILL
+                // runs no `Drop`, so a quick tunnel can outlive the app. Reap any
+                // cloudflared on our `--config` marker before a fresh share.
+                let tunnels_reaped = tunnel::sweep_stale_cloudflared();
+                if tunnels_reaped > 0 {
+                    tracing::info!(count = tunnels_reaped, "reaped stale cloudflared tunnels at boot");
+                }
+                // Clear the cross-process tunnel mirror: nothing of ours is
+                // tunneling at boot, so a stale file from a crashed prior run
+                // must not make the CLI / MCP server report phantom tunnels.
+                state.persist_tunnel_state();
+                state.persist_ssh_tunnel_state();
 
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::block_on(async {
-                let state: tauri::State<AppState> = app_handle.state();
-                state.boot_caddy(&app_handle).await
-            })
-            .map_err(boxed)?;
+                // Recover-on-boot for the sidecars spawned *directly* as app
+                // children — caddy, dnsmasq, mailpit (+ php-fpm, a PC child the
+                // stale-PC sweep above orphans). A crash / `tauri dev` rebuild
+                // leaves them on launchd holding :443 / the DNS port / the SMTP
+                // port / the FPM socket; the fresh stack then can't bind and
+                // silently degrades (the ERR_SSL_PROTOCOL_ERROR / "php-fpm
+                // already listening" incidents). Reaping them here — before we
+                // boot our own — frees the canonical ports. For Caddy the
+                // reclaim also waits for :443 to release before returning,
+                // closing the kill→rebind race. Foreign instances (ServBay,
+                // Homebrew) never match — the signature keys on our config paths.
+                for kind in [
+                    sidecar_reclaim::SidecarKind::Caddy,
+                    sidecar_reclaim::SidecarKind::Dnsmasq,
+                    sidecar_reclaim::SidecarKind::Mailpit,
+                    sidecar_reclaim::SidecarKind::PhpFpm,
+                ] {
+                    sidecar_reclaim::reclaim_stale(kind, sidecar_reclaim::SweepMode::All);
+                }
 
-            // Best-effort dnsmasq boot. Until the resolver-file install
-            // command lands, dnsmasq running is harmless background
-            // noise — no production queries route through it yet — so
-            // a binary-missing or spawn failure is logged but does
-            // not block startup.
-            if let Err(e) = state.boot_dnsmasq(app.handle()) {
-                tracing::warn!(error = %e, "dnsmasq sidecar did not start");
-            }
+                // Advisory pidfile so the CLI / `portbay doctor` can tell the app
+                // is live. The single-instance plugin is the real double-spawn
+                // guard; this is just out-of-process visibility.
+                sidecar_reclaim::write_pidfile();
 
-            // Best-effort Mailpit boot. Same degraded-mode story as
-            // dnsmasq: useful for catching outgoing SMTP from local
-            // projects, but not on the critical path of any other
-            // sidecar.
-            if let Err(e) = state.boot_mailpit(app.handle()) {
-                tracing::warn!(error = %e, "mailpit sidecar did not start");
-            }
+                // Boot failures must not be fatal — log and run degraded. The
+                // reconcile loop spawned below retries, and the frontend surfaces
+                // a not-running sidecar from its status polling.
+                if let Err(e) = state.boot_pc(&boot_handle, &boot_yaml_path) {
+                    tracing::error!(error = %e, "process-compose failed to boot — degraded mode (reconciler will retry)");
+                }
 
-            // Prime the PC sub-cache with the hash of the YAML we just
-            // wrote + booted against — without this, the first tick's
-            // PC sub-reconciler re-restarts the daemon that boot_pc
-            // spawned moments ago. (Caddy and hosts don't need priming:
-            // Caddy's bootstrap config differs from the registry-driven
-            // one whenever projects exist, and an empty registry's
-            // POST /load against the running bootstrap is sub-50 ms.)
-            let yaml_for_prime = initial_yaml.clone();
-            tauri::async_runtime::block_on(async {
-                let state: tauri::State<AppState> = app.state();
+                if let Err(e) = state.boot_caddy(&boot_handle).await {
+                    tracing::error!(error = %e, "caddy failed to boot — degraded mode (reconciler will retry)");
+                }
+
+                // Best-effort dnsmasq / Mailpit boot — useful background services
+                // but not on any other sidecar's critical path.
+                if let Err(e) = state.boot_dnsmasq(&boot_handle) {
+                    tracing::warn!(error = %e, "dnsmasq sidecar did not start");
+                }
+                if let Err(e) = state.boot_mailpit(&boot_handle) {
+                    tracing::warn!(error = %e, "mailpit sidecar did not start");
+                }
+
+                // Prime the PC sub-cache with the hash of the YAML we just booted
+                // against — without this the first tick re-restarts the daemon
+                // boot_pc spawned moments ago.
                 state
                     .reconciler
-                    .prime_pc_cache_from_yaml(&yaml_for_prime)
+                    .prime_pc_cache_from_yaml(&boot_initial_yaml)
                     .await;
-            });
 
-            // Spawn the reconcile loop. Kick an immediate first tick so
-            // the registry-driven Caddy config + hosts + certs land
-            // alongside the cold boot.
-            let state_ref: tauri::State<AppState> = app.state();
-            state_ref.reconciler.mark_dirty();
-            reconciler::spawn_reconcile_loop(app.handle().clone(), RECONCILE_SAFETY_PERIOD);
+                // Spawn the reconcile loop with an immediate first tick so the
+                // registry-driven Caddy config + hosts + certs land alongside the
+                // cold boot.
+                state.reconciler.mark_dirty();
+                reconciler::spawn_reconcile_loop(boot_handle.clone(), RECONCILE_SAFETY_PERIOD);
+            });
 
             // Background SSH reconnect supervisor — restores dropped auto-reconnect
             // tunnels with exponential backoff regardless of whether the SSH page
@@ -451,10 +516,45 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 overlay_window::configure(app.handle());
-                dictation_anywhere::init(
-                    app.handle(),
-                    objc2::MainThreadMarker::new().expect("Tauri setup runs on the main thread"),
-                );
+                // Tauri runs `setup()` on the main thread today, so this marker
+                // is normally present. Degrade gracefully rather than panic if a
+                // future runtime change ever violates that: dictate-anywhere just
+                // stays uninstalled instead of taking the whole app down on boot.
+                if let Some(mtm) = objc2::MainThreadMarker::new() {
+                    dictation_anywhere::init(app.handle(), mtm);
+                } else {
+                    tracing::error!(
+                        "dictation: setup() not on the main thread — anywhere monitors skipped"
+                    );
+                }
+
+                // Proactive grant nudge. "Dictate anywhere" needs Accessibility
+                // trust to install its global Fn monitor — but TCC is keyed per
+                // bundle/signature, so a fresh production install starts
+                // untrusted even though the pref may have synced on from another
+                // machine. Untrusted, the monitor never installs and the feature
+                // is silently dead. We can't fire the system TCC prompt at launch
+                // (a surprise permission dialog is forbidden) and we can't observe
+                // the Fn key to nudge on use (macOS withholds key events from an
+                // untrusted process) — so a desktop notification is the one
+                // proactive surface left. It points at AI → Speech-to-Text, where
+                // the in-app drag-to-grant sheet now auto-opens. Respects the
+                // user's desktop-notification preference.
+                {
+                    let prefs = app.state::<AppState>().preferences_snapshot();
+                    if prefs.dictation.anywhere
+                        && prefs.desktop_notifications
+                        && !crate::typing::ax_trusted()
+                    {
+                        use tauri_plugin_notification::NotificationExt;
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("Dictate Anywhere needs Accessibility access")
+                            .body("Open PortBay → AI → Speech-to-Text to grant it, then hold Fn in any app.")
+                            .show();
+                    }
+                }
             }
             // Watch every project's audit log for new agent activity (comments,
             // blocks, warnings) and surface it to the topbar bell + desktop.
@@ -463,24 +563,53 @@ pub fn run() {
             #[cfg(feature = "tasks")]
             notifications::spawn_scanner(app.handle().clone());
 
+            // Tail every live run's transcript → `portbay://task-run-log`
+            // events, for the agent panel's live stream and the board's
+            // "latest action" line on running cards. Board-only.
+            #[cfg(feature = "tasks")]
+            run_stream::spawn_run_log_tailer(app.handle().clone());
+
             // Tail Caddy's JSON access log → `portbay://request` events for the
             // HTTP request inspector. Idle until Caddy writes its first entry.
             commands::http_inspector::spawn_request_tailer(app.handle().clone());
 
-            // Reconcile per-project task-board leases on boot: a board dispatched
-            // an agent, then the app (or laptop) went down. Any lease whose
-            // process is gone / heartbeat expired is reclaimed (card → To Do,
-            // reason logged) so a crashed run never wedges the board (edge cases
-            // #2/#11). Best-effort; never blocks startup. Board-only.
+            // Background task-board sweep: reconcile per-project leases on boot
+            // AND on a Rust-side timer, independent of the board UI being open.
+            // The boot pass reclaims runs the app (or laptop) died under; the
+            // recurring pass reclaims an agent that crashes while the board is
+            // closed (the 3.5s frontend poll only runs with the board open) and
+            // re-dispatches the persisted queue after a restart. Each pass also
+            // prunes stale never-merged worktrees of long-Done/archived cards.
+            // All file/process/git work, so it runs on a blocking thread — sync
+            // work on the async workers stalls unrelated async commands.
+            // Best-effort; never blocks startup. Board-only.
             #[cfg(feature = "tasks")]
             {
                 let app_h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let st: tauri::State<AppState> = app_h.state();
-                    if let Ok(reg) = store::load_or_default(&st.registry_path, &st.domain_suffix) {
-                        for project in reg.list_projects() {
-                            let _ = crate::context::automation::reconcile(project);
-                        }
+                    let mut tick =
+                        tokio::time::interval(std::time::Duration::from_secs(60));
+                    loop {
+                        tick.tick().await; // first tick fires immediately = boot sweep
+                        let (registry_path, domain_suffix) = {
+                            let st: tauri::State<AppState> = app_h.state();
+                            (st.registry_path.clone(), st.domain_suffix.clone())
+                        };
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            let Ok(reg) = store::load_or_default(&registry_path, &domain_suffix)
+                            else {
+                                return;
+                            };
+                            for project in reg.list_projects() {
+                                if !crate::context::automation::sweep_needed(&project.path) {
+                                    continue;
+                                }
+                                let _ = crate::context::automation::reconcile(&reg, project);
+                                let _ = crate::context::automation::drain_queue(project);
+                                crate::context::automation::prune_stale_worktrees(&project.path);
+                            }
+                        })
+                        .await;
                     }
                 });
             }
@@ -562,21 +691,44 @@ pub fn run() {
             // (Windows Mica placeholder, Linux unchanged). See `crate::vibrancy`.
             if let Some(main_win) = app.get_webview_window("main") {
                 crate::vibrancy::apply_main(&main_win);
-                // Reveal the window from Rust, *after* vibrancy is in place. It's
-                // created hidden (`visible: false`) so the blur material is set
-                // before it appears; doing the reveal here — rather than relying
-                // on the frontend calling `.show()` — guarantees the window opens
-                // on launch even if the webview is slow or errors. Previously a
-                // failed frontend reveal left the window openable only via the
-                // tray.
-                let _ = main_win.show();
-                let _ = main_win.set_focus();
 
                 // Appearance-aware Dock icon: match the current Light/Dark
                 // appearance now (read from NSApplication.effectiveAppearance),
                 // and keep it in sync on the ThemeChanged window event below.
                 // See `crate::dock_icon`.
                 crate::dock_icon::apply();
+
+                // Window reveal is driven primarily by the frontend
+                // (`+layout.svelte`), which calls `.show()` only after the themed
+                // UI has painted (two rAFs). The window is created hidden +
+                // transparent, so revealing it before first paint shows macOS's
+                // white/grey webview backing — the classic launch flash. On a
+                // contended cold-boot autostart that "frame" can stretch into
+                // seconds of grey, which is exactly what made autostart look
+                // broken. So we do NOT show from Rust eagerly any more.
+                //
+                // Rust keeps only a *fallback*: after a grace period, if the
+                // window is somehow still hidden (webview failed to load, or JS
+                // errored before onMount), force it visible so it's never
+                // stranded off-screen and reachable only via the tray. The grace
+                // period lets the paint-aware frontend path win on every healthy
+                // launch.
+                let main_win_fallback = main_win.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+                    if !main_win_fallback.is_visible().unwrap_or(false) {
+                        tracing::warn!(
+                            "main window still hidden after grace period; forcing reveal"
+                        );
+                        let _ = main_win_fallback.show();
+                        let _ = main_win_fallback.set_focus();
+                    }
+                });
+            } else {
+                tracing::error!(
+                    "main webview window not found at setup — the app would appear \
+                     with no visible window; check the window label in tauri.conf.json"
+                );
             }
             if let Some(tray_panel) = app.get_webview_window("tray-panel") {
                 crate::vibrancy::apply_tray_panel(&tray_panel);
@@ -709,6 +861,107 @@ pub fn run() {
             commands::lifecycle::open_project,
             commands::lifecycle::reveal_in_finder,
             commands::lifecycle::preview_port_conflict,
+            commands::mobile::list_mobile_run_targets,
+            commands::mobile::mobile_preflight,
+            commands::mobile::get_mobile_phases,
+            commands::mobile::mobile_hot_reload,
+            commands::mobile::mobile_hot_restart,
+            commands::mobile::open_mobile_simulator,
+            commands::mobile::android_wifi_pair_start,
+            commands::mobile::android_wifi_pair_manual,
+            // Live-preview handlers — injected with the `visual-editor`
+            // feature; absent from the public OSS build. `generate_handler!`
+            // honours the per-entry #[cfg].
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_available,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_open,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_close,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_set_bounds,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_navigate,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_back,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_forward,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_reload,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_set_color_scheme,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_set_visible,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_set_select_mode,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_start_region_select,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_cancel_region_select,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_highlight,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_apply_style,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_set_text,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_refresh_context,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_get_console,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_clear_console,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_capture,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_list_captures,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_read_capture,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_delete_capture,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_copy_capture,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_export_capture,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_save_annotated,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_create_card,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_preview_patch,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_apply_edits,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_load_session,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_save_session,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_history_list,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_history_preview,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_history_restore,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_detect_breakpoints,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_set_csp_proxy,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_watch_card,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_verify_edits,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_card_outcome,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_drag_capture,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_pin_capture,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_close_pin,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_ocr_capture,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_edit_mode_set,
+            #[cfg(feature = "visual-editor")]
+            commands::live_preview::live_preview_edit_mode_ids,
             commands::integrations::installed_dev_tools,
             commands::integrations::open_in_ide,
             commands::integrations::open_privacy_settings,
@@ -727,7 +980,9 @@ pub fn run() {
             commands::certs::export_cert_bundle,
             commands::webservers::webserver_overview,
             commands::system::doctor,
+            commands::system::legal_notices,
             commands::system::tail_logs,
+            commands::events::proc_log_history,
             commands::system::read_dotenv,
             commands::dbconn::project_db_connections,
             commands::artifacts::scan_artifacts,
@@ -749,6 +1004,7 @@ pub fn run() {
             commands::dictation::dictation_list_apps,
             commands::stt::stt_status,
             commands::stt::stt_overview,
+            commands::stt::stt_request_mic_access,
             commands::stt::stt_download_model,
             commands::stt::stt_cancel_download,
             commands::stt::stt_delete_model,
@@ -756,8 +1012,27 @@ pub fn run() {
             commands::stt::stt_stop_capture,
             commands::stt::stt_cancel_capture,
             commands::stt::stt_prewarm,
+            commands::tts::tts_overview,
+            commands::tts::tts_download_model,
+            commands::tts::tts_speak,
+            commands::tts::tts_delete_model,
+            commands::imagegen::imagegen_overview,
+            commands::imagegen::imagegen_download_model,
+            commands::imagegen::imagegen_cancel_download,
+            commands::imagegen::imagegen_generate,
+            commands::imagegen::imagegen_cancel_generate,
+            commands::imagegen::imagegen_delete_model,
+            commands::imageplayground::imageplayground_check,
+            commands::imageplayground::imageplayground_generate,
+            commands::imageplayground::imageplayground_open_app,
+            commands::cli::cli_status,
+            commands::cli::cli_install_tool,
+            commands::cli::cli_uninstall_tool,
             commands::dictation_anywhere::dictation_anywhere_status,
             commands::dictation_anywhere::dictation_anywhere_arm,
+            commands::dictation_anywhere::dictation_preview_cue,
+            commands::dictation_anywhere::dictation_favicon_consent,
+            commands::dictation_anywhere::dictation_favicon_consent_request,
             commands::dictation_anywhere::dictation_history_list,
             commands::dictation_anywhere::dictation_history_clear,
             commands::dictation_anywhere::dictation_overlay_stop,
@@ -842,6 +1117,8 @@ pub fn run() {
             commands::ssh_agent::ssh_agent_forward_stop,
             commands::ssh_agent::ssh_agent_abort,
             commands::ssh_agent::ssh_agent_close,
+            commands::ssh_agent::ssh_agent_threads_get,
+            commands::ssh_agent::ssh_agent_threads_set,
             commands::ssh_connections::ssh_connections_list,
             commands::ssh_connections::ssh_connection_save,
             commands::ssh_connections::ssh_connection_delete,
@@ -898,6 +1175,7 @@ pub fn run() {
             commands::ollama::ollama_delete_model,
             commands::ollama::ollama_unload_model,
             commands::ollama::ollama_smoke_test,
+            commands::ollama::ollama_embed,
             commands::ollama::ollama_test_stream,
             commands::ollama::ollama_cancel_generate,
             commands::ollama::ollama_pull_model,
@@ -907,6 +1185,7 @@ pub fn run() {
             commands::ollama::ollama_update_check,
             commands::ollama_library::ollama_library,
             commands::ollama_library::ollama_library_tags,
+            commands::hwfit::hardware_profile,
             commands::entitlements::get_entitlement,
             commands::entitlements::refresh_entitlement,
             commands::entitlements::clear_entitlement,
@@ -1038,6 +1317,10 @@ pub fn run() {
             #[cfg(feature = "tasks")]
             commands::tasks::task_archive,
             #[cfg(feature = "tasks")]
+            commands::tasks::task_archive_many,
+            #[cfg(feature = "tasks")]
+            commands::tasks::tasks_running_all,
+            #[cfg(feature = "tasks")]
             commands::tasks::task_subscribe,
             #[cfg(feature = "tasks")]
             commands::tasks::task_attach,
@@ -1060,7 +1343,17 @@ pub fn run() {
             #[cfg(feature = "tasks")]
             commands::tasks::task_branch,
             #[cfg(feature = "tasks")]
+            commands::tasks::task_diff,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_commit,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_merge,
+            #[cfg(feature = "tasks")]
             commands::tasks::task_duplicate,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_attempts_start,
+            #[cfg(feature = "tasks")]
+            commands::tasks::task_attempt_pick,
             #[cfg(feature = "tasks")]
             commands::tasks::task_start_with_agent,
             #[cfg(feature = "tasks")]

@@ -58,6 +58,11 @@ struct PcProcess {
 
     log_location: String,
 
+    /// Per-process log writer tuning — see [`PcLogConfiguration`]. Emitted for
+    /// EVERY process: PC v1.110.0 silently ignores `log_configuration` at the
+    /// global config level, so per-process is the only placement that works.
+    log_configuration: PcLogConfiguration,
+
     /// Process Compose's `types.Environment` is a *sequence* of `KEY=value`
     /// strings, not a YAML map — feeding it a map fails the config parse
     /// fatally (`cannot unmarshal !!map into types.Environment`) and the daemon
@@ -77,6 +82,27 @@ struct PcProcess {
     /// infrastructure daemons leave it `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     depends_on: Option<BTreeMap<String, PcDependsOn>>,
+}
+
+/// Process Compose buffers each process's log file in a 4096-byte
+/// `bufio.Writer` and otherwise flushes only on process exit — measured at a
+/// median **26 s** of child-print → file-append latency for a 1 line/s
+/// process. `flush_each_line: true` flushes after every line (measured median
+/// 8 ms), giving the log viewer, the `tail_logs` snapshot, and the
+/// `mobile_phase` marker poller true `tail -f` freshness. One `write(2)` per
+/// line is exactly `tail -f` semantics — negligible next to a dev server's own
+/// I/O.
+#[derive(Debug, Serialize)]
+struct PcLogConfiguration {
+    flush_each_line: bool,
+}
+
+impl PcLogConfiguration {
+    fn instant_tail() -> Self {
+        Self {
+            flush_each_line: true,
+        }
+    }
 }
 
 /// One `depends_on` edge. Process Compose's condition vocabulary we use:
@@ -325,6 +351,7 @@ fn php_fpm_to_pc_process(spec: &PhpFpmSpec, logs_dir: &Path) -> PcProcess {
         availability: PcAvailability { restart: "no" },
         readiness_probe: None,
         log_location: log_path.to_string_lossy().into_owned(),
+        log_configuration: PcLogConfiguration::instant_tail(),
         environment: BTreeMap::new(),
         shutdown: PcShutdown {
             signal: 15,
@@ -374,6 +401,7 @@ fn db_daemon_to_pc_process(spec: &DatabaseDaemonSpec, logs_dir: &Path) -> PcProc
             failure_threshold: 30,
         }),
         log_location: log_path.to_string_lossy().into_owned(),
+        log_configuration: PcLogConfiguration::instant_tail(),
         environment: BTreeMap::new(),
         shutdown: PcShutdown {
             signal: 15,
@@ -406,6 +434,7 @@ fn web_server_to_pc_process(spec: &WebServerSpec, logs_dir: &Path) -> PcProcess 
             failure_threshold: 30,
         }),
         log_location: log_path.to_string_lossy().into_owned(),
+        log_configuration: PcLogConfiguration::instant_tail(),
         environment: BTreeMap::new(),
         shutdown: PcShutdown {
             signal: 15,
@@ -428,6 +457,14 @@ fn project_to_pc_process(
     // app from the repo root instead of fanning out. A project with neither
     // (a pure Caddy-served site) produces no PC entry.
     let mut command = match &p.start_command {
+        // A mobile project's `start_command` is normally the launch script we
+        // stamped at add time — the phase markers prove it's ours, so derive a
+        // fresh one instead of replaying the stamp verbatim: that's the only
+        // way generator fixes reach already-added projects. A hand-written
+        // custom command carries no markers and still wins untouched.
+        Some(cmd) if crate::mobile::is_generated_launch(cmd) => {
+            crate::mobile::launch_command(p).unwrap_or_else(|| cmd.clone())
+        }
         Some(cmd) => cmd.clone(),
         // No explicit command: a mobile kind (iOS/Android/Flutter/Expo) derives
         // a simulator/emulator launch; a monorepo app derives a
@@ -475,6 +512,14 @@ fn project_to_pc_process(
             }
         }
     }
+    // Python block-buffers stdout when it's a pipe (measured: zero log lines
+    // for 45 s while the interpreter sat on a 4–8 KB libc buffer), defeating
+    // the per-line flush PC's logger now does. PYTHONUNBUFFERED switches the
+    // interpreter to unbuffered streams — the same thing `python -u` does.
+    // Inserted before the project env so an explicit user value wins.
+    if p.kind == crate::registry::ProjectType::Python {
+        environment.insert("PYTHONUNBUFFERED".into(), "1".into());
+    }
     for (k, v) in &p.env {
         environment.insert(k.clone(), v.clone());
     }
@@ -500,6 +545,7 @@ fn project_to_pc_process(
         availability: PcAvailability { restart: "no" },
         readiness_probe,
         log_location: log_path.to_string_lossy().into_owned(),
+        log_configuration: PcLogConfiguration::instant_tail(),
         environment,
         shutdown: PcShutdown {
             signal: 15, // SIGTERM
@@ -639,7 +685,11 @@ impl HookTemplate {
             disabled: self.disabled,
             availability: PcAvailability { restart: "no" },
             readiness_probe: None,
+            // Hooks share the main process's log file (inline output in the
+            // viewer) — they still need their own per-process flush flag, since
+            // PC builds one buffered writer per process, not per file.
             log_location: self.log_location.clone(),
+            log_configuration: PcLogConfiguration::instant_tail(),
             environment: self.environment.clone(),
             shutdown: PcShutdown {
                 signal: 15,
@@ -867,19 +917,27 @@ fn inject_python_venv(p: &Project, environment: &mut BTreeMap<String, String>) {
 
 fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadinessProbe> {
     match r {
+        // `Http` readiness intentionally probes at the TCP layer. Process
+        // Compose re-runs the readiness probe for the LIFE of the process
+        // (it feeds the Unhealthy pill), and a real GET every 2 s is hostile
+        // to framework dev servers: each request SSR-renders the page and
+        // makes Next/Turbopack broadcast a `building`/`built` cycle to every
+        // connected HMR client — the browser console fills with
+        // "[Fast Refresh] rebuilding" forever, and the app burns a render
+        // per probe. A TCP connect is invisible to the app while still
+        // catching the dead-server case the pill exists for. The registry
+        // keeps the `Http { path }` shape (no migration; the path documents
+        // intent), only the probe transport changes here.
         Readiness::Http {
-            path,
-            timeout_seconds,
+            timeout_seconds, ..
         } => {
             let port = port?;
             Some(PcReadinessProbe {
-                http_get: Some(PcHttpGet {
+                http_get: None,
+                tcp_socket: Some(PcTcpSocket {
                     host: "127.0.0.1",
-                    scheme: "http",
-                    path: path.clone(),
                     port,
                 }),
-                tcp_socket: None,
                 initial_delay_seconds: 2,
                 period_seconds: 2,
                 timeout_seconds: 5,
@@ -993,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn next_project_produces_process_with_http_probe() {
+    fn next_project_produces_process_with_tcp_probe() {
         let mut r = Registry::new("test");
         r.add_project(next_project("marketing-site", 3010)).unwrap();
         let yaml = to_yaml(&r, Path::new("/tmp/logs"), None, &[], &[], &[], true).unwrap();
@@ -1003,8 +1061,15 @@ mod tests {
         );
         assert!(yaml.contains("pnpm dev"));
         assert!(yaml.contains("port: 3010"));
-        assert!(yaml.contains("path: /"));
-        assert!(yaml.contains("scheme: http"));
+        // `Http` readiness maps to a TCP probe on purpose: the probe recurs
+        // every 2 s for the life of the process, and a real GET makes
+        // framework dev servers re-render + broadcast HMR rebuild cycles
+        // ("[Fast Refresh] rebuilding" forever in the browser console).
+        assert!(yaml.contains("tcp_socket"), "expected tcp probe: {yaml}");
+        assert!(
+            !yaml.contains("scheme: http"),
+            "dev-server probe must not issue HTTP requests: {yaml}"
+        );
         assert!(yaml.contains("/tmp/logs/marketing-site.log"));
         // serde_yaml 0.9 emits bare `no` (a string in YAML 1.2); PC reads
         // it as the string "no", which is what its schema expects. Confirm
@@ -1151,6 +1216,47 @@ mod tests {
     }
 
     #[test]
+    fn mobile_stamped_start_command_is_regenerated_fresh() {
+        // An add-time mobile launch stamp (phase markers = ours) must not be
+        // replayed verbatim: registries stamped before a generator fix keep
+        // the old bug forever (kitabi: first-listed-scheme fallback). The PC
+        // entry derives a fresh script instead.
+        let mut p = next_project("kitabi-ios", 1);
+        p.kind = ProjectType::Xcode;
+        p.port = None;
+        p.readiness = None;
+        p.start_command = Some(
+            "set -e; echo '::portbay::phase=resolving-device'; xcodebuild -stale-script".into(),
+        );
+        p.mobile_run = Some(crate::registry::MobileRunConfig {
+            device: Some("00008120-001964AC0CB8C01E".into()),
+            ..Default::default()
+        });
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+        assert!(
+            !yaml.contains("-stale-script"),
+            "stale stamp replayed verbatim:\n{yaml}"
+        );
+        assert!(yaml.contains("produced no .app"), "fresh script missing:\n{yaml}");
+    }
+
+    #[test]
+    fn mobile_custom_start_command_without_markers_wins_untouched() {
+        // No phase markers → the user wrote it; never regenerate over it.
+        let mut p = next_project("custom-mobile", 1);
+        p.kind = ProjectType::Xcode;
+        p.port = None;
+        p.readiness = None;
+        p.start_command = Some("./my-custom-build.sh".into());
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+        assert!(yaml.contains("./my-custom-build.sh"));
+    }
+
+    #[test]
     fn project_env_vars_appear_in_yaml() {
         let mut p = next_project("env-test", 3010);
         p.env.insert("DATABASE_URL".into(), "postgres://x".into());
@@ -1161,6 +1267,38 @@ mod tests {
         assert!(yaml.contains("DATABASE_URL"));
         assert!(yaml.contains("postgres://x"));
         assert!(yaml.contains("NODE_ENV"));
+    }
+
+    #[test]
+    fn python_project_gets_unbuffered_env() {
+        let mut p = next_project("py-app", 8000);
+        p.kind = ProjectType::Python;
+        p.start_command = Some("uvicorn app:app".into());
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+        assert!(yaml.contains("PYTHONUNBUFFERED=1"));
+    }
+
+    #[test]
+    fn python_unbuffered_env_yields_to_explicit_project_value() {
+        let mut p = next_project("py-app", 8000);
+        p.kind = ProjectType::Python;
+        p.start_command = Some("uvicorn app:app".into());
+        p.env.insert("PYTHONUNBUFFERED".into(), "0".into());
+        let mut r = Registry::new("test");
+        r.add_project(p).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+        assert!(yaml.contains("PYTHONUNBUFFERED=0"));
+        assert!(!yaml.contains("PYTHONUNBUFFERED=1"));
+    }
+
+    #[test]
+    fn non_python_project_is_not_unbuffered() {
+        let mut r = Registry::new("test");
+        r.add_project(next_project("node-app", 3010)).unwrap();
+        let yaml = to_yaml(&r, Path::new("/tmp"), None, &[], &[], &[], true).unwrap();
+        assert!(!yaml.contains("PYTHONUNBUFFERED"));
     }
 
     #[test]
@@ -1582,6 +1720,74 @@ mod tests {
         assert!(
             corepack_home_is_populated(&home),
             "a home with a real v1/<pm>/<version> dir must count as populated"
+        );
+    }
+
+    #[test]
+    fn every_process_kind_emits_per_process_flush_each_line() {
+        // PC v1.110.0 buffers each process's log file in a 4096-byte bufio
+        // and flushes only at 4 KB or process exit (measured: 26 s median
+        // line latency at 1 line/s). `log_configuration.flush_each_line`
+        // fixes that, but ONLY when placed per process — the global
+        // `log_configuration` block is silently ignored in v1.110.0. Assert
+        // every process category carries the flag: project main, pre/post
+        // hooks, PHP-FPM pools, database daemons, and web servers.
+        let mut r = Registry::new("test");
+        let mut p = next_project("flushy", 3010);
+        p.pre_start = vec!["pnpm install".into()];
+        p.post_start = vec!["echo warm".into()];
+        r.add_project(p).unwrap();
+
+        let php = PhpFpmSpec {
+            process_id: "php-fpm-8-3".into(),
+            version: "8.3".into(),
+            php_fpm_bin: PathBuf::from("/x/sbin/php-fpm"),
+            pool_config: PathBuf::from("/x/php-fpm.conf"),
+            working_dir: PathBuf::from("/x"),
+        };
+        let db = DatabaseDaemonSpec {
+            process_id: "db-flushy-pg".into(),
+            description: "PostgreSQL 16 — flushy-pg".into(),
+            command: "postgres -D /data".into(),
+            working_dir: PathBuf::from("/data"),
+            port: 5433,
+            auto_start: false,
+        };
+        let web = WebServerSpec {
+            process_id: "web-nginx-flushy".into(),
+            description: "Nginx - flushy".into(),
+            command: "nginx -g 'daemon off;'".into(),
+            working_dir: PathBuf::from("/tmp/web"),
+            port: 9080,
+            auto_start: true,
+        };
+
+        let yaml = to_yaml(
+            &r,
+            Path::new("/tmp/logs"),
+            None,
+            &[php],
+            &[db],
+            &[web],
+            true,
+        )
+        .unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let procs = doc["processes"].as_mapping().expect("processes map");
+        assert_eq!(procs.len(), 6, "main + 2 hooks + php + db + web: {yaml}");
+        for (name, proc) in procs {
+            assert_eq!(
+                proc["log_configuration"]["flush_each_line"].as_bool(),
+                Some(true),
+                "process `{}` must emit per-process flush_each_line: {yaml}",
+                name.as_str().unwrap_or("?")
+            );
+        }
+        // Global log_configuration must NOT be relied on (ignored by PC) —
+        // we don't emit one at the top level at all.
+        assert!(
+            doc["log_configuration"].is_null(),
+            "no global log_configuration expected: {yaml}"
         );
     }
 

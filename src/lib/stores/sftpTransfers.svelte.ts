@@ -76,6 +76,8 @@ function createSftpTransfersStore() {
     listening = true;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
+      // The backend emits transfer progress point-to-point to the main window;
+      // a targeted emit skips untargeted listeners.
       await listen<ProgressEvent>("portbay://sftp-progress", (event) => {
         const p = event.payload;
         const t = find(p.id);
@@ -97,7 +99,7 @@ function createSftpTransfersStore() {
         }
         // `done` is finalised on the invoke's resolve (below) to avoid a race
         // between the last progress event and the command returning.
-      });
+      }, { target: "main" });
     })();
   }
 

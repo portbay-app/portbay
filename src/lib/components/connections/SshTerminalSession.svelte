@@ -206,6 +206,13 @@
       );
       term.unicode.activeVersion = "11";
 
+      // OSC 52 pin: with `allowProposedApi: true`, loading a future
+      // ClipboardAddon would silently let the remote host write the local
+      // clipboard (paste-hijack). xterm dispatches OSC handlers most-recently-
+      // registered first and stops on `true`, so this no-op permanently
+      // swallows OSC 52 regardless of what addons are added later.
+      term.parser.registerOscHandler(52, () => true);
+
       term.open(host);
       fitNow();
 

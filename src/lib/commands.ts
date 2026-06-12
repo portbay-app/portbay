@@ -23,6 +23,7 @@ import { dns } from "$lib/stores/dns.svelte";
 import { sidecars } from "$lib/stores/sidecars.svelte";
 import { theme } from "$lib/stores/theme.svelte";
 import { tunnels } from "$lib/stores/tunnels.svelte";
+import { NAV_ITEMS } from "$lib/stores/navOrderCore";
 import type { PaletteCommand } from "$lib/types/palette";
 
 /**
@@ -86,17 +87,12 @@ export function collectCommands(): PaletteCommand[] {
   );
 
   // ────────── Navigation ──────────
+  // Derived from the sidebar's canonical catalog so every destination is
+  // always reachable here — including entries the user unpinned from the
+  // sidebar (the Integrations page bills the palette as the recovery path).
   for (const route of [
     { id: "/", label: "Projects", icon: "home" as const },
-    { id: "/services", label: "Services", icon: "server" as const },
-    { id: "/domains", label: "Domains", icon: "link" as const },
-    { id: "/certificates", label: "Certificates", icon: "shield" as const },
-    { id: "/sandbox", label: "Sandbox", icon: "package" as const },
-    { id: "/languages", label: "Languages", icon: "file-code" as const },
-    { id: "/logs", label: "Logs", icon: "file-text" as const },
-    { id: "/inspector", label: "Inspector", icon: "activity" as const },
-    { id: "/ssh", label: "SSH Tunnels", icon: "terminal" as const },
-    { id: "/settings", label: "Settings", icon: "settings" as const },
+    ...NAV_ITEMS.map((it) => ({ id: it.href, label: it.label, icon: it.icon })),
   ]) {
     cmds.push({
       id: `nav.${route.id}`,

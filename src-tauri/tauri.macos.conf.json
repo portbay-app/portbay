@@ -11,7 +11,8 @@
       "binaries/portbay-hosts-helper",
       "binaries/portbay-mcp",
       "binaries/portbay-afm",
-      "binaries/portbay-stt"
+      "binaries/portbay-stt",
+      "binaries/portbay-imagegen"
     ]
   }
 }

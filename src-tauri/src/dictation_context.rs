@@ -148,8 +148,9 @@ pub fn resolve(sources: Sources) -> Vec<String> {
         learned,
         projects,
     } = sources;
-    let mut out =
-        Vec::with_capacity(custom.len() + profile.len() + surface.len() + learned.len() + projects.len());
+    let mut out = Vec::with_capacity(
+        custom.len() + profile.len() + surface.len() + learned.len() + projects.len(),
+    );
     out.extend(custom);
     out.extend(profile);
     out.extend(surface);
@@ -172,19 +173,20 @@ pub fn dedup_cap(terms: Vec<String>, cap: usize) -> Vec<String> {
         .collect()
 }
 
-/// Whether to actually SEND the resolved bias to the recognizer. Default OFF
-/// pending live validation that WhisperKit `promptTokens` biasing is safe on
-/// every model: observed 2026-06-08 that `whisper-large-v3-turbo` returned
-/// EMPTY transcripts once a bias prompt was attached (it works on `tiny` in
-/// WhisperKit's own tests), which zeroed dictation everywhere. The whole
-/// resolution still runs — the always-on correction net and the rewrite vocab
-/// consume the same snapshot — so the trigger bug is still addressed downstream;
-/// only the recognizer SEND (the regressing path) is gated. Flip on for
-/// validation with `PORTBAY_STT_BIAS=1`.
+/// Whether to actually SEND the resolved bias to the recognizer. Default ON —
+/// the 2026-06-08 "empty transcripts with a bias prompt" regression was
+/// re-diagnosed as a MODEL capability problem, not a code bug: it reproduced
+/// only on `whisper-large-v3-turbo`, whose distilled decoder (like
+/// Distil-Whisper's) was trained without previous-text conditioning, so a
+/// `<|startofprev|>` prompt derails it — upstream guidance for turbo/distil
+/// is exactly "don't condition on previous text". Those families are now
+/// excluded per-model in [`engine_supports_text_bias`] instead of gating the
+/// feature off for everyone. `PORTBAY_STT_BIAS=0` is the field kill switch if
+/// a regression ever shows on a supposedly-safe model.
 pub fn recognizer_bias_enabled() -> bool {
-    matches!(
+    !matches!(
         std::env::var("PORTBAY_STT_BIAS").as_deref(),
-        Ok("1") | Ok("true") | Ok("on")
+        Ok("0") | Ok("false") | Ok("off")
     )
 }
 
@@ -193,9 +195,15 @@ pub fn recognizer_bias_enabled() -> bool {
 /// text-prompt seam, so it degrades to rewrite-only — we never send a bias the
 /// engine can't apply (the engine-capability gate, §5.4). Keyed off the catalog
 /// id (the only engine signal the Rust side has; the catalog lives in the
-/// sidecar). Conservative: only the known-supporting family returns true.
+/// sidecar). Conservative: only the known-supporting family returns true —
+/// and within Whisper, `turbo`/`distil` decoders are excluded: they were
+/// distilled WITHOUT previous-text conditioning and return empty/degenerate
+/// output when a `<|startofprev|>` prompt is attached (observed live on
+/// large-v3-turbo 2026-06-08; matches Distil-Whisper's own guidance).
+/// tiny/base/small are the models WhisperKit's prompt tests cover.
 pub fn engine_supports_text_bias(model_id: &str) -> bool {
-    model_id.to_ascii_lowercase().contains("whisper")
+    let id = model_id.to_ascii_lowercase();
+    id.contains("whisper") && !id.contains("turbo") && !id.contains("distil")
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +248,9 @@ pub fn correct_terms(text: &str, terms: &[String]) -> Correction {
         if squashed.chars().count() < 3 {
             continue;
         }
-        by_squash.entry(squashed).or_insert_with(|| term.to_string());
+        by_squash
+            .entry(squashed)
+            .or_insert_with(|| term.to_string());
     }
     if by_squash.is_empty() {
         return Correction {
@@ -460,11 +470,31 @@ mod tests {
 
     #[test]
     fn engine_capability_gate() {
-        assert!(engine_supports_text_bias("whisper-large-v3-turbo"));
-        assert!(engine_supports_text_bias("whisper-distil-large-v3"));
+        // Standard Whisper decoders take a prompt.
+        assert!(engine_supports_text_bias("whisper-tiny"));
+        assert!(engine_supports_text_bias("whisper-base"));
+        assert!(engine_supports_text_bias("whisper-small"));
+        // turbo/distil decoders were distilled without previous-text
+        // conditioning — a <|startofprev|> prompt yields empty output
+        // (the 2026-06-08 live regression) → no bias sent.
+        assert!(!engine_supports_text_bias("whisper-large-v3-turbo"));
+        assert!(!engine_supports_text_bias("whisper-distil-large-v3"));
         // Parakeet (TDT) has no text-prompt seam → no bias sent.
         assert!(!engine_supports_text_bias("parakeet-tdt-v3"));
         assert!(!engine_supports_text_bias(""));
+    }
+
+    #[test]
+    fn recognizer_bias_defaults_on_with_kill_switch() {
+        // No parallel test touches PORTBAY_STT_BIAS (same pattern as the
+        // stt.rs PORTBAY_STT_BIN test).
+        std::env::remove_var("PORTBAY_STT_BIAS");
+        assert!(recognizer_bias_enabled());
+        std::env::set_var("PORTBAY_STT_BIAS", "0");
+        assert!(!recognizer_bias_enabled());
+        std::env::set_var("PORTBAY_STT_BIAS", "1");
+        assert!(recognizer_bias_enabled());
+        std::env::remove_var("PORTBAY_STT_BIAS");
     }
 
     #[test]

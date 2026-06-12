@@ -7,6 +7,20 @@ description: "Full reference for the portbay CLI: add, start, stop, logs, doctor
 
 The `portbay` CLI shares the same `portbay_lib` core as the Tauri GUI. It acts as a client: lifecycle commands (`start`, `stop`, `restart`) require the PortBay daemon (the GUI app, or a future `portbay daemon` subcommand) to be running and exposing Process Compose on a discoverable port.
 
+Typed without a management subcommand, `portbay` starts the local PortBay agent engine, similar to `codex` or `claude`:
+
+```bash
+portbay
+portbay "inspect this repo and summarize the next fix"
+portbay --json -P ollama -m qwen2.5-coder:latest "run the task"
+```
+
+The command is lowercase on disk and case-insensitive wherever PortBay parses it as an agent id.
+
+## Install
+
+The app ships the CLI inside its bundle. To put it on `$PATH`, open **Settings → Advanced** and enable the **Command-line tool** row — this symlinks the bundled binary to `/usr/local/bin/portbay` (one OS authorization prompt at most, VS Code's "install `code` command" model). The agent engine ships in the same bundle and is resolved through that symlink automatically; no second install step is needed. Homebrew installs (`brew install portbay-app/portbay/portbay`) land on `$PATH` directly.
+
 Global options:
 
 | Option | Meaning |
@@ -36,6 +50,54 @@ Global options:
 | `portbay login [--email <addr>]` | Sign in to PortBay Cloud (GitHub OAuth by default; `--email` for a magic link). |
 | `portbay license` | Show the current account, tier, and entitlement limits. |
 | `portbay logout` | Sign out and clear the saved session. |
+
+## Agent mode
+
+Anything that isn't a management subcommand proxies to the bundled `portbay-agent` engine — the same parity you get from typing `codex` or `claude`. Bare `portbay` opens an interactive session; a quoted free-text argument runs that prompt; `--json` runs headless for automation. Local-model board dispatches use the same engine internally: the visible card agent can stay **Ollama**, while PortBay launches the engine with `-P ollama -m <selected-model>`.
+
+```bash
+portbay                          # interactive session (TTY required)
+portbay -i                       # force the full TUI
+portbay "fix the failing test"   # one-shot run, act mode
+portbay -p "plan the refactor"   # plan mode: propose before touching files
+portbay --json "run the task"    # headless NDJSON for scripts and CI
+```
+
+The engine resolves `portbay-agent` beside the `portbay` binary (following the install symlink back into the app bundle). Set `PORTBAY_AGENT_BIN` to point at a different engine build.
+
+Agent-mode flags:
+
+| Option | Meaning |
+| --- | --- |
+| `--json` | Emit NDJSON events (one JSON object per line) instead of styled text. |
+| `--auto-approve <bool>` | Tool auto-approval for the run. Defaults to `true` for one-shot prompts; pass `false` to gate each tool use. |
+| `-p, --plan` | Plan mode — propose an approach before acting. Act is the default. |
+| `-i, --tui` | Open the full terminal UI for an interactive session. |
+| `-P, --provider <id>` | Provider id. PortBay defaults to `ollama`. |
+| `-m, --model <id>` | Model id, such as `qwen2.5-coder:latest`. |
+| `-c, --cwd <path>` | Working directory for the run. |
+| `--id <session-id>` | Resume an existing session. |
+| `--thinking <level>` | Reasoning effort: `none\|low\|medium\|high\|xhigh`. |
+| `--worktree` | Run the task in an auto-created detached git worktree. |
+| `--retries <n>` | Max consecutive mistakes before exiting (default 6). |
+| `-t, --timeout <seconds>` | Hard run timeout (default 0 = none). |
+
+### Headless `--json` contract
+
+With `--json`, the run emits newline-delimited JSON on stdout. Every line has a `ts` timestamp and a `type`:
+
+| `type` | Meaning |
+| --- | --- |
+| `hook_event` | Lifecycle hooks (`agent_start`, `agent_error`, …) with `agentId` / `taskId`. |
+| `agent_event` | The run stream: `iteration_start`, content and tool events, and `error` (with `recoverable`). |
+| `run_result` | Terminal summary: `finishReason`, `iterations`, token `usage` and `totalCost`, `durationMs`, the final `text`, and the resolved `model` (`{id, provider}`). |
+| `error` | Terminal failure message (also reflected in `run_result.finishReason: "error"`). |
+
+A failed run still ends with a well-formed `run_result`, so automation can always key off the last `run_result` line:
+
+```json
+{"ts":"2026-06-10T17:41:12.541Z","type":"run_result","finishReason":"error","iterations":1,"usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"totalCost":0},"durationMs":6221,"text":"Can't connect to Ollama at http://localhost:11434/v1 — …","model":{"id":"qwen2.5:7b","provider":"ollama"}}
+```
 
 ## `add`
 

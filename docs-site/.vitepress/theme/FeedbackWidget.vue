@@ -1,15 +1,19 @@
 <script setup lang="ts">
 /**
- * "Was this helpful?" feedback widget shown at the bottom of every docs page
- * (mounted via the default theme's `doc-after` slot in theme/index.ts).
+ * "Was this helpful?" feedback widget for docs pages (mounted via the default
+ * theme's `doc-after` slot in theme/index.ts, so it never renders on the
+ * `layout: home` landing page).
  *
+ * Floats fixed at the bottom of the viewport and fades in once the reader has
+ * scrolled 70% of the page (pages too short to scroll count as fully read).
  * Collapsed: a pill with four rating faces. Picking one expands a textarea;
  * Send POSTs to the portbay-cloud Worker, which relays the message by email.
  */
-import { computed, nextTick, ref } from "vue";
-import { useData } from "vitepress";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useData, useRoute } from "vitepress";
 
 const ENDPOINT = "https://cloud.portbay.app/feedback/docs";
+const SCROLL_THRESHOLD = 0.7;
 
 const RATINGS = [
   { id: "very-sad", label: "Terrible" },
@@ -19,6 +23,7 @@ const RATINGS = [
 ] as const;
 
 const { page } = useData();
+const route = useRoute();
 
 const value = ref("");
 const feedback = ref("");
@@ -28,6 +33,42 @@ const error = ref("");
 const textareaEl = ref<HTMLTextAreaElement | null>(null);
 
 const expanded = computed(() => value.value !== "");
+
+const scrolledEnough = ref(false);
+// Stay visible while the reader is mid-interaction, even if they scroll back up.
+const visible = computed(
+  () => scrolledEnough.value || expanded.value || submitting.value,
+);
+
+function measureScroll() {
+  const max = document.documentElement.scrollHeight - window.innerHeight;
+  scrolledEnough.value = max <= 0 || window.scrollY / max >= SCROLL_THRESHOLD;
+}
+
+onMounted(() => {
+  window.addEventListener("scroll", measureScroll, { passive: true });
+  window.addEventListener("resize", measureScroll, { passive: true });
+  measureScroll();
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("scroll", measureScroll);
+  window.removeEventListener("resize", measureScroll);
+});
+
+// Fresh state per page: clear any draft and re-measure once the new content
+// has settled (client-side navigation does not remount this component).
+watch(
+  () => route.path,
+  () => {
+    value.value = "";
+    feedback.value = "";
+    sent.value = false;
+    error.value = "";
+    scrolledEnough.value = false;
+    nextTick(measureScroll);
+  },
+);
 
 function pick(id: string) {
   error.value = "";
@@ -69,7 +110,7 @@ async function send() {
 </script>
 
 <template>
-  <div class="fbw-wrap">
+  <div class="fbw-wrap" :class="{ visible }" :inert="!visible">
     <div class="fbw" :class="{ expanded }">
       <div class="fbw-row">
         <span class="fbw-label">{{ sent ? "Thanks for your feedback!" : "Was this helpful?" }}</span>
@@ -151,14 +192,30 @@ async function send() {
 
 <style scoped>
 .fbw-wrap {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  z-index: var(--vp-z-index-nav, 30);
+  width: min(420px, calc(100vw - 32px));
   display: flex;
   justify-content: center;
-  margin-top: 48px;
+  opacity: 0;
+  transform: translate(-50%, 16px);
+  pointer-events: none;
+  transition:
+    opacity 0.3s ease,
+    transform 0.35s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.fbw-wrap.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  pointer-events: auto;
 }
 
 .fbw {
   width: fit-content;
-  max-width: 420px;
+  max-width: 100%;
   border: 1px solid var(--vp-c-divider);
   background: var(--vp-c-bg-elv, var(--vp-c-bg));
   border-radius: 9999px;

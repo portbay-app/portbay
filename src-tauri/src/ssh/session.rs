@@ -14,6 +14,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use russh::client::{self, KeyboardInteractiveAuthResponse};
+use russh::keys::agent::AgentIdentity;
+use russh::keys::{self, HashAlg, PrivateKeyWithHashAlg};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
 
@@ -140,7 +142,7 @@ pub async fn connect_session(
     let passphrase = passphrase.filter(|p| !p.is_empty());
 
     // Dev-only diagnostic (compiled out of release builds): no secret values,
-    // only presence/length.
+    // not even lengths — a password's length narrows a brute-force.
     #[cfg(debug_assertions)]
     tracing::info!(
         host = %conn.ssh_host,
@@ -148,7 +150,6 @@ pub async fn connect_session(
         user = %user,
         auth_kind = ?conn.auth_kind,
         has_password = password.is_some(),
-        password_len = password.map(|p| p.len()).unwrap_or(0),
         has_passphrase = passphrase.is_some(),
         proxy_jump = ?conn.proxy_jump,
         "ssh connect_session: begin auth"
@@ -288,7 +289,11 @@ fn parse_jump_chain(spec: &str) -> Vec<JumpHop> {
 }
 
 /// Parse a single `[user@]host[:port]` hop. Returns `None` for an empty token,
-/// a blank host, or an unparseable port.
+/// a blank host, an unparseable port, or a malformed bracket form.
+///
+/// IPv6 follows OpenSSH: a bracketed `[2001:db8::1]:2222` carries a port; a
+/// bare `2001:db8::1` (more than one `:`, no brackets) is all host — the old
+/// `rsplit_once(':')` would have mangled it into host `2001:db8:` + a bad port.
 fn parse_jump_hop(token: &str) -> Option<JumpHop> {
     if token.is_empty() {
         return None;
@@ -304,9 +309,22 @@ fn parse_jump_hop(token: &str) -> Option<JumpHop> {
     if host_port.is_empty() {
         return None;
     }
-    let (host, port) = match host_port.rsplit_once(':') {
-        Some((host, port)) => (host.trim(), port.trim().parse::<u16>().ok()?),
-        None => (host_port, DEFAULT_SSH_PORT),
+    let (host, port) = if let Some(rest) = host_port.strip_prefix('[') {
+        // Bracketed IPv6: `[addr]` or `[addr]:port`. Anything else after the
+        // closing bracket is malformed — reject rather than guess.
+        let (host, after) = rest.split_once(']')?;
+        match after.trim() {
+            "" => (host.trim(), DEFAULT_SSH_PORT),
+            p => (host.trim(), p.strip_prefix(':')?.trim().parse::<u16>().ok()?),
+        }
+    } else if host_port.matches(':').count() > 1 {
+        // Bare IPv6 — no port form exists without brackets.
+        (host_port, DEFAULT_SSH_PORT)
+    } else {
+        match host_port.rsplit_once(':') {
+            Some((host, port)) => (host.trim(), port.trim().parse::<u16>().ok()?),
+            None => (host_port, DEFAULT_SSH_PORT),
+        }
     };
     if host.is_empty() {
         return None;
@@ -355,10 +373,10 @@ async fn connect_target(
         return Ok(handle);
     }
 
-    // Keyboard-interactive runs on a *fresh* transport. russh 0.43 only wires
-    // the server's info-request prompts when KI is the first auth method on a
-    // handle, so a fresh connect makes KI the first method. For a jumped target
-    // "fresh" means a new direct-tcpip channel on the last hop.
+    // Keyboard-interactive runs on a *fresh* transport. russh only reliably
+    // wires the server's info-request prompts when KI is the first auth method
+    // on a handle, so a fresh connect makes KI the first method. For a jumped
+    // target "fresh" means a new direct-tcpip channel on the last hop.
     //
     // Run the leg when we can actually answer: a password to echo (PAM-password-
     // over-KBI) *or* a UI interactor that can collect 2FA/OTP responses. The
@@ -515,17 +533,23 @@ async fn authenticate_jump(
         .filter(|s| !s.is_empty())
     {
         let expanded = expand_tilde(key_path);
-        match russh_keys::load_secret_key(&expanded, passphrase) {
+        warn_on_lax_key_permissions(&expanded);
+        match keys::load_secret_key(&expanded, passphrase) {
             Ok(keypair) => {
                 attempts += 1;
                 push_unique(&mut tried, "key");
+                let hash_alg = best_rsa_hash(handle).await;
                 let ok = timeout(
                     AUTH_TIMEOUT,
-                    handle.authenticate_publickey(user, Arc::new(keypair)),
+                    handle.authenticate_publickey(
+                        user,
+                        PrivateKeyWithHashAlg::new(Arc::new(keypair), hash_alg),
+                    ),
                 )
                 .await
                 .map_err(|_| SshError::Russh("SSH key authentication timed out".into()))?
-                .map_err(|e| SshError::Russh(format!("SSH key authentication failed: {e}")))?;
+                .map_err(|e| SshError::Russh(format!("SSH key authentication failed: {e}")))?
+                .success();
                 if ok {
                     return Ok(true);
                 }
@@ -575,7 +599,8 @@ async fn authenticate_multiplexed(
                     continue;
                 };
                 let expanded = expand_tilde(key_path);
-                let keypair = match russh_keys::load_secret_key(&expanded, passphrase) {
+                warn_on_lax_key_permissions(&expanded);
+                let keypair = match keys::load_secret_key(&expanded, passphrase) {
                     Ok(keypair) => keypair,
                     Err(e) => {
                         // Encrypted/passphrase-protected or unreadable key. The
@@ -587,7 +612,7 @@ async fn authenticate_multiplexed(
                         // declined it (chose "Skip" → this key has no
                         // passphrase / can't be unlocked here), so we fall
                         // through to the password prompt instead of re-asking.
-                        let encrypted = matches!(e, russh_keys::Error::KeyIsEncrypted);
+                        let encrypted = matches!(e, keys::Error::KeyIsEncrypted);
                         if passphrase.is_none() && !passphrase_declined && encrypted {
                             *needs_passphrase = true;
                         }
@@ -597,7 +622,7 @@ async fn authenticate_multiplexed(
                         // — so it stays at debug (it fires on every encrypted-key
                         // connect). A key that won't load *with* a passphrase
                         // (wrong passphrase) or for any non-encryption reason (a
-                        // format/cipher russh 0.43 can't parse) is the usual cause
+                        // format/cipher russh can't parse) is the usual cause
                         // of an otherwise-inexplicable auth dead-end, so warn.
                         if encrypted && passphrase.is_none() {
                             tracing::debug!(
@@ -617,13 +642,18 @@ async fn authenticate_multiplexed(
                 };
                 attempts += 1;
                 push_unique(tried, "key");
+                let hash_alg = best_rsa_hash(handle).await;
                 let ok = timeout(
                     AUTH_TIMEOUT,
-                    handle.authenticate_publickey(user, Arc::new(keypair)),
+                    handle.authenticate_publickey(
+                        user,
+                        PrivateKeyWithHashAlg::new(Arc::new(keypair), hash_alg),
+                    ),
                 )
                 .await
                 .map_err(|_| SshError::Russh("SSH key authentication timed out".into()))?
-                .map_err(|e| SshError::Russh(format!("SSH key authentication failed: {e}")))?;
+                .map_err(|e| SshError::Russh(format!("SSH key authentication failed: {e}")))?
+                .success();
                 if ok {
                     return Ok(true);
                 }
@@ -644,8 +674,9 @@ async fn authenticate_multiplexed(
                     .map_err(|_| SshError::Russh("SSH password authentication timed out".into()))?
                     .map_err(|e| {
                         SshError::Russh(format!("SSH password authentication failed: {e}"))
-                    })?;
-                tracing::info!(accepted = ok, "ssh password auth attempt finished");
+                    })?
+                    .success();
+                tracing::debug!(accepted = ok, "ssh password auth attempt finished");
                 if ok {
                     return Ok(true);
                 }
@@ -667,7 +698,7 @@ async fn try_agent(
     attempts: &mut usize,
     tried: &mut Vec<&'static str>,
 ) -> Result<bool> {
-    let mut agent = match russh_keys::agent::client::AgentClient::connect_env().await {
+    let mut agent = match keys::agent::client::AgentClient::connect_env().await {
         Ok(agent) => agent,
         Err(e) => {
             tracing::debug!(error = %e, "SSH agent unavailable; skipping agent auth");
@@ -681,38 +712,68 @@ async fn try_agent(
             return Ok(false);
         }
     };
-    if identities.is_empty() {
-        return Ok(false);
-    }
+    // Certificates need `authenticate_certificate_with` and a CA-aware server
+    // setup; plain public keys are the pre-migration behaviour, so keep to them.
+    let identities = identities
+        .into_iter()
+        .filter_map(|identity| match identity {
+            AgentIdentity::PublicKey { key, .. } => Some(key),
+            AgentIdentity::Certificate { .. } => None,
+        });
 
-    for key in identities.into_iter().take(MAX_AGENT_IDENTITIES) {
+    let mut rsa_hash: Option<Option<HashAlg>> = None;
+    for key in identities.take(MAX_AGENT_IDENTITIES) {
         if *attempts >= MAX_AUTH_ATTEMPTS {
             break;
         }
         *attempts += 1;
         push_unique(tried, "agent");
 
-        // `authenticate_future` consumes the signer and hands it back, so thread
-        // it through the loop to reuse one agent connection across identities.
-        let attempt = timeout(AUTH_TIMEOUT, handle.authenticate_future(user, key, agent)).await;
-        let (returned_agent, result) = match attempt {
-            Ok(pair) => pair,
+        // RSA keys sign with the strongest hash the server advertises
+        // (rsa-sha2-512/256); resolve it once, lazily, for the whole loop.
+        let hash_alg = if key.algorithm().is_rsa() {
+            match rsa_hash {
+                Some(h) => h,
+                None => {
+                    let h = best_rsa_hash(handle).await;
+                    rsa_hash = Some(h);
+                    h
+                }
+            }
+        } else {
+            None
+        };
+
+        let attempt = timeout(
+            AUTH_TIMEOUT,
+            handle.authenticate_publickey_with(user, key, hash_alg, &mut agent),
+        )
+        .await;
+        match attempt {
             Err(_) => {
                 tracing::debug!("SSH agent authentication timed out");
                 return Ok(false);
             }
-        };
-        agent = returned_agent;
-        match result {
-            Ok(true) => return Ok(true),
-            Ok(false) => continue,
-            Err(e) => {
+            Ok(Ok(result)) if result.success() => return Ok(true),
+            Ok(Ok(_)) => continue,
+            Ok(Err(e)) => {
                 tracing::debug!(error = %e, "SSH agent signing failed; stopping agent auth");
                 break;
             }
         }
     }
     Ok(false)
+}
+
+/// The strongest RSA signature hash the server advertises via `server-sig-algs`
+/// (`None` → legacy `ssh-rsa`/SHA-1). Non-RSA keys ignore this entirely.
+async fn best_rsa_hash(handle: &mut SshSessionHandle) -> Option<HashAlg> {
+    handle
+        .best_supported_rsa_hash()
+        .await
+        .ok()
+        .flatten()
+        .flatten()
 }
 
 /// Run a keyboard-interactive exchange. Each server info-request is answered by
@@ -742,7 +803,7 @@ async fn try_keyboard_interactive(
     for _ in 0..MAX_KI_ROUNDS {
         match response {
             KeyboardInteractiveAuthResponse::Success => return Ok(true),
-            KeyboardInteractiveAuthResponse::Failure => return Ok(false),
+            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
             KeyboardInteractiveAuthResponse::InfoRequest {
                 name,
                 instructions,
@@ -781,8 +842,11 @@ async fn try_keyboard_interactive(
 /// 2. Otherwise, with a UI interactor → surface every field to the user (OTP,
 ///    2FA, "Duo passcode", multi-field), returning their answers or `None` if
 ///    they cancel.
-/// 3. Otherwise (headless) with a password → echo it into every field, the
-///    legacy fallback. With nothing to offer → `None`.
+/// 3. Otherwise (headless) with a password → answer only a *single hidden*
+///    prompt (covers localized password prompts the heuristic misses). Never
+///    multi-field or echoed prompts: broadcasting the password into every
+///    field would hand it to a server-controlled non-secret field (e.g. a
+///    "Username:" prompt). With nothing safe to offer → `None`.
 async fn resolve_kbi_answers(
     host: &str,
     name: String,
@@ -813,7 +877,10 @@ async fn resolve_kbi_answers(
         return interactor.kbi_responses(prompt).await;
     }
 
-    password.map(|pw| prompts.iter().map(|_| pw.to_string()).collect())
+    if prompts.len() == 1 && !prompts[0].echo {
+        return password.map(|pw| vec![pw.to_string()]);
+    }
+    None
 }
 
 /// Does this prompt look like a request for the account password (as opposed to
@@ -826,6 +893,35 @@ fn prompt_looks_like_password(prompt: &str) -> bool {
 fn push_unique(list: &mut Vec<&'static str>, item: &'static str) {
     if !list.contains(&item) {
         list.push(item);
+    }
+}
+
+/// Whether a private key file is readable by group/other (e.g. 0644) — the
+/// condition OpenSSH refuses outright ("UNPROTECTED PRIVATE KEY FILE").
+/// `None` when the file can't be stat'd or on non-Unix platforms.
+fn key_permissions_are_lax(path: &str) -> Option<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).ok()?.permissions().mode();
+        Some(mode & 0o077 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Warn (don't fail — unlike OpenSSH we keep the connect working) when a key
+/// is group/other-readable, so the exposure is at least visible in the logs.
+fn warn_on_lax_key_permissions(path: &str) {
+    if key_permissions_are_lax(path) == Some(true) {
+        tracing::warn!(
+            key = %path,
+            "SSH private key is readable by group/other — run `chmod 600` on it \
+             (OpenSSH refuses keys with these permissions)"
+        );
     }
 }
 
@@ -932,6 +1028,146 @@ mod tests {
         );
         // Out-of-range port (>65535) is unparseable as u16 → skipped.
         assert_eq!(parse_jump_chain("h:99999"), vec![]);
+    }
+
+    #[tokio::test]
+    async fn headless_kbi_answers_single_hidden_prompt_only() {
+        // Localized password prompt the heuristic misses: still answered when
+        // it is the only field and hidden.
+        let single_hidden = vec![client::Prompt {
+            prompt: "Mot de passe :".into(),
+            echo: false,
+        }];
+        assert_eq!(
+            resolve_kbi_answers(
+                "h",
+                String::new(),
+                String::new(),
+                &single_hidden,
+                Some("pw"),
+                None
+            )
+            .await,
+            Some(vec!["pw".to_string()])
+        );
+
+        // An echoed single field is never a password slot — don't leak into it.
+        let single_echoed = vec![client::Prompt {
+            prompt: "Username:".into(),
+            echo: true,
+        }];
+        assert_eq!(
+            resolve_kbi_answers(
+                "h",
+                String::new(),
+                String::new(),
+                &single_echoed,
+                Some("pw"),
+                None
+            )
+            .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_kbi_never_broadcasts_password_into_multi_field() {
+        // Pre-fix behaviour echoed the password into EVERY field — including a
+        // server-controlled "Username:" field a MITM could read back. Multi-field
+        // exchanges must fail closed without an interactor.
+        let multi = vec![
+            client::Prompt {
+                prompt: "Username:".into(),
+                echo: true,
+            },
+            client::Prompt {
+                prompt: "Password:".into(),
+                echo: false,
+            },
+        ];
+        assert_eq!(
+            resolve_kbi_answers("h", String::new(), String::new(), &multi, Some("pw"), None).await,
+            None
+        );
+    }
+
+    /// Pins the P3 IPv6 fix from the 2026-06-10 assessment: bracketed
+    /// `[addr]:port` parses, and a bare IPv6 address is all host — never
+    /// mangled by splitting on its last colon.
+    #[test]
+    fn parse_jump_hop_handles_ipv6() {
+        // Bracketed with port (the OpenSSH form), with and without a user.
+        assert_eq!(
+            parse_jump_hop("[2001:db8::1]:2222"),
+            Some(JumpHop {
+                host: "2001:db8::1".into(),
+                port: 2222,
+                user: None
+            })
+        );
+        assert_eq!(
+            parse_jump_hop("alice@[::1]:2200"),
+            Some(JumpHop {
+                host: "::1".into(),
+                port: 2200,
+                user: Some("alice".into())
+            })
+        );
+        // Bracketed without port → default 22.
+        assert_eq!(
+            parse_jump_hop("[2001:db8::1]"),
+            Some(JumpHop {
+                host: "2001:db8::1".into(),
+                port: 22,
+                user: None
+            })
+        );
+        // Bare IPv6 (no brackets): all host, default port — the pre-fix code
+        // returned host `2001:db8:` here.
+        assert_eq!(
+            parse_jump_hop("2001:db8::1"),
+            Some(JumpHop {
+                host: "2001:db8::1".into(),
+                port: 22,
+                user: None
+            })
+        );
+        // Malformed bracket forms are rejected, not guessed at.
+        assert_eq!(parse_jump_hop("[2001:db8::1"), None);
+        assert_eq!(parse_jump_hop("[2001:db8::1]2222"), None);
+        assert_eq!(parse_jump_hop("[2001:db8::1]:notaport"), None);
+        assert_eq!(parse_jump_hop("[]:22"), None);
+        // Plain host:port is untouched by the IPv6 path.
+        assert_eq!(
+            parse_jump_hop("bastion:2222"),
+            Some(JumpHop {
+                host: "bastion".into(),
+                port: 2222,
+                user: None
+            })
+        );
+    }
+
+    /// Pins the P3 key-permission check: group/other-readable keys are flagged
+    /// (OpenSSH refuses them; we warn), 0600 keys are not.
+    #[cfg(unix)]
+    #[test]
+    fn key_permissions_lax_detection() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("id_test");
+        std::fs::write(&key, "stub").unwrap();
+
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(key_permissions_are_lax(key.to_str().unwrap()), Some(true));
+
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(key_permissions_are_lax(key.to_str().unwrap()), Some(false));
+
+        assert_eq!(
+            key_permissions_are_lax(dir.path().join("missing").to_str().unwrap()),
+            None
+        );
     }
 
     #[test]

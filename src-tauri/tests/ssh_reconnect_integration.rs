@@ -27,10 +27,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
+use russh::keys::{key::safe_rng, Algorithm, PrivateKey};
 use russh::server::{Auth, Config, Handler, Msg, Server as _, Session};
 use russh::{Channel, Disconnect};
-use russh_keys::key::KeyPair;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -56,7 +55,6 @@ impl russh::server::Server for TestServer {
     }
 }
 
-#[async_trait]
 impl Handler for TestServer {
     type Error = russh::Error;
 
@@ -64,9 +62,7 @@ impl Handler for TestServer {
         if password == PASSWORD {
             Ok(Auth::Accept)
         } else {
-            Ok(Auth::Reject {
-                proceed_with_methods: None,
-            })
+            Ok(Auth::reject())
         }
     }
 
@@ -166,7 +162,7 @@ fn live_handshake_drop_reconnect_and_stop() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let config = Arc::new(Config {
-            keys: vec![KeyPair::generate_ed25519().unwrap()],
+            keys: vec![PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap()],
             ..Default::default()
         });
         let mut server = server.clone();
@@ -200,7 +196,9 @@ fn live_handshake_drop_reconnect_and_stop() {
     let mut mgr = SshManager::new();
 
     // (1) UP — a real handshake + password auth, then live forwarded traffic.
-    mgr.start(profile.clone(), Some(PASSWORD.to_string()))
+    // No interactor: headless test path — silent TOFU against the throwaway
+    // server container, same trust model this suite has always exercised.
+    mgr.start(profile.clone(), Some(PASSWORD.to_string().into()), None)
         .expect("tunnel should start over a live SSH handshake");
     assert!(
         poll_until(Duration::from_secs(5), || echo_roundtrip(local_port)),

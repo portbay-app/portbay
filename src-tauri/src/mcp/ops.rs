@@ -347,9 +347,9 @@ impl McpContext {
         let passphrase = crate::commands::ssh_tunnels::load_stored_key_passphrase(&conn.id)?;
         crate::ssh::exec::run_command(
             &conn,
-            password.as_deref(),
-            proxy_password.as_deref(),
-            passphrase.as_deref(),
+            crate::ssh::secret::secret_str(&password),
+            crate::ssh::secret::secret_str(&proxy_password),
+            crate::ssh::secret::secret_str(&passphrase),
             command,
             cwd,
             // Headless (MCP) — no window to prompt; keep silent TOFU.

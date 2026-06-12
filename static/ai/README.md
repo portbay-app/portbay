@@ -19,11 +19,19 @@ brand colour Simple Icons publishes for it (`fill="#…"` stamped on the root
 - `mistral.svg` (Mistral AI)
 - `lg.svg` (LG) — EXAONE family
 - `ollama.svg` (Ollama) — the "More models" catch-all
+- `nvidia.svg` (NVIDIA) — Parakeet + Nemotron speech-to-text engines
 
-## Ids with no asset
+## Ids with no asset (brand-tinted monogram chips)
 
-- Phi (Microsoft) — Simple Icons no longer carries Microsoft marks; renders
-  as a monogram chip in ModelMark.
+Simple Icons no longer carries these marks (Microsoft pulled theirs; several
+AI labs requested removal), so they render as monogram chips in ModelMark:
+
+- Phi (Microsoft) — chip `Phi`
+- Whisper (OpenAI) — chip `Wh`
+- Cohere — chip `Co`
+- Kokoro (TTS) — chip `Ko`
+- FLUX (Black Forest Labs) — chip `FL`
+- Stable Diffusion / SDXL (Stability AI) — chip `SD`
 - Embeddings / Vision — functional groupings, not brands; render as neutral
   Icon glyphs (search / eye).
 

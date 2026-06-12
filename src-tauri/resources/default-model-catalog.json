@@ -1,0 +1,360 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-08T00:00:00Z",
+  "stt": [
+    {
+      "id": "parakeet-eou-streaming",
+      "engine": "parakeet-eou",
+      "displayName": "Parakeet EOU 120M (streaming)",
+      "repoModel": "parakeet-eou-320ms",
+      "approxSizeBytes": 300000000,
+      "languages": "English",
+      "speedNote": "True streaming — words decode while you speak, so the text is ready the instant you stop.",
+      "recommended": true,
+      "streaming": true,
+      "license": "CC-BY-4.0",
+      "licenseUrl": "https://huggingface.co/FluidInference"
+    },
+    {
+      "id": "parakeet-tdt-v3",
+      "engine": "parakeet",
+      "displayName": "Parakeet TDT v3 (0.6B)",
+      "repoModel": "parakeet-tdt-0.6b-v3-coreml",
+      "parakeetVersion": "v3",
+      "approxSizeBytes": 2400000000,
+      "languages": "25 European languages",
+      "speedNote": "Fastest on Apple Silicon — near-instant transcription on the Neural Engine.",
+      "recommended": true,
+      "streaming": false,
+      "license": "CC-BY-4.0",
+      "licenseUrl": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3"
+    },
+    {
+      "id": "parakeet-tdt-v2",
+      "engine": "parakeet",
+      "displayName": "Parakeet TDT v2 (0.6B, English)",
+      "repoModel": "parakeet-tdt-0.6b-v2-coreml",
+      "parakeetVersion": "v2",
+      "approxSizeBytes": 2400000000,
+      "languages": "English",
+      "speedNote": "English-only Parakeet — highest accuracy on English at the same near-instant speed.",
+      "recommended": false,
+      "streaming": false,
+      "license": "CC-BY-4.0",
+      "licenseUrl": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2"
+    },
+    {
+      "id": "cohere-transcribe",
+      "engine": "cohere",
+      "displayName": "Cohere Transcribe",
+      "repoModel": "cohere-transcribe-03-2026-coreml",
+      "approxSizeBytes": 1400000000,
+      "languages": "14 languages",
+      "speedNote": "Cohere's on-device transcription model (March 2026) — strong multilingual accuracy.",
+      "recommended": false,
+      "streaming": false,
+      "licenseUrl": "https://huggingface.co/FluidInference"
+    },
+    {
+      "id": "nemotron-streaming",
+      "engine": "nemotron",
+      "displayName": "Nemotron Speech 3.5 (English)",
+      "repoModel": "nemotron-speech-streaming-en-0.6b-coreml",
+      "approxSizeBytes": 670000000,
+      "languages": "English",
+      "speedNote": "NVIDIA Nemotron 3.5 — true streaming with top-tier English accuracy (bigger download than Parakeet EOU).",
+      "recommended": false,
+      "streaming": true,
+      "license": "CC-BY-4.0",
+      "licenseUrl": "https://huggingface.co/FluidInference"
+    },
+    {
+      "id": "qwen3-asr",
+      "engine": "qwen3",
+      "displayName": "Qwen3 ASR",
+      "repoModel": "qwen3-asr-0.6b-coreml",
+      "approxSizeBytes": 2000000000,
+      "languages": "30 languages",
+      "speedNote": "Qwen3-ASR — broad multilingual coverage. Requires macOS 15 or newer.",
+      "recommended": false,
+      "streaming": false,
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/FluidInference"
+    },
+    {
+      "id": "whisper-large-v3-turbo",
+      "engine": "whisper",
+      "displayName": "Whisper Large v3 Turbo",
+      "repoModel": "large-v3-v20240930",
+      "approxSizeBytes": 1600000000,
+      "languages": "Multilingual (99 languages)",
+      "speedNote": "Best accuracy-per-second in the Whisper family — the default Whisper pick.",
+      "recommended": true,
+      "streaming": true,
+      "license": "MIT",
+      "licenseUrl": "https://github.com/openai/whisper/blob/main/LICENSE"
+    },
+    {
+      "id": "whisper-distil-large-v3",
+      "engine": "whisper",
+      "displayName": "Distil-Whisper Large v3",
+      "repoModel": "distil-large-v3",
+      "approxSizeBytes": 1500000000,
+      "languages": "English",
+      "speedNote": "Distilled large-v3 — close to turbo speed, English only.",
+      "recommended": false,
+      "streaming": true,
+      "license": "MIT",
+      "licenseUrl": "https://github.com/openai/whisper/blob/main/LICENSE"
+    },
+    {
+      "id": "whisper-large-v3",
+      "engine": "whisper",
+      "displayName": "Whisper Large v3",
+      "repoModel": "large-v3",
+      "approxSizeBytes": 3100000000,
+      "languages": "Multilingual (99 languages)",
+      "speedNote": "Most accurate, slowest — for when every word matters more than latency.",
+      "recommended": false,
+      "streaming": true,
+      "license": "MIT",
+      "licenseUrl": "https://github.com/openai/whisper/blob/main/LICENSE"
+    },
+    {
+      "id": "whisper-medium-en",
+      "engine": "whisper",
+      "displayName": "Whisper Medium (English)",
+      "repoModel": "medium.en",
+      "approxSizeBytes": 1500000000,
+      "languages": "English",
+      "speedNote": "Mid-size English-only — a lighter download for English dictation.",
+      "recommended": false,
+      "streaming": true,
+      "license": "MIT",
+      "licenseUrl": "https://github.com/openai/whisper/blob/main/LICENSE"
+    },
+    {
+      "id": "whisper-small",
+      "engine": "whisper",
+      "displayName": "Whisper Small",
+      "repoModel": "small",
+      "approxSizeBytes": 466000000,
+      "languages": "Multilingual (99 languages)",
+      "speedNote": "Light multilingual download — quicker and smaller than the large models.",
+      "recommended": false,
+      "streaming": true,
+      "license": "MIT",
+      "licenseUrl": "https://github.com/openai/whisper/blob/main/LICENSE"
+    },
+    {
+      "id": "whisper-base",
+      "engine": "whisper",
+      "displayName": "Whisper Base",
+      "repoModel": "base",
+      "approxSizeBytes": 142000000,
+      "languages": "Multilingual (99 languages)",
+      "speedNote": "Tiny footprint, fast — good for quick notes where accuracy is less critical.",
+      "recommended": false,
+      "streaming": true,
+      "license": "MIT",
+      "licenseUrl": "https://github.com/openai/whisper/blob/main/LICENSE"
+    },
+    {
+      "id": "whisper-tiny",
+      "engine": "whisper",
+      "displayName": "Whisper Tiny",
+      "repoModel": "tiny",
+      "approxSizeBytes": 75000000,
+      "languages": "Multilingual (99 languages)",
+      "speedNote": "Smallest, fastest Whisper — lowest accuracy; for constrained machines.",
+      "recommended": false,
+      "streaming": true,
+      "license": "MIT",
+      "licenseUrl": "https://github.com/openai/whisper/blob/main/LICENSE"
+    }
+  ],
+  "tts": [
+    {
+      "id": "kokoro-en",
+      "engine": "kokoro",
+      "displayName": "Kokoro (English)",
+      "repoModel": "kokoro-82m-coreml",
+      "approxSizeBytes": 374000000,
+      "languages": "English (US & UK)",
+      "speedNote": "Compact 82M on-device voice model — 28 natural voices on the Neural Engine.",
+      "recommended": true,
+      "defaultVoice": "af_heart",
+      "voices": [
+        {
+          "id": "af_heart",
+          "label": "Heart (US, female)"
+        },
+        {
+          "id": "af_alloy",
+          "label": "Alloy (US, female)"
+        },
+        {
+          "id": "af_aoede",
+          "label": "Aoede (US, female)"
+        },
+        {
+          "id": "af_bella",
+          "label": "Bella (US, female)"
+        },
+        {
+          "id": "af_jessica",
+          "label": "Jessica (US, female)"
+        },
+        {
+          "id": "af_kore",
+          "label": "Kore (US, female)"
+        },
+        {
+          "id": "af_nicole",
+          "label": "Nicole (US, female)"
+        },
+        {
+          "id": "af_nova",
+          "label": "Nova (US, female)"
+        },
+        {
+          "id": "af_river",
+          "label": "River (US, female)"
+        },
+        {
+          "id": "af_sarah",
+          "label": "Sarah (US, female)"
+        },
+        {
+          "id": "af_sky",
+          "label": "Sky (US, female)"
+        },
+        {
+          "id": "am_adam",
+          "label": "Adam (US, male)"
+        },
+        {
+          "id": "am_echo",
+          "label": "Echo (US, male)"
+        },
+        {
+          "id": "am_eric",
+          "label": "Eric (US, male)"
+        },
+        {
+          "id": "am_fenrir",
+          "label": "Fenrir (US, male)"
+        },
+        {
+          "id": "am_liam",
+          "label": "Liam (US, male)"
+        },
+        {
+          "id": "am_michael",
+          "label": "Michael (US, male)"
+        },
+        {
+          "id": "am_onyx",
+          "label": "Onyx (US, male)"
+        },
+        {
+          "id": "am_puck",
+          "label": "Puck (US, male)"
+        },
+        {
+          "id": "am_santa",
+          "label": "Santa (US, male)"
+        },
+        {
+          "id": "bf_alice",
+          "label": "Alice (UK, female)"
+        },
+        {
+          "id": "bf_emma",
+          "label": "Emma (UK, female)"
+        },
+        {
+          "id": "bf_isabella",
+          "label": "Isabella (UK, female)"
+        },
+        {
+          "id": "bf_lily",
+          "label": "Lily (UK, female)"
+        },
+        {
+          "id": "bm_daniel",
+          "label": "Daniel (UK, male)"
+        },
+        {
+          "id": "bm_fable",
+          "label": "Fable (UK, male)"
+        },
+        {
+          "id": "bm_george",
+          "label": "George (UK, male)"
+        },
+        {
+          "id": "bm_lewis",
+          "label": "Lewis (UK, male)"
+        }
+      ],
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/hexgrad/Kokoro-82M"
+    }
+  ],
+  "image": [
+    {
+      "id": "sd-2-1-base",
+      "engine": "sd",
+      "displayName": "Stable Diffusion 2.1 (base)",
+      "repoModel": "apple/coreml-stable-diffusion-2-1-base",
+      "approxSizeBytes": 2600000000,
+      "defaultSteps": 25,
+      "defaultSize": 768,
+      "speedNote": "Balanced quality and speed — Core ML, runs on the Neural Engine. Best starter.",
+      "recommended": true,
+      "license": "CreativeML Open RAIL++-M",
+      "licenseUrl": "https://huggingface.co/apple/coreml-stable-diffusion-2-1-base"
+    },
+    {
+      "id": "sd-1-5",
+      "engine": "sd",
+      "displayName": "Stable Diffusion 1.5",
+      "repoModel": "apple/coreml-stable-diffusion-v1-5",
+      "approxSizeBytes": 1700000000,
+      "defaultSteps": 25,
+      "defaultSize": 512,
+      "speedNote": "Smallest and fastest — good on modest machines.",
+      "recommended": false,
+      "license": "CreativeML OpenRAIL-M",
+      "licenseUrl": "https://huggingface.co/apple/coreml-stable-diffusion-v1-5"
+    },
+    {
+      "id": "sd-turbo",
+      "engine": "sd",
+      "displayName": "SD-Turbo",
+      "repoModel": "keijiro-tk/coreml-sd-turbo",
+      "compiledGlob": "original/compiled/*",
+      "approxSizeBytes": 4315932432,
+      "defaultSteps": 2,
+      "defaultSize": 512,
+      "speedNote": "Distilled for near-instant generation — usable images in 1–4 steps (set a low guidance).",
+      "recommended": false,
+      "license": "Stability AI Community",
+      "licenseUrl": "https://huggingface.co/stabilityai/sd-turbo"
+    },
+    {
+      "id": "sdxl-base",
+      "engine": "sdxl",
+      "displayName": "Stable Diffusion XL (base)",
+      "repoModel": "apple/coreml-stable-diffusion-xl-base",
+      "approxSizeBytes": 6500000000,
+      "defaultSteps": 25,
+      "defaultSize": 1024,
+      "speedNote": "Highest quality at 1024px — needs ample memory.",
+      "recommended": false,
+      "license": "CreativeML Open RAIL++-M",
+      "licenseUrl": "https://huggingface.co/apple/coreml-stable-diffusion-xl-base"
+    }
+  ]
+}

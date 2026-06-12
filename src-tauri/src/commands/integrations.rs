@@ -242,7 +242,12 @@ pub struct DevToolInfo {
 /// `installed_dev_tools()` — ordered list of supported local tools.
 #[tauri::command]
 pub async fn installed_dev_tools() -> AppResult<Vec<DevToolInfo>> {
-    Ok(detect_installed_dev_tools())
+    // Detection shells out to `mdfind` (Spotlight, 200ms–1s) per bundle-id
+    // probe across ~14 tool definitions — blocking work that would starve
+    // the shared async workers if run inline.
+    tokio::task::spawn_blocking(detect_installed_dev_tools)
+        .await
+        .map_err(|e| AppError::Internal(format!("dev-tool detection task failed: {e}")))
 }
 
 /// `open_in_ide(id, ide)` — open a project folder in an editor, agent, or terminal.
@@ -527,6 +532,17 @@ pub async fn open_privacy_settings(app: AppHandle, kind: String) -> AppResult<()
         }
         "full-disk-access" => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+        }
+        "microphone" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        }
+        "camera" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera",
+        // Not a privacy pane, but the same guided-dialog flow: the user
+        // unticks macOS's own ⌘⇧3/4/5 screenshot keys so PortBay's capture
+        // hotkeys can take over. System Settings has no deep link to the
+        // Shortcuts sheet itself — the Keyboard pane is as close as it gets.
+        "keyboard-shortcuts" => {
+            "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
         }
         _ => {
             return Err(AppError::BadInput(format!(

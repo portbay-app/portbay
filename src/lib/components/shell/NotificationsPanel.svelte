@@ -10,8 +10,9 @@
   toast colour so the two surfaces feel like the same system.
 -->
 <script lang="ts">
-  import Icon from "$lib/components/atoms/Icon.svelte";
-  import { notifications, type NotificationEntry } from "$lib/stores/notifications.svelte";
+  import Icon, { type IconName } from "$lib/components/atoms/Icon.svelte";
+  import { notifications } from "$lib/stores/notifications.svelte";
+  import { activity, type ActivityKind } from "$lib/stores/activity.svelte";
   import type { CommandError } from "$lib/types/error";
 
   interface Props {
@@ -36,11 +37,47 @@
   // than mark inline so the badge transition is visible to the user.
   $effect(() => {
     if (!open) return;
-    const handle = setTimeout(() => notifications.markAllRead(), 600);
+    const handle = setTimeout(() => {
+      void notifications.markAllRead();
+      void activity.markAllRead();
+    }, 600);
     return () => clearTimeout(handle);
   });
 
+  function markAllRead() {
+    void notifications.markAllRead();
+    void activity.markAllRead();
+  }
+  function clearAll() {
+    notifications.clear();
+    void activity.clear();
+  }
+
   type Tone = "error" | "warn" | "info" | "success";
+
+  // Agent-activity presentation: tone, circle icon, and the verb that joins
+  // "<agent> … <card>". Comments read as info; blocks as errors; warnings warn.
+  const activityTone: Record<ActivityKind, Tone> = {
+    done: "success",
+    comment: "info",
+    blocked: "error",
+    warning: "warn",
+    learning: "info",
+  };
+  const activityIcon: Record<ActivityKind, IconName> = {
+    done: "circle-check",
+    comment: "bot",
+    blocked: "circle-alert",
+    warning: "circle-alert",
+    learning: "sparkles",
+  };
+  const activityVerb: Record<ActivityKind, string> = {
+    done: "finished",
+    comment: "commented on",
+    blocked: "blocked",
+    warning: "flagged",
+    learning: "recorded a learning",
+  };
 
   function severityTone(e: CommandError): Tone {
     if (e.severity === "success") return "success";
@@ -98,7 +135,7 @@
       <div class="flex items-center gap-1">
         <button
           type="button"
-          onclick={() => notifications.markAllRead()}
+          onclick={markAllRead}
           title="Mark all read"
           class="text-[11px] text-fg-muted hover:text-fg px-1.5 py-0.5 rounded"
         >
@@ -106,7 +143,7 @@
         </button>
         <button
           type="button"
-          onclick={() => notifications.clear()}
+          onclick={clearAll}
           title="Clear history"
           class="text-[11px] text-fg-muted hover:text-status-crashed px-1.5 py-0.5 rounded"
         >
@@ -115,43 +152,98 @@
       </div>
     </header>
 
-    {#if notifications.value.length === 0}
+    {#if activity.value.length === 0 && notifications.value.length === 0}
       <p class="px-4 py-10 text-center text-[12px] text-fg-subtle">
-        Nothing has happened yet. Toasts, errors, and system events will
-        appear here.
+        Nothing has happened yet. Agent activity, toasts, errors, and system
+        events will appear here.
       </p>
     {:else}
-      <ul class="flex-1 min-h-0 overflow-y-auto divide-y divide-border/60">
-        {#each notifications.value as entry (entry.id)}
-          {@const tone = severityTone(entry.envelope)}
-          <li class="flex gap-2.5 px-3 py-2.5">
-            <span
-              class="mt-0.5 inline-flex items-center justify-center w-5 h-5 rounded-full {toneIconWrap[tone]}"
-            >
-              <Icon name={iconFor(tone)} size={12} />
-            </span>
-            <div class="flex-1 min-w-0">
-              <p class="text-[12px] text-fg truncate">
-                {entry.envelope.whatHappened}
-              </p>
-              {#if entry.envelope.whyItMatters}
-                <p class="text-[11px] text-fg-muted line-clamp-2">
-                  {entry.envelope.whyItMatters}
-                </p>
-              {/if}
-              <p class="mt-1 text-[10px] text-fg-subtle tabular-nums">
-                {relativeTime(entry.receivedAt)}
-              </p>
+      <div class="flex-1 min-h-0 overflow-y-auto">
+        <!-- Agent activity: comments, blocks, and warnings from your agents,
+             across every project. Click an item to open its card. -->
+        {#if activity.value.length > 0}
+          <div class="px-3 pt-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
+            Agent activity
+          </div>
+          <ul class="divide-y divide-border/60">
+            {#each activity.value as n (n.id)}
+              {@const tone = activityTone[n.kind]}
+              <li>
+                <button
+                  type="button"
+                  onclick={() => {
+                    void activity.open(n);
+                    onclose();
+                  }}
+                  class="w-full flex gap-2.5 px-3 py-2.5 text-left hover:bg-surface-2/60 transition-colors"
+                >
+                  <span
+                    class="mt-0.5 inline-flex items-center justify-center w-5 h-5 rounded-full {toneIconWrap[tone]}"
+                  >
+                    <Icon name={activityIcon[n.kind]} size={12} />
+                  </span>
+                  <div class="flex-1 min-w-0">
+                    <p class="text-[12px] text-fg truncate">
+                      <span class="font-medium">{n.agent ?? "Agent"}</span>
+                      {activityVerb[n.kind]}
+                      <span class="text-fg-muted">{n.cardTitle}</span>
+                    </p>
+                    {#if n.body}
+                      <p class="text-[11px] text-fg-muted line-clamp-2">{n.body}</p>
+                    {/if}
+                    <p class="mt-1 text-[10px] text-fg-subtle tabular-nums truncate">
+                      {n.projectName} · {relativeTime(n.createdMs)}
+                    </p>
+                  </div>
+                  {#if !n.read}
+                    <span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-accent shrink-0" title="Unread"></span>
+                  {/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+
+        <!-- System: the toast/error history (command failures, status events). -->
+        {#if notifications.value.length > 0}
+          {#if activity.value.length > 0}
+            <div class="px-3 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle border-t border-border/60">
+              System
             </div>
-            {#if !entry.read}
-              <span
-                class="mt-1.5 w-1.5 h-1.5 rounded-full bg-accent shrink-0"
-                title="Unread"
-              ></span>
-            {/if}
-          </li>
-        {/each}
-      </ul>
+          {/if}
+          <ul class="divide-y divide-border/60">
+            {#each notifications.value as entry (entry.id)}
+              {@const tone = severityTone(entry.envelope)}
+              <li class="flex gap-2.5 px-3 py-2.5">
+                <span
+                  class="mt-0.5 inline-flex items-center justify-center w-5 h-5 rounded-full {toneIconWrap[tone]}"
+                >
+                  <Icon name={iconFor(tone)} size={12} />
+                </span>
+                <div class="flex-1 min-w-0">
+                  <p class="text-[12px] text-fg truncate">
+                    {entry.envelope.whatHappened}
+                  </p>
+                  {#if entry.envelope.whyItMatters}
+                    <p class="text-[11px] text-fg-muted line-clamp-2">
+                      {entry.envelope.whyItMatters}
+                    </p>
+                  {/if}
+                  <p class="mt-1 text-[10px] text-fg-subtle tabular-nums">
+                    {relativeTime(entry.receivedAt)}
+                  </p>
+                </div>
+                {#if !entry.read}
+                  <span
+                    class="mt-1.5 w-1.5 h-1.5 rounded-full bg-accent shrink-0"
+                    title="Unread"
+                  ></span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     {/if}
   </div>
 {/if}

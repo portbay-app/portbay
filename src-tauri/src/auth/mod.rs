@@ -27,6 +27,43 @@ const SESSION_ENV: &str = "PORTBAY_SESSION_JSON";
 const SESSION_FILE: &str = "session.json";
 
 // ---------------------------------------------------------------------------
+// Session-env capture (security hardening)
+// ---------------------------------------------------------------------------
+//
+// `PORTBAY_SESSION_JSON` is a dev/CI override that bypasses the keychain.
+// It must never reach child processes: every process-compose service, npm
+// postinstall, mkcert call, and project script runs as a child of this
+// process and inherits its environment — a malicious `postinstall` could
+// exfiltrate the access + refresh tokens simply by reading the variable.
+//
+// Strategy: capture the env value into this `OnceCell` as early as possible
+// (in `run()` before the Tauri builder and async runtime spawn workers),
+// then call `std::env::remove_var(SESSION_ENV)` to scrub it. The loader
+// below reads the cell on the keychain-miss path, so the override semantics
+// are preserved for tests and CI without the value lingering in the process
+// environment.
+static SESSION_ENV_CAPTURE: once_cell::sync::OnceCell<Option<String>> =
+    once_cell::sync::OnceCell::new();
+
+/// Call once, as early as possible in `run()` — before any async workers are
+/// spawned (the Tauri builder, tokio, etc.). This grabs the session-override
+/// env var into a `OnceCell` and removes it from the live environment so
+/// every child process the app spawns afterwards never sees it.
+///
+/// Calling this after threads are spawned is technically unsound on some
+/// platforms (POSIX `setenv` is not thread-safe), but in practice
+/// `remove_var` on macOS is safe here because the caller is the only thread
+/// at startup.  The `OnceCell::set` makes a second call harmless — the env
+/// var has already been captured and removed.
+pub fn capture_and_strip_session_env() {
+    let value = std::env::var(SESSION_ENV).ok();
+    // Capture first, then remove. If capture fails (never set) the cell holds
+    // `None` and the remove is a no-op.
+    let _ = SESSION_ENV_CAPTURE.set(value);
+    std::env::remove_var(SESSION_ENV);
+}
+
+// ---------------------------------------------------------------------------
 // Session + keychain
 // ---------------------------------------------------------------------------
 
@@ -65,7 +102,16 @@ pub fn load_session() -> Option<Session> {
             return Some(session);
         }
     }
-    if let Ok(raw) = std::env::var(SESSION_ENV) {
+    // Dev/CI override: the raw JSON was captured from the environment at
+    // startup by `capture_and_strip_session_env()` and the env var was then
+    // removed so children never see it.  Fall back to the live env var only
+    // when the cell was never populated (e.g. in unit tests that call
+    // `load_session` directly without going through `run()`).
+    let env_raw: Option<String> = SESSION_ENV_CAPTURE
+        .get()
+        .and_then(|opt| opt.clone())
+        .or_else(|| std::env::var(SESSION_ENV).ok());
+    if let Some(raw) = env_raw {
         if let Ok(session) = serde_json::from_str(&raw) {
             // Security-sensitive override (SECURITY.md "Session Environment
             // Override"): the environment is readable by anything inspecting

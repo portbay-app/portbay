@@ -12,7 +12,7 @@
 //! this matches the CLI's pattern so the two binaries can never drift.
 //! See `bin/portbay.rs`'s `CliContext` for the parallel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Mutex;
@@ -183,6 +183,16 @@ pub struct AppState {
     /// project's audit log; the `notifications_*` commands read/mutate it.
     pub notifications: Mutex<crate::notifications::NotificationCenter>,
 
+    /// Recent PortBay-authored narration lines (▶ Starting, `$ cmd`,
+    /// port-conflict ✗, …) per project id. The live `portbay://proc-log`
+    /// event only reaches listeners that already exist, so a log viewer
+    /// opened *after* Play would otherwise never see the Play narration —
+    /// the `proc_log_history` command replays this ring on open. Bounded to
+    /// [`PROC_LOG_HISTORY_CAP`] lines per project; cleared on Start/Restart
+    /// so a replay narrates the current run, not stale attempts.
+    pub proc_log_history:
+        Mutex<HashMap<String, VecDeque<crate::commands::events::ProcLogEvent>>>,
+
     /// Session-long set of canonicalized local paths the user approved via a
     /// host-mediated dialog (file picker, save dialog) or a real OS drag-drop.
     /// Consulted by SFTP transfer commands before reading or writing any local
@@ -194,6 +204,12 @@ pub struct AppState {
     /// `.lock().unwrap_or_else(|e| e.into_inner())`.
     pub sftp_approved_paths: Mutex<std::collections::HashSet<std::path::PathBuf>>,
 }
+
+/// Per-project cap on retained narration lines (see
+/// [`AppState::proc_log_history`]). Narration is sparse — a Start/Stop
+/// cycle emits a handful of lines — so 50 covers many cycles while keeping
+/// the replay payload trivially small.
+pub const PROC_LOG_HISTORY_CAP: usize = 50;
 
 /// How long after a Stop request a non-zero exit is still considered
 /// the result of that stop. Long enough for the child to fully wind
@@ -236,6 +252,7 @@ impl AppState {
             pending_login: Mutex::new(None),
             icon_cache: Mutex::new(HashMap::new()),
             notifications: Mutex::new(crate::notifications::NotificationCenter::load()),
+            proc_log_history: Mutex::new(HashMap::new()),
             sftp_approved_paths: Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -266,6 +283,40 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(id);
+    }
+
+    /// Append one narration line to a project's replay ring, evicting the
+    /// oldest when the ring is at [`PROC_LOG_HISTORY_CAP`].
+    pub fn push_proc_log(&self, event: crate::commands::events::ProcLogEvent) {
+        let mut guard = self
+            .proc_log_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ring = guard.entry(event.id.clone()).or_default();
+        if ring.len() >= PROC_LOG_HISTORY_CAP {
+            ring.pop_front();
+        }
+        ring.push_back(event);
+    }
+
+    /// The retained narration lines for a project, oldest first.
+    pub fn proc_log_snapshot(&self, project_id: &str) -> Vec<crate::commands::events::ProcLogEvent> {
+        self.proc_log_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(project_id)
+            .map(|ring| ring.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Drop a project's narration ring. Called when a run begins
+    /// (Start/Restart) so a replay narrates the current run only, and when
+    /// a project is removed.
+    pub fn clear_proc_log(&self, project_id: &str) {
+        self.proc_log_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(project_id);
     }
 
     /// Snapshot the current preferences. Returns by value so the lock

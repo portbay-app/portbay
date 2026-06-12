@@ -41,6 +41,16 @@ the macOS Keychain. If the Keychain is unavailable, it falls back to a restricte
 permission file in PortBay's local data directory on your device. Either way the tokens
 stay on your machine.
 
+**Dictation stays on your device.** Local dictation records and transcribes audio
+entirely on this Mac; audio and transcripts are never sent to us or to any third party.
+To improve recognition of your vocabulary, the app keeps a small on-device list of terms
+it has learned from your accepted dictations (capped at a few hundred entries) in
+PortBay's local data directory — you can clear it any time with Settings → AI →
+"Reset learned vocabulary". When dictation inserts text into another app it may briefly
+use the system clipboard for the paste and then restores your previous clipboard
+contents; clipboard managers are signalled to skip recording the transient entry. None
+of this data leaves your machine.
+
 **Connections the app makes on your behalf.** Two local features contact third parties
 directly from your machine (we never see this traffic):
 

@@ -2,20 +2,21 @@
   LogViewer — full-screen modal log tail for one project.
 
   Two modes:
-    - Static tail (default): one-shot snapshot from `tail_logs`.
-      Refresh button re-fetches.
-    - Follow: a Channel<string> from `subscribe_logs` streams new
-      lines as they're written. The channel is dropped on
-      unmount / toggle-off so the Rust task exits cleanly.
+    - Follow (default on open): a Channel<string> from `subscribe_logs`
+      streams new lines as they're written, on top of an initial
+      `tail_logs` snapshot. The channel is dropped on unmount /
+      toggle-off so the Rust task exits cleanly.
+    - Static tail (Follow unticked): the snapshot only; the Refresh
+      button re-fetches.
 -->
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { trapFocus } from "$lib/actions/trapFocus";
   import { Channel } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
   import { Icon, StatusPill } from "$lib/components/atoms";
-  import { safeInvoke } from "$lib/ipc";
+  import { invokeQuiet, safeInvoke } from "$lib/ipc";
   import { logViewer } from "$lib/stores/logViewer.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import type { ProjectView } from "$lib/types/projects";
@@ -46,7 +47,11 @@
   // chatty follow stream stays O(1) per line instead of re-parsing the buffer.
   let parsed = $state<LogLine[]>([]);
   let loading = $state<boolean>(false);
-  let follow = $state<boolean>(false);
+  // Follow defaults ON: the viewer should behave like `tail -f` the moment it
+  // opens, not after a manual checkbox tick. `subscribe_logs` tolerates a
+  // not-yet-created file (30 s wait loop), so always-on is safe even for a
+  // stopped project. The manual toggle still works for pausing the stream.
+  let follow = $state<boolean>(true);
   let searchQuery = $state<string>("");
   let matchIndex = $state<number>(0);
   let autoScroll = $state<boolean>(true);
@@ -90,11 +95,25 @@
     if (!project) return;
     loading = true;
     try {
-      const raw = await safeInvoke<string[]>("tail_logs", {
-        id: project.id,
-        limit: 1000,
-      });
-      parsed = raw.map(parseLogLine);
+      // Replay the PortBay narration ring alongside the file snapshot, so a
+      // viewer opened *after* Play still shows "▶ Starting…" / "$ cmd" /
+      // port-conflict lines (the live proc-log event only reaches listeners
+      // that already exist). Narration renders first: the backend clears the
+      // ring on Start/Restart and PC truncates the log file per run, so
+      // narration-then-output is the run's real chronology. Quiet fetch — a
+      // missing history must not toast over a perfectly good snapshot.
+      const [history, raw] = await Promise.all([
+        invokeQuiet<ProcLogEvent[]>("proc_log_history", {
+          id: project.id,
+        }).catch(() => [] as ProcLogEvent[]),
+        safeInvoke<string[]>("tail_logs", {
+          id: project.id,
+          limit: 1000,
+        }),
+      ]);
+      parsed = history
+        .map((e) => eventLogLine(e.message, e.level as LogLevel))
+        .concat(raw.map(parseLogLine));
     } catch {
       parsed = [];
     } finally {
@@ -129,7 +148,10 @@
       next = next.slice(next.length - (MAX_LINES - TRIM_CHUNK));
     }
     parsed = next;
-    if (autoScroll) scrollToBottom();
+    // The $state write above lands in the DOM on Svelte's microtask flush,
+    // *after* this synchronous frame — scrolling now would target the old
+    // scrollHeight and leave the view one burst behind the tail forever.
+    if (autoScroll) void tick().then(scrollToBottom);
   }
 
   function startFollow() {
@@ -212,21 +234,45 @@
       return;
     }
     untrack(() => {
+      // Tear down any previous project's stream first — `follow` may already
+      // be true (it defaults on), so the follow-toggle effect below won't
+      // re-fire on a project switch; the channel swap happens here.
+      stopFollow();
       parsed = [];
       searchQuery = "";
       matchIndex = 0;
       levelFilter = "all";
       autoScroll = true;
-      follow = false;
+      follow = true;
       void reload();
+      // startFollow guards on an existing channel, so the explicit call and
+      // the toggle effect can't double-subscribe. Subscribing right after the
+      // `tail_logs` snapshot leaves a ms-sized gap (the backend tail attaches
+      // at end-of-file): a line landing exactly in that window is shown by
+      // neither — accepted as a rare miss rather than plumbing the snapshot's
+      // byte offset through `subscribe_logs`.
+      startFollow();
       void startProcLog(id);
     });
   });
 
-  // Follow toggle wires up / tears down the poll.
+  // Follow toggle wires up / tears down the poll. Body is untracked so the
+  // only dependency is `follow` itself — startFollow reads the derived
+  // `project`, whose reference churns every 1.5 s status tick and would
+  // otherwise re-run this (and force-scroll) while the user reads scrollback.
   $effect(() => {
-    if (follow) startFollow();
-    else stopFollow();
+    const on = follow;
+    untrack(() => {
+      if (on) {
+        startFollow();
+        // Ticking Follow means "take me to the live tail": re-arm auto-scroll
+        // even if a manual scroll-up had released it, and snap to the bottom.
+        autoScroll = true;
+        scrollToBottom();
+      } else {
+        stopFollow();
+      }
+    });
   });
 
   // ----- search -----

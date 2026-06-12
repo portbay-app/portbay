@@ -11,6 +11,9 @@
 
   Add a new icon by importing it from `@lucide/svelte` and adding it to
   `iconMap`. Don't import lucide icons directly anywhere else.
+
+  `finder` is the one hand-drawn glyph (the macOS Finder face) — lucide has
+  no equivalent; it's inlined below following lucide's stroke conventions.
 -->
 <script lang="ts" module>
   export type IconName =
@@ -29,6 +32,9 @@
     | "plus"
     | "minus"
     | "refresh-cw"
+    | "git-compare"
+    | "git-commit-horizontal"
+    | "git-merge"
     | "x"
     | "check"
     | "chevron-right"
@@ -82,6 +88,9 @@
     | "power"
     | "panel-left-close"
     | "panel-left-open"
+    | "history"
+    | "pin"
+    | "type"
     | "square-kanban"
     | "trash-2"
     | "eraser"
@@ -116,7 +125,12 @@
     | "pen-line"
     | "list-ordered"
     | "download"
-    | "loader-circle";
+    | "loader-circle"
+    | "smartphone"
+    | "camera"
+    | "grip-vertical"
+    | "eye-off"
+    | "finder";
 </script>
 
 <script lang="ts">
@@ -136,6 +150,9 @@
     Plus,
     Minus,
     RefreshCw,
+    GitCompare,
+    GitCommitHorizontal,
+    GitMerge,
     X,
     Check,
     ChevronRight,
@@ -189,6 +206,9 @@
     Power,
     PanelLeftClose,
     PanelLeftOpen,
+    History,
+    Pin,
+    Type,
     SquareKanban,
     Trash2,
     Eraser,
@@ -224,6 +244,10 @@
     ListOrdered,
     Download,
     LoaderCircle,
+    Smartphone,
+    Camera,
+    GripVertical,
+    EyeOff,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -242,7 +266,7 @@
     class: cls = "",
   }: Props = $props();
 
-  const iconMap: Record<IconName, typeof LucideIconComponent> = {
+  const iconMap: Record<Exclude<IconName, "finder">, typeof LucideIconComponent> = {
     play: Play,
     "stop-circle": StopCircle,
     square: Square,
@@ -258,6 +282,9 @@
     plus: Plus,
     minus: Minus,
     "refresh-cw": RefreshCw,
+    "git-compare": GitCompare,
+    "git-commit-horizontal": GitCommitHorizontal,
+    "git-merge": GitMerge,
     x: X,
     check: Check,
     "chevron-right": ChevronRight,
@@ -311,6 +338,9 @@
     power: Power,
     "panel-left-close": PanelLeftClose,
     "panel-left-open": PanelLeftOpen,
+    history: History,
+    pin: Pin,
+    type: Type,
     "square-kanban": SquareKanban,
     "trash-2": Trash2,
     eraser: Eraser,
@@ -346,9 +376,36 @@
     "list-ordered": ListOrdered,
     download: Download,
     "loader-circle": LoaderCircle,
+    smartphone: Smartphone,
+    camera: Camera,
+    "grip-vertical": GripVertical,
+    "eye-off": EyeOff,
   };
 
-  const Component = $derived(iconMap[name]);
+  const Component = $derived(name === "finder" ? null : iconMap[name]);
 </script>
 
-<Component {size} {strokeWidth} class={cls} aria-hidden="true" />
+{#if Component}
+  <Component {size} {strokeWidth} class={cls} aria-hidden="true" />
+{:else}
+  <!-- finder — the macOS Finder face, drawn lucide-style -->
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width={strokeWidth}
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    class={cls}
+    aria-hidden="true"
+  >
+    <rect x="3" y="3" width="18" height="18" rx="3" />
+    <path d="M11.5 3c-1.8 5.7-1.8 12.3 0 18" />
+    <path d="M8 9.5v2" />
+    <path d="M16 9.5v2" />
+    <path d="M7 15.5c3.2 2.4 6.8 2.4 10 0" />
+  </svg>
+{/if}

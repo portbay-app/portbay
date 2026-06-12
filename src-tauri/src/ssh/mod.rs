@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod backend;
+pub mod secret;
 pub mod config_import;
 pub mod exec;
 pub mod exec_manager;
@@ -28,9 +29,11 @@ pub use config_import::{parse_ssh_config, SshConfigCandidate};
 pub use exec_manager::ExecManager;
 pub use interaction::{EventInteractor, NoopInteractor, SshInteractor};
 pub use manager::{
-    read_state, state_file_path, write_state, SshManager, SshTunnelRuntimeStatus, SSH_STATE_CHANNEL,
+    read_state, state_file_path, write_state, SshManager, SshTunnelEventStatus,
+    SshTunnelRuntimeStatus, SSH_STATE_CHANNEL,
 };
 pub use probe::{probe_connection, ProbeResult};
 pub use pty::PtyManager;
+pub use secret::{secret_str, SecretString};
 pub use session::{connect_session, SshSession, SshSessionHandle};
 pub use sftp::SftpManager;

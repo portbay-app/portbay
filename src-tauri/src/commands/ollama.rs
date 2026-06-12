@@ -196,6 +196,15 @@ pub struct SmokeTestResult {
     pub total_duration_ms: Option<u64>,
 }
 
+/// One or more embedding vectors from `/api/embed` (the Embeddings playground
+/// embeds 1–2 inputs and computes dimension + cosine similarity client-side).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbedResult {
+    pub model: String,
+    pub embeddings: Vec<Vec<f32>>,
+}
+
 #[tauri::command]
 pub async fn ollama_overview(state: State<'_, AppState>) -> AppResult<OllamaOverview> {
     overview(&state).await
@@ -227,9 +236,7 @@ pub async fn ollama_running(state: State<'_, AppState>) -> AppResult<bool> {
 /// `ollama_running`. A non-answering endpoint yields an empty list rather than
 /// an error so the caller can poll it without special-casing a stopped server.
 #[tauri::command]
-pub async fn ollama_loaded_models(
-    state: State<'_, AppState>,
-) -> AppResult<Vec<OllamaLoadedModel>> {
+pub async fn ollama_loaded_models(state: State<'_, AppState>) -> AppResult<Vec<OllamaLoadedModel>> {
     let prefs = state.preferences_snapshot().normalise_ai_endpoint().ai;
     Ok(loaded_models(&prefs.endpoint).await.unwrap_or_default())
 }
@@ -388,7 +395,11 @@ fn listener_pids(port: u16) -> Vec<u32> {
 
 #[tauri::command]
 pub async fn ollama_show_model(state: State<'_, AppState>, model: String) -> AppResult<Value> {
-    let endpoint = state.preferences_snapshot().normalise_ai_endpoint().ai.endpoint;
+    let endpoint = state
+        .preferences_snapshot()
+        .normalise_ai_endpoint()
+        .ai
+        .endpoint;
     // `long_client` (connect timeout, no total cap): `/api/show` normally
     // answers in milliseconds but legitimately blocks while a large model is
     // mid-load — a fixed total timeout would hard-fail that instead of waiting.
@@ -404,7 +415,11 @@ pub async fn ollama_show_model(state: State<'_, AppState>, model: String) -> App
 
 #[tauri::command]
 pub async fn ollama_delete_model(state: State<'_, AppState>, model: String) -> AppResult<()> {
-    let endpoint = state.preferences_snapshot().normalise_ai_endpoint().ai.endpoint;
+    let endpoint = state
+        .preferences_snapshot()
+        .normalise_ai_endpoint()
+        .ai
+        .endpoint;
     let client = http_client()?;
     let res = client
         .delete(format!("{}/api/delete", endpoint.trim_end_matches('/')))
@@ -417,7 +432,11 @@ pub async fn ollama_delete_model(state: State<'_, AppState>, model: String) -> A
 
 #[tauri::command]
 pub async fn ollama_unload_model(state: State<'_, AppState>, model: String) -> AppResult<()> {
-    let endpoint = state.preferences_snapshot().normalise_ai_endpoint().ai.endpoint;
+    let endpoint = state
+        .preferences_snapshot()
+        .normalise_ai_endpoint()
+        .ai
+        .endpoint;
     let client = long_client()?;
     let res = client
         .post(format!("{}/api/generate", endpoint.trim_end_matches('/')))
@@ -435,9 +454,15 @@ pub async fn ollama_smoke_test(
     prompt: String,
 ) -> AppResult<SmokeTestResult> {
     if model.trim().is_empty() {
-        return Err(AppError::BadInput("Choose a model before running a test prompt.".into()));
+        return Err(AppError::BadInput(
+            "Choose a model before running a test prompt.".into(),
+        ));
     }
-    let endpoint = state.preferences_snapshot().normalise_ai_endpoint().ai.endpoint;
+    let endpoint = state
+        .preferences_snapshot()
+        .normalise_ai_endpoint()
+        .ai
+        .endpoint;
     let client = long_client()?;
     let res = client
         .post(format!("{}/api/generate", endpoint.trim_end_matches('/')))
@@ -461,6 +486,64 @@ pub async fn ollama_smoke_test(
             .get("total_duration")
             .and_then(Value::as_u64)
             .map(|nanos| nanos / 1_000_000),
+    })
+}
+
+/// Embed 1–2 inputs with an installed embedding model (`/api/embed`). The
+/// Embeddings playground uses the returned vectors to show dimension, a value
+/// sparkline, and cosine similarity between two inputs.
+#[tauri::command]
+pub async fn ollama_embed(
+    state: State<'_, AppState>,
+    model: String,
+    input: Vec<String>,
+) -> AppResult<EmbedResult> {
+    if model.trim().is_empty() {
+        return Err(AppError::BadInput(
+            "Choose an embedding model first.".into(),
+        ));
+    }
+    let inputs: Vec<String> = input.into_iter().filter(|s| !s.trim().is_empty()).collect();
+    if inputs.is_empty() {
+        return Err(AppError::BadInput("Enter text to embed.".into()));
+    }
+    let endpoint = state
+        .preferences_snapshot()
+        .normalise_ai_endpoint()
+        .ai
+        .endpoint;
+    let client = long_client()?;
+    let res = client
+        .post(format!("{}/api/embed", endpoint.trim_end_matches('/')))
+        .json(&json!({ "model": model, "input": inputs }))
+        .send()
+        .await
+        .map_err(http_err)?;
+    let value = json_response(res).await?;
+    let embeddings = value
+        .get("embeddings")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    row.as_array()
+                        .map(|v| {
+                            v.iter()
+                                .filter_map(|n| n.as_f64().map(|f| f as f32))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(EmbedResult {
+        model: value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(&model)
+            .to_string(),
+        embeddings,
     })
 }
 
@@ -556,7 +639,9 @@ pub async fn ollama_test_stream(
         .unwrap_or_else(|e| e.into_inner())
         .remove(&run_id);
     if let Err(err) = result {
-        let _ = on_event.send(GenerateEvent::Error { message: err.to_string() });
+        let _ = on_event.send(GenerateEvent::Error {
+            message: err.to_string(),
+        });
     }
     Ok(())
 }
@@ -583,7 +668,11 @@ async fn run_generate(
     think: bool,
     options: Option<Value>,
 ) -> AppResult<()> {
-    let endpoint = state.preferences_snapshot().normalise_ai_endpoint().ai.endpoint;
+    let endpoint = state
+        .preferences_snapshot()
+        .normalise_ai_endpoint()
+        .ai
+        .endpoint;
     let client = long_client()?;
     // Build the request incrementally so unset knobs fall back to Ollama's own
     // defaults rather than being pinned to zeros.
@@ -638,7 +727,9 @@ async fn run_generate(
                     GENERATE_STALL_TIMEOUT.as_secs()
                 )));
             }
-            Ok(r) => r.map_err(|e| AppError::Internal(format!("response stream interrupted: {e}")))?,
+            Ok(r) => {
+                r.map_err(|e| AppError::Internal(format!("response stream interrupted: {e}")))?
+            }
         };
         let Some(chunk) = chunk else { break };
         if is_generate_cancelled(run_id) {
@@ -652,7 +743,9 @@ async fn run_generate(
             if line.is_empty() {
                 continue;
             }
-            let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
             if let Some(error) = value.get("error").and_then(Value::as_str) {
                 return Err(AppError::Internal(error.to_string()));
             }
@@ -660,12 +753,16 @@ async fn run_generate(
             // that supports it) — forwarded separately from the answer.
             if let Some(thinking) = value.get("thinking").and_then(Value::as_str) {
                 if !thinking.is_empty() {
-                    let _ = on_event.send(GenerateEvent::Thinking { text: thinking.to_string() });
+                    let _ = on_event.send(GenerateEvent::Thinking {
+                        text: thinking.to_string(),
+                    });
                 }
             }
             if let Some(text) = value.get("response").and_then(Value::as_str) {
                 if !text.is_empty() {
-                    let _ = on_event.send(GenerateEvent::Token { text: text.to_string() });
+                    let _ = on_event.send(GenerateEvent::Token {
+                        text: text.to_string(),
+                    });
                 }
             }
             if value.get("done").and_then(Value::as_bool) == Some(true) {
@@ -727,7 +824,11 @@ pub async fn ollama_pull_model(
         let mut cancelled = cancelled_pulls().lock().unwrap_or_else(|e| e.into_inner());
         cancelled.remove(&pull_id);
     }
-    let endpoint = state.preferences_snapshot().normalise_ai_endpoint().ai.endpoint;
+    let endpoint = state
+        .preferences_snapshot()
+        .normalise_ai_endpoint()
+        .ai
+        .endpoint;
     // Register the pull up front so the overview reports it even before the
     // first stream event (and after the page unmounts mid-download).
     publish_pull_event(
@@ -1164,7 +1265,10 @@ async fn overview(state: &AppState) -> AppResult<OllamaOverview> {
         },
     };
     let (installed_models, loaded_models) = if version.is_some() {
-        tokio::join!(installed_models(&prefs.endpoint), loaded_models(&prefs.endpoint))
+        tokio::join!(
+            installed_models(&prefs.endpoint),
+            loaded_models(&prefs.endpoint)
+        )
     } else {
         (Ok(Vec::new()), Ok(Vec::new()))
     };
@@ -1186,7 +1290,11 @@ async fn overview(state: &AppState) -> AppResult<OllamaOverview> {
     })
 }
 
-async fn spawn_ollama(binary: PathBuf, prefs: AiPrefs, log_path: PathBuf) -> AppResult<std::process::Child> {
+async fn spawn_ollama(
+    binary: PathBuf,
+    prefs: AiPrefs,
+    log_path: PathBuf,
+) -> AppResult<std::process::Child> {
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(parent) = log_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1295,9 +1403,16 @@ async fn installed_models(endpoint: &str) -> AppResult<Vec<OllamaModel>> {
         .unwrap_or_default()
         .into_iter()
         .map(|m| OllamaModel {
-            name: m.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+            name: m
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             size: m.get("size").and_then(Value::as_u64).unwrap_or(0),
-            modified_at: m.get("modified_at").and_then(Value::as_str).map(str::to_string),
+            modified_at: m
+                .get("modified_at")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             family: m
                 .get("details")
                 .and_then(|d| d.get("family"))
@@ -1335,11 +1450,21 @@ async fn loaded_models(endpoint: &str) -> AppResult<Vec<OllamaLoadedModel>> {
         .unwrap_or_default()
         .into_iter()
         .map(|m| OllamaLoadedModel {
-            name: m.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+            name: m
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             size: m.get("size").and_then(Value::as_u64).unwrap_or(0),
             size_vram: m.get("size_vram").and_then(Value::as_u64).unwrap_or(0),
-            expires_at: m.get("expires_at").and_then(Value::as_str).map(str::to_string),
-            processor: m.get("processor").and_then(Value::as_str).map(str::to_string),
+            expires_at: m
+                .get("expires_at")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            processor: m
+                .get("processor")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
         .filter(|m| !m.name.is_empty())
         .collect();
@@ -1352,8 +1477,7 @@ async fn disk_usage(configured_dir: String) -> AppResult<DiskUsage> {
         // the preference only describes the NEXT managed start. Reporting the
         // configured dir while an external server stored everything on another
         // volume showed the wrong disk's free space entirely.
-        let expanded =
-            running_server_models_dir().unwrap_or_else(|| expand_tilde(&configured_dir));
+        let expanded = running_server_models_dir().unwrap_or_else(|| expand_tilde(&configured_dir));
         let used = dir_size(Path::new(&expanded));
         // Match mount points against the symlink-resolved path: a models dir
         // reached through a home-dir symlink onto another volume otherwise
@@ -1435,8 +1559,9 @@ fn running_server_models_dir() -> Option<String> {
     match ps_env_value(env_block, "OLLAMA_MODELS").filter(|v| !v.is_empty()) {
         Some(dir) => Some(expand_tilde(dir)),
         // Server up without the env: it stores under Ollama's own default.
-        None => dirs::home_dir()
-            .map(|home| home.join(".ollama/models").to_string_lossy().into_owned()),
+        None => {
+            dirs::home_dir().map(|home| home.join(".ollama/models").to_string_lossy().into_owned())
+        }
     }
 }
 
@@ -1590,14 +1715,18 @@ async fn stop_managed_pid(pid: u32) -> AppResult<()> {
 async fn binary_status(path: Option<PathBuf>) -> OllamaBinaryStatus {
     let version = match path.clone() {
         Some(path) => tauri::async_runtime::spawn_blocking(move || {
-            Command::new(path).arg("--version").output().ok().map(|out| {
-                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if text.is_empty() {
-                    String::from_utf8_lossy(&out.stderr).trim().to_string()
-                } else {
-                    text
-                }
-            })
+            Command::new(path)
+                .arg("--version")
+                .output()
+                .ok()
+                .map(|out| {
+                    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if text.is_empty() {
+                        String::from_utf8_lossy(&out.stderr).trim().to_string()
+                    } else {
+                        text
+                    }
+                })
         })
         .await
         .ok()
@@ -1647,7 +1776,11 @@ fn ollama_host(endpoint: &str) -> String {
 }
 
 fn bool_env(value: bool) -> &'static str {
-    if value { "1" } else { "0" }
+    if value {
+        "1"
+    } else {
+        "0"
+    }
 }
 
 /// Client for quick JSON endpoints (version/tags/ps/show/delete). The total
@@ -1684,13 +1817,19 @@ async fn ensure_ok(res: reqwest::Response) -> AppResult<()> {
     if res.status().is_success() {
         Ok(())
     } else {
-        Err(AppError::Internal(format!("ollama returned HTTP {}", res.status())))
+        Err(AppError::Internal(format!(
+            "ollama returned HTTP {}",
+            res.status()
+        )))
     }
 }
 
 async fn json_response(res: reqwest::Response) -> AppResult<Value> {
     if !res.status().is_success() {
-        return Err(AppError::Internal(format!("ollama returned HTTP {}", res.status())));
+        return Err(AppError::Internal(format!(
+            "ollama returned HTTP {}",
+            res.status()
+        )));
     }
     res.json::<Value>()
         .await
@@ -1705,13 +1844,19 @@ fn parse_pull_event(line: &str) -> AppResult<PullEvent> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let error = value.get("error").and_then(Value::as_str).map(str::to_string);
+    let error = value
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Ok(PullEvent {
         done: error.is_some()
             || status.eq_ignore_ascii_case("success")
             || status.eq_ignore_ascii_case("done"),
         status,
-        digest: value.get("digest").and_then(Value::as_str).map(str::to_string),
+        digest: value
+            .get("digest")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         total: value.get("total").and_then(Value::as_u64),
         completed: value.get("completed").and_then(Value::as_u64),
         error,
@@ -1904,14 +2049,19 @@ mod tests {
 
     #[tokio::test]
     async fn run_pull_streams_progress_then_done() {
-        let body = "{\"status\":\"pulling\",\"total\":100,\"completed\":40}\n{\"status\":\"success\"}\n";
+        let body =
+            "{\"status\":\"pulling\",\"total\":100,\"completed\":40}\n{\"status\":\"success\"}\n";
         let url = serve_once(body.to_string());
         let (ch, seen) = collecting_channel();
         let r = run_pull(&url, "tiny", "pull-happy", &ch, None).await;
         assert!(r.is_ok(), "{r:?}");
         let seen = seen.lock().unwrap();
-        assert!(seen.iter().any(|e| e["status"] == "pulling" && e["total"] == 100));
-        assert!(seen.iter().any(|e| e["status"] == "success" && e["done"] == true));
+        assert!(seen
+            .iter()
+            .any(|e| e["status"] == "pulling" && e["total"] == 100));
+        assert!(seen
+            .iter()
+            .any(|e| e["status"] == "success" && e["done"] == true));
     }
 
     #[tokio::test]
@@ -1922,7 +2072,11 @@ mod tests {
         let r = run_pull(&url, "ghost", "pull-err", &ch, None).await;
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("model not found"));
-        assert!(seen.lock().unwrap().iter().any(|e| e["error"] == "model not found"));
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e["error"] == "model not found"));
     }
 
     #[tokio::test]
@@ -1944,7 +2098,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert("pull-cancel".to_string());
-        let body = "{\"status\":\"pulling\",\"total\":100,\"completed\":10}\n{\"status\":\"success\"}\n";
+        let body =
+            "{\"status\":\"pulling\",\"total\":100,\"completed\":10}\n{\"status\":\"success\"}\n";
         let url = serve_once(body.to_string());
         let (ch, seen) = collecting_channel();
         let r = run_pull(&url, "tiny", "pull-cancel", &ch, None).await;

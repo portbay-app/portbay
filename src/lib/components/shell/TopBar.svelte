@@ -13,6 +13,7 @@
       pill appears between Stop All and the cluster when active.
 -->
 <script lang="ts">
+  import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
@@ -20,9 +21,11 @@
   import { tunnels } from "$lib/stores/tunnels.svelte";
   import { theme } from "$lib/stores/theme.svelte";
   import { notifications } from "$lib/stores/notifications.svelte";
+  import { activity } from "$lib/stores/activity.svelte";
   import StopAllButton from "./StopAllButton.svelte";
   import NotificationsPanel from "./NotificationsPanel.svelte";
   import UserMenu from "./UserMenu.svelte";
+  import UserAvatar from "./UserAvatar.svelte";
   import PlatformIcon from "$lib/components/marketing/PlatformIcon.svelte";
   import { detectedPlatform } from "$lib/platform";
 
@@ -32,6 +35,13 @@
 
   let notificationsOpen = $state<boolean>(false);
   let userMenuOpen = $state<boolean>(false);
+
+  // The bell badge unifies system/toast history with agent-activity. Start the
+  // activity feed once (hydrates persisted history + listens for new events).
+  const unreadTotal = $derived(notifications.unreadCount + activity.unreadCount);
+  onMount(() => {
+    void activity.start();
+  });
 
   function openAddProject() {
     addProjectWizard.requestAdd();
@@ -57,11 +67,6 @@
     if (userMenuOpen) notificationsOpen = false;
   }
 
-  // Avatar gradient is deterministic — PortBay is single-user, but we
-  // still want the topbar's chip to read as "an account UI" so the
-  // affordance is unmistakable. "P" initial sits on a brand-flavoured
-  // teal→indigo gradient.
-  const avatarGradient = "linear-gradient(135deg, #4d9cff 0%, #7b5cff 100%)";
 </script>
 
 <header
@@ -174,20 +179,20 @@
         type="button"
         onclick={toggleNotifications}
         title="Notifications"
-        aria-label="Notifications ({notifications.unreadCount} unread)"
+        aria-label="Notifications ({unreadTotal} unread)"
         aria-expanded={notificationsOpen}
         class="inline-flex items-center justify-center w-9 h-9 rounded-lg
                text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
       >
         <Icon name="bell" size={15} />
-        {#if notifications.unreadCount > 0}
+        {#if unreadTotal > 0}
           <span
             class="absolute top-1 right-1.5 min-w-[14px] h-3.5 px-1
                    rounded-full bg-status-crashed text-on-accent
                    text-[9px] leading-[14px] font-semibold text-center
                    tabular-nums shadow"
           >
-            {notifications.unreadCount > 9 ? "9+" : notifications.unreadCount}
+            {unreadTotal > 9 ? "9+" : unreadTotal}
           </span>
         {/if}
       </button>
@@ -207,14 +212,7 @@
         class="inline-flex items-center gap-1 h-9 pl-1 pr-1.5 rounded-lg
                hover:bg-surface-2 transition-colors"
       >
-        <span
-          class="inline-flex items-center justify-center w-7 h-7 rounded-full
-                 text-on-accent text-[11px] font-semibold tracking-tight
-                 shadow-inner"
-          style:background={avatarGradient}
-        >
-          P
-        </span>
+        <UserAvatar size={28} />
         <Icon
           name="chevron-down"
           size={12}

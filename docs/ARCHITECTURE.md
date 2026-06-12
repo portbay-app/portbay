@@ -70,7 +70,7 @@ Considered. Rejected:
 
 ## Bundle size budget
 
-The `<100 MB` budget is for the **compressed DMG installer** (what a user
+The `<130 MB` budget is for the **compressed DMG installer** (what a user
 downloads), **not** the uncompressed `.app`. The two differ by ~2.3× because
 the bundle is dominated by prebuilt Go sidecars that compress to ~⅓ their size.
 
@@ -91,11 +91,15 @@ the bundle is dominated by prebuilt Go sidecars that compress to ~⅓ their size
 `codegen-units = 1`); stripping pulls the shell binary back toward ~12 MB.
 
 The original `<30 MB` target from the planning phase was unreachable once we
-accepted bundling all sidecars. The revised `<100 MB` **installer** budget holds
-with ~23 MB of headroom. RAM budget (`<80 MB idle`) is unchanged — disk size and
-runtime memory are independent. If the installer ever nears 100 MB, the cheapest
-lever is lazy-downloading the optional sidecars (cloudflared/tunnels,
-mailpit/mail) instead of bundling them.
+accepted bundling all sidecars; the `<100 MB` revision held (~77 MB) until the
+AI sidecars (portbay-stt with WhisperKit/FluidAudio, portbay-imagegen with
+Core ML Stable Diffusion, portbay-afm) joined the bundle and pushed the DMG to
+~114 MB. The current `<130 MB` **installer** budget reflects that — model
+weights are NOT bundled (downloaded on demand), only the engine binaries. RAM
+budget (`<80 MB idle`) is unchanged — disk size and runtime memory are
+independent. If the installer ever nears 130 MB, the cheapest levers are
+lazy-downloading the optional sidecars (cloudflared/tunnels, mailpit/mail) or
+the AI engines themselves.
 
 ---
 

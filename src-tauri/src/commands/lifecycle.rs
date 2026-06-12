@@ -110,8 +110,11 @@ pub async fn start_project(
     // echo the command the moment Play is pressed. Without this the panel sits
     // blank until the child emits its first line — which can be many seconds
     // for a dev server that compiles before printing — making PortBay feel
-    // laggy next to a terminal that echoes `$ pnpm dev` instantly. Live-only
-    // narration; emitted before any of the slower start work below.
+    // laggy next to a terminal that echoes `$ pnpm dev` instantly. Emitted
+    // before any of the slower start work below. Reset the replay ring first
+    // so a viewer opened mid-run sees this run's narration, not stale
+    // attempts — mirroring PC's truncate-per-run log file.
+    state.clear_proc_log(&id);
     if let Ok(reg) = load_registry(&state) {
         if let Some(p) = reg.get_project(&ProjectId::new(&id)) {
             emit_proc_log(&app, &id, "system", format!("▶ Starting {}…", p.name));
@@ -138,7 +141,7 @@ pub async fn start_project(
         // knows exactly which process to stop. Skipping this step would
         // let Process Compose try, fail mysteriously, and surface a bare
         // "exited with code 1" — the cause the user reported.
-        if let Some(holder) = preflight_port(&state, &id)? {
+        if let Some(holder) = tokio::task::block_in_place(|| preflight_port(&state, &id))? {
             // Surface *why* the start was refused in the log itself, so the log
             // view stays the single source of truth rather than only a toast.
             emit_proc_log(
@@ -157,7 +160,19 @@ pub async fn start_project(
         }
 
         let client = state.pc_client()?;
-        client.start(&process_id).await?;
+        // Play is idempotent: a process that's already up is success, not an
+        // error. If the user presses Play on a project that's already running
+        // (or double-clicks Play, or the row's state lagged a tick), Process
+        // Compose answers `/process/start` with a 4xx "process X is already
+        // running" — but the site is serving, so surfacing a red envelope is a
+        // false alarm. Swallow *only* that case and still fall through to
+        // session_add + the reconcile tick so routes/hosts converge. Every
+        // other start failure (no such process, bind error, …) propagates.
+        if let Err(e) = client.start(&process_id).await {
+            if !is_already_running(&e) {
+                return Err(e.into());
+            }
+        }
         // Remember this project in the running session so
         // `reopen_previous_projects` can restart it next launch.
         session_add(&state, &id);
@@ -259,7 +274,9 @@ pub async fn start_project_sandboxed(
             // Fail closed: prove macOS accepts this exact profile before we
             // persist the sandboxed state or start the project. We never want a
             // path where the project runs but confinement silently didn't apply.
-            crate::sandbox::preflight(data_dir, project)
+            // `preflight` runs `sandbox-exec` (a blocking subprocess) — keep it
+            // off the async command worker so it can't stall other commands.
+            tokio::task::block_in_place(|| crate::sandbox::preflight(data_dir, project))
                 .map_err(|e| AppError::Internal(format!("sandbox could not be activated: {e}")))?;
             crate::sandbox::reset_ephemeral_state(data_dir, project)
                 .map_err(|e| AppError::Internal(format!("sandbox reset failed: {e}")))?;
@@ -347,7 +364,8 @@ pub async fn install_project_sandboxed(
             .to_path_buf();
 
         // Fail closed: prove macOS accepts the install profile before running.
-        crate::sandbox::preflight_install(&data_dir, &project)
+        // `sandbox-exec` is a blocking subprocess — keep it off the async worker.
+        tokio::task::block_in_place(|| crate::sandbox::preflight_install(&data_dir, &project))
             .map_err(|e| AppError::Internal(format!("sandbox could not be activated: {e}")))?;
         // Give the (ephemeral) cache scratch a clean dir if ephemeral mode is on.
         crate::sandbox::reset_ephemeral_state(&data_dir, &project)
@@ -469,7 +487,7 @@ pub async fn force_start_project(
         force_free_ports(&state, &id).await?;
         // Re-check: anything we couldn't kill (e.g. a root-owned process) still
         // blocks the bind — surface it rather than letting PC flail.
-        if let Some((port, holder)) = preflight_port(&state, &id)? {
+        if let Some((port, holder)) = tokio::task::block_in_place(|| preflight_port(&state, &id))? {
             return Err(AppError::PortConflict { port, holder });
         }
         let client = state.pc_client()?;
@@ -541,6 +559,22 @@ fn project_pc_process_id(
 
 fn pc_process_id_for_project(project: &Project) -> Option<String> {
     project.process_compose_id()
+}
+
+/// Classify a `client.start` failure as the benign "it's already up" case so
+/// Play can treat it as success (C2). Process Compose answers a start on a
+/// running process with a 4xx whose body PortBay has already unwrapped to PC's
+/// own message — `process X is already running` (see
+/// `process_compose::client::check_status`). Matched on the message rather than
+/// the bare status so an unrelated 4xx (no such process, bad request) still
+/// propagates as a real error. Mirrors the `is not running` match `stop_project`
+/// uses for the inverse PC quirk.
+fn is_already_running(err: &crate::process_compose::PcError) -> bool {
+    matches!(
+        err,
+        crate::process_compose::PcError::HttpStatus { body, .. }
+            if body.contains("is already running")
+    )
 }
 
 /// Whether `project_id` is a static site served directly by Caddy (no process),
@@ -733,8 +767,60 @@ pub async fn stop_project(app: AppHandle, state: State<'_, AppState>, id: String
         return Ok(());
     };
     state.mark_stop_requested(&id);
+
+    // Mobile runs: kill the *app* first — Xcode's Stop semantics. PC's SIGTERM
+    // below only tears down the attached stream (console-pty / logcat), which
+    // would leave the app running on the simulator/device. The launch script
+    // wrote the device + bundle/package ids to `run-meta`; `terminate_app`
+    // consumes it. Blocking subprocess work → blocking pool.
+    if let Ok(reg) = load_registry(&state) {
+        if let Some(p) = reg.get_project(&ProjectId::new(&id)) {
+            if crate::mobile::is_mobile_kind(p.kind) {
+                let path = p.path.clone();
+                let _ =
+                    tokio::task::spawn_blocking(move || crate::mobile::terminate_app(&path)).await;
+            }
+        }
+    }
+
     let client = state.pc_client()?;
-    client.stop(&process_id).await?;
+    if let Err(e) = client.stop(&process_id).await {
+        // PC quirk (observed live, kitabi 2026-06-11): after a completed →
+        // started-again cycle, `/process/stop/{name}` can 400 "process X is
+        // not running" while `/processes` reports the same process Running
+        // with a live pid. Stop must converge anyway: if PC's list shows a
+        // live pid, kill it ourselves (same SIGTERM the daemon would send);
+        // if not, the process is genuinely down and Stop already succeeded —
+        // either way the user doesn't get an error for stopping something.
+        let stale_state = matches!(
+            &e,
+            crate::process_compose::PcError::HttpStatus { status: 400, body }
+                if body.contains("is not running")
+        );
+        if !stale_state {
+            return Err(e.into());
+        }
+        let live_pid = client
+            .processes()
+            .await
+            .ok()
+            .and_then(|list| list.into_iter().find(|p| p.name == process_id))
+            .filter(|p| p.is_running && p.pid > 0)
+            .map(|p| p.pid);
+        if let Some(pid) = live_pid {
+            tracing::warn!(
+                project = %id,
+                pid,
+                "PC stop said 'not running' but the process is alive — killing it directly"
+            );
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::port_holder::kill_gracefully(pid, std::time::Duration::from_secs(5))
+            })
+            .await;
+        } else {
+            tracing::info!(project = %id, "PC stop said 'not running' and no live pid — treating stop as done");
+        }
+    }
 
     // PC's SIGTERM may leave the real dev-server worker orphaned and still on
     // the port; reap it so the next Start doesn't hit a self-inflicted
@@ -750,6 +836,9 @@ pub async fn restart_project(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
+    // New run: reset the narration replay ring (same rationale as
+    // start_project — PC truncates the log file per run).
+    state.clear_proc_log(&id);
     if let Ok(reg) = load_registry(&state) {
         if let Some(p) = reg.get_project(&ProjectId::new(&id)) {
             emit_proc_log(&app, &id, "system", format!("↻ Restarting {}…", p.name));
@@ -773,7 +862,7 @@ pub async fn restart_project(
     // got reclaimed by the new child. If a foreign process holds it,
     // surface the same PortConflict envelope start_project uses.
     tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-    if let Some((port, holder)) = preflight_port(&state, &id)? {
+    if let Some((port, holder)) = tokio::task::block_in_place(|| preflight_port(&state, &id))? {
         emit_proc_log(
             &app,
             &id,
@@ -939,15 +1028,39 @@ fn session_file(state: &AppState) -> std::path::PathBuf {
 }
 
 pub(crate) fn load_session(state: &AppState) -> Vec<String> {
-    std::fs::read(session_file(state))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
-        .unwrap_or_default()
+    let path = session_file(state);
+    let Ok(bytes) = std::fs::read(&path) else {
+        // No file yet (fresh install / never persisted) — nothing to reopen.
+        return Vec::new();
+    };
+    match serde_json::from_slice::<Vec<String>>(&bytes) {
+        Ok(ids) => ids,
+        Err(e) => {
+            // A half-written (interrupted quit) or corrupted session file: don't
+            // silently drop the reopen list — surface why "my projects didn't
+            // come back" so it's diagnosable rather than a mystery.
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "session.json unreadable — reopen-on-launch skipped"
+            );
+            Vec::new()
+        }
+    }
 }
 
 fn write_session(state: &AppState, ids: &[String]) {
     if let Ok(json) = serde_json::to_vec(ids) {
-        let _ = std::fs::write(session_file(state), json);
+        let path = session_file(state);
+        let _ = std::fs::write(&path, json);
+        // Owner-only. The ids themselves aren't sensitive, but this path
+        // collides with auth's keychain-fallback session file on macOS
+        // (config_dir == data_dir), which is 0600 — never loosen it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
     }
 }
 
@@ -1095,5 +1208,31 @@ mod tests {
         let p = project_at("/repos/static", None, vec![], None);
         let (ports, _) = project_ports_and_dir(&p);
         assert!(ports.is_empty());
+    }
+
+    #[test]
+    fn already_running_is_idempotent_but_other_errors_propagate() {
+        use crate::process_compose::PcError;
+        // The benign double-Play case PC reports — treated as success.
+        assert!(is_already_running(&PcError::HttpStatus {
+            status: 400,
+            body: "process web is already running".into(),
+        }));
+        // PC uses 409 in some versions for the same condition; the message,
+        // not the status, is the load-bearing signal.
+        assert!(is_already_running(&PcError::HttpStatus {
+            status: 409,
+            body: "process web is already running".into(),
+        }));
+        // A genuinely different start failure must NOT be swallowed.
+        assert!(!is_already_running(&PcError::HttpStatus {
+            status: 400,
+            body: "no such process: web".into(),
+        }));
+        // The inverse quirk (stop path) must not be confused for already-running.
+        assert!(!is_already_running(&PcError::HttpStatus {
+            status: 400,
+            body: "process web is not running".into(),
+        }));
     }
 }

@@ -27,6 +27,7 @@
   import { ConfirmDialog } from "$lib/components/atoms";
   import { SignInSheet, AboutLicenseDialog } from "$lib/components/account";
   import FeedbackPrompt from "$lib/components/lifecycle/FeedbackPrompt.svelte";
+  import AnywhereGrantBootCheck from "$lib/components/permissions/AnywhereGrantBootCheck.svelte";
   import CrashReportCard from "$lib/components/lifecycle/CrashReportCard.svelte";
   import { density } from "$lib/stores/density.svelte";
   import { theme } from "$lib/stores/theme.svelte";
@@ -44,6 +45,7 @@
   import { preferences } from "$lib/stores/preferences.svelte";
   import { notificationPrefs } from "$lib/stores/notificationPrefs.svelte";
   import { projects } from "$lib/stores/projects.svelte";
+  import { mobilePhase } from "$lib/stores/mobilePhase.svelte";
   import { projectDetailPanel } from "$lib/stores/detailPanel.svelte";
   import { addProjectWizard } from "$lib/stores/wizard.svelte";
   import { databases } from "$lib/stores/databases.svelte";
@@ -123,6 +125,10 @@
     // the dashboard could leave other routes looking at a stale or
     // emptied store.
     void projects.start();
+    // Mobile run-phase overlay (Building…/Connected on mobile rows and the
+    // rail) rides its own event channel; same page-spanning lifetime as the
+    // projects store it annotates.
+    void mobilePhase.start();
     // The setup banner and Settings "Setup" surface in this layout read sidecar
     // health on every route, so the poll must run layout-wide — not only on the
     // dashboard / Services / Web Servers pages that also start it. Without this,
@@ -523,5 +529,6 @@
   <AboutLicenseDialog />
   <FeedbackPrompt />
   <CrashReportCard />
+  <AnywhereGrantBootCheck />
   <ToastHost />
 {/if}

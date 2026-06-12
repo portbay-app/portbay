@@ -14,7 +14,12 @@
 	     builds without these keys are denied by TCC with no prompt — a missing
 	     mic key can kill the process outright on capture. -->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>PortBay uses the microphone when you dictate text into a task card via macOS Dictation.</string>
+	<string>PortBay uses the microphone when you dictate text into a task card via macOS Dictation, and to record narration in screen recordings.</string>
+	<!-- Screen-recording webcam PiP (portbay-capture sidecar): the camera
+	     bubble recorded into clips. Hardened builds without this key are
+	     denied silently. -->
+	<key>NSCameraUsageDescription</key>
+	<string>PortBay uses the camera for the webcam overlay in screen recordings.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>PortBay uses macOS speech recognition to turn your dictation into text on task cards.</string>
 </dict>

@@ -353,6 +353,53 @@ pub fn mic_permission() -> String {
     authorization_label(status).into()
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn mic_permission() -> String {
+    "unknown".into()
+}
+
+/// Trigger the system microphone prompt (`AVCaptureDevice requestAccess`),
+/// resolving with the user's answer. TCC attributes the prompt to PortBay —
+/// the same grant the STT sidecar's capture rides on. When permission is
+/// already settled (granted or denied) the callback fires immediately with
+/// the current state, so this is safe to call from a CTA regardless.
+#[cfg(target_os = "macos")]
+pub async fn request_mic_access() -> bool {
+    use block2::RcBlock;
+    use objc2::runtime::{AnyClass, Bool};
+    use objc2_foundation::NSString;
+
+    if !load_framework(c"/System/Library/Frameworks/AVFoundation.framework/AVFoundation") {
+        return false;
+    }
+    let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
+        return false;
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    // The ObjC values (NSString, RcBlock) are !Send and a `tauri::command`
+    // future must be Send — scope them to drop BEFORE the await. AVFoundation
+    // copies the escaping completion block, so our reference doesn't need to
+    // outlive the call.
+    {
+        let tx = std::sync::Mutex::new(Some(tx));
+        let block = RcBlock::new(move |granted: Bool| {
+            if let Some(tx) = tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = tx.send(granted.as_bool());
+            }
+        });
+        let media = NSString::from_str("soun"); // AVMediaTypeAudio
+        let _: () = unsafe {
+            objc2::msg_send![cls, requestAccessForMediaType: &*media, completionHandler: &*block]
+        };
+    }
+    rx.await.unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn request_mic_access() -> bool {
+    false
+}
+
 /// Speech-recognition TCC status via `SFSpeechRecognizer` (informational —
 /// system dictation does not use SFSpeechRecognizer).
 #[cfg(target_os = "macos")]

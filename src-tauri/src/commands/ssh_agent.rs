@@ -26,6 +26,7 @@ use crate::ssh::agent::{
 };
 use crate::ssh::exec::ExecResult;
 use crate::ssh::interaction::EventInteractor;
+use crate::ssh::secret::{nonblank_secret, secret_str};
 use crate::state::AppState;
 
 /// One chat message relayed to the host's model (ollama `/api/chat` shape).
@@ -99,12 +100,11 @@ pub async fn ssh_agent_open(
     passphrase: Option<String>,
 ) -> AppResult<AgentInfo> {
     let conn = resolve_conn(&state, &connection_id)?;
-    let nonblank = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    let password = match nonblank(password) {
+    let password = match nonblank_secret(password) {
         Some(p) => Some(p),
         None => load_stored_password(&conn.id)?,
     };
-    let passphrase = match nonblank(passphrase) {
+    let passphrase = match nonblank_secret(passphrase) {
         Some(p) => Some(p),
         None => load_stored_key_passphrase(&conn.id)?,
     };
@@ -114,9 +114,9 @@ pub async fn ssh_agent_open(
         let mut mgr = state.agent.lock().await;
         mgr.session_for(
             &conn,
-            password.as_deref(),
-            proxy_password.as_deref(),
-            passphrase.as_deref(),
+            secret_str(&password),
+            secret_str(&proxy_password),
+            secret_str(&passphrase),
             Some(EventInteractor::shared(app)),
         )
         .await
@@ -286,6 +286,17 @@ pub async fn ssh_agent_cli_chat(
 ) -> AppResult<()> {
     let cli_provider = CliProvider::parse(&provider)
         .ok_or_else(|| AppError::BadInput(format!("`{provider}` is not a CLI agent provider")))?;
+    // Allowlist the permission posture at the IPC boundary: the UI only ever
+    // offers these three. Anything else — notably "bypassPermissions", which
+    // would map to Codex's no-sandbox flag on the remote host — is rejected
+    // rather than forwarded.
+    if let Some(mode) = permission_mode.as_deref() {
+        if !matches!(mode, "default" | "plan" | "acceptEdits") {
+            return Err(AppError::BadInput(format!(
+                "`{mode}` is not a permission mode this app offers"
+            )));
+        }
+    }
     let conn = resolve_conn(&state, &connection_id)?;
     let session = {
         let mut mgr = state.agent.lock().await;
@@ -1033,6 +1044,75 @@ pub async fn ssh_agent_close(state: State<'_, AppState>, connection_id: String) 
         cleanup_attachments(&session).await;
     }
     state.agent.lock().await.disconnect(&connection_id);
+    Ok(())
+}
+
+/// On-disk home for persisted agent chat threads, next to `preferences.json`.
+///
+/// These used to live in webview localStorage, which lands full conversations —
+/// including remote tool output — plaintext under `~/Library/WebKit/…`, outside
+/// the app's data dir (and keyed by bundle identity, so dev vs. bundled builds
+/// saw different histories). The frontend owns the thread shape
+/// (`agentThreads.svelte.ts`); the backend stores it as opaque JSON keyed by
+/// connection id, same split as deploy snippets.
+fn agent_threads_path() -> std::io::Result<std::path::PathBuf> {
+    let mut dir = dirs::data_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no platform data dir"))?;
+    dir.push("PortBay");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join("ssh-agent-threads.json"))
+}
+
+/// Persisted thread stores keyed by SSH connection id.
+type AgentThreadMap = std::collections::BTreeMap<String, serde_json::Value>;
+
+/// Serialises read-modify-write cycles on the threads file so two saves (e.g.
+/// agent panes on two hosts) can't interleave and drop each other's update.
+static AGENT_THREADS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Missing file or parse failure → empty map; the chat pane must still render
+/// (with no history) if the file is corrupted by a disk fault.
+fn read_agent_threads() -> AgentThreadMap {
+    let Ok(path) = agent_threads_path() else {
+        return AgentThreadMap::new();
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return AgentThreadMap::new();
+    };
+    match serde_json::from_str::<AgentThreadMap>(&raw) {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "agent threads file corrupt — starting empty");
+            AgentThreadMap::new()
+        }
+    }
+}
+
+/// Load one connection's persisted threads (`null` when none).
+#[tauri::command]
+pub async fn ssh_agent_threads_get(connection_id: String) -> AppResult<Option<serde_json::Value>> {
+    let _guard = AGENT_THREADS_LOCK.lock().await;
+    Ok(read_agent_threads().remove(&connection_id))
+}
+
+/// Replace one connection's persisted threads. Atomic write (temp + rename) so
+/// a crash mid-write can't truncate the other connections' histories.
+#[tauri::command]
+pub async fn ssh_agent_threads_set(
+    connection_id: String,
+    data: serde_json::Value,
+) -> AppResult<()> {
+    let _guard = AGENT_THREADS_LOCK.lock().await;
+    let path = agent_threads_path()
+        .map_err(|e| AppError::Internal(format!("failed to resolve threads path: {e}")))?;
+    let mut map = read_agent_threads();
+    map.insert(connection_id, data);
+    let serialised = serde_json::to_vec(&map)
+        .map_err(|e| AppError::Internal(format!("failed to serialise threads: {e}")))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &serialised)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| AppError::Internal(format!("failed to save agent threads: {e}")))?;
     Ok(())
 }
 

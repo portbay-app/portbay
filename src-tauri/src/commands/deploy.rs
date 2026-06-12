@@ -26,8 +26,8 @@ use crate::commands::ssh_tunnels::{
 use crate::error::{AppError, AppResult};
 use crate::registry::{ProjectId, SshConnection, SshConnectionId};
 use crate::ssh::exec::{run_deploy_on_streaming, StepResult};
+use crate::ssh::secret::{nonblank_secret, secret_str, SecretString};
 use crate::state::AppState;
-use tauri::Emitter;
 use russh_sftp::client::SftpSession;
 use tokio::io::AsyncWriteExt;
 
@@ -87,15 +87,18 @@ fn resolve_secrets(
     conn: &SshConnection,
     password_override: Option<String>,
     passphrase_override: Option<String>,
-) -> AppResult<(Option<String>, Option<String>, Option<String>)> {
-    let nonblank = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    let password = match nonblank(password_override) {
+) -> AppResult<(
+    Option<SecretString>,
+    Option<SecretString>,
+    Option<SecretString>,
+)> {
+    let password = match nonblank_secret(password_override) {
         Some(p) => Some(p),
         None => load_stored_password(&conn.id)?,
     };
     let passphrase = match passphrase_override {
-        Some(ref s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        Some(_) => Some(String::new()),
+        Some(ref s) if !s.trim().is_empty() => Some(SecretString::new(s.trim().to_string())),
+        Some(_) => Some(SecretString::new(String::new())),
         None => load_stored_key_passphrase(&conn.id)?,
     };
     let proxy_password = load_stored_proxy_password(&conn.id)?;
@@ -157,9 +160,9 @@ pub async fn project_deploy_run(
         let mut mgr = state.sftp.lock().await;
         mgr.session_for(
             &conn,
-            password.as_deref(),
-            proxy_password.as_deref(),
-            passphrase.as_deref(),
+            secret_str(&password),
+            secret_str(&proxy_password),
+            secret_str(&passphrase),
             interactor.clone(),
         )
         .await
@@ -198,7 +201,8 @@ pub async fn project_deploy_run(
     let total = files.len() as u32;
     let emit_sync = |uploaded: u32, bytes: u64| {
         if let Some(id) = run_id.as_deref() {
-            let _ = app.emit(
+            let _ = crate::commands::events::emit_to_main(
+                &app,
                 DEPLOY_CHANNEL,
                 DeployEvent::Sync {
                     run_id: id.to_string(),
@@ -255,9 +259,9 @@ pub async fn project_deploy_run(
             let mut mgr = state.exec.lock().await;
             mgr.session_for(
                 &conn,
-                password.as_deref(),
-                proxy_password.as_deref(),
-                passphrase.as_deref(),
+                secret_str(&password),
+                secret_str(&proxy_password),
+                secret_str(&passphrase),
                 interactor,
             )
             .await

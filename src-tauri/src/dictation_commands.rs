@@ -75,7 +75,10 @@ fn command_for(squashed_clause: &str) -> Option<Command> {
         "step" | "steps" | "nextstep" | "newstep" | "numberedlist" | "number" | "nextnumber" => {
             Some(Command::NumberedItem)
         }
-        "scratchthat" | "deletethat" | "removethat" | "scratchthelastsentence"
+        "scratchthat"
+        | "deletethat"
+        | "removethat"
+        | "scratchthelastsentence"
         | "deletethelastsentence" => Some(Command::ScratchPrevious),
         _ => None,
     }
@@ -242,7 +245,9 @@ mod tests {
     #[test]
     fn bullet_starts_a_bulleted_line() {
         assert_eq!(
-            apply_voice_commands("Here are the items. Bullet point. Install deps. Bullet point. Run migrations."),
+            apply_voice_commands(
+                "Here are the items. Bullet point. Install deps. Bullet point. Run migrations."
+            ),
             "Here are the items.\n- Install deps.\n- Run migrations."
         );
         // "New point" / "next point" are bullet synonyms.
@@ -255,7 +260,9 @@ mod tests {
     #[test]
     fn numbered_items_count_up_and_reset_on_paragraph() {
         assert_eq!(
-            apply_voice_commands("Steps. Install the deps. Next step. Run the migrations. Next step. Seed the data."),
+            apply_voice_commands(
+                "Steps. Install the deps. Next step. Run the migrations. Next step. Seed the data."
+            ),
             "1. Install the deps.\n2. Run the migrations.\n3. Seed the data."
         );
         // A paragraph break starts a fresh numbered context.
@@ -333,7 +340,10 @@ mod tests {
         let mut checked = 0;
         for entry in entries {
             let path = entry.expect("dir entry").path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
             // The corpus proper (j*/t*); the cmd-* fixtures are asserted
             // separately (they intentionally do/don't fire).
             if !(name.starts_with('j') || name.starts_with('t')) || !name.ends_with(".txt") {
@@ -348,7 +358,10 @@ mod tests {
             checked += 1;
         }
         // Guard against the test silently passing because it found nothing.
-        assert!(checked >= 30, "expected the full corpus, only saw {checked} files");
+        assert!(
+            checked >= 30,
+            "expected the full corpus, only saw {checked} files"
+        );
     }
 
     #[test]

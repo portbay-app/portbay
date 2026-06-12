@@ -462,6 +462,16 @@ pub struct Preferences {
     #[serde(default)]
     pub preferred_terminal: Option<String>,
 
+    /// Terminal multiplexer an *interactive* dispatch runs inside, so the run
+    /// survives its terminal window closing (detach/reattach) — the same
+    /// persistent-session model PortBay gives remote `tmux`/`screen` in the SSH
+    /// Jobs panel. `Some("tmux")` opts in; `None` (or `"none"`) keeps the
+    /// historical behaviour of running directly in the window. The launch
+    /// wrapper degrades to a direct run when `tmux` isn't on the terminal's
+    /// PATH, so enabling this can't wedge a dispatch.
+    #[serde(default)]
+    pub dispatch_multiplexer: Option<String>,
+
     /// Global default agent (kind id, e.g. `"claude"`) dispatched for project
     /// boards that haven't saved their own automation config yet. A project's
     /// own board config overrides this once edited. `None` → Claude.
@@ -550,6 +560,375 @@ pub struct Preferences {
     /// `dictation` (it's a dictation behavior); this is the models' home.
     #[serde(default)]
     pub stt: SttPrefs,
+
+    // -------- Local text-to-speech --------
+    /// Storage settings for the local TTS engine's models (Kokoro, run through
+    /// the same `portbay-stt` sidecar's FluidAudio link).
+    #[serde(default)]
+    pub tts: TtsPrefs,
+
+    // -------- Local image generation --------
+    /// Storage settings for the local image-generation models (FLUX/SD3, run
+    /// through the `portbay-imagegen` DiffusionKit sidecar).
+    #[serde(default)]
+    pub imagegen: ImagegenPrefs,
+
+    // -------- Screen capture --------
+    /// Screen-capture settings (the `portbay-capture` sidecar — hotkeys,
+    /// selection overlay, Quick Access). Pushed to the resident sidecar as
+    /// its `configure` op on every save; the sidecar persists nothing.
+    #[serde(default)]
+    pub capture: CapturePrefs,
+}
+
+/// One global capture hotkey, in the sidecar's wire shape: a Carbon virtual
+/// key code plus modifier names ("command" | "option" | "shift" |
+/// "control"). `key_code: -1` = hotkey disabled.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureShortcut {
+    pub key_code: i32,
+    pub modifiers: Vec<String>,
+}
+
+impl CaptureShortcut {
+    fn option_shift(key_code: i32) -> Self {
+        Self {
+            key_code,
+            modifiers: vec!["option".into(), "shift".into()],
+        }
+    }
+
+    fn command_shift(key_code: i32) -> Self {
+        Self {
+            key_code,
+            modifiers: vec!["command".into(), "shift".into()],
+        }
+    }
+}
+
+/// Screen-capture sidecar settings. Defaults mirror the sidecar's own
+/// (Settings.swift) so a sidecar that never saw a configure behaves the
+/// same — the CleanShot-style ⌘⇧ scheme: ⌘⇧3 fullscreen · ⌘⇧4 area ·
+/// ⌘⇧5 All-in-One HUD · ⌘⇧6 record · ⌘⇧1 previous area · ⌘⇧2 OCR ·
+/// ⌘⇧7 window · ⌘⇧8 scrolling · ⌘⇧9 timer · ⌘⇧0 freeze · ⌘⇧G GIF ·
+/// ⌘⇧P pause, saving to ~/Downloads. macOS's own ⌘⇧3/4/5 take precedence
+/// until disabled under System Settings → Keyboard → Shortcuts →
+/// Screenshots.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturePrefs {
+    /// Keep the capture sidecar resident. The global hotkeys live in that
+    /// process, so off = no hotkeys and no capture surface.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Where captures are written; tilde expanded sidecar-side.
+    #[serde(default = "default_capture_save_dir")]
+    pub save_dir: String,
+    /// Copy every capture to the clipboard as it lands.
+    #[serde(default)]
+    pub auto_copy: bool,
+    /// Show the Quick Access floating thumbnail stack after each capture.
+    #[serde(default = "default_true")]
+    pub show_quick_access: bool,
+    /// Include the pointer in fullscreen captures.
+    #[serde(default)]
+    pub show_cursor: bool,
+    /// Self-timer countdown seconds (sidecar clamps to 2–15).
+    #[serde(default = "default_capture_timer_seconds")]
+    pub timer_seconds: u32,
+    /// OCR output keeps recognized line breaks (false = join with spaces).
+    #[serde(default = "default_true")]
+    pub ocr_keep_line_breaks: bool,
+    /// Days of capture history to keep (rows + thumbnails only — saved
+    /// files are never pruned). Sidecar clamps to 1–365.
+    #[serde(default = "default_capture_retention_days")]
+    pub history_retention_days: u32,
+    #[serde(default = "default_capture_shortcut_area")]
+    pub shortcut_area: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_fullscreen")]
+    pub shortcut_fullscreen: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_window")]
+    pub shortcut_window: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_hud")]
+    pub shortcut_hud: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_scrolling")]
+    pub shortcut_scrolling: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_timer")]
+    pub shortcut_timer: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_freeze")]
+    pub shortcut_freeze: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_previous_area")]
+    pub shortcut_previous_area: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_ocr")]
+    pub shortcut_ocr: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_recording")]
+    pub shortcut_recording: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_gif")]
+    pub shortcut_gif: CaptureShortcut,
+    #[serde(default = "default_capture_shortcut_pause_recording")]
+    pub shortcut_pause_recording: CaptureShortcut,
+
+    // -------- Recording (P2) --------
+    /// MP4 frame rate (sidecar clamps 10–60).
+    #[serde(default = "default_recording_fps")]
+    pub recording_fps: u32,
+    /// "h264" | "hevc".
+    #[serde(default = "default_recording_codec")]
+    pub recording_codec: String,
+    /// Pointer in recordings: "system" (baked) | "circle" (elegant overlay
+    /// cursor with click ripples, recorded in place of the real cursor) |
+    /// "hidden" (none; the editor can draw a smoothed one from telemetry).
+    #[serde(default = "default_recording_cursor_style")]
+    pub recording_cursor_style: String,
+    /// Capture system audio (our own process excluded).
+    #[serde(default = "default_true")]
+    pub recording_system_audio: bool,
+    /// Capture the microphone.
+    #[serde(default)]
+    pub recording_microphone: bool,
+    /// AVCaptureDevice uniqueID; "" = system default mic.
+    #[serde(default)]
+    pub recording_mic_device_id: String,
+    /// Two audio tracks (system + mic) instead of the mixed default.
+    #[serde(default)]
+    pub recording_separate_audio_tracks: bool,
+    /// 3-2-1 countdown before recording starts.
+    #[serde(default = "default_true")]
+    pub recording_countdown: bool,
+    /// Best-effort Focus during recording ("PortBay Focus On/Off" Shortcuts).
+    #[serde(default)]
+    pub recording_auto_dnd: bool,
+    /// Hide desktop icons while recording (restored afterwards).
+    #[serde(default)]
+    pub recording_hide_desktop_icons: bool,
+    /// GIF mode: frame rate (sidecar clamps 5–30).
+    #[serde(default = "default_gif_fps")]
+    pub gif_fps: u32,
+    /// GIF quality "low" | "medium" | "high" (frame size + palette).
+    #[serde(default = "default_gif_quality")]
+    pub gif_quality: String,
+    /// Floyd–Steinberg dithering in the GIF encoder.
+    #[serde(default = "default_true")]
+    pub gif_dithering: bool,
+    /// Webcam PiP overlay (recorded into the clip).
+    #[serde(default)]
+    pub camera_enabled: bool,
+    /// AVCaptureDevice uniqueID; "" = default camera.
+    #[serde(default)]
+    pub camera_device_id: String,
+    /// PiP shape: "circle" | "square" | "portrait" | "landscape".
+    #[serde(default = "default_camera_shape")]
+    pub camera_shape: String,
+    /// Click-highlight ripples baked into recordings.
+    #[serde(default)]
+    pub click_highlight: bool,
+    /// "filled" | "outline" | "pulse".
+    #[serde(default = "default_click_highlight_style")]
+    pub click_highlight_style: String,
+    /// Keystroke display overlay baked into recordings (needs
+    /// Accessibility trust; degrades to nothing without it).
+    #[serde(default)]
+    pub keystroke_overlay: bool,
+    /// "bottom-center" | "bottom-left" | "bottom-right" | "top-center".
+    #[serde(default = "default_keystroke_position")]
+    pub keystroke_position: String,
+    /// "small" | "medium" | "large".
+    #[serde(default = "default_keystroke_size")]
+    pub keystroke_size: String,
+    /// "dark" | "light".
+    #[serde(default = "default_keystroke_appearance")]
+    pub keystroke_appearance: String,
+    /// Show only modifier-carrying keystrokes (shortcuts, not typing).
+    #[serde(default = "default_true")]
+    pub keystroke_only_modified: bool,
+}
+
+impl Default for CapturePrefs {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            save_dir: default_capture_save_dir(),
+            auto_copy: false,
+            show_quick_access: true,
+            show_cursor: false,
+            timer_seconds: default_capture_timer_seconds(),
+            ocr_keep_line_breaks: true,
+            history_retention_days: default_capture_retention_days(),
+            shortcut_area: default_capture_shortcut_area(),
+            shortcut_fullscreen: default_capture_shortcut_fullscreen(),
+            shortcut_window: default_capture_shortcut_window(),
+            shortcut_hud: default_capture_shortcut_hud(),
+            shortcut_scrolling: default_capture_shortcut_scrolling(),
+            shortcut_timer: default_capture_shortcut_timer(),
+            shortcut_freeze: default_capture_shortcut_freeze(),
+            shortcut_previous_area: default_capture_shortcut_previous_area(),
+            shortcut_ocr: default_capture_shortcut_ocr(),
+            shortcut_recording: default_capture_shortcut_recording(),
+            shortcut_gif: default_capture_shortcut_gif(),
+            shortcut_pause_recording: default_capture_shortcut_pause_recording(),
+            recording_fps: default_recording_fps(),
+            recording_codec: default_recording_codec(),
+            recording_cursor_style: default_recording_cursor_style(),
+            recording_system_audio: true,
+            recording_microphone: false,
+            recording_mic_device_id: String::new(),
+            recording_separate_audio_tracks: false,
+            recording_countdown: true,
+            recording_auto_dnd: false,
+            recording_hide_desktop_icons: false,
+            gif_fps: default_gif_fps(),
+            gif_quality: default_gif_quality(),
+            gif_dithering: true,
+            camera_enabled: false,
+            camera_device_id: String::new(),
+            camera_shape: default_camera_shape(),
+            click_highlight: false,
+            click_highlight_style: default_click_highlight_style(),
+            keystroke_overlay: false,
+            keystroke_position: default_keystroke_position(),
+            keystroke_size: default_keystroke_size(),
+            keystroke_appearance: default_keystroke_appearance(),
+            keystroke_only_modified: true,
+        }
+    }
+}
+
+fn default_capture_save_dir() -> String {
+    "~/Downloads".to_string()
+}
+
+fn default_capture_timer_seconds() -> u32 {
+    5
+}
+
+fn default_capture_retention_days() -> u32 {
+    30
+}
+
+/// Carbon virtual key codes for the digit row: 18 = "1", 19 = "2",
+/// 20 = "3", 21 = "4", 23 = "5", 22 = "6", 26 = "7", 28 = "8", 25 = "9",
+/// 29 = "0"; letters: 5 = "G", 35 = "P".
+fn default_capture_shortcut_area() -> CaptureShortcut {
+    CaptureShortcut::command_shift(21) // ⌘⇧4, like macOS
+}
+
+fn default_capture_shortcut_fullscreen() -> CaptureShortcut {
+    CaptureShortcut::command_shift(20) // ⌘⇧3, like macOS
+}
+
+fn default_capture_shortcut_window() -> CaptureShortcut {
+    CaptureShortcut::command_shift(26) // ⌘⇧7
+}
+
+fn default_capture_shortcut_hud() -> CaptureShortcut {
+    CaptureShortcut::command_shift(23) // ⌘⇧5, like macOS's capture panel
+}
+
+fn default_capture_shortcut_scrolling() -> CaptureShortcut {
+    CaptureShortcut::command_shift(28) // ⌘⇧8
+}
+
+fn default_capture_shortcut_timer() -> CaptureShortcut {
+    CaptureShortcut::command_shift(25) // ⌘⇧9
+}
+
+fn default_capture_shortcut_freeze() -> CaptureShortcut {
+    CaptureShortcut::command_shift(29) // ⌘⇧0
+}
+
+fn default_capture_shortcut_previous_area() -> CaptureShortcut {
+    CaptureShortcut::command_shift(18) // ⌘⇧1
+}
+
+fn default_capture_shortcut_ocr() -> CaptureShortcut {
+    CaptureShortcut::command_shift(19) // ⌘⇧2
+}
+
+fn default_capture_shortcut_recording() -> CaptureShortcut {
+    CaptureShortcut::command_shift(22) // ⌘⇧6
+}
+
+fn default_capture_shortcut_gif() -> CaptureShortcut {
+    CaptureShortcut::command_shift(5) // ⌘⇧G
+}
+
+fn default_capture_shortcut_pause_recording() -> CaptureShortcut {
+    CaptureShortcut::command_shift(35) // ⌘⇧P
+}
+
+fn default_recording_fps() -> u32 {
+    30
+}
+
+fn default_recording_codec() -> String {
+    "h264".to_string()
+}
+
+fn default_recording_cursor_style() -> String {
+    "system".to_string()
+}
+
+fn default_gif_fps() -> u32 {
+    15
+}
+
+fn default_gif_quality() -> String {
+    "medium".to_string()
+}
+
+fn default_camera_shape() -> String {
+    "circle".to_string()
+}
+
+fn default_click_highlight_style() -> String {
+    "filled".to_string()
+}
+
+fn default_keystroke_position() -> String {
+    "bottom-center".to_string()
+}
+
+fn default_keystroke_size() -> String {
+    "medium".to_string()
+}
+
+fn default_keystroke_appearance() -> String {
+    "dark".to_string()
+}
+
+/// Local image-generation model storage. Sits beside [`SttPrefs`]/[`TtsPrefs`]
+/// under the same AI-models root (`<root>/imagegen`).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagegenPrefs {
+    #[serde(default = "default_imagegen_models_dir")]
+    pub models_dir: String,
+}
+
+impl Default for ImagegenPrefs {
+    fn default() -> Self {
+        Self {
+            models_dir: default_imagegen_models_dir(),
+        }
+    }
+}
+
+/// Local text-to-speech model storage. Sits beside [`SttPrefs`] under the same
+/// AI-models root (`<root>/tts`), managed by the AI page's one folder pick.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtsPrefs {
+    #[serde(default = "default_tts_models_dir")]
+    pub models_dir: String,
+}
+
+impl Default for TtsPrefs {
+    fn default() -> Self {
+        Self {
+            models_dir: default_tts_models_dir(),
+        }
+    }
 }
 
 /// Local speech-to-text model storage. Mirrors `AiPrefs.models_dir`'s role
@@ -616,6 +995,14 @@ pub struct DictationPrefs {
     #[serde(default)]
     pub custom_terms: Vec<String>,
 
+    /// User-written rewrite instructions, appended to the system prompt as a
+    /// clearly-delimited addendum AFTER the built-in rules (which stay
+    /// immutable — the hidden-base / editable-body split, so users can tune
+    /// style without being able to break the load-bearing core). Empty =
+    /// no addendum, prompt byte-identical to the probed snapshots.
+    #[serde(default)]
+    pub custom_instructions: String,
+
     /// Transcription engine: `"macos"` (system dictation types into the
     /// field, the default) or `"local"` (the `portbay-stt` sidecar captures
     /// the mic and runs a downloaded Whisper/Parakeet model on-device). A
@@ -643,6 +1030,43 @@ pub struct DictationPrefs {
     /// hatch for users whose Fn key already double-taps into something else.
     #[serde(default = "default_true")]
     pub anywhere_double_tap: bool,
+
+    /// Auto-stop for hands-free ("toggle") anywhere sessions: when the
+    /// streaming recognizer flags End-of-Utterance (sustained silence after
+    /// speech), the session finishes on its own — no closing Fn tap. Off by
+    /// default: push-to-talk and the explicit tap-to-stop stay the baseline,
+    /// and only the streaming EOU engine emits the signal (other engines
+    /// simply never auto-stop). Hold sessions always ignore it — the held
+    /// key IS the stop signal.
+    #[serde(default)]
+    pub anywhere_auto_stop: bool,
+
+    /// Automatic activation: a quick Fn TAP (released inside the hold gate)
+    /// starts a hands-free session instead of being discarded — hold stays
+    /// push-to-talk, tap toggles, resolved at release time. Off by default:
+    /// every accidental Fn tap would otherwise open a session, so this is a
+    /// deliberate opt-in for users who set the system Fn key to "Do
+    /// Nothing". Supersedes the double-tap gesture while on (the first tap
+    /// already starts the session).
+    #[serde(default)]
+    pub anywhere_tap_toggle: bool,
+
+    /// The key that cancels an anywhere session in flight (capture discarded,
+    /// nothing pasted). macOS virtual key code; Esc (53) by default — F13/14/15
+    /// are the offered alternatives for apps that eat Esc (vim, games).
+    #[serde(default = "default_cancel_key")]
+    pub anywhere_cancel_key: u16,
+
+    /// The system sound played when an anywhere capture goes live ("Tink"
+    /// by default; empty = silent start). Bare names from
+    /// /System/Library/Sounds; the failure cue stays Pop regardless.
+    #[serde(default = "default_cue_sound")]
+    pub anywhere_cue_sound: String,
+
+    /// Cue playback volume (0.0–1.0), independent of the system output
+    /// volume (afplay's own gain). Applies to the start and failure cues.
+    #[serde(default = "default_cue_volume")]
+    pub anywhere_cue_volume: f32,
 
     /// Where the recording overlay sits: `"notch"` (the camera-housing HUD,
     /// the default) or `"bottom"` (a floating pill near the bottom of the
@@ -787,10 +1211,16 @@ impl Default for DictationPrefs {
             model: String::new(),
             push_to_talk: true,
             custom_terms: Vec::new(),
+            custom_instructions: String::new(),
             stt_engine: default_stt_engine(),
             stt_model: String::new(),
             anywhere: false,
             anywhere_double_tap: true,
+            anywhere_auto_stop: false,
+            anywhere_tap_toggle: false,
+            anywhere_cancel_key: default_cancel_key(),
+            anywhere_cue_sound: default_cue_sound(),
+            anywhere_cue_volume: default_cue_volume(),
             overlay_position: default_overlay_position(),
             overlay_noise_floor: default_overlay_noise_floor(),
             overlay_preview_chars: default_overlay_preview_chars(),
@@ -825,7 +1255,11 @@ fn default_dictation_endpoint() -> String {
 // this release, so no existing install has models at an older default.
 fn default_ollama_models_dir() -> String {
     dirs::data_dir()
-        .map(|p| p.join("PortBay/ai-models/ollama").to_string_lossy().into_owned())
+        .map(|p| {
+            p.join("PortBay/ai-models/ollama")
+                .to_string_lossy()
+                .into_owned()
+        })
         .unwrap_or_else(|| "~/Library/Application Support/PortBay/ai-models/ollama".to_string())
 }
 
@@ -851,10 +1285,34 @@ fn default_overlay_preview_chars() -> u32 {
     150
 }
 
+fn default_tts_models_dir() -> String {
+    dirs::data_dir()
+        .map(|p| {
+            p.join("PortBay/ai-models/tts")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| "~/Library/Application Support/PortBay/ai-models/tts".to_string())
+}
+
 fn default_stt_models_dir() -> String {
     dirs::data_dir()
-        .map(|p| p.join("PortBay/ai-models/speech").to_string_lossy().into_owned())
+        .map(|p| {
+            p.join("PortBay/ai-models/speech")
+                .to_string_lossy()
+                .into_owned()
+        })
         .unwrap_or_else(|| "~/Library/Application Support/PortBay/ai-models/speech".to_string())
+}
+
+fn default_imagegen_models_dir() -> String {
+    dirs::data_dir()
+        .map(|p| {
+            p.join("PortBay/ai-models/imagegen")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| "~/Library/Application Support/PortBay/ai-models/imagegen".to_string())
 }
 
 fn default_ollama_keep_alive() -> String {
@@ -863,6 +1321,18 @@ fn default_ollama_keep_alive() -> String {
 
 fn default_ollama_origins() -> String {
     "http://localhost,https://localhost,http://127.0.0.1,https://127.0.0.1".to_string()
+}
+
+fn default_cancel_key() -> u16 {
+    crate::dictation_anywhere::KEY_ESCAPE
+}
+
+fn default_cue_sound() -> String {
+    "Tink".to_string()
+}
+
+fn default_cue_volume() -> f32 {
+    0.3
 }
 
 fn default_true() -> bool {
@@ -886,7 +1356,19 @@ fn default_log_retention_days() -> u32 {
 }
 
 fn default_cli_path() -> String {
-    "/usr/local/bin/portbay".to_string()
+    // `/usr/local/bin` is the Intel-Homebrew prefix and ships preconfigured on
+    // x86_64 macOS, but on Apple Silicon it often doesn't exist and isn't on
+    // PATH — Homebrew lives at `/opt/homebrew/bin` there. Default to the prefix
+    // that matches the architecture so the Settings field shows a path the user
+    // can actually install into (the installer still escalates if needed).
+    #[cfg(target_arch = "aarch64")]
+    {
+        "/opt/homebrew/bin/portbay".to_string()
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        "/usr/local/bin/portbay".to_string()
+    }
 }
 
 fn default_auto_clean_schedule() -> String {
@@ -984,6 +1466,7 @@ impl Default for Preferences {
             default_start_behavior: default_start_behavior(),
             default_web_server: None,
             preferred_terminal: None,
+            dispatch_multiplexer: None,
             preferred_agent: None,
             agent_paths: BTreeMap::new(),
             agent_launch_modes: BTreeMap::new(),
@@ -998,6 +1481,9 @@ impl Default for Preferences {
             ai: AiPrefs::default(),
             dictation: DictationPrefs::default(),
             stt: SttPrefs::default(),
+            tts: TtsPrefs::default(),
+            imagegen: ImagegenPrefs::default(),
+            capture: CapturePrefs::default(),
         }
     }
 }
@@ -1036,6 +1522,35 @@ impl Preferences {
         self
     }
 
+    /// One-time capture-hotkey migration: the original defaults were the
+    /// ⌥⇧ family; the scheme moved to CleanShot-style ⌘⇧ (⌘⇧3 fullscreen,
+    /// ⌘⇧4 area, …). A stored assignment that still equals its OLD default
+    /// was never customized — move it to the new default. Anything the
+    /// user changed is untouched. Applied on every load (idempotent: once
+    /// migrated, nothing matches the old defaults anymore).
+    pub fn migrate_capture_shortcuts(mut self) -> Self {
+        let pairs: [(&mut CaptureShortcut, i32, fn() -> CaptureShortcut); 12] = [
+            (&mut self.capture.shortcut_area, 18, default_capture_shortcut_area),
+            (&mut self.capture.shortcut_fullscreen, 19, default_capture_shortcut_fullscreen),
+            (&mut self.capture.shortcut_window, 20, default_capture_shortcut_window),
+            (&mut self.capture.shortcut_hud, 0, default_capture_shortcut_hud),
+            (&mut self.capture.shortcut_scrolling, 21, default_capture_shortcut_scrolling),
+            (&mut self.capture.shortcut_timer, 22, default_capture_shortcut_timer),
+            (&mut self.capture.shortcut_freeze, 3, default_capture_shortcut_freeze),
+            (&mut self.capture.shortcut_previous_area, 23, default_capture_shortcut_previous_area),
+            (&mut self.capture.shortcut_ocr, 17, default_capture_shortcut_ocr),
+            (&mut self.capture.shortcut_recording, 15, default_capture_shortcut_recording),
+            (&mut self.capture.shortcut_gif, 5, default_capture_shortcut_gif),
+            (&mut self.capture.shortcut_pause_recording, 35, default_capture_shortcut_pause_recording),
+        ];
+        for (slot, legacy_key, new_default) in pairs {
+            if *slot == CaptureShortcut::option_shift(legacy_key) {
+                *slot = new_default();
+            }
+        }
+        self
+    }
+
     /// Resolve the on-disk path. Creates the parent directory on first
     /// call so a subsequent `save()` can't fail on a missing folder.
     pub fn path() -> std::io::Result<PathBuf> {
@@ -1070,7 +1585,10 @@ impl Preferences {
                 } else {
                     prefs.notifications.normalised()
                 };
-                prefs.normalise_ai_endpoint().normalise_dictation_overlay()
+                prefs
+                    .normalise_ai_endpoint()
+                    .normalise_dictation_overlay()
+                    .migrate_capture_shortcuts()
             }
             Err(e) => {
                 tracing::warn!(
@@ -1089,9 +1607,13 @@ impl Preferences {
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path()?;
         let tmp = path.with_extension("json.tmp");
-        let serialised =
-            serde_json::to_vec_pretty(&self.clone().normalise_ai_endpoint().normalise_dictation_overlay())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let serialised = serde_json::to_vec_pretty(
+            &self
+                .clone()
+                .normalise_ai_endpoint()
+                .normalise_dictation_overlay(),
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         std::fs::write(&tmp, &serialised)?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
@@ -1306,6 +1828,7 @@ mod tests {
             default_start_behavior: "auto".to_string(),
             default_web_server: Some(WebServer::Nginx),
             preferred_terminal: Some("warp".to_string()),
+            dispatch_multiplexer: Some("tmux".to_string()),
             preferred_agent: Some("codex".to_string()),
             agent_paths: BTreeMap::from([(
                 "codex".to_string(),
@@ -1328,10 +1851,16 @@ mod tests {
                 model: "qwen2.5:3b".to_string(),
                 push_to_talk: false,
                 custom_terms: vec!["refactor".to_string(), "Tailwind".to_string()],
+                custom_instructions: String::new(),
                 stt_engine: "local".to_string(),
                 stt_model: "parakeet-tdt-v3".to_string(),
                 anywhere: true,
                 anywhere_double_tap: true,
+                anywhere_auto_stop: false,
+                anywhere_tap_toggle: false,
+                anywhere_cancel_key: 53,
+                anywhere_cue_sound: "Tink".to_string(),
+                anywhere_cue_volume: 0.3,
                 overlay_position: "bottom".to_string(),
                 overlay_noise_floor: 0.02,
                 overlay_preview_chars: 300,
@@ -1344,6 +1873,9 @@ mod tests {
             stt: SttPrefs {
                 models_dir: "/Volumes/DevSSD/system/ai/stt".to_string(),
             },
+            tts: TtsPrefs::default(),
+            imagegen: ImagegenPrefs::default(),
+            capture: CapturePrefs::default(),
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("\"showTrayIcon\":false"));
@@ -1376,6 +1908,112 @@ mod tests {
         assert!(json.contains("\"agentPaths\":{\"codex\":\"/Volumes/Ext/bin/codex\"}"));
         let back: Preferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn capture_prefs_round_trip_and_old_file_defaults() {
+        // Non-default capture prefs survive a camelCase round trip.
+        let mut p = Preferences::default();
+        p.capture.timer_seconds = 10;
+        p.capture.ocr_keep_line_breaks = false;
+        p.capture.history_retention_days = 90;
+        p.capture.shortcut_scrolling = CaptureShortcut {
+            key_code: 40, // K
+            modifiers: vec!["command".into(), "shift".into()],
+        };
+        p.capture.shortcut_hud = CaptureShortcut {
+            key_code: -1, // disabled
+            modifiers: vec![],
+        };
+        // P2 recording fields survive the round trip too.
+        p.capture.recording_fps = 60;
+        p.capture.recording_codec = "hevc".to_string();
+        p.capture.recording_cursor_style = "circle".to_string();
+        p.capture.recording_microphone = true;
+        p.capture.recording_mic_device_id = "mic-123".to_string();
+        p.capture.recording_separate_audio_tracks = true;
+        p.capture.gif_fps = 24;
+        p.capture.gif_quality = "high".to_string();
+        p.capture.gif_dithering = false;
+        p.capture.camera_enabled = true;
+        p.capture.camera_shape = "portrait".to_string();
+        p.capture.click_highlight = true;
+        p.capture.click_highlight_style = "pulse".to_string();
+        p.capture.keystroke_overlay = true;
+        p.capture.keystroke_position = "top-center".to_string();
+        p.capture.keystroke_only_modified = false;
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"timerSeconds\":10"));
+        assert!(json.contains("\"ocrKeepLineBreaks\":false"));
+        assert!(json.contains("\"historyRetentionDays\":90"));
+        assert!(json.contains("\"shortcutScrolling\""));
+        assert!(json.contains("\"shortcutPreviousArea\""));
+        assert!(json.contains("\"recordingFps\":60"));
+        assert!(json.contains("\"recordingCodec\":\"hevc\""));
+        assert!(json.contains("\"recordingCursorStyle\":\"circle\""));
+        assert!(json.contains("\"recordingMicDeviceId\":\"mic-123\""));
+        assert!(json.contains("\"recordingSeparateAudioTracks\":true"));
+        assert!(json.contains("\"gifQuality\":\"high\""));
+        assert!(json.contains("\"cameraShape\":\"portrait\""));
+        assert!(json.contains("\"clickHighlightStyle\":\"pulse\""));
+        assert!(json.contains("\"keystrokePosition\":\"top-center\""));
+        assert!(json.contains("\"shortcutPauseRecording\""));
+        let back: Preferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+
+        // A prefs file written before the P1 surface (only the P0 capture
+        // fields) reads with the new defaults — including the P2 ones.
+        let raw = r#"{ "capture": { "enabled": false, "saveDir": "~/Shots" } }"#;
+        let old: Preferences = serde_json::from_str(raw).unwrap();
+        assert!(!old.capture.enabled);
+        assert_eq!(old.capture.save_dir, "~/Shots");
+        assert_eq!(old.capture.timer_seconds, 5);
+        assert!(old.capture.ocr_keep_line_breaks);
+        assert_eq!(old.capture.history_retention_days, 30);
+        // The ⌘⇧ scheme (CleanShot-style; 3/4/5 mirror macOS).
+        assert_eq!(old.capture.shortcut_fullscreen.key_code, 20); // ⌘⇧3
+        assert_eq!(old.capture.shortcut_area.key_code, 21); // ⌘⇧4
+        assert_eq!(old.capture.shortcut_hud.key_code, 23); // ⌘⇧5
+        assert_eq!(old.capture.shortcut_recording.key_code, 22); // ⌘⇧6
+        assert_eq!(old.capture.shortcut_previous_area.key_code, 18); // ⌘⇧1
+        assert_eq!(old.capture.shortcut_ocr.key_code, 19); // ⌘⇧2
+        assert_eq!(old.capture.shortcut_window.key_code, 26); // ⌘⇧7
+        assert_eq!(old.capture.shortcut_scrolling.key_code, 28); // ⌘⇧8
+        assert_eq!(old.capture.shortcut_timer.key_code, 25); // ⌘⇧9
+        assert_eq!(old.capture.shortcut_freeze.key_code, 29); // ⌘⇧0
+        assert_eq!(old.capture.shortcut_gif.key_code, 5); // ⌘⇧G
+        assert_eq!(old.capture.shortcut_pause_recording.key_code, 35); // ⌘⇧P
+        assert_eq!(
+            old.capture.shortcut_area.modifiers,
+            vec!["command".to_string(), "shift".to_string()]
+        );
+
+        // Legacy ⌥⇧ assignments that were never customized migrate to the
+        // new ⌘⇧ defaults; customized ones survive untouched.
+        let mut legacy = Preferences::default();
+        legacy.capture.shortcut_area = CaptureShortcut::option_shift(18); // old default
+        legacy.capture.shortcut_ocr = CaptureShortcut {
+            key_code: 17,
+            modifiers: vec!["control".into()], // user-customized ⌃T
+        };
+        let migrated = legacy.migrate_capture_shortcuts();
+        assert_eq!(migrated.capture.shortcut_area, default_capture_shortcut_area());
+        assert_eq!(migrated.capture.shortcut_ocr.modifiers, vec!["control".to_string()]);
+        assert_eq!(old.capture.recording_fps, 30);
+        assert_eq!(old.capture.recording_codec, "h264");
+        assert_eq!(old.capture.recording_cursor_style, "system");
+        assert!(old.capture.recording_system_audio);
+        assert!(!old.capture.recording_microphone);
+        assert!(old.capture.recording_countdown);
+        assert_eq!(old.capture.gif_fps, 15);
+        assert_eq!(old.capture.gif_quality, "medium");
+        assert!(old.capture.gif_dithering);
+        assert_eq!(old.capture.camera_shape, "circle");
+        assert_eq!(old.capture.click_highlight_style, "filled");
+        assert_eq!(old.capture.keystroke_position, "bottom-center");
+        assert_eq!(old.capture.keystroke_size, "medium");
+        assert_eq!(old.capture.keystroke_appearance, "dark");
+        assert!(old.capture.keystroke_only_modified);
     }
 
     #[test]

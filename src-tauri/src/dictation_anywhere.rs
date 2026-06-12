@@ -113,6 +113,15 @@ struct Session {
     /// always-on term correction (Polish-off safety net) and as the rewrite
     /// vocabulary, so recognizer and rewrite never drift within one session.
     terms: Vec<String>,
+    /// PREBUFFER: the capture started at Fn-down went mic-hot and no
+    /// transition has consumed it yet. Whoever moves the machine on must
+    /// either promote it (→ Capturing) or cancel it — a true flag with no
+    /// consumer means a hot mic leaks.
+    mic_hot: bool,
+    /// The notch overlay is up for this session. Decides which side
+    /// completes Arming → Capturing (overlay first vs mic first) and
+    /// whether an abort needs to hide anything.
+    overlay_shown: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -124,6 +133,8 @@ static SESSION: Lazy<Mutex<Session>> = Lazy::new(|| {
         target: None,
         last_tap: None,
         terms: Vec::new(),
+        mic_hot: false,
+        overlay_shown: false,
     })
 });
 
@@ -224,6 +235,13 @@ pub struct AnywhereStatus {
     pub monitoring: bool,
 }
 
+/// kVK_Escape — the default "cancel dictation" key
+/// (`preferences::default_cancel_key`). Lives here, next to the key monitor
+/// that consumes the configured code, so the binding semantics and the
+/// default stay in one file. Cross-platform on purpose: preferences
+/// (de)serialize on every OS even where the monitor doesn't run.
+pub const KEY_ESCAPE: u16 = 53;
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ptr::NonNull;
@@ -240,20 +258,50 @@ mod macos {
     use once_cell::sync::Lazy;
 
     use super::{AnywhereStatus, Mode, OverlayMode, OverlaySettings, OverlayState, Phase, SESSION};
-    use crate::dictation::{InputSource, ProviderConfig, RewriteContext, RewriteMode};
+    use crate::dictation::{
+        InputSource, ProviderConfig, RewriteContext, RewriteMode, RewriteProvider,
+    };
     use crate::overlay_window;
     use crate::preferences::AppContextRule;
     use crate::state::AppState;
     use crate::typing::FrontTarget;
 
-    /// Same hold gate as the in-app push-to-talk disambiguator.
+    /// Same hold gate as the in-app push-to-talk disambiguator. Since the
+    /// PREBUFFER change this gates only the OVERLAY and the tap/chord
+    /// disambiguation — the mic starts at Fn-down (see `early_capture`), so
+    /// words spoken immediately are captured; a tap discards them unheard.
     const HOLD_GATE: Duration = Duration::from_millis(300);
+
+    /// How long the window stays up after the "hidden" transition so the
+    /// overlay's exit choreography can finish: the content drop-out plus the
+    /// collapse spring that morphs the shape back into the physical notch
+    /// outline (critically damped, ~450 ms to settle). Ordering the window
+    /// out mid-collapse would freeze the shape half-expanded — rAF stops for
+    /// occluded windows, so the next show would start from a stale frame.
+    const OVERLAY_EXIT_GRACE: Duration = Duration::from_millis(700);
+
+    /// Serializes sidecar capture lifecycle ops (start vs cancel). The
+    /// prebuffer makes start/discard overlap real — every Fn-down starts a
+    /// capture that a tap discards ~200 ms later, and without ordering the
+    /// next session's start could reach the sidecar before the discard and
+    /// fail with "a capture session is already active".
+    static CAPTURE_FLOW: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
     /// How long the polish rewrite gets before the paste falls back to the raw
-    /// transcript. Bounded so a slow/cold model never holds the paste open
-    /// indefinitely; the words always land (raw) within this window even when
-    /// the rewrite stalls. `begin_session` prewarms the model so the common
-    /// case finishes well inside it.
-    const POLISH_TIMEOUT: Duration = Duration::from_secs(25);
+    /// transcript. The raw words are already ON SCREEN when this clock runs —
+    /// polish is a bonus, and a notch sitting in "Polishing…" much longer
+    /// than this reads as a hang. The capture-start prewarm now also primes
+    /// the provider's prompt cache (measured 2026-06-09: first rewrite went
+    /// 24.8s → 2.6-4.4s once the static head was cached), so a healthy warm
+    /// rewrite finishes in single-digit seconds and this cap only catches
+    /// genuinely degraded providers.
+    const POLISH_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// How long "Polishing…" may hold the notch open. The raw words are
+    /// already in the field — past this the session looks finished (notch
+    /// closes, user moves on) and the polish swap lands silently in the
+    /// background when it completes. What the polished-dictation products
+    /// ship: text first, refinement arrives in place.
+    const POLISH_NOTCH_VISIBLE: Duration = Duration::from_secs(4);
 
     /// Terminal-emulator bundle ids that default to `TerminalCommand`
     /// formatting (operator words → symbols, no prose paragraphs). Everything
@@ -319,6 +367,29 @@ mod macos {
             endpoint: prefs.endpoint.clone(),
             model: prefs.model.clone(),
         };
+        // Pre-flight, tightly bounded: a provider that isn't running or has
+        // no usable model must never put the notch into "Polishing…" — the
+        // raw words are already on screen, so the session just finishes. A
+        // healthy local provider answers in ms; an unreachable one must not
+        // stall the notch either, hence the cap.
+        let available = match tokio::time::timeout(
+            Duration::from_millis(1500),
+            provider.build().status(),
+        )
+        .await
+        {
+            Ok(st) => {
+                st.reachable && (st.default_model.is_some() || !provider.model.trim().is_empty())
+            }
+            Err(_) => false,
+        };
+        if !available {
+            tracing::debug!(
+                provider = %provider.kind,
+                "dictation: polish provider unavailable; skipping polish (raw kept)"
+            );
+            return text.to_string();
+        }
         let context = resolve_context(
             target.and_then(|t| t.bundle_id.as_deref()),
             &prefs.anywhere_app_contexts,
@@ -379,9 +450,6 @@ mod macos {
     /// double-tap that starts a hands-free session (FluidVoice's tap
     /// threshold is 0.4 s; macOS's own double-press window feels the same).
     const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(400);
-    /// kVK_Escape.
-    const KEY_ESCAPE: u16 = 53;
-
     static MONITORS_INSTALLED: AtomicBool = AtomicBool::new(false);
 
     /// Install the global monitors at app start when trust already exists.
@@ -391,9 +459,7 @@ mod macos {
         if crate::typing::ax_trusted() {
             install_monitors(app, mtm);
         } else {
-            tracing::info!(
-                "dictation: anywhere monitors deferred — accessibility not granted yet"
-            );
+            tracing::info!("dictation: anywhere monitors deferred — accessibility not granted yet");
         }
     }
 
@@ -404,6 +470,14 @@ mod macos {
     pub fn ensure_monitors(app: &AppHandle, mtm: MainThreadMarker) -> AnywhereStatus {
         if !MONITORS_INSTALLED.load(Ordering::SeqCst) && crate::typing::ax_trusted() {
             install_monitors(app, mtm);
+        } else if MONITORS_INSTALLED.load(Ordering::SeqCst) {
+            // Monitors can predate the feature: trust at launch installs them
+            // with `anywhere` still off, and install's warm correctly skips.
+            // The arm call only fires on the user's toggle-on / re-check —
+            // never a poll — so warming here keeps "enable mid-session" from
+            // paying a cold model load on the first Fn-hold. (No-op when the
+            // feature is off or the resident engine already holds the model.)
+            maybe_prewarm_stt(app);
         }
         status()
     }
@@ -432,7 +506,8 @@ mod macos {
             let event = unsafe { event.as_ref() };
             match event.r#type() {
                 NSEventType::FlagsChanged => {
-                    let down = event.modifierFlags()
+                    let down = event
+                        .modifierFlags()
                         .contains(NSEventModifierFlags::Function);
                     if FN_DOWN.swap(down, Ordering::SeqCst) != down {
                         on_fn(&handle, down);
@@ -468,13 +543,12 @@ mod macos {
 
     /// Background-warm the local STT model when dictate-anywhere is configured,
     /// so the first Fn-hold pays the warm path (sub-second) instead of a cold
-    /// load (3-4 s on first use after boot). Fire-and-forget: the load happens
-    /// in a throwaway sidecar process, so the lasting benefit is the OS-level
-    /// caches that persist process-to-process (file cache, CoreML
-    /// specialization, ANE) — keeping the model *resident* between captures is
-    /// a separate, larger change. No-op unless the feature is enabled on the
-    /// local engine with a model chosen; the sidecar's own PREWARMING guard
-    /// makes a concurrent in-app prewarm a no-op.
+    /// load (3-4 s on first use after boot). Fire-and-forget into the resident
+    /// `--serve` engine (`stt::EngineProc`), which keeps the model loaded in
+    /// RAM between captures — so this warms once and every later capture
+    /// reuses the live process. No-op unless the feature is enabled on the
+    /// local engine with a model chosen; `stt::prewarm`'s own guard makes a
+    /// concurrent in-app prewarm a no-op.
     fn maybe_prewarm_stt(app: &AppHandle) {
         let prefs = app.state::<AppState>().preferences_snapshot();
         let d = &prefs.dictation;
@@ -492,6 +566,9 @@ mod macos {
     /// Fn transition while another app is active (global monitors never
     /// fire for our own app). Main thread.
     fn on_fn(app: &AppHandle, down: bool) {
+        // Physical Fn state, tracked unconditionally — the onboarding hint's
+        // sustained-hold detector reads it (a tap must not hint).
+        FN_HELD.store(down, Ordering::SeqCst);
         if down {
             fn_pressed(app);
         } else {
@@ -570,9 +647,7 @@ mod macos {
         match (phase, mode) {
             // Second tap — hands-free session, no hold gate (the first tap
             // already disambiguated the gesture).
-            (Phase::Idle, _) if double_tap => {
-                (Phase::Arming, Mode::Toggle, PressKind::BeginToggle)
-            }
+            (Phase::Idle, _) if double_tap => (Phase::Arming, Mode::Toggle, PressKind::BeginToggle),
             (Phase::Idle, _) => (Phase::Pending, Mode::Hold, PressKind::BeginHold),
             // Hands-free capture: a fresh Fn press is the stop signal.
             (Phase::Capturing, Mode::Toggle) => (Phase::Finishing, mode, PressKind::Finish),
@@ -588,6 +663,9 @@ mod macos {
         // engine, model chosen, sidecar capture conceivable.
         let prefs = app.state::<AppState>().preferences_snapshot().dictation;
         if !anywhere_trigger_allowed(prefs.anywhere, &prefs.stt_engine, &prefs.stt_model) {
+            // The user is holding Fn like a push-to-talk while the feature
+            // is off/unconfigured — the one moment onboarding is wanted.
+            maybe_onboarding_hint(app);
             return;
         }
         let model = prefs.stt_model;
@@ -604,8 +682,8 @@ mod macos {
                     // Capture the paste target NOW — the frontmost app at the
                     // moment the user started talking, not wherever they
                     // ended up.
-                    let mtm = MainThreadMarker::new()
-                        .expect("NSEvent monitor runs on the main thread");
+                    let mtm =
+                        MainThreadMarker::new().expect("NSEvent monitor runs on the main thread");
                     s.target = crate::typing::capture_front_target(mtm);
                     s.phase = new_phase;
                     s.mode = new_mode;
@@ -633,20 +711,37 @@ mod macos {
 
         match action {
             PressAction::BeginHold(generation) => {
+                tracing::debug!(generation, "dictation: anywhere Fn-down (hold begins)");
+                spawn_favicon_swap(app, generation);
+                // PREBUFFER: the mic starts NOW, not after the hold gate —
+                // that saved 300 ms (gate) + overlay-show used to come out
+                // of every dictation's latency budget AND ate the first
+                // word of fast talkers. The gate task only decides whether
+                // an overlay appears; a tap discards the capture unheard.
+                let capture_app = app.clone();
+                let capture_model = model.clone();
+                tauri::async_runtime::spawn(async move {
+                    early_capture(capture_app, generation, capture_model).await;
+                });
                 let app = app.clone();
+                let pressed_at = std::time::Instant::now();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(HOLD_GATE).await;
-                    {
-                        let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
-                        if s.generation != generation || s.phase != Phase::Pending {
-                            return;
-                        }
-                        s.phase = Phase::Arming;
-                    }
-                    begin_session(app, generation, model).await;
+                    tracing::debug!(
+                        generation,
+                        gate_ms = pressed_at.elapsed().as_millis() as u64,
+                        "dictation: hold gate fired (overlay next)"
+                    );
+                    arm_overlay_after_gate(app, generation).await;
+                    tracing::debug!(
+                        generation,
+                        since_press_ms = pressed_at.elapsed().as_millis() as u64,
+                        "dictation: overlay armed"
+                    );
                 });
             }
             PressAction::BeginToggle(generation) => {
+                spawn_favicon_swap(app, generation);
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     begin_session(app, generation, model).await;
@@ -659,28 +754,456 @@ mod macos {
         }
     }
 
-    /// Hold confirmed: show the overlay (arming look) and start the sidecar
-    /// capture. The await spans the model cold-load; the overlay's arming
-    /// state is honest about it, exactly like the in-app `arming` phase.
+    /// Browser targets get a better leading glyph: the ACTIVE TAB's site
+    /// favicon (dictating into chatgpt.com should show ChatGPT, not Chrome).
+    /// Fired at Fn-down right after the target capture, entirely OFF the hot
+    /// path: the AppleScript round trip and any favicon fetch run
+    /// concurrently with the prebuffer/hold-gate and never delay them. When
+    /// the favicon resolves and this generation still owns the session, the
+    /// parked target's icon is upgraded in place — so every later transition
+    /// that re-reads or re-clones the target (arming after the gate,
+    /// processing, polishing, the rescue toast) carries it — and the overlay
+    /// is re-emitted in its CURRENT phase so an already-visible notch swaps
+    /// live. Every failure leaves the browser icon exactly as it was.
+    fn spawn_favicon_swap(app: &AppHandle, generation: u64) {
+        let bundle_id = {
+            let s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            if s.generation != generation {
+                return;
+            }
+            s.target.as_ref().and_then(|t| t.bundle_id.clone())
+        };
+        let Some(bundle_id) = bundle_id else { return };
+        // Cheap pre-classification on the monitor thread: non-browser
+        // targets (the overwhelmingly common case) never even spawn.
+        if crate::favicon::browser_family(&bundle_id).is_none() {
+            return;
+        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let Some(icon) = crate::favicon::active_tab_favicon(&bundle_id).await else {
+                return;
+            };
+            // Swap the parked icon and decide whether to re-emit, briefly
+            // under the session lock. Only an overlay that is actually up
+            // re-emits; pre-gate phases just park the icon for the arming
+            // emit (which re-reads the session target), and Finishing's
+            // emits already cloned their target — too late, session ending.
+            let emit = {
+                let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+                if s.generation != generation {
+                    None
+                } else if let Some(target) = s.target.as_mut() {
+                    target.icon_data_url = Some(icon.clone());
+                    let name = target.name.clone();
+                    let phase = match s.phase {
+                        Phase::Arming if s.overlay_shown => Some("arming"),
+                        Phase::Capturing => Some("live"),
+                        _ => None,
+                    };
+                    phase.map(|p| (p, name, s.mode == Mode::Toggle))
+                } else {
+                    None
+                }
+            };
+            if let Some((phase, app_name, toggle)) = emit {
+                tracing::debug!(generation, "dictation: overlay icon swapped to tab favicon");
+                emit_state(
+                    &app,
+                    OverlayState {
+                        app_name: Some(app_name),
+                        app_icon: Some(icon),
+                        toggle,
+                        ..OverlayState::bare(phase)
+                    },
+                );
+            }
+        });
+    }
+
+    /// Fire-and-forget rewrite-model prewarm when polish is on, so the
+    /// rewrite at session end doesn't pay the cold load inside its own
+    /// timeout — same prewarm-when-anticipated pattern the in-app path uses.
+    fn maybe_prewarm_polish(app: &AppHandle) {
+        let d = app.state::<AppState>().preferences_snapshot().dictation;
+        if d.anywhere_polish {
+            crate::dictation::prewarm(&ProviderConfig {
+                kind: d.provider,
+                endpoint: d.endpoint,
+                model: d.model,
+            });
+        }
+    }
+
+    /// Resolve the Context-Store term snapshot for this session (global set
+    /// — anywhere has no project surface, §10.3). The rewrite context is
+    /// inferred from the target app so the learned-jargon ranking matches
+    /// what the finish-time rewrite will use. The full snapshot is parked on
+    /// the session (correction net + rewrite reuse the exact same set); the
+    /// returned bias is the engine-gated slice of it (never a prompt the
+    /// engine can't apply).
+    async fn resolve_bias(
+        app: &AppHandle,
+        target: Option<&FrontTarget>,
+        model: &str,
+        generation: u64,
+    ) -> Vec<String> {
+        let context = {
+            let prefs = app.state::<AppState>().preferences_snapshot().dictation;
+            resolve_context(
+                target.and_then(|t| t.bundle_id.as_deref()),
+                &prefs.anywhere_app_contexts,
+            )
+        };
+        let snapshot = crate::commands::dictation::recognizer_terms(
+            app.state::<AppState>().inner(),
+            Some(context),
+            None,
+        )
+        .await;
+        let bias = if crate::dictation_context::recognizer_bias_enabled()
+            && crate::dictation_context::engine_supports_text_bias(model)
+        {
+            crate::dictation_context::instrument::record_bias(snapshot.len());
+            tracing::debug!(model = %model, terms = snapshot.len(), "dictation: anywhere recognizer bias resolved");
+            snapshot.clone()
+        } else {
+            // Default: no recognizer bias (gated/unsupported — see
+            // `recognizer_bias_enabled`). The always-on correction net and
+            // the rewrite still fix known terms from the parked snapshot.
+            Vec::new()
+        };
+        {
+            let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            // Only park the snapshot if this session still owns the slot — a
+            // hold/toggle race across the await above must not install
+            // another session's vocab.
+            if s.generation == generation {
+                s.terms = snapshot;
+            }
+        }
+        bias
+    }
+
+    /// Physical Fn key state (set on press, cleared on release), tracked in
+    /// `on_fn` regardless of feature gates — the onboarding hint's
+    /// sustained-hold detector reads it.
+    static FN_HELD: AtomicBool = AtomicBool::new(false);
+    /// Once-per-run guard for the onboarding hint — a discovery nudge, not a
+    /// nag. Accidental Fn taps (emoji picker, input switching) never hint;
+    /// only a sustained hold does.
+    static ONBOARD_HINTED: AtomicBool = AtomicBool::new(false);
+    /// How long Fn must stay down before "they're holding it like
+    /// push-to-talk" is credible. Well past the 300 ms session hold-gate and
+    /// past a deliberate emoji-picker press.
+    const ONBOARD_HOLD: Duration = Duration::from_millis(1200);
+
+    /// Fn held while "Dictate anywhere" is off/unconfigured: the user expects
+    /// dictation and gets silence — the exact moment to onboard (the app is
+    /// usually in the BACKGROUND here, so an in-window toast would never be
+    /// seen; the notch overlay floats over everything). Once per run, and
+    /// only on a sustained hold.
+    fn maybe_onboarding_hint(app: &AppHandle) {
+        if ONBOARD_HINTED.load(Ordering::SeqCst) {
+            return;
+        }
+        // Never hint over PortBay itself — an in-app Fn hold belongs to the
+        // in-app push-to-talk flow (this runs on the monitor's main thread,
+        // so the marker always resolves).
+        if let Some(mtm) = MainThreadMarker::new() {
+            if let Some(front) = crate::typing::capture_front_target(mtm) {
+                if front.pid == std::process::id() as i32 {
+                    return;
+                }
+            }
+        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(ONBOARD_HOLD).await;
+            if !FN_HELD.load(Ordering::SeqCst) {
+                return; // tap or chord, not a push-to-talk hold
+            }
+            if ONBOARD_HINTED.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            tracing::info!(
+                "dictation: sustained Fn hold with dictate-anywhere off — showing onboarding hint"
+            );
+            let _ = show_overlay(&app).await;
+            emit_state(
+                &app,
+                OverlayState {
+                    error: Some(
+                        "Dictate anywhere is off — turn it on in PortBay under AI → Speech to Text"
+                            .into(),
+                    ),
+                    ..OverlayState::bare("error")
+                },
+            );
+            tokio::time::sleep(Duration::from_millis(4000)).await;
+            // Hide only if no real session took the overlay over meanwhile
+            // (the user may have enabled the feature and started dictating).
+            let idle = {
+                let s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+                s.phase == Phase::Idle
+            };
+            if idle {
+                emit_state(&app, OverlayState::bare("hidden"));
+                tokio::time::sleep(OVERLAY_EXIT_GRACE).await;
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    overlay_window::hide(&handle);
+                });
+            }
+        });
+    }
+
+    /// Bring the overlay up to report a failed capture start, then tear the
+    /// session down after the user has had a beat to read it.
+    async fn fail_session(app: &AppHandle, generation: u64, detail: String, overlay_up: bool) {
+        tracing::warn!(detail = %detail, "dictation: anywhere capture failed to start");
+        if !overlay_up {
+            // Pre-gate failure: no overlay yet, but the user is mid-hold
+            // expecting dictation — silence here is the P0 "Fn does
+            // nothing" class. Bring the notch up just to say why.
+            let _ = show_overlay(app).await;
+        }
+        emit_state(
+            app,
+            OverlayState {
+                error: Some(detail),
+                ..OverlayState::bare("error")
+            },
+        );
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2200)).await;
+            finish_hidden(&app, generation).await;
+        });
+    }
+
+    /// PREBUFFER half of a hold session: start the sidecar capture the
+    /// instant Fn goes down. Runs concurrently with the hold-gate timer
+    /// (`arm_overlay_after_gate`); the two coordinate through
+    /// `mic_hot`/`overlay_shown` under the session lock, and whichever
+    /// completes second performs the Arming → Capturing transition. A tap
+    /// or chord abandons the session and the capture is cancelled wherever
+    /// its start happens to be in flight.
+    async fn early_capture(app: AppHandle, generation: u64, model: String) {
+        let target = {
+            let s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            s.target.clone()
+        };
+        maybe_prewarm_polish(&app);
+        let models_dir = crate::ollama::expand_tilde(
+            &app.state::<AppState>()
+                .preferences_snapshot()
+                .stt
+                .models_dir,
+        );
+        let bias = resolve_bias(&app, target.as_ref(), &model, generation).await;
+        tracing::debug!(
+            generation,
+            "dictation: prebuffer bias resolved; starting capture"
+        );
+
+        let flow = CAPTURE_FLOW.lock().await;
+        // The session may already be dead (tap released during the bias
+        // resolve) — then nothing was started and nothing needs cancelling.
+        {
+            let s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            if s.generation != generation || !matches!(s.phase, Phase::Pending | Phase::Arming) {
+                return;
+            }
+        }
+        let start_at = std::time::Instant::now();
+        let started = crate::stt::start_capture(app.clone(), &models_dir, &model, &bias).await;
+        tracing::debug!(
+            generation,
+            start_ms = start_at.elapsed().as_millis() as u64,
+            ok = started.is_ok(),
+            "dictation: prebuffer capture start returned"
+        );
+
+        match started {
+            Ok(()) => {
+                enum Next {
+                    /// Mic hot, but the overlay side isn't ready — parked on
+                    /// the session for the gate task to promote.
+                    Parked,
+                    /// Overlay already up: this side promotes to Capturing.
+                    Live,
+                    /// Session abandoned with the overlay up: discard + hide.
+                    CancelHide,
+                    /// Session abandoned pre-overlay (tap): discard quietly.
+                    Cancel,
+                }
+                let next = {
+                    let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+                    if s.generation != generation {
+                        Next::Cancel
+                    } else {
+                        match s.phase {
+                            Phase::Pending => {
+                                s.mic_hot = true;
+                                Next::Parked
+                            }
+                            Phase::Arming if !s.overlay_shown => {
+                                s.mic_hot = true;
+                                Next::Parked
+                            }
+                            Phase::Arming => {
+                                s.phase = Phase::Capturing;
+                                Next::Live
+                            }
+                            Phase::AbortAfterArm => Next::CancelHide,
+                            // Idle (tap already settled) / Finishing — discard.
+                            _ => Next::Cancel,
+                        }
+                    }
+                };
+                match next {
+                    Next::Parked => {}
+                    Next::Live => {
+                        drop(flow);
+                        emit_state(
+                            &app,
+                            OverlayState {
+                                app_name: target.as_ref().map(|t| t.name.clone()),
+                                app_icon: target.as_ref().and_then(|t| t.icon_data_url.clone()),
+                                ..OverlayState::bare("live")
+                            },
+                        );
+                        play_start_cue(&app);
+                    }
+                    Next::CancelHide => {
+                        crate::stt::cancel_capture().await;
+                        drop(flow);
+                        finish_hidden(&app, generation).await;
+                    }
+                    Next::Cancel => {
+                        crate::stt::cancel_capture().await;
+                    }
+                }
+            }
+            Err(detail) => {
+                drop(flow);
+                let (dead, overlay_up) = {
+                    let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+                    if s.generation != generation {
+                        (true, false)
+                    } else {
+                        let overlay_up = s.overlay_shown;
+                        s.phase = Phase::Idle;
+                        s.mic_hot = false;
+                        (false, overlay_up)
+                    }
+                };
+                if !dead {
+                    fail_session(&app, generation, detail, overlay_up).await;
+                }
+            }
+        }
+    }
+
+    /// Overlay half of a hold session: after the 300 ms gate confirms this
+    /// is a hold (not a tap/chord), show the arming overlay — and promote to
+    /// Capturing if the prebuffer capture already went mic-hot meanwhile.
+    async fn arm_overlay_after_gate(app: AppHandle, generation: u64) {
+        {
+            let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            if s.generation != generation || s.phase != Phase::Pending {
+                return;
+            }
+            s.phase = Phase::Arming;
+        }
+        let target = {
+            let s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            s.target.clone()
+        };
+        let notch = show_overlay(&app).await;
+        emit_state(
+            &app,
+            OverlayState {
+                app_name: target.as_ref().map(|t| t.name.clone()),
+                app_icon: target.as_ref().and_then(|t| t.icon_data_url.clone()),
+                notch,
+                settings: Some(overlay_settings(&app)),
+                ..OverlayState::bare("arming")
+            },
+        );
+        // The capture may have gone mic-hot during the gate/show — promote.
+        // It may also have been abandoned mid-show (release raced the
+        // overlay): then the abort path's hide may have run BEFORE our show,
+        // so hide again rather than leave an orphan notch.
+        enum After {
+            Promote,
+            Rehide,
+            Wait,
+        }
+        let after = {
+            let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            if s.generation != generation {
+                After::Rehide
+            } else {
+                s.overlay_shown = true;
+                match s.phase {
+                    Phase::Arming if s.mic_hot => {
+                        s.mic_hot = false;
+                        s.phase = Phase::Capturing;
+                        After::Promote
+                    }
+                    Phase::Idle | Phase::AbortAfterArm => After::Rehide,
+                    _ => After::Wait,
+                }
+            }
+        };
+        match after {
+            After::Promote => {
+                emit_state(
+                    &app,
+                    OverlayState {
+                        app_name: target.as_ref().map(|t| t.name.clone()),
+                        app_icon: target.as_ref().and_then(|t| t.icon_data_url.clone()),
+                        ..OverlayState::bare("live")
+                    },
+                );
+                play_start_cue(&app);
+            }
+            After::Rehide => {
+                finish_hidden(&app, generation).await;
+            }
+            After::Wait => {}
+        }
+    }
+
+    /// Cancel a prebuffer capture whose session was abandoned after it went
+    /// mic-hot (the early task has already returned, so nobody else will).
+    /// `hide` tears the overlay down too; a pre-gate tap never showed one.
+    fn spawn_abort_capture(app: &AppHandle, generation: u64, hide: bool) {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            {
+                let _flow = CAPTURE_FLOW.lock().await;
+                crate::stt::cancel_capture().await;
+            }
+            if hide {
+                finish_hidden(&app, generation).await;
+            }
+        });
+    }
+
+    /// Hands-free (toggle) session: show the overlay (arming look) and start
+    /// the sidecar capture. The await spans the model cold-load; the
+    /// overlay's arming state is honest about it, exactly like the in-app
+    /// `arming` phase. Hold sessions don't come here anymore — they split
+    /// across `early_capture` + `arm_overlay_after_gate` for the prebuffer.
     async fn begin_session(app: AppHandle, generation: u64, model: String) {
         let (target, toggle) = {
             let s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
             (s.target.clone(), s.mode == Mode::Toggle)
         };
-        // Page the rewrite model in now (best-effort, fire-and-forget) when
-        // polish is on, so the rewrite at session end doesn't pay the cold
-        // load inside its own timeout — same prewarm-when-anticipated pattern
-        // the in-app path uses.
-        {
-            let d = app.state::<AppState>().preferences_snapshot().dictation;
-            if d.anywhere_polish {
-                crate::dictation::prewarm(&ProviderConfig {
-                    kind: d.provider,
-                    endpoint: d.endpoint,
-                    model: d.model,
-                });
-            }
-        }
+        maybe_prewarm_polish(&app);
         let notch = show_overlay(&app).await;
         emit_state(
             &app,
@@ -693,54 +1216,32 @@ mod macos {
                 ..OverlayState::bare("arming")
             },
         );
+        SESSION
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .overlay_shown = true;
 
         let models_dir = crate::ollama::expand_tilde(
-            &app.state::<AppState>().preferences_snapshot().stt.models_dir,
+            &app.state::<AppState>()
+                .preferences_snapshot()
+                .stt
+                .models_dir,
         );
+        let bias = resolve_bias(&app, target.as_ref(), &model, generation).await;
 
-        // Resolve the Context-Store term snapshot for this session (global set
-        // — anywhere has no project surface, §10.3). The rewrite context is
-        // inferred from the target app so the learned-jargon ranking matches
-        // what the finish-time rewrite will use. Stored on the session so the
-        // correction net + rewrite reuse the exact same snapshot; the recognizer
-        // bias is the engine-gated slice of it (never a prompt Parakeet can't
-        // apply).
-        let context = {
-            let prefs = app.state::<AppState>().preferences_snapshot().dictation;
-            resolve_context(
-                target.as_ref().and_then(|t| t.bundle_id.as_deref()),
-                &prefs.anywhere_app_contexts,
-            )
-        };
-        let snapshot = crate::commands::dictation::recognizer_terms(
-            app.state::<AppState>().inner(),
-            Some(context),
-            None,
-        )
-        .await;
-        let bias = if crate::dictation_context::recognizer_bias_enabled()
-            && crate::dictation_context::engine_supports_text_bias(&model)
-        {
-            crate::dictation_context::instrument::record_bias(snapshot.len());
-            tracing::debug!(model = %model, terms = snapshot.len(), "dictation: anywhere recognizer bias resolved");
-            snapshot.clone()
-        } else {
-            // Default: no recognizer bias (gated/unsupported — see
-            // `recognizer_bias_enabled`). The always-on correction net below
-            // and the rewrite still fix known terms from `snapshot`.
-            Vec::new()
-        };
-        // Park the full snapshot for the finish path (correction + rewrite).
-        SESSION.lock().unwrap_or_else(|e| e.into_inner()).terms = snapshot;
-
+        // Ordered behind any pending discard of a prebuffer capture (the
+        // first tap of this very double-tap started one).
+        let flow = CAPTURE_FLOW.lock().await;
         let started = crate::stt::start_capture(app.clone(), &models_dir, &model, &bias).await;
 
+        let mut dead = false;
         let next: Phase = {
             let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
             if s.generation != generation {
                 // Superseded (defensive — Arming blocks new sessions, so
                 // this shouldn't occur). A capture that landed anyway has
                 // no owner: discard it; the new owner manages the overlay.
+                dead = true;
                 if started.is_ok() {
                     Phase::AbortAfterArm
                 } else {
@@ -764,6 +1265,7 @@ mod macos {
 
         match next {
             Phase::Capturing => {
+                drop(flow);
                 emit_state(
                     &app,
                     OverlayState {
@@ -773,59 +1275,95 @@ mod macos {
                         ..OverlayState::bare("live")
                     },
                 );
-                play_cue("Tink");
+                play_start_cue(&app);
             }
             Phase::AbortAfterArm => {
                 crate::stt::cancel_capture().await;
+                drop(flow);
                 finish_hidden(&app, generation).await;
             }
             _ => {
+                drop(flow);
+                // A dead session's failure is not ours to report — the new
+                // owner manages the overlay (mirrors early_capture's check).
                 if let Err(detail) = started {
-                    tracing::warn!(detail = %detail, "dictation: anywhere capture failed to start");
-                    emit_state(
-                        &app,
-                        OverlayState {
-                            error: Some(detail),
-                            ..OverlayState::bare("error")
-                        },
-                    );
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(2200)).await;
-                        finish_hidden(&app, generation).await;
-                    });
+                    if !dead {
+                        fail_session(&app, generation, detail, true).await;
+                    }
                 }
             }
         }
     }
 
     fn fn_released(app: &AppHandle) {
-        let finish = {
+        enum Release {
+            None,
+            Finish(u64, Option<FrontTarget>),
+            /// A prebuffer capture went hot and its session just died here —
+            /// the early task has returned, so this release must discard it.
+            Abort {
+                generation: u64,
+                hide: bool,
+            },
+        }
+        let tap_toggle = app
+            .state::<AppState>()
+            .preferences_snapshot()
+            .dictation
+            .anywhere_tap_toggle;
+        let action = {
             let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
             match (s.phase, s.mode) {
+                // Automatic mode: a release inside the hold gate IS the
+                // hands-free start — the prebuffer capture keeps rolling
+                // and the gate task arms the overlay as usual; the next Fn
+                // press (or the cancel key / EOU auto-stop) ends it.
+                (Phase::Pending, _) if tap_toggle => {
+                    s.mode = Mode::Toggle;
+                    s.last_tap = None;
+                    Release::None
+                }
                 // Quick tap — the emoji picker / input-source switch, not
                 // us; but note the time, it may be half a toggle double-tap.
                 (Phase::Pending, _) => {
                     s.phase = Phase::Idle;
                     s.last_tap = Some(std::time::Instant::now());
-                    None
+                    if std::mem::take(&mut s.mic_hot) {
+                        Release::Abort {
+                            generation: s.generation,
+                            hide: false,
+                        }
+                    } else {
+                        Release::None
+                    }
                 }
                 (Phase::Arming, Mode::Hold) => {
                     s.phase = Phase::AbortAfterArm;
-                    None
+                    if std::mem::take(&mut s.mic_hot) {
+                        Release::Abort {
+                            generation: s.generation,
+                            hide: true,
+                        }
+                    } else {
+                        // Start still in flight — the early task sees
+                        // AbortAfterArm when it resolves and discards there.
+                        Release::None
+                    }
                 }
                 (Phase::Capturing, Mode::Hold) => {
                     s.phase = Phase::Finishing;
-                    Some((s.generation, s.target.clone()))
+                    Release::Finish(s.generation, s.target.clone())
                 }
                 // Hands-free sessions ignore releases — the starting
                 // double-tap's own release lands here; only the next Fn
                 // PRESS (or Esc) stops the capture.
-                _ => None,
+                _ => Release::None,
             }
         };
-        if let Some((generation, target)) = finish {
-            spawn_finish(app, generation, target);
+        match action {
+            Release::Finish(generation, target) => spawn_finish(app, generation, target),
+            Release::Abort { generation, hide } => spawn_abort_capture(app, generation, hide),
+            Release::None => {}
         }
     }
 
@@ -863,6 +1401,10 @@ mod macos {
             };
 
             let trimmed = transcript.trim();
+            // Whether the notch is still on screen by the time the session
+            // wraps up — false once a slow polish closed it early (the swap
+            // then finishes in the background).
+            let mut notch_up = true;
             if !trimmed.is_empty() {
                 // Gap 3: apply inline voice commands ("new line", "bullet",
                 // "scratch that") as a deterministic pre-pass — a no-op unless
@@ -873,7 +1415,11 @@ mod macos {
                 // The armed Context-Store snapshot (recognizer + rewrite share
                 // it). Still set this session — the state machine can't start a
                 // new one until finish_hidden returns to Idle.
-                let terms = SESSION.lock().unwrap_or_else(|e| e.into_inner()).terms.clone();
+                let terms = SESSION
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .terms
+                    .clone();
                 // Foundation: always-on term correction — a deterministic,
                 // exact-squash spelling fix for known terms even when Polish is
                 // OFF (the recognizer may have missed one, or the engine
@@ -891,46 +1437,105 @@ mod macos {
                     );
                 }
                 let corrected = correction.text;
-                // Gap 1: polish the (command-processed, term-corrected)
-                // transcript through the shared rewrite engine before pasting
-                // (when enabled), sourcing its vocab from the same snapshot.
-                // Degrades to those words on any failure/timeout — see
-                // `maybe_polish`.
-                let delivered =
-                    maybe_polish(&app, &corrected, target.as_ref(), generation, &terms).await;
-                // History keeps the ORIGINAL transcript recoverable whenever
-                // commands, correction, or polish changed what was delivered.
-                let raw_original = (delivered != trimmed).then(|| trimmed.to_string());
+
+                // PASTE-FIRST (sub-2-3 s target). Get the user's words on screen
+                // *now* — typed into the field ~0.5 s after Fn-release — instead
+                // of blocking the paste on the LLM polish (the cold/warm rewrite
+                // is what made it "wait, then process, then paste"). Polish then
+                // runs (its model is prewarmed at capture start) and, when it
+                // changes the text, swaps it in place — see below.
                 let mut inserted = false;
-                let mut rescue: Option<String> = None;
                 if let Some(target) = &target {
-                    match crate::typing::insert_text(&app, delivered.clone(), target.pid).await {
-                        Ok(()) => {
-                            inserted = true;
-                            play_cue("Pop");
-                        }
+                    match crate::typing::insert_text(&app, corrected.clone(), target.pid).await {
+                        Ok(()) => inserted = true,
                         Err(detail) => {
                             tracing::warn!(detail = %detail, "dictation: anywhere insertion failed");
-                            // The words must survive the failure: leave them
-                            // on the clipboard — persistently, no restore —
-                            // and tell the user where they went.
-                            rescue = Some(
-                                if crate::typing::copy_text_persistent(&app, delivered.clone())
-                                    .await
-                                    .is_ok()
-                                {
-                                    "Couldn’t paste — copied instead. Press ⌘V.".to_string()
-                                } else {
-                                    "Couldn’t paste the transcript.".to_string()
-                                },
-                            );
                         }
                     }
                 }
-                // Second safety net: the history ring (tray "Paste Last
-                // Dictation" + the settings panel's recent list). Stores the
-                // delivered text plus the pre-polish transcript when a rewrite
-                // changed it, so an over-eager polish stays recoverable.
+
+                // Polish AFTER the raw paste. The notch shows "Polishing…" and
+                // streams the rewrite preview; `maybe_polish` degrades to the raw
+                // words on any failure/timeout. The notch only stays up for
+                // [`POLISH_NOTCH_VISIBLE`] though: the raw words are already
+                // delivered, so past that the session LOOKS done (notch closes,
+                // user moves on) and the swap lands silently in the background
+                // when the rewrite finishes — the guarded replace makes a late
+                // swap safe by construction (any caret/text drift keeps raw).
+                let polish = maybe_polish(&app, &corrected, target.as_ref(), generation, &terms);
+                tokio::pin!(polish);
+                let polished = match tokio::time::timeout(POLISH_NOTCH_VISIBLE, polish.as_mut())
+                    .await
+                {
+                    Ok(polished) => polished,
+                    Err(_) => {
+                        tracing::debug!(
+                            "dictation: polish still running — closing the notch, swap continues in background"
+                        );
+                        notch_up = false;
+                        emit_state(&app, OverlayState::bare("done"));
+                        tokio::time::sleep(Duration::from_millis(450)).await;
+                        finish_hidden(&app, generation).await;
+                        polish.await
+                    }
+                };
+
+                // Resolve what actually ended up in the field. When polish
+                // changed the text, swap it in place — but ONLY via the guarded
+                // replace, which succeeds only when the words right before the
+                // caret are still exactly what we pasted (native AX-readable
+                // fields, user hasn't typed on). In web editors / on any drift it
+                // returns false and the fast raw words simply stay — it can never
+                // delete anything else the user had.
+                let mut delivered = corrected.clone();
+                let mut rescue: Option<String> = None;
+                if polished != corrected {
+                    if inserted {
+                        if let Some(target) = &target {
+                            if crate::typing::replace_recent_insertion(
+                                &app, &corrected, &polished, target.pid,
+                            )
+                            .await
+                            {
+                                delivered = polished;
+                            } else if crate::typing::replace_recent_insertion_via_keys(
+                                &app, &corrected, &polished, target.pid,
+                            )
+                            .await
+                            {
+                                // Web-editor fallback: the AX write path is
+                                // closed there, so the swap goes select-back →
+                                // verify-readback → paste. Same safety
+                                // contract — any uncertainty keeps the raw.
+                                delivered = polished;
+                            }
+                        }
+                    } else {
+                        // Never landed in the field — rescue the polished text.
+                        delivered = polished;
+                    }
+                }
+
+                // The raw paste failed (focus moved before it landed): the words
+                // aren't anywhere yet, so leave the best version on the clipboard
+                // — persistently, no restore — and tell the user where they went.
+                if !inserted && target.is_some() {
+                    rescue = Some(
+                        if crate::typing::copy_text_persistent(&app, delivered.clone())
+                            .await
+                            .is_ok()
+                        {
+                            "Couldn’t paste — copied instead. Press ⌘V.".to_string()
+                        } else {
+                            "Couldn’t paste the transcript.".to_string()
+                        },
+                    );
+                }
+
+                // History keeps the ORIGINAL transcript recoverable whenever
+                // commands, correction, or polish changed what was delivered
+                // (tray "Paste Last Dictation" + the settings recent list).
+                let raw_original = (delivered != trimmed).then(|| trimmed.to_string());
                 crate::dictation_history::record(
                     &delivered,
                     raw_original,
@@ -940,6 +1545,16 @@ mod macos {
                 crate::tray::refresh_dictation_item(&app);
 
                 if let Some(message) = rescue {
+                    // The one time the cue fires: the transcript couldn't be
+                    // placed in the target field. An audible flag for the
+                    // eyes-free case where the words silently went to the
+                    // clipboard instead of the cursor.
+                    play_failure_cue(&app);
+                    if !notch_up {
+                        // The notch already closed (background polish) —
+                        // bring it back to deliver the rescue message.
+                        let _ = show_overlay(&app).await;
+                    }
                     emit_state(
                         &app,
                         OverlayState {
@@ -950,15 +1565,28 @@ mod macos {
                         },
                     );
                     tokio::time::sleep(Duration::from_millis(2200)).await;
-                    finish_hidden(&app, generation).await;
+                    if notch_up {
+                        finish_hidden(&app, generation).await;
+                    } else {
+                        // The session was already torn down when the notch
+                        // closed; just hide the re-shown window.
+                        emit_state(&app, OverlayState::bare("hidden"));
+                        tokio::time::sleep(OVERLAY_EXIT_GRACE).await;
+                        let handle = app.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            overlay_window::hide(&handle);
+                        });
+                    }
                     return;
                 }
             }
-            emit_state(&app, OverlayState::bare("done"));
-            // Let the overlay play its exit animation before the window
-            // disappears under it.
-            tokio::time::sleep(Duration::from_millis(450)).await;
-            finish_hidden(&app, generation).await;
+            if notch_up {
+                emit_state(&app, OverlayState::bare("done"));
+                // Let the overlay play its exit animation before the window
+                // disappears under it.
+                tokio::time::sleep(Duration::from_millis(450)).await;
+                finish_hidden(&app, generation).await;
+            }
         });
     }
 
@@ -969,34 +1597,78 @@ mod macos {
     /// the start of "tap Fn, then Fn+arrow"); once the mic is hot, keys are
     /// the user typing alongside their hands-free dictation and pass.
     fn on_key_down(app: &AppHandle, key_code: u16) {
-        let cancel_generation = {
+        enum Key {
+            None,
+            CancelLive(u64),
+            /// Abandoned with a hot prebuffer capture and no pending early
+            /// task — discard it here (see `fn_released`'s twin).
+            Abort {
+                generation: u64,
+                hide: bool,
+            },
+        }
+        let action = {
             let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
-            match (s.phase, key_code) {
-                (Phase::Pending, _) => {
-                    s.phase = Phase::Idle;
-                    None
+            if s.phase == Phase::Idle {
+                // The common path for every global keystroke: no session, no
+                // preference read, out immediately.
+                Key::None
+            } else {
+                // The cancel key is user-configurable (Esc by default); only
+                // consulted while a session is in flight.
+                let cancel = app
+                    .state::<AppState>()
+                    .preferences_snapshot()
+                    .dictation
+                    .anywhere_cancel_key;
+                match (s.phase, key_code) {
+                    (Phase::Pending, _) => {
+                        s.phase = Phase::Idle;
+                        if std::mem::take(&mut s.mic_hot) {
+                            Key::Abort {
+                                generation: s.generation,
+                                hide: false,
+                            }
+                        } else {
+                            Key::None
+                        }
+                    }
+                    (Phase::Arming, k) if k == cancel => {
+                        s.phase = Phase::AbortAfterArm;
+                        if std::mem::take(&mut s.mic_hot) {
+                            Key::Abort {
+                                generation: s.generation,
+                                hide: true,
+                            }
+                        } else {
+                            Key::None
+                        }
+                    }
+                    (Phase::Arming, _) if s.mode == Mode::Toggle => {
+                        s.phase = Phase::AbortAfterArm;
+                        Key::None
+                    }
+                    (Phase::Capturing, k) if k == cancel => {
+                        s.phase = Phase::Finishing;
+                        Key::CancelLive(s.generation)
+                    }
+                    _ => Key::None,
                 }
-                (Phase::Arming, KEY_ESCAPE) => {
-                    s.phase = Phase::AbortAfterArm;
-                    None
-                }
-                (Phase::Arming, _) if s.mode == Mode::Toggle => {
-                    s.phase = Phase::AbortAfterArm;
-                    None
-                }
-                (Phase::Capturing, KEY_ESCAPE) => {
-                    s.phase = Phase::Finishing;
-                    Some(s.generation)
-                }
-                _ => None,
             }
         };
-        if let Some(generation) = cancel_generation {
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                crate::stt::cancel_capture().await;
-                finish_hidden(&app, generation).await;
-            });
+        match action {
+            Key::CancelLive(generation) => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    {
+                        let _flow = CAPTURE_FLOW.lock().await;
+                        crate::stt::cancel_capture().await;
+                    }
+                    finish_hidden(&app, generation).await;
+                });
+            }
+            Key::Abort { generation, hide } => spawn_abort_capture(app, generation, hide),
+            Key::None => {}
         }
     }
 
@@ -1005,7 +1677,7 @@ mod macos {
     /// otherwise).
     async fn finish_hidden(app: &AppHandle, generation: u64) {
         emit_state(app, OverlayState::bare("hidden"));
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(OVERLAY_EXIT_GRACE).await;
         let hide_now = {
             let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
             if s.generation == generation {
@@ -1013,6 +1685,8 @@ mod macos {
                 s.mode = Mode::Hold;
                 s.target = None;
                 s.terms = Vec::new();
+                s.mic_hot = false;
+                s.overlay_shown = false;
                 true
             } else {
                 false
@@ -1041,7 +1715,9 @@ mod macos {
         let handle = app.clone();
         let ok = app.run_on_main_thread(move || {
             let mtm = MainThreadMarker::new().expect("run_on_main_thread is the main thread");
-            let _ = tx.send(overlay_window::show_on_pointer_screen(&handle, mtm, placement));
+            let _ = tx.send(overlay_window::show_on_pointer_screen(
+                &handle, mtm, placement,
+            ));
         });
         if ok.is_err() {
             return None;
@@ -1059,36 +1735,107 @@ mod macos {
     }
 
     fn emit_state(app: &AppHandle, state: OverlayState) {
-        let _ = app.emit_to(overlay_window::OVERLAY_WINDOW_LABEL, "anywhere://state", state);
+        let _ = app.emit_to(
+            overlay_window::OVERLAY_WINDOW_LABEL,
+            "anywhere://state",
+            state,
+        );
+    }
+
+    /// Streaming-engine End-of-Utterance (relayed by `stt::route_event`).
+    /// Only a hands-free (toggle) session with the auto-stop preference on
+    /// treats it as the stop signal: hold sessions end on Fn release (the
+    /// held key IS the stop), and in-app sessions belong to micSession.
+    /// Engines without native EOU detection simply never send this.
+    pub fn on_eou(app: &AppHandle) {
+        if !app
+            .state::<AppState>()
+            .preferences_snapshot()
+            .dictation
+            .anywhere_auto_stop
+        {
+            return;
+        }
+        let finish = {
+            let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            if s.phase == Phase::Capturing && s.mode == Mode::Toggle {
+                s.phase = Phase::Finishing;
+                Some((s.generation, s.target.clone()))
+            } else {
+                None
+            }
+        };
+        if let Some((generation, target)) = finish {
+            spawn_finish(app, generation, target);
+        }
+    }
+
+    /// A live capture's engine failed BEHIND the mic (relayed by
+    /// `stt::read_loop`): with the mic-first sidecar, `listening` resolves the
+    /// start while the model still loads, so a load failure can land after the
+    /// session went live. Fail the visible session now instead of leaving the
+    /// notch "recording" until the user releases into a dead engine. In-app
+    /// sessions (anywhere idle) are untouched — micSession surfaces the error
+    /// at its own stop, which the dropped routing makes fail fast.
+    pub fn on_capture_lost(app: &AppHandle, detail: String) {
+        let failing = {
+            let s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            matches!(s.phase, Phase::Pending | Phase::Arming | Phase::Capturing)
+                .then_some((s.generation, s.overlay_shown))
+        };
+        let Some((generation, overlay_up)) = failing else {
+            return;
+        };
+        tracing::warn!(detail = %detail, "dictation: engine failed behind a live capture");
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            fail_session(&app, generation, detail, overlay_up).await;
+        });
     }
 
     /// Finish (or abort) the active anywhere session — the overlay's stop
     /// button. Returns false when no anywhere session is running, in which
     /// case the caller forwards the stop to the in-app session instead.
     pub fn finish_active(app: &AppHandle) -> bool {
+        enum Stop {
+            Finish(u64, Option<FrontTarget>),
+            /// Mic-hot prebuffer capture with no pending early task —
+            /// discard here (the in-flight case resolves in `early_capture`
+            /// / `begin_session` via AbortAfterArm).
+            Abort(u64),
+            Acknowledged,
+            NotOurs,
+        }
         let action = {
             let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
             match s.phase {
                 Phase::Capturing => {
                     s.phase = Phase::Finishing;
-                    Some(Some((s.generation, s.target.clone())))
+                    Stop::Finish(s.generation, s.target.clone())
                 }
-                // Stop during model load = "never mind"; begin_session
-                // resolves the abort when the start lands.
+                // Stop during model load = "never mind".
                 Phase::Arming => {
                     s.phase = Phase::AbortAfterArm;
-                    Some(None)
+                    if std::mem::take(&mut s.mic_hot) {
+                        Stop::Abort(s.generation)
+                    } else {
+                        Stop::Acknowledged
+                    }
                 }
-                _ => None,
+                _ => Stop::NotOurs,
             }
         };
         match action {
-            Some(Some((generation, target))) => {
+            Stop::Finish(generation, target) => {
                 spawn_finish(app, generation, target);
                 true
             }
-            Some(None) => true,
-            None => false,
+            Stop::Abort(generation) => {
+                spawn_abort_capture(app, generation, true);
+                true
+            }
+            Stop::Acknowledged => true,
+            Stop::NotOurs => false,
         }
     }
 
@@ -1227,7 +1974,7 @@ mod macos {
                 tokio::time::sleep(Duration::from_millis(450)).await;
             }
             emit_state(&app, OverlayState::bare("hidden"));
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::time::sleep(OVERLAY_EXIT_GRACE).await;
             // Hide only if an anywhere session hasn't claimed the window in
             // the meantime (it owns hide/show through its own generation).
             if anywhere_idle() {
@@ -1272,15 +2019,49 @@ mod macos {
     }
 
     /// Subtle session cues from the system sound set — start when the mic
-    /// goes hot, end after the transcript landed. Fire-and-forget.
-    fn play_cue(name: &str) {
+    /// goes hot, and a failure flag when the transcript couldn't be placed
+    /// in the target field. A clean, placed transcript stays silent: the
+    /// words in the field are confirmation enough. Fire-and-forget. The
+    /// start sound and the volume are preferences; the failure cue always
+    /// uses Pop (it's a safety signal, only the volume applies).
+    fn play_start_cue(app: &AppHandle) {
+        let d = app.state::<AppState>().preferences_snapshot().dictation;
+        if d.anywhere_cue_sound.is_empty() {
+            return; // "None" — silent start
+        }
+        play_cue_file(&d.anywhere_cue_sound, d.anywhere_cue_volume);
+    }
+
+    fn play_failure_cue(app: &AppHandle) {
+        let d = app.state::<AppState>().preferences_snapshot().dictation;
+        play_cue_file("Pop", d.anywhere_cue_volume);
+    }
+
+    /// One-shot cue playback for the Settings picker — selecting a sound (or
+    /// moving the volume slider) echoes the choice, like macOS's alert-sound
+    /// list. Routed through `play_cue_file` so the preview is byte-identical
+    /// to what a real session start will play (same sanitizing, same clamp).
+    pub fn preview_cue(name: &str, volume: f32) {
+        play_cue_file(name, volume);
+    }
+
+    fn play_cue_file(name: &str, volume: f32) {
+        // The name lands in a filesystem path — accept bare system-sound
+        // names only.
+        if !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return;
+        }
+        let volume = volume.clamp(0.0, 1.0);
+        if volume <= 0.0 {
+            return;
+        }
         let path = format!("/System/Library/Sounds/{name}.aiff");
         if !std::path::Path::new(&path).exists() {
             return;
         }
         tauri::async_runtime::spawn(async move {
             let _ = tokio::process::Command::new("/usr/bin/afplay")
-                .args(["-v", "0.3", &path])
+                .args(["-v", &format!("{volume:.2}"), &path])
                 .output()
                 .await;
         });
@@ -1309,7 +2090,11 @@ mod macos {
 
         #[test]
         fn terminals_default_to_terminal_command() {
-            for id in ["com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp-Stable"] {
+            for id in [
+                "com.apple.Terminal",
+                "com.googlecode.iterm2",
+                "dev.warp.Warp-Stable",
+            ] {
                 assert_eq!(
                     resolve_context(Some(id), &[]),
                     RewriteContext::TerminalCommand,
@@ -1396,10 +2181,16 @@ mod macos {
         #[test]
         fn press_from_idle_single_tap_begins_hold() {
             let (phase, mode, kind) = decide_press(Phase::Idle, Mode::Hold, false);
-            assert_eq!((phase, mode, kind), (Phase::Pending, Mode::Hold, PressKind::BeginHold));
+            assert_eq!(
+                (phase, mode, kind),
+                (Phase::Pending, Mode::Hold, PressKind::BeginHold)
+            );
             // Incoming mode is irrelevant when starting from Idle.
             let (phase, mode, kind) = decide_press(Phase::Idle, Mode::Toggle, false);
-            assert_eq!((phase, mode, kind), (Phase::Pending, Mode::Hold, PressKind::BeginHold));
+            assert_eq!(
+                (phase, mode, kind),
+                (Phase::Pending, Mode::Hold, PressKind::BeginHold)
+            );
         }
 
         #[test]
@@ -1414,7 +2205,10 @@ mod macos {
         #[test]
         fn press_during_toggle_capture_finishes() {
             let (phase, mode, kind) = decide_press(Phase::Capturing, Mode::Toggle, false);
-            assert_eq!((phase, mode, kind), (Phase::Finishing, Mode::Toggle, PressKind::Finish));
+            assert_eq!(
+                (phase, mode, kind),
+                (Phase::Finishing, Mode::Toggle, PressKind::Finish)
+            );
         }
 
         #[test]
@@ -1430,10 +2224,18 @@ mod macos {
         #[test]
         fn press_is_noop_in_hold_capture_and_transient_phases() {
             // A hold-mode capture ends on *release*, never on a press.
-            assert_eq!(decide_press(Phase::Capturing, Mode::Hold, false).2, PressKind::None);
+            assert_eq!(
+                decide_press(Phase::Capturing, Mode::Hold, false).2,
+                PressKind::None
+            );
             // A second press while a hold session is still pending/finishing
             // (or a hold-mode arming) does nothing.
-            for phase in [Phase::Pending, Phase::Finishing, Phase::AbortAfterArm, Phase::Arming] {
+            for phase in [
+                Phase::Pending,
+                Phase::Finishing,
+                Phase::AbortAfterArm,
+                Phase::Arming,
+            ] {
                 assert_eq!(
                     decide_press(phase, Mode::Hold, false).2,
                     PressKind::None,
@@ -1441,7 +2243,10 @@ mod macos {
                 );
             }
             // A double-tap flag only matters from Idle; mid-session it's ignored.
-            assert_eq!(decide_press(Phase::Capturing, Mode::Hold, true).2, PressKind::None);
+            assert_eq!(
+                decide_press(Phase::Capturing, Mode::Hold, true).2,
+                PressKind::None
+            );
         }
 
         #[test]
@@ -1459,11 +2264,17 @@ mod macos {
 #[cfg(target_os = "macos")]
 pub use macos::{
     ensure_monitors, finish_active, inapp_arming, inapp_done, inapp_hidden, inapp_live,
-    inapp_processing, init, on_local_fn, paste_latest, status,
+    inapp_processing, init, on_capture_lost, on_eou, on_local_fn, paste_latest, preview_cue,
+    status,
 };
 
 #[cfg(not(target_os = "macos"))]
 pub fn init(_app: &tauri::AppHandle) {}
+
+/// Cues come from /System/Library/Sounds, so there is nothing to preview
+/// off macOS — but the Settings command is cross-platform code.
+#[cfg(not(target_os = "macos"))]
+pub fn preview_cue(_name: &str, _volume: f32) {}
 
 /// History only records on macOS, so there is never anything to paste —
 /// but the tray item is cross-platform code and needs the symbol.

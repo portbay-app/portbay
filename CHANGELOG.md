@@ -5,6 +5,34 @@ All notable changes to PortBay are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-06-09
+
+- On-device AI, expanded: image generation (Stable Diffusion / SDXL via
+  Apple's ml-stable-diffusion, plus an Apple Image Playground bridge),
+  Kokoro text-to-speech with 28 English voices, Ollama embeddings, and
+  playground tabs for every local model type on the AI page.
+- Speech-to-Text: local on-device transcription with Whisper and Parakeet
+  (v2/v3) on the Neural Engine — a resident engine stays warm between
+  captures, live partial transcripts, and model downloads from a signed
+  PortBay Model Catalog with provenance (live / cached / built-in).
+- Dictate anywhere: hold (or double-tap) Fn in any app and the local engine
+  types the transcript where you are — notch overlay HUD, per-app formatting
+  contexts, voice commands, entity formatting, custom terms, and
+  self-learning vocabulary with a privacy reset.
+- Ollama manager: PortBay owns the local server lifecycle (start/stop/
+  adopt), with a live library catalog, model store, and board-dispatch
+  parity for local-model agents.
+- PortBay agent engine: bundled Cline-derived local agent (portbay-agent)
+  with worktree-per-card dispatch from the task board.
+- Workbench: certificates surface (TLS source fields, create-certificate
+  pane), SFTP file-browser overhaul, live streaming deploys with
+  cancellation, IDE file-tree with 40+ language modes, sidebar reorder.
+- `portbay` CLI installer in Advanced settings (PATH symlink with an
+  elevation fallback).
+- Fixes: database data dirs healed on start, quieter DNS page when healthy,
+  project-selector avatars, and the release workflow never overwrites a
+  manually published release.
+
 ## [0.1.3] — 2026-06-05
 
 - Smart Dictation: a mic button on task cards and the SSH agent composer
@@ -109,6 +137,7 @@ Initial public release.
 - CLI (`portbay`) and MCP server for agent-driven workflows.
 - Signed and notarized macOS build for Apple Silicon.
 
+[0.1.4]: https://github.com/portbay-app/portbay/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/portbay-app/portbay/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/portbay-app/portbay/compare/v0.1.0...v0.1.2
 [0.1.1]: https://github.com/portbay-app/portbay/compare/v0.1.0...v0.1.1

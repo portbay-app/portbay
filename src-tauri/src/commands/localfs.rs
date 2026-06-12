@@ -8,8 +8,10 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::state::AppState;
 
 /// One local file or directory entry, mirroring the SFTP entry shape so the UI
 /// can reuse the same row rendering for local and remote listings.
@@ -91,7 +93,11 @@ const LOCAL_SEARCH_MAX_DEPTH: usize = 24;
 pub async fn local_search(root: String, query: String) -> AppResult<LocalSearchResult> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
-        return Ok(LocalSearchResult { entries: Vec::new(), scanned: 0, truncated: false });
+        return Ok(LocalSearchResult {
+            entries: Vec::new(),
+            scanned: 0,
+            truncated: false,
+        });
     }
     let pattern = if q.contains('*') || q.contains('?') {
         q
@@ -151,7 +157,11 @@ pub async fn local_search(root: String, query: String) -> AppResult<LocalSearchR
                 }
             }
         }
-        Ok(LocalSearchResult { entries, scanned, truncated })
+        Ok(LocalSearchResult {
+            entries,
+            scanned,
+            truncated,
+        })
     })
     .await
     .map_err(|e| AppError::Internal(format!("search task panicked: {e}")))?
@@ -177,12 +187,15 @@ pub struct WalkedLocalFile {
 
 /// Recursively enumerate every file under a local folder, for uploading a
 /// whole directory over SFTP. Listing is read-only metadata (names + sizes),
-/// the same exposure class as [`local_list_dir`]; actually *reading* the files
-/// still requires the path to be in the SFTP approved set (the folder picker
-/// or the host-side access prompt put it there).
+/// but a recursive walk of an arbitrary root maps the user's filesystem —
+/// so the root must already be in the SFTP approved set (the folder picker
+/// or the host-side access prompt put it there), same as upload/download.
 #[tauri::command]
-pub async fn local_walk_files(root: String) -> AppResult<Vec<WalkedLocalFile>> {
-    let root_path = PathBuf::from(&root);
+pub async fn local_walk_files(
+    state: State<'_, AppState>,
+    root: String,
+) -> AppResult<Vec<WalkedLocalFile>> {
+    let root_path = crate::commands::sftp::ensure_local_path_approved(&state, &root)?;
     let files = walk_files(&root_path, &[])?;
     Ok(files
         .into_iter()

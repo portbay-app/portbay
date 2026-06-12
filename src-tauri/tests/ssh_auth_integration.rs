@@ -14,9 +14,8 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use russh::keys::{key::safe_rng, Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, Config as ServerConfig, Handler as SshHandler, Response, Server as _};
-use russh_keys::key::{KeyPair, PublicKey};
 
 use portbay_lib::registry::{SshAuthKind, SshConnection, SshConnectionId};
 use portbay_lib::ssh::connect_session;
@@ -59,12 +58,9 @@ struct AuthConn {
 }
 
 fn reject() -> Auth {
-    Auth::Reject {
-        proceed_with_methods: None,
-    }
+    Auth::reject()
 }
 
-#[async_trait]
 impl SshHandler for AuthConn {
     type Error = russh::Error;
 
@@ -76,7 +72,8 @@ impl SshHandler for AuthConn {
         // `"*"` is a live-test sentinel: trust whatever key the agent signs with
         // (used by `agent_auth_via_real_socket_live`, where we can't know the
         // agent's fingerprint up front). Normal tests pin an exact fingerprint.
-        let trusted = self.trusted_key_fp == "*" || public_key.fingerprint() == self.trusted_key_fp;
+        let trusted = self.trusted_key_fp == "*"
+            || public_key.fingerprint(HashAlg::Sha256).to_string() == self.trusted_key_fp;
         if self.policy.allow_key && trusted {
             Ok(Auth::Accept)
         } else {
@@ -96,7 +93,7 @@ impl SshHandler for AuthConn {
         &mut self,
         _user: &str,
         _submethods: &str,
-        response: Option<Response<'async_trait>>,
+        response: Option<Response<'_>>,
     ) -> Result<Auth, Self::Error> {
         if !self.policy.allow_keyboard_interactive {
             return Ok(reject());
@@ -112,7 +109,7 @@ impl SshHandler for AuthConn {
             Some(mut answers) => {
                 let answer = answers
                     .next()
-                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                     .unwrap_or_default();
                 if answer == PASSWORD {
                     Ok(Auth::Accept)
@@ -133,7 +130,7 @@ async fn start_server(policy: Policy, trusted_key_fp: String) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(ServerConfig {
-        keys: vec![KeyPair::generate_ed25519().unwrap()],
+        keys: vec![PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap()],
         ..Default::default()
     });
     let mut server = AuthServer {
@@ -165,10 +162,13 @@ fn connection(port: u16, auth_kind: SshAuthKind, key_path: Option<String>) -> Ss
 /// Generate an ed25519 client key, write it as a PKCS#8 PEM the production
 /// `load_secret_key` path reads, and return `(path, fingerprint)`.
 fn write_client_key(dir: &std::path::Path) -> (String, String) {
-    let keypair = KeyPair::generate_ed25519().unwrap();
-    let fingerprint = keypair.clone_public_key().unwrap().fingerprint();
+    let keypair = PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap();
+    let fingerprint = keypair
+        .public_key()
+        .fingerprint(HashAlg::Sha256)
+        .to_string();
     let mut pem = Vec::new();
-    russh_keys::encode_pkcs8_pem(&keypair, &mut pem).unwrap();
+    russh::keys::encode_pkcs8_pem(&keypair, &mut pem).unwrap();
     let path = dir.join("id_ed25519");
     std::fs::write(&path, &pem).unwrap();
     (path.to_string_lossy().into_owned(), fingerprint)
@@ -343,7 +343,7 @@ async fn agent_only_auth_succeeds_live() {
 
 /// Live SSH-agent check against our **own in-process server** over the real
 /// `SSH_AUTH_SOCK` — proves the agent leg end to end (`connect_env` →
-/// `request_identities` → `authenticate_future` signing) without needing an
+/// `request_identities` → `authenticate_publickey_with` signing) without needing an
 /// external host or touching `~/.ssh/authorized_keys`. Ignored because it needs
 /// a loaded agent. The runner loads an ephemeral key first:
 ///

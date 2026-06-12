@@ -1,6 +1,6 @@
 //! Minimal `~/.ssh/known_hosts` editing for the "reset host trust" action.
 //!
-//! The connect/probe paths use `russh_keys` for trust-on-first-use; this module
+//! The connect/probe paths use `russh::keys` for trust-on-first-use; this module
 //! adds the one mutating operation they don't: removing a host's recorded key
 //! (the GUI equivalent of `ssh-keygen -R host`), so a user who sees a "key
 //! changed" warning — or just wants to forget a host — can clear the stale entry
@@ -24,6 +24,10 @@ fn known_hosts_path() -> Option<PathBuf> {
 }
 
 /// The name OpenSSH stores for a host: bare for port 22, `[host]:port` otherwise.
+pub(crate) fn host_entry_name(host: &str, port: u16) -> String {
+    host_key(host, port)
+}
+
 fn host_key(host: &str, port: u16) -> String {
     if port == 22 {
         host.to_string()
@@ -101,11 +105,37 @@ pub fn stored_fingerprint(host: &str, port: u16, key_type: &str) -> Option<Strin
         if kt != key_type {
             continue;
         }
-        if let Ok(key) = russh_keys::parse_public_key_base64(b64) {
-            return Some(format!("SHA256:{}", key.fingerprint()));
+        if let Ok(key) = russh::keys::parse_public_key_base64(b64) {
+            return Some(key.fingerprint(russh::keys::HashAlg::Sha256).to_string());
         }
     }
     None
+}
+
+/// Append a trusted-key line for `host`/`port` in the standard OpenSSH format,
+/// creating `~/.ssh/known_hosts` (mode 0600) if it doesn't exist yet. Used by
+/// the system-ssh trust pre-flight's Trust & Save so both OpenSSH and russh
+/// read the entry back on the next connect.
+pub fn append_host(host: &str, port: u16, key_type: &str, key_base64: &str) -> std::io::Result<()> {
+    let Some(path) = known_hosts_path() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "cannot resolve HOME to locate known_hosts",
+        ));
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(&path)?;
+    writeln!(file, "{} {} {}", host_key(host, port), key_type, key_base64)
 }
 
 /// Remove every `known_hosts` entry for `host`/`port`. Returns the number of
@@ -114,18 +144,25 @@ pub fn remove_host(host: &str, port: u16) -> std::io::Result<usize> {
     let Some(path) = known_hosts_path() else {
         return Ok(0);
     };
-    let content = match std::fs::read_to_string(&path) {
+    remove_host_at(&path, &host_key(host, port))
+}
+
+/// The rewrite behind [`remove_host`], split out so the atomic-write behaviour
+/// is unit-testable against a temp file. Writes a sibling tempfile and renames
+/// over the original — a crash mid-write can never truncate `known_hosts` —
+/// and sets the rewritten file to 0600 (matching [`append_host`]).
+fn remove_host_at(path: &std::path::Path, name: &str) -> std::io::Result<usize> {
+    let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(e) => return Err(e),
     };
 
-    let name = host_key(host, port);
     let mut removed = 0usize;
     let kept: Vec<&str> = content
         .lines()
         .filter(|line| {
-            let hit = line_matches(line, &name);
+            let hit = line_matches(line, name);
             if hit {
                 removed += 1;
             }
@@ -138,7 +175,14 @@ pub fn remove_host(host: &str, port: u16) -> std::io::Result<usize> {
         if !out.is_empty() {
             out.push('\n');
         }
-        std::fs::write(&path, out)?;
+        let tmp = path.with_extension("portbay-tmp");
+        std::fs::write(&tmp, out)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&tmp, path)?;
     }
     Ok(removed)
 }
@@ -165,6 +209,42 @@ mod tests {
             "*.example.com"
         ));
         assert!(!line_matches("# a comment", "a.com"));
+    }
+
+    /// Pins the P2-2 fix from the 2026-06-10 assessment: removing a host
+    /// rewrites via tmp→rename (never a bare truncating write) and leaves the
+    /// file owner-only, like `append_host` creates it.
+    #[test]
+    fn remove_rewrites_atomically_with_owner_only_perms() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(
+            &path,
+            "example.com ssh-ed25519 AAAA\nkeep.com ssh-ed25519 BBBB\n",
+        )
+        .unwrap();
+
+        let removed = remove_host_at(&path, "example.com").unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "keep.com ssh-ed25519 BBBB\n"
+        );
+        // No leftover tempfile.
+        assert!(!path.with_extension("portbay-tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        // Missing file and missing host are both clean no-ops.
+        assert_eq!(remove_host_at(&path, "absent.com").unwrap(), 0);
+        assert_eq!(
+            remove_host_at(&dir.path().join("nope"), "example.com").unwrap(),
+            0
+        );
     }
 
     #[test]

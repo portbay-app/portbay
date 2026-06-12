@@ -524,6 +524,7 @@ pub async fn update_project(
     if let Some(extras) = patch.extra_ports {
         project.extra_ports = extras;
     }
+    let start_command_patched = patch.start_command.is_some();
     if let Some(cmd) = patch.start_command {
         project.start_command = cmd.and_then(|value| {
             let trimmed = value.trim().to_string();
@@ -580,6 +581,15 @@ pub async fn update_project(
     }
     if let Some(mobile_run) = patch.mobile_run {
         project.mobile_run = Some(mobile_run);
+        // Mobile projects carry the generated launch script stamped into
+        // `start_command` (set at add time). A new destination/scheme/flavor
+        // must regenerate it, or the pick would never take effect. An explicit
+        // start_command in the same patch wins — the user is overriding.
+        if !start_command_patched && crate::mobile::is_mobile_kind(project.kind) {
+            if let Some(cmd) = crate::mobile::launch_command(project) {
+                project.start_command = Some(cmd);
+            }
+        }
     }
     if let Some(ws) = patch.workspace {
         project.workspace = Some(ws);
@@ -1631,6 +1641,7 @@ pub async fn remove_project(state: State<'_, AppState>, id: String) -> AppResult
     let _removed = registry.remove_project(&pid)?;
     save_registry(&state, &registry)?;
     state.invalidate_icon(&id);
+    state.clear_proc_log(&id);
     state.reconciler.mark_dirty();
     Ok(())
 }
@@ -1887,8 +1898,12 @@ mod tests {
         assert_eq!(detected.port, None);
         assert_eq!(detected.mobile_run, Some(MobileRunConfig::default()));
         // Launch attaches to the running app (hot-reload host), so it stays a
-        // long-running PC process. See `crate::mobile`.
-        assert_eq!(detected.start_command.as_deref(), Some("exec flutter run"));
+        // long-running PC process; the pid file enables hot reload/restart
+        // signals. See `crate::mobile`.
+        let cmd = detected
+            .start_command
+            .expect("flutter projects get a command");
+        assert!(cmd.ends_with("exec flutter run --pid-file .portbay-flutter.pid"));
     }
 
     #[test]

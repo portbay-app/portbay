@@ -12,7 +12,8 @@
 //! reconcile loop is fleshed out.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -23,6 +24,33 @@ use crate::state::AppState;
 use crate::tray;
 
 pub const STATUS_CHANNEL: &str = "portbay://status";
+
+/// Label of the primary app window (`tauri.conf.json` `app.windows[0]`).
+pub const MAIN_WEBVIEW_LABEL: &str = "main";
+
+/// Emit `payload` on `channel` to the main window only, instead of
+/// broadcasting to every webview. SSH/deploy/SFTP events carry
+/// secrets-adjacent data (private-key paths, command lines, raw remote
+/// output, host-key prompts) and the secondary windows (`tray-panel`,
+/// `dictation-overlay`) hold `core:default` — which includes
+/// `event:allow-listen` — so a broadcast would hand that data to any JS
+/// running there. Point-to-point is the same standard the PTY stream already
+/// follows with its dedicated IPC channel.
+///
+/// Frontend note: a targeted event is only delivered to listeners that name
+/// the label (`listen(ev, cb, { target: "main" })`); the default global
+/// `listen()` registers for `EventTarget::Any`, which targeted emits skip.
+pub fn emit_to_main<S: serde::Serialize + Clone>(
+    app: &AppHandle,
+    channel: &str,
+    payload: S,
+) -> tauri::Result<()> {
+    app.emit_to(
+        tauri::EventTarget::labeled(MAIN_WEBVIEW_LABEL),
+        channel,
+        payload,
+    )
+}
 
 /// Channel for PortBay-authored lifecycle log lines (see [`emit_proc_log`]).
 /// Separate from `STATUS_CHANNEL` (machine-readable status transitions) so the
@@ -44,18 +72,32 @@ pub struct ProcLogEvent {
 /// log viewer so a developer gets immediate, terminal-style feedback
 /// (e.g. "▶ Starting myapp", "$ pnpm dev") the instant they press Play —
 /// rather than a blank panel while the child process boots and buffers its
-/// first output. These lines are live-only narration; they are not written
-/// to the on-disk log file, which Process Compose owns. Best-effort: a send
-/// failure (no window listening) is ignored.
+/// first output. These lines are never written to the on-disk log file,
+/// which Process Compose owns; instead each one is recorded in a small
+/// per-project ring ([`AppState::push_proc_log`]) that [`proc_log_history`]
+/// replays, so a viewer opened *after* Play still sees the narration the
+/// live event missed. Best-effort: a send failure (no window listening) is
+/// ignored.
 pub fn emit_proc_log(app: &AppHandle, id: &str, level: &str, message: impl Into<String>) {
-    let _ = app.emit(
-        PROC_LOG_CHANNEL,
-        ProcLogEvent {
-            id: id.to_string(),
-            level: level.to_string(),
-            message: message.into(),
-        },
-    );
+    let event = ProcLogEvent {
+        id: id.to_string(),
+        level: level.to_string(),
+        message: message.into(),
+    };
+    if let Some(state) = app.try_state::<AppState>() {
+        state.push_proc_log(event.clone());
+    }
+    let _ = app.emit(PROC_LOG_CHANNEL, event);
+}
+
+/// `proc_log_history(id)` — the retained narration lines for a project,
+/// oldest first. The log viewer calls this on open and renders the lines
+/// *above* the file-tail snapshot: the ring is cleared on Start/Restart and
+/// Process Compose truncates the log file per run, so "narration first,
+/// then child output" matches the real chronology of the current run.
+#[tauri::command]
+pub fn proc_log_history(state: tauri::State<AppState>, id: String) -> Vec<ProcLogEvent> {
+    state.proc_log_snapshot(&id)
 }
 
 /// Cadence at which the poller wakes to check PC. Diffs are computed every
@@ -64,6 +106,36 @@ pub fn emit_proc_log(app: &AppHandle, id: &str, level: &str, message: impl Into<
 /// roughly every second) competitive without saturating PC's REST API
 /// (each tick costs one /processes round-trip, sub-100 ms).
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
+
+/// Connect timeout for the poller's own liveness probe. Matches the DNS
+/// pre-flight's `port_in_use` budget — a loopback connect either completes in
+/// microseconds or the port is closed; 200 ms is generous headroom and short
+/// enough that a stalled probe can't visibly lag the 750 ms poll tick.
+const LIVENESS_CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Once our liveness probe has confirmed a probe-stuck process is actually
+/// serving, don't re-connect on every tick — re-confirm at most this often.
+/// Process Compose never resurrects an exhausted readiness probe, so a process
+/// that answered our connect is overwhelmingly likely to keep answering; this
+/// keeps the override from turning the 750 ms loop into a connect storm while
+/// still re-checking often enough to catch a process that later dies on its
+/// port without leaving PC's list (rare, but the re-check makes it self-heal).
+const LIVENESS_RECHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Cheap PortBay-owned liveness check: can we open a TCP connection to the
+/// project's loopback port? Mirrors `dnsmasq::port_in_use` — a successful
+/// connect proves something is accepting on the port right now, which is the
+/// ground truth the stale readiness probe has stopped reporting. Returns false
+/// when the project pins no port (nothing to probe) or the connect is refused.
+fn port_accepts(port: Option<u16>) -> bool {
+    let Some(port) = port else {
+        return false;
+    };
+    let Ok(addr) = format!("127.0.0.1:{port}").parse() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, LIVENESS_CONNECT_TIMEOUT).is_ok()
+}
 
 /// Which side of the main process a hook runs on.
 #[derive(Debug, Clone, Copy)]
@@ -113,6 +185,12 @@ impl ObservedState {
 pub fn spawn_status_poller(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut last: HashMap<String, ObservedState> = HashMap::new();
+        // Liveness-override cache (C3): the instant we last *confirmed* a
+        // probe-stuck process is actually serving its port, keyed by PC process
+        // name. Lets us answer "still alive?" without re-connecting every tick
+        // until `LIVENESS_RECHECK_INTERVAL` elapses. Pruned each tick to the
+        // processes still present, so it can't grow unbounded.
+        let mut liveness_ok: HashMap<String, Instant> = HashMap::new();
         let mut tick = tokio::time::interval(POLL_INTERVAL);
         // First tick fires immediately; that's the right shape for a poller
         // — emit a first snapshot as soon as the daemon is reachable.
@@ -151,6 +229,36 @@ pub fn spawn_status_poller(app: AppHandle) {
                                 .process_compose_id()
                                 .map(|process_id| (process_id, project.id.as_str().to_string()))
                         })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // PC process name → the project's primary port, for the C3 liveness
+            // override below. A project that pins no port has no port to probe,
+            // so it's simply absent from the map (the override never fires).
+            let process_to_port: HashMap<String, u16> = registry
+                .as_ref()
+                .map(|reg| {
+                    reg.list_projects()
+                        .iter()
+                        .filter_map(|project| {
+                            let pid = project.process_compose_id()?;
+                            Some((pid, project.port?))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Mobile projects get a phase sub-state derived from their log
+            // tail (markers + CLI milestones) — fed every tick below so the
+            // incremental log read stays current. Keyed by project id.
+            let mobile_kinds: HashMap<String, crate::registry::ProjectType> = registry
+                .as_ref()
+                .map(|reg| {
+                    reg.list_projects()
+                        .iter()
+                        .filter(|p| crate::mobile::is_mobile_kind(p.kind))
+                        .map(|p| (p.id.as_str().to_string(), p.kind))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -258,6 +366,37 @@ pub fn spawn_status_poller(app: AppHandle) {
                     observed.status = ProjectStatus::Stopped;
                 }
 
+                // C3 liveness override. Process Compose stops re-running a TCP
+                // readiness probe once its failure threshold is exhausted, so a
+                // cold Next/Vite build that binds its port a moment too late
+                // pins `is_ready` at "Not Ready" forever — and `portbay_status`
+                // then paints Unhealthy permanently even though the server is
+                // serving. Before trusting that, do our own cheap loopback
+                // connect: if the port accepts, the process is genuinely up, so
+                // report Running. Scoped tightly to keep the 750 ms loop quiet:
+                // only when the status is *probe-only* Unhealthy, and at most
+                // once per `LIVENESS_RECHECK_INTERVAL` once confirmed alive.
+                if observed.status == ProjectStatus::Unhealthy && p.unhealthy_is_probe_only() {
+                    let fresh = liveness_ok
+                        .get(&p.name)
+                        .is_some_and(|t| t.elapsed() < LIVENESS_RECHECK_INTERVAL);
+                    let alive = fresh || port_accepts(process_to_port.get(&p.name).copied());
+                    if alive {
+                        if !fresh {
+                            liveness_ok.insert(p.name.clone(), Instant::now());
+                        }
+                        observed.status = ProjectStatus::Running;
+                    } else {
+                        // Port is genuinely closed — it's really stuck. Drop any
+                        // stale "alive" marker so a later recovery re-probes.
+                        liveness_ok.remove(&p.name);
+                    }
+                } else {
+                    // No longer in the probe-stuck state (Ready, restarted,
+                    // stopped, …) — forget any cached liveness for this process.
+                    liveness_ok.remove(&p.name);
+                }
+
                 let changed = match last.get(&p.name) {
                     Some(prev) => prev != &observed,
                     None => true, // first observation == emit
@@ -304,6 +443,18 @@ pub fn spawn_status_poller(app: AppHandle) {
                     if expose_ids.contains(&observed.event_id) {
                         expose_changed = true;
                     }
+                }
+                // Mobile phase sub-state: fold this tick's observation (and
+                // any new log output) into the project's run phase. Every
+                // tick, not just on transitions — the log tail is incremental.
+                if let Some(kind) = mobile_kinds.get(&observed.event_id) {
+                    crate::mobile_phase::observe(
+                        &app,
+                        &state.logs_dir,
+                        &observed.event_id,
+                        *kind,
+                        observed.status,
+                    );
                 }
                 next.insert(p.name.clone(), observed);
             }
@@ -355,6 +506,15 @@ pub fn spawn_status_poller(app: AppHandle) {
                     if expose_ids.contains(&prev.event_id) {
                         expose_changed = true;
                     }
+                    if let Some(kind) = mobile_kinds.get(&prev.event_id) {
+                        crate::mobile_phase::observe(
+                            &app,
+                            &state.logs_dir,
+                            &prev.event_id,
+                            *kind,
+                            ProjectStatus::Stopped,
+                        );
+                    }
                 }
             }
 
@@ -376,6 +536,12 @@ pub fn spawn_status_poller(app: AppHandle) {
             if let Some(reg) = registry {
                 tray::refresh(&app, reg.list_projects(), &aggregate_input);
             }
+
+            // Prune the liveness cache to processes still present this tick, so
+            // a process that vanished from PC's list (stopped, removed) can't
+            // leave a stale "alive" marker behind. Keys are PC process names,
+            // which is exactly what `next` keys process/project rows on.
+            liveness_ok.retain(|name, _| next.contains_key(name));
 
             last = next;
         }
@@ -435,6 +601,18 @@ fn crashed_summary(state: &AppState, project_id: &str, exit_code: i32) -> String
              to a file or port it isn't allowed to use."
             .into();
     }
+    // iOS code-signing failures (physical-device builds). xcodebuild's raw
+    // error is buried in build noise; surface the one action that fixes it.
+    if tail.iter().any(|l| {
+        l.contains("requires a development team")
+            || l.contains("No profiles for")
+            || l.contains("No signing certificate")
+    }) {
+        return "Code signing failed — open the project in Xcode once, set your team \
+             under Signing & Capabilities, and run again. PortBay builds with automatic \
+             signing after that."
+            .into();
+    }
 
     // No recognised pattern — fall back to the bare PC report plus the
     // last useful-looking line of stderr so the user has at least a
@@ -483,7 +661,9 @@ fn tail_last_lines(path: &std::path::Path, n: usize) -> Option<Vec<String>> {
 /// in a JSON envelope:
 /// `{"level":"error","process":"x","replica":0,"message":"..."}`.
 /// Pull the `message` out so pattern matching works on the raw stderr.
-fn extract_pc_message(line: &str) -> Option<String> {
+/// Shared with `mobile_phase`, which parses phase markers out of the same
+/// envelope format.
+pub(crate) fn extract_pc_message(line: &str) -> Option<String> {
     if !line.starts_with('{') {
         return None;
     }

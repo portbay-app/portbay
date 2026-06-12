@@ -12,9 +12,20 @@
 	     nothing — silently. -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- Screen-recording webcam PiP (portbay-capture sidecar). Without this
+	     the hardened runtime blocks AVCaptureSession video silently. -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
 	<!-- Agent-task dispatch drives Terminal/Warp/iTerm via Apple Events
 	     (osascript). Pairs with NSAppleEventsUsageDescription in Info.plist. -->
 	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+	<!-- The bundler signs every externalBin sidecar with THIS file, and the
+	     bun-compiled portbay-agent (JavaScriptCore) needs JIT pages under
+	     hardened runtime — without this it dies on launch with "Ran out of
+	     executable memory" (SIGTRAP) in any release/notarized bundle, while
+	     dev's ad-hoc signing hides the problem. -->
+	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
 </dict>
 </plist>

@@ -30,6 +30,22 @@ pub struct SttCatalogModel {
     pub speed_note: String,
     pub recommended: bool,
     pub streaming: bool,
+    /// Parakeet generation ("v2" | "v3"); `None` for Whisper. Passed to the
+    /// sidecar so it downloads/loads the right FluidAudio version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parakeet_version: Option<String>,
+    /// Model-weights license label (e.g. "MIT", "CC-BY-4.0") — disclosed in
+    /// the download UI; the linked card is authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// Where the license/model card lives (Hugging Face card or upstream).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_url: Option<String>,
+    /// Expected install-content digest from the signed catalog (sha256 over
+    /// the sorted per-file hashes — the sidecar's `--digest` format). When
+    /// present the sidecar verifies the download before sealing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
 }
 
 /// One installed model (a sealed install under the models dir).
@@ -50,6 +66,16 @@ pub struct SttOverview {
     pub installed: Vec<SttInstalledModel>,
     pub models_dir: String,
     pub disk: super::ollama::DiskUsage,
+    /// Catalog served from cache/bundled after a failed live refresh.
+    pub catalog_stale: bool,
+    /// "live" | "cache" | "bundled" — provenance of `catalog`.
+    pub catalog_source: String,
+    /// Microphone TCC status for PortBay: "authorized" | "denied" |
+    /// "restricted" | "not_determined" | "unknown". The capture runs in the
+    /// sidecar but TCC attributes it to the app, so this is the effective
+    /// state — surfaced so the UI can pre-flight instead of failing
+    /// mid-session at first Fn-hold.
+    pub mic_permission: String,
 }
 
 /// Download progress for the AI page, streamed over a `Channel` like
@@ -89,15 +115,12 @@ fn fmt_gb(bytes: u64) -> String {
 /// install. A missing catalog entry or a failed disk probe skips the check
 /// (never block a download on uncertainty); only a positive shortfall stops it.
 #[cfg(target_os = "macos")]
-async fn ensure_disk_space_for(dir: &str, model: &str) -> AppResult<()> {
-    let catalog = match crate::stt::one_shot_op(serde_json::json!({ "op": "catalog" })).await {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
-    };
-    let models: Vec<SttCatalogModel> =
-        serde_json::from_value(catalog.get("models").cloned().unwrap_or_default())
-            .unwrap_or_default();
-    let Some(entry) = models.into_iter().find(|m| m.id == model) else {
+async fn ensure_disk_space_for(
+    state: &State<'_, AppState>,
+    dir: &str,
+    model: &str,
+) -> AppResult<()> {
+    let Some(entry) = crate::commands::model_catalog::stt_entry(state, model).await else {
         return Ok(());
     };
     if entry.approx_size_bytes == 0 {
@@ -131,48 +154,62 @@ pub async fn stt_status() -> SttStatus {
     crate::stt::check().await
 }
 
-/// Catalog + installed models + storage, one call for the page.
+/// Catalog + installed models + storage, one call for the page. `refresh`
+/// forces a live re-fetch of the PortBay Model Catalog (the AI page's refresh
+/// button); otherwise the catalog comes from the daily cache / bundled fallback.
 #[tauri::command]
-pub async fn stt_overview(state: State<'_, AppState>) -> AppResult<SttOverview> {
+pub async fn stt_overview(
+    state: State<'_, AppState>,
+    refresh: Option<bool>,
+) -> AppResult<SttOverview> {
     let dir = models_dir(&state);
     let status = crate::stt::check().await;
 
+    // The catalog is Rust-owned now (live signed manifest + cache + bundled
+    // fallback), not the sidecar's static list — so new models ship without an
+    // app release, and the list renders even when the sidecar can't run.
+    let catalog_result =
+        crate::commands::model_catalog::load_stt(&state, refresh.unwrap_or(false)).await;
+
     #[cfg(target_os = "macos")]
-    let (catalog, installed) = if status.available {
-        let catalog_response = crate::stt::one_shot_op(serde_json::json!({ "op": "catalog" }))
-            .await
-            .map_err(op_err)?;
-        let installed_response = crate::stt::one_shot_op(
-            serde_json::json!({ "op": "installed", "modelsDir": dir }),
-        )
-        .await
-        .map_err(op_err)?;
-        (
-            serde_json::from_value(catalog_response.get("models").cloned().unwrap_or_default())
+    let installed: Vec<SttInstalledModel> = if status.available {
+        let installed_response =
+            crate::stt::one_shot_op(serde_json::json!({ "op": "installed", "modelsDir": dir }))
+                .await
+                .map_err(op_err)?;
+        serde_json::from_value(
+            installed_response
+                .get("installed")
+                .cloned()
                 .unwrap_or_default(),
-            serde_json::from_value(
-                installed_response
-                    .get("installed")
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .unwrap_or_default(),
         )
+        .unwrap_or_default()
     } else {
-        // No sidecar / too-old macOS: the page still renders status + copy.
-        (Vec::new(), Vec::new())
+        Vec::new()
     };
     #[cfg(not(target_os = "macos"))]
-    let (catalog, installed) = (Vec::new(), Vec::new());
+    let installed: Vec<SttInstalledModel> = Vec::new();
 
     let disk = disk_usage_of(dir.clone()).await?;
     Ok(SttOverview {
         status,
-        catalog,
+        catalog: catalog_result.models,
         installed,
         models_dir: dir,
         disk,
+        catalog_stale: catalog_result.stale,
+        catalog_source: catalog_result.source,
+        mic_permission: crate::dictation_session::mic_permission(),
     })
+}
+
+/// Trigger the system microphone prompt (or report the settled state).
+/// Returns true when access is granted. The UI calls this from its
+/// "Enable microphone" CTA while the status is still `not_determined`, so
+/// the grant happens before the first dictation instead of mid-session.
+#[tauri::command]
+pub async fn stt_request_mic_access() -> bool {
+    crate::dictation_session::request_mic_access().await
 }
 
 /// Download a catalog model, streaming progress into `on_event`. The
@@ -188,7 +225,7 @@ pub async fn stt_download_model(
     let dir = models_dir(&state);
     // Refuse early (with the same terminal Done event the UI expects) if the
     // volume plainly can't hold the model, rather than failing mid-download.
-    if let Err(e) = ensure_disk_space_for(&dir, &model).await {
+    if let Err(e) = ensure_disk_space_for(&state, &dir, &model).await {
         let _ = on_event.send(SttDownloadEvent::Done {
             success: false,
             cancelled: false,
@@ -196,11 +233,23 @@ pub async fn stt_download_model(
         });
         return Err(e);
     }
+    // Resolve the engine/variant from the PortBay Model Catalog and hand it to
+    // the sidecar, so models the sidecar's bundled list doesn't know still
+    // download correctly (the live-catalog path).
+    let spec = crate::commands::model_catalog::stt_entry(&state, &model)
+        .await
+        .map(|m| crate::stt::DownloadSpec {
+            engine: m.engine,
+            repo_model: m.repo_model,
+            parakeet_version: m.parakeet_version,
+            content_digest: m.content_digest,
+        });
     let progress_channel = on_event.clone();
-    let outcome = crate::stt::run_download(&dir, &model, &download_id, move |fraction, phase| {
-        let _ = progress_channel.send(SttDownloadEvent::Progress { fraction, phase });
-    })
-    .await;
+    let outcome =
+        crate::stt::run_download(&dir, &model, &download_id, spec, move |fraction, phase| {
+            let _ = progress_channel.send(SttDownloadEvent::Progress { fraction, phase });
+        })
+        .await;
 
     match outcome {
         Ok(done) => {
@@ -306,8 +355,10 @@ pub async fn stt_start_capture(
         tracing::debug!(model = %model, terms = terms.len(), "stt: recognizer bias resolved");
         terms
     } else {
-        // Default: no recognizer bias (see `recognizer_bias_enabled` — turbo
-        // regressed). The rewrite still corrects spellings downstream.
+        // No recognizer bias: engine can't take a prompt (Parakeet, and the
+        // turbo/distil Whisper decoders — see `engine_supports_text_bias`) or
+        // the kill switch is set. The always-on correction net + rewrite
+        // still fix known terms downstream.
         Vec::new()
     };
     // The notch HUD covers in-app sessions too (same UI as dictate-anywhere):

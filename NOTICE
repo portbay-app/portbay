@@ -47,6 +47,81 @@ code (AGPL-3.0-only, this repository). Optional managed runtimes (e.g.
 PHP-FPM) are downloaded on demand from the portbay-runtimes project, which
 carries its own license attribution.
 
+  portbay-agent
+      PortBay's local-model agent engine is derived from Cline CLI / SDK
+      (https://github.com/cline/cline), pinned from the Apache-2.0 upstream
+      fork maintained at https://github.com/portbay-app/portbay-cline.
+      Copyright 2026 Cline Bot Inc. PortBay modifications are copyright
+      Tribal House and PortBay contributors. The fork's LICENSE is Apache-2.0;
+      no upstream NOTICE file was present at the pinned source.
+
+================================================================================
+
+AI engine libraries (statically linked into first-party sidecars)
+
+The first-party portbay-stt and portbay-imagegen sidecars (AGPL-3.0-only,
+this repository) statically link the following third-party Swift libraries.
+Unlike the aggregate sidecar binaries above, these are combined works; each
+library's license is inbound-compatible with AGPL-3.0-only and its notice is
+reproduced or referenced here as the license requires.
+
+  WhisperKit — https://github.com/argmaxinc/argmax-oss-swift
+      On-device Whisper speech recognition (portbay-stt).
+      License: MIT. The license follows verbatim:
+
+      MIT License
+
+      Copyright (c) 2024 argmax, inc.
+
+      Permission is hereby granted, free of charge, to any person obtaining
+      a copy of this software and associated documentation files (the
+      "Software"), to deal in the Software without restriction, including
+      without limitation the rights to use, copy, modify, merge, publish,
+      distribute, sublicense, and/or sell copies of the Software, and to
+      permit persons to whom the Software is furnished to do so, subject to
+      the following conditions:
+
+      The above copyright notice and this permission notice shall be
+      included in all copies or substantial portions of the Software.
+
+      THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+      EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+      MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+      NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+      BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+      ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+      CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+      SOFTWARE.
+
+  FluidAudio — https://github.com/FluidInference/FluidAudio
+      Parakeet / Nemotron / Qwen3 / Cohere ASR and Kokoro TTS runtime
+      (portbay-stt). Copyright FluidInference contributors.
+      License: Apache-2.0 (full text at the repository's LICENSE).
+      FluidAudio's own ThirdPartyLicenses directory (fastcluster, vbx)
+      applies to code it vendors.
+
+  Apple ml-stable-diffusion — https://github.com/apple/ml-stable-diffusion
+      Core ML Stable Diffusion pipeline (portbay-imagegen).
+      License: MIT. Copyright (c) 2024 Apple Inc. The MIT license text
+      reproduced verbatim under WhisperKit above applies with this
+      copyright line; the upstream LICENSE.md is authoritative.
+
+  Hugging Face swift-transformers —
+      https://github.com/huggingface/swift-transformers
+      Tokenizers and Hub utilities (portbay-stt, portbay-imagegen).
+      Copyright Hugging Face and contributors.
+      License: Apache-2.0 (full text at the repository's LICENSE).
+
+  Kokoro voice packs — https://github.com/hexgrad/kokoro
+      The Kokoro English voice data files (af_*.bin etc.) are downloaded
+      on demand, byte-identical from the pinned upstream revision, and
+      staged into the model directory. Copyright hexgrad and Kokoro
+      contributors. License: Apache-2.0.
+
+Model weights downloaded on demand (Whisper, Parakeet, Nemotron, Qwen3,
+Cohere, Kokoro, Stable Diffusion / FLUX) remain under their respective
+model licenses, shown in the in-app catalog where the model is downloaded.
+
 ================================================================================
 
 Export compliance

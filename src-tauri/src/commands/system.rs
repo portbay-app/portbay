@@ -11,6 +11,16 @@ use crate::error::{AppError, AppResult};
 use crate::hosts::HostsManager;
 use crate::state::AppState;
 
+/// The repository NOTICE file, embedded at build time so every distributed
+/// binary carries its own third-party attribution — the in-app
+/// "Third-party licenses" view renders this (MIT/Apache notices must
+/// accompany binary distribution, and the dnsmasq GPL-3.0 §6 source offer
+/// must be reachable from the product, not just the repo).
+#[tauri::command]
+pub fn legal_notices() -> &'static str {
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../NOTICE"))
+}
+
 #[tauri::command]
 pub async fn doctor(state: State<'_, AppState>) -> AppResult<DoctorReport> {
     let mut findings = Vec::new();

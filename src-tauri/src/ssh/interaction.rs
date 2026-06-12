@@ -12,16 +12,17 @@
 //! oneshot registered under that id, and the frontend posts the answer back via
 //! the [`ssh_interaction_respond`] / [`ssh_interaction_cancel`] commands. A
 //! [`NoopInteractor`] (or a `None` interactor) preserves the old silent-TOFU
-//! behaviour for headless callers (the MCP agent, tunnels).
+//! behaviour for truly headless callers (the MCP agent). UI-triggered paths —
+//! sessions, tunnels, connection tests — pass a real interactor so first
+//! contact is always the user's decision.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::oneshot;
 
 use crate::error::AppResult;
@@ -35,7 +36,7 @@ pub const KBI_PROMPT_EVENT: &str = "portbay://ssh-kbi-prompt";
 /// Hold a handshake open this long waiting for the user before treating silence
 /// as a cancel, so a forgotten dialog can't pin a connection (and its server
 /// socket) open indefinitely.
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Why the connect is asking: a never-seen host key, or one that differs from
 /// the recorded one. Mirrors the read-only probe's vocabulary so the UI speaks
@@ -140,22 +141,46 @@ impl SshInteractor for NoopInteractor {
 static PENDING: LazyLock<Mutex<HashMap<String, oneshot::Sender<InteractionReply>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Monotonic source of `flow_id`s. (`Math.random`/clock-free so it stays
-/// deterministic in tests and replay.)
-static FLOW_SEQ: AtomicU64 = AtomicU64::new(1);
-
+/// A fresh, unguessable `flow_id`. UUIDv4 rather than a sequential counter so
+/// a compromised secondary webview can't predict (and race-answer) a pending
+/// flow it never saw the prompt event for.
 fn next_flow_id() -> String {
-    format!("ssh-flow-{}", FLOW_SEQ.fetch_add(1, Ordering::Relaxed))
+    format!("ssh-flow-{}", uuid::Uuid::new_v4())
 }
 
 /// The frontend's posted answer. `action` is the host-key choice; `responses`
-/// is reserved for Phase 2 keyboard-interactive.
-#[derive(Debug, Clone, Deserialize)]
+/// carries the keyboard-interactive field answers (secrets: OTPs, passwords).
+/// Deliberately not `Clone` — every copy of a secret is another heap allocation
+/// to leak — and zeroized on drop so an unconsumed reply (timeout, cancel)
+/// doesn't linger until reallocation.
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionReply {
     pub action: String,
     #[serde(default)]
     pub responses: Option<Vec<String>>,
+}
+
+impl Drop for InteractionReply {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.action.zeroize();
+        self.responses.zeroize();
+    }
+}
+
+/// Redacted: KBI responses are secrets (OTPs, passwords) and must never reach
+/// a log through a stray `{:?}`.
+impl std::fmt::Debug for InteractionReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InteractionReply")
+            .field("action", &self.action)
+            .field(
+                "responses",
+                &self.responses.as_ref().map(|r| format!("[{} redacted]", r.len())),
+            )
+            .finish()
+    }
 }
 
 /// Live interactor: emits a Tauri event and awaits the frontend's answer.
@@ -182,16 +207,19 @@ impl EventInteractor {
             .unwrap_or_else(|e| e.into_inner())
             .insert(flow_id.clone(), tx);
 
-        if self
-            .app
-            .emit(
-                event,
-                &PromptEnvelope {
-                    flow_id: &flow_id,
-                    inner: payload,
-                },
-            )
-            .is_err()
+        // Point-to-point to the main window: the prompt carries host names,
+        // fingerprints, and KBI field labels, and only the main window hosts
+        // the dialogs that answer it. Broadcast would also wake any secondary
+        // webview holding `event:allow-listen`.
+        if crate::commands::events::emit_to_main(
+            &self.app,
+            event,
+            &PromptEnvelope {
+                flow_id: &flow_id,
+                inner: payload,
+            },
+        )
+        .is_err()
         {
             PENDING.lock().ok().and_then(|mut p| p.remove(&flow_id));
             return None;
@@ -232,9 +260,11 @@ impl SshInteractor for EventInteractor {
     }
 
     async fn kbi_responses(&self, prompt: KbiPrompt) -> Option<Vec<String>> {
-        let reply = self.ask(KBI_PROMPT_EVENT, &prompt).await?;
+        // `take` rather than destructure: the reply zeroizes itself on drop, so
+        // move the answers out and let the husk scrub what remains.
+        let mut reply = self.ask(KBI_PROMPT_EVENT, &prompt).await?;
         match reply.action.as_str() {
-            "submit" => reply.responses,
+            "submit" => reply.responses.take(),
             _ => None,
         }
     }
@@ -267,4 +297,39 @@ pub fn ssh_interaction_cancel(flow_id: String) -> AppResult<()> {
         .unwrap_or_else(|e| e.into_inner())
         .remove(&flow_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the P3 fix from the 2026-06-10 assessment: flow ids must be
+    /// unguessable (UUIDv4), not a predictable `ssh-flow-1`, `ssh-flow-2`, …
+    /// sequence another webview could race-answer.
+    #[test]
+    fn flow_ids_are_uuids_not_sequential() {
+        let a = next_flow_id();
+        let b = next_flow_id();
+        assert_ne!(a, b);
+        for id in [&a, &b] {
+            let suffix = id.strip_prefix("ssh-flow-").expect("keeps the ssh-flow- prefix");
+            assert!(
+                uuid::Uuid::parse_str(suffix).is_ok(),
+                "flow id suffix is a UUID, got `{suffix}`"
+            );
+        }
+    }
+
+    /// KBI responses are secrets — a stray `{:?}` must never print them.
+    #[test]
+    fn interaction_reply_debug_redacts_responses() {
+        let reply = InteractionReply {
+            action: "submit".into(),
+            responses: Some(vec!["hunter2".into(), "123456".into()]),
+        };
+        let rendered = format!("{reply:?}");
+        assert!(!rendered.contains("hunter2"));
+        assert!(!rendered.contains("123456"));
+        assert!(rendered.contains("[2 redacted]"));
+    }
 }

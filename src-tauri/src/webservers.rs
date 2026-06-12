@@ -483,7 +483,7 @@ mod tests {
         Project {
             id: ProjectId::new("tribal-house-cms"),
             name: "Tribal House CMS".into(),
-            path: PathBuf::from("/Volumes/DevSSD/projects/Clients/Tribal House/tribal-house-cms"),
+            path: PathBuf::from("/tmp/portbay-tests/Tribal House/tribal-house-cms"),
             kind: ProjectType::Php,
             start_command: None,
             port: Some(8090),
@@ -561,9 +561,7 @@ mod tests {
             Path::new("/tmp/logs"),
         );
         assert!(
-            cfg.contains(
-                "root \"/Volumes/DevSSD/projects/Clients/Tribal House/tribal-house-cms/public\";"
-            ),
+            cfg.contains("root \"/tmp/portbay-tests/Tribal House/tribal-house-cms/public\";"),
             "root must be quoted:\n{cfg}"
         );
         assert!(

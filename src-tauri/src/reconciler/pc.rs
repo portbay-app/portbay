@@ -80,8 +80,19 @@ pub(super) async fn reconcile(
         return StepOutcome::failed(format!("write {}: {}", yaml_path.display(), e));
     }
 
-    state.shutdown_pc();
-    if let Err(e) = state.boot_pc(app, yaml_path) {
+    // `shutdown_pc` sleeps ~800 ms (graceful drain) and `boot_pc` blocks until
+    // the daemon is live (readiness poll) — both synchronous. `reconcile` runs
+    // ON the async reconciler worker (`tick().await`), so running this inline
+    // parks that worker for ~1 s+ on every YAML change, starving unrelated async
+    // commands scheduled on the same thread. `block_in_place` preserves the
+    // exact ordering and the "PC is serving the new YAML" postcondition (the
+    // readiness poll still completes before we return) while letting the runtime
+    // relocate other tasks off this thread for the duration.
+    let boot = tokio::task::block_in_place(|| {
+        state.shutdown_pc();
+        state.boot_pc(app, yaml_path)
+    });
+    if let Err(e) = boot {
         return StepOutcome::failed(format!("boot pc: {e}"));
     }
 

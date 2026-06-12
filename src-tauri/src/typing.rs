@@ -30,16 +30,74 @@
 //! Everything here is local: the transcript goes to the pasteboard and into
 //! the target app, never anywhere else.
 
+/// Pure decision core for `replace_recent_insertion_via_keys` — the parts of
+/// the keyed fallback that decide whether any synthetic key is ever posted,
+/// when the ⇧← burst pauses to re-verify focus, and whether the bail-out
+/// collapse → is safe to post. Extracted from the FFI path (self-documented
+/// as the most fragile in the module) so the guards are unit-testable
+/// without a window server.
+pub(crate) mod keyed_guard {
+    /// Ceiling on the keyed replace's select-back span: each character costs
+    /// one synthetic ⇧← pair, so a very long transcript would visibly crawl.
+    /// Above this the raw words simply stay (the AX path already covered
+    /// native fields of any length).
+    pub const MAX_CHARS: usize = 500;
+    /// ⇧← burst batch size. Batches keep the burst from coalescing in the
+    /// target's queue, and every batch boundary re-probes the frontmost pid:
+    /// the events go to the HID tap (frontmost app, not a specific pid), so
+    /// a focus switch mid-burst must abort before the next batch lands in
+    /// whatever window is now in front.
+    pub const BATCH: usize = 32;
+
+    /// Chars to select back over, or None when the span is empty or too long
+    /// — both bail before any key is posted. Arrow keys move per character/
+    /// grapheme; `chars()` is the right unit for plain dictation text, and
+    /// the read-back verify catches any editor whose caret strides differ
+    /// (clusters, soft breaks).
+    pub fn span_chars(old: &str) -> Option<usize> {
+        let n = old.chars().count();
+        (n > 0 && n <= MAX_CHARS).then_some(n)
+    }
+
+    /// True after the `i`-th ⇧← pair (0-based) when the burst should pause
+    /// for a breather and a focus re-probe.
+    pub fn batch_boundary(i: usize) -> bool {
+        (i + 1).is_multiple_of(BATCH)
+    }
+
+    /// Whether the probed frontmost pid is still the captured target — the
+    /// gate for continuing the burst and for posting the bail collapse →.
+    /// A failed probe (None) counts as lost: posting blind is never safe.
+    pub fn focus_still_target(front: Option<i32>, target_pid: i32) -> bool {
+        front == Some(target_pid)
+    }
+
+    /// The selection read-back proves we selected exactly what we typed:
+    /// every ⇧← was posted AND AXSelectedText returns precisely `old`.
+    /// An unreadable selection (None) is a fail — never paste over an
+    /// unverified selection.
+    pub fn selection_verified(
+        posted: usize,
+        count: usize,
+        selected: Option<&str>,
+        old: &str,
+    ) -> bool {
+        posted == count && selected == Some(old)
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::{c_ulong, c_void};
+
+    use super::keyed_guard;
 
     use objc2::MainThreadMarker;
     use objc2_app_kit::{
         NSApplicationActivationPolicy, NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard,
         NSPasteboardTypeString, NSRunningApplication, NSWorkspace,
     };
-    use objc2_foundation::{NSDictionary, NSString};
+    use objc2_foundation::{NSData, NSDictionary, NSString};
     use serde::Serialize;
 
     // ---------------------------------------------------------------------
@@ -72,6 +130,14 @@ mod macos {
         fn AXValueGetValue(value: *const c_void, the_type: u32, value_ptr: *mut c_void) -> bool;
         /// Wrap a primitive (a CFRange) back into an AXValue.
         fn AXValueCreate(the_type: u32, value_ptr: *const c_void) -> *const c_void;
+    }
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        /// Whether ANY process holds Secure Event Input (password dialogs,
+        /// password managers, the login window). While it's held, keyboards
+        /// are cryptographically isolated — a transcript must not be typed.
+        fn IsSecureEventInputEnabled() -> bool;
     }
 
     /// kAXValueTypeCFRange — the AXValue tag for a CFRange (selected-text range).
@@ -202,6 +268,12 @@ mod macos {
     /// below carries the literal "v" so non-QWERTY layouts still read the
     /// event as ⌘V (apps match key equivalents by character).
     const KEY_V: u16 = 9;
+    /// kVK_LeftArrow / kVK_RightArrow — the keyed replace's select-back and
+    /// its bail-out collapse.
+    const KEY_LEFT: u16 = 123;
+    const KEY_RIGHT: u16 = 124;
+    /// kCGEventFlagMaskShift.
+    const MASK_SHIFT: u64 = 1 << 17;
     /// kCGEventSourceStateCombinedSessionState — the source state a real
     /// keypress reports. Shipping clipboard/paste tools (e.g. Maccy) build
     /// their synthetic ⌘V from a source in this state.
@@ -339,7 +411,8 @@ mod macos {
         let workspace = NSWorkspace::sharedWorkspace();
         let front = workspace.frontmostApplication()?;
         let pid = front.processIdentifier();
-        let name = front.localizedName()
+        let name = front
+            .localizedName()
             .map(|n| n.to_string())
             .unwrap_or_default();
         let bundle_id = front.bundleIdentifier().map(|b| b.to_string());
@@ -406,6 +479,31 @@ mod macos {
         apps
     }
 
+    /// Name + bundle id of every dock-visible running app — the icon-free
+    /// sibling of [`collect_running_apps`] for callers that only classify
+    /// (the favicon Automation-consent probe). Main thread (NSWorkspace).
+    pub fn running_app_identities(mtm: MainThreadMarker) -> Vec<(String, String)> {
+        let _ = mtm; // NSWorkspace is documented main-thread; the marker is the contract.
+        let workspace = NSWorkspace::sharedWorkspace();
+        let running = workspace.runningApplications();
+        let mut apps: Vec<(String, String)> = Vec::new();
+        for i in 0..running.count() {
+            let app = running.objectAtIndex(i);
+            if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+                continue;
+            }
+            let Some(bundle_id) = app.bundleIdentifier().map(|b| b.to_string()) else {
+                continue;
+            };
+            let name = app
+                .localizedName()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| bundle_id.clone());
+            apps.push((name, bundle_id));
+        }
+        apps
+    }
+
     /// Off-main pass: dedup by bundle id (multiple instances), downscale each
     /// icon to a data URL, then sort alphabetically. Pure Rust (image crate +
     /// base64) — run it on a blocking worker, never the main thread. The
@@ -445,7 +543,7 @@ mod macos {
     /// (and intended) to run off the main thread. A source icon can carry a
     /// 1024² rep, so the raw PNG runs up to ~512 KB; the overlay/picker render
     /// it at ≤16 pt, so 64 px keeps the data URL a few KB. None on any hiccup.
-    fn png_bytes_to_data_url(bytes: &[u8]) -> Option<String> {
+    pub fn png_bytes_to_data_url(bytes: &[u8]) -> Option<String> {
         use base64::Engine;
         let small = downscale_png(bytes, ICON_PX)?;
         Some(format!(
@@ -460,6 +558,23 @@ mod macos {
     /// [`collect_running_apps`] / [`finalize_app_infos`].
     fn icon_png_data_url(app: &NSRunningApplication) -> Option<String> {
         png_bytes_to_data_url(&icon_png_bytes(app)?)
+    }
+
+    /// Arbitrary encoded image bytes → PNG bytes via AppKit's NSBitmapImageRep
+    /// (ImageIO underneath). This is how favicon bytes get decoded: favicons
+    /// usually arrive as .ico, which the png-only image-crate build cannot
+    /// read, while ImageIO handles ICO/PNG/JPEG natively — the same decode
+    /// the app icon rides through `icon_png_bytes`. Pure decode work with no
+    /// window-server tie, so it is safe off the main thread (the favicon
+    /// fetch task calls it). Best-effort; None on undecodable bytes.
+    pub fn decode_image_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+        let data = NSData::with_bytes(bytes);
+        let rep = NSBitmapImageRep::imageRepWithData(&data)?;
+        let props = NSDictionary::new();
+        let png =
+            unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }?;
+        let png = png.to_vec();
+        (!png.is_empty()).then_some(png)
     }
 
     /// Target edge for the overlay's leading app-icon glyph.
@@ -566,6 +681,24 @@ mod macos {
             return Err("focus moved before insert".into());
         }
 
+        // SECURITY: never inject into a password surface. Two independent
+        // checks — the focused element's secure AX subrole, and the global
+        // Secure-Event-Input flag every password dialog raises (which AX
+        // often can't read into). The caller's rescue leaves the words on
+        // the clipboard, so the user still decides what happens to them.
+        let secure = on_main(app, |mtm| {
+            let _ = mtm;
+            unsafe { IsSecureEventInputEnabled() || ax_focused_is_secure_field() }
+        })
+        .await?;
+        if secure {
+            tracing::warn!(
+                target_pid,
+                "dictation: secure input field focused — transcript withheld"
+            );
+            return Err("secure input active — transcript not typed".into());
+        }
+
         let chars = text.chars().count();
         tracing::info!(
             target_pid,
@@ -579,7 +712,10 @@ mod macos {
         // Primary: type the transcript straight into the target process.
         match type_unicode_to_pid(target_pid, &text).await {
             Ok(()) => {
-                tracing::info!(target_pid, "dictation: transcript typed (unicode/postToPid)");
+                tracing::info!(
+                    target_pid,
+                    "dictation: transcript typed (unicode/postToPid)"
+                );
                 Ok(())
             }
             Err(detail) => {
@@ -592,7 +728,10 @@ mod macos {
                     "dictation: unicode typing failed — trying accessibility insert"
                 );
                 if insert_via_accessibility(app, &text).await {
-                    tracing::info!(target_pid, "dictation: transcript inserted via accessibility");
+                    tracing::info!(
+                        target_pid,
+                        "dictation: transcript inserted via accessibility"
+                    );
                     return Ok(());
                 }
                 tracing::warn!(
@@ -602,6 +741,181 @@ mod macos {
                 insert_via_clipboard_paste(app, text, target_pid).await
             }
         }
+    }
+
+    /// Guarded in-place replace for the paste-first dictation flow. After the
+    /// raw transcript is typed into the target, the polished version (when it
+    /// differs) swaps in here — but ONLY when the text immediately before the
+    /// caret is still exactly `old` (what we just inserted) AND focus hasn't
+    /// left the target window. That guard makes it impossible to delete
+    /// anything the user typed: if they kept typing, moved the caret, selected
+    /// text, or the field isn't AX-readable (many web editors), this returns
+    /// false and the raw words simply stay. It NEVER blind-replaces a field.
+    pub async fn replace_recent_insertion(
+        app: &tauri::AppHandle,
+        old: &str,
+        new: &str,
+        target_pid: i32,
+    ) -> bool {
+        if !ax_trusted() || old.is_empty() {
+            return false;
+        }
+        // Focus must still be the window we pasted into — otherwise the caret
+        // we're about to read belongs to someone else.
+        match on_main(app, front_pid).await {
+            Ok(Some(pid)) if pid == target_pid => {}
+            _ => return false,
+        }
+        let old = old.to_string();
+        let new = new.to_string();
+        on_main(app, move |mtm| {
+            let _ = mtm;
+            unsafe { ax_replace_recent_insertion(&old, &new) }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Keyed fallback for the paste-first polish swap, for editors whose AX
+    /// value can be read-verified but not written (Chromium contenteditables
+    /// — ChatGPT, Gmail — typically expose AXSelectedText/range while
+    /// rejecting `AXValue` writes), where [`replace_recent_insertion`]
+    /// necessarily returned false. Strategy: select back over exactly what we
+    /// typed with synthetic ⇧← (HID tap — the level web renderers honor, per
+    /// the ⌘V history), VERIFY the selection reads back as exactly `old` via
+    /// AXSelectedText, then paste `new` over it with the proven clipboard-⌘V
+    /// machinery. Every uncertainty bails without modifying anything:
+    ///   * focus left the target, caret not readable/collapsed, span too long
+    ///     → return false before any key is posted;
+    ///   * the selected text isn't exactly `old` (user typed, caret moved,
+    ///     the editor normalized whitespace, AXSelectedText unsupported) →
+    ///     collapse the selection back to its end (one →) and return false —
+    ///     the caret is back where it was and the raw words stay;
+    ///   * focus leaves the target mid-burst (re-probed at every batch
+    ///     boundary) → abort immediately, posting nothing further — not even
+    ///     the collapse →, which would land in the newly focused app.
+    ///
+    /// This is deliberately the LAST resort in the chain and the most
+    /// fragile path in the module — flag any in-app anomaly against it.
+    pub async fn replace_recent_insertion_via_keys(
+        app: &tauri::AppHandle,
+        old: &str,
+        new: &str,
+        target_pid: i32,
+    ) -> bool {
+        if !ax_trusted() || old.is_empty() {
+            return false;
+        }
+        let Some(count) = keyed_guard::span_chars(old) else {
+            return false;
+        };
+        match on_main(app, front_pid).await {
+            Ok(Some(pid)) if pid == target_pid => {}
+            _ => return false,
+        }
+        // A live selection would be destroyed by our select-back, and an
+        // unreadable range means we can't know — both bail before any event.
+        match on_main(app, |mtm| {
+            let _ = mtm;
+            unsafe { ax_focused_caret_collapsed() }
+        })
+        .await
+        {
+            Ok(Some(true)) => {}
+            _ => return false,
+        }
+
+        // Select back over the span we typed. Same source posture as the
+        // paste path: combined session state + held-key suppression, so a
+        // still-held Fn can't contaminate the synthetic ⇧←.
+        let source = EventSource(unsafe { CGEventSourceCreate(EVENT_SOURCE_COMBINED) });
+        if !source.0.is_null() {
+            unsafe {
+                CGEventSourceSetLocalEventsFilterDuringSuppressionState(
+                    source.0,
+                    SUPPRESS_FILTER,
+                    SUPPRESS_STATE,
+                );
+            }
+        }
+        let mut posted = 0usize;
+        for i in 0..count {
+            if post_key(source.0, KEY_LEFT, true, MASK_SHIFT, false).is_err()
+                || post_key(source.0, KEY_LEFT, false, MASK_SHIFT, false).is_err()
+            {
+                break;
+            }
+            posted += 1;
+            // Small breathers keep the burst from coalescing in the target's
+            // queue; batches stay well under perceptible jank. Each boundary
+            // also re-probes focus: the ⇧← go to the HID tap (frontmost app,
+            // not a pid), so the moment focus leaves the target the rest of
+            // the burst would select text in whatever window is now in
+            // front. Abort hard — and post no collapse → either, for the
+            // same reason. (The final partial batch has no boundary probe;
+            // the verify + focus-guarded collapse below cover that window.)
+            if keyed_guard::batch_boundary(i) {
+                tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                let front = on_main(app, front_pid).await.ok().flatten();
+                if !keyed_guard::focus_still_target(front, target_pid) {
+                    tracing::warn!(
+                        target_pid,
+                        posted,
+                        "dictation: keyed replace aborted mid-burst (focus left target)"
+                    );
+                    return false;
+                }
+            }
+        }
+        // Let the editor settle before reading the selection back.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+
+        let selected = on_main(app, |mtm| {
+            let _ = mtm;
+            unsafe { ax_focused_selected_text() }
+        })
+        .await
+        .ok()
+        .flatten();
+        let verified = keyed_guard::selection_verified(posted, count, selected.as_deref(), old);
+
+        if !verified {
+            // Collapse to the selection's end — the caret returns to where
+            // it was, nothing was modified, the fast raw words stay. But a
+            // verify failure is also exactly how a focus switch presents
+            // (ax_focused_selected_text reads the *globally* focused
+            // element), and the → posts to the HID tap — so only collapse
+            // when the target is still frontmost; otherwise the keystroke
+            // would land in the app the user just switched to.
+            let front = on_main(app, front_pid).await.ok().flatten();
+            if keyed_guard::focus_still_target(front, target_pid) {
+                let _ = post_key(source.0, KEY_RIGHT, true, 0, false);
+                let _ = post_key(source.0, KEY_RIGHT, false, 0, false);
+                tracing::debug!(
+                    target_pid,
+                    "dictation: keyed replace bailed (selection didn't verify) — raw stays"
+                );
+            } else {
+                tracing::warn!(
+                    target_pid,
+                    "dictation: keyed replace bailed and focus left target — collapse skipped"
+                );
+            }
+            return false;
+        }
+        drop(source);
+
+        // The selection IS our raw span — paste the polished text over it.
+        let ok = insert_via_clipboard_paste(app, new.to_string(), target_pid)
+            .await
+            .is_ok();
+        if ok {
+            tracing::info!(
+                target_pid,
+                "dictation: polished swap via keyed select+paste"
+            );
+        }
+        ok
     }
 
     /// Type `text` into process `pid` as Unicode characters — FluidVoice's
@@ -665,6 +979,108 @@ mod macos {
         .unwrap_or(false)
     }
 
+    /// The system-wide focused UI element, or null. Caller releases.
+    unsafe fn ax_focused_element() -> *const c_void {
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() {
+            return std::ptr::null();
+        }
+        let focus_attr = NSString::from_str("AXFocusedUIElement");
+        let mut focused: *const c_void = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            system,
+            &*focus_attr as *const NSString as *const c_void,
+            &mut focused,
+        );
+        CFRelease(system);
+        if err != KAX_ERROR_SUCCESS {
+            return std::ptr::null();
+        }
+        focused
+    }
+
+    /// Whether the system-wide focused element is a secure (password) text
+    /// field — `AXSubrole == AXSecureTextField`. `true` only on a positive
+    /// match: an unreadable focus answers `false` so ordinary fields (web
+    /// editors often expose no subrole at all) keep working; the global
+    /// Secure-Event-Input check covers the password dialogs AX can't read.
+    unsafe fn ax_focused_is_secure_field() -> bool {
+        let focused = ax_focused_element();
+        if focused.is_null() {
+            return false;
+        }
+        let subrole_attr = NSString::from_str("AXSubrole");
+        let mut value: *const c_void = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            focused,
+            &*subrole_attr as *const NSString as *const c_void,
+            &mut value,
+        );
+        CFRelease(focused);
+        if err != KAX_ERROR_SUCCESS || value.is_null() {
+            return false;
+        }
+        let secure = (*(value as *const NSString)).to_string() == "AXSecureTextField";
+        CFRelease(value);
+        secure
+    }
+
+    /// Whether the focused element's AXSelectedTextRange is a collapsed
+    /// caret. `Some(false)` = a selection is active; `None` = unreadable
+    /// (no focused element, or the editor doesn't expose the range) — the
+    /// keyed replace treats both non-`Some(true)` answers as "don't touch".
+    unsafe fn ax_focused_caret_collapsed() -> Option<bool> {
+        let focused = ax_focused_element();
+        if focused.is_null() {
+            return None;
+        }
+        let range_attr = NSString::from_str("AXSelectedTextRange");
+        let mut range_ref: *const c_void = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            focused,
+            &*range_attr as *const NSString as *const c_void,
+            &mut range_ref,
+        );
+        CFRelease(focused);
+        if err != KAX_ERROR_SUCCESS || range_ref.is_null() {
+            return None;
+        }
+        let mut range = CFRange {
+            location: 0,
+            length: 0,
+        };
+        let got = AXValueGetValue(
+            range_ref,
+            KAX_VALUE_TYPE_CFRANGE,
+            &mut range as *mut CFRange as *mut c_void,
+        );
+        CFRelease(range_ref);
+        got.then_some(range.length == 0)
+    }
+
+    /// The focused element's AXSelectedText, when the editor exposes it —
+    /// the keyed replace's read-back verification channel.
+    unsafe fn ax_focused_selected_text() -> Option<String> {
+        let focused = ax_focused_element();
+        if focused.is_null() {
+            return None;
+        }
+        let text_attr = NSString::from_str("AXSelectedText");
+        let mut text_ref: *const c_void = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            focused,
+            &*text_attr as *const NSString as *const c_void,
+            &mut text_ref,
+        );
+        CFRelease(focused);
+        if err != KAX_ERROR_SUCCESS || text_ref.is_null() {
+            return None;
+        }
+        let text: String = (*(text_ref as *const NSString)).to_string();
+        CFRelease(text_ref);
+        Some(text)
+    }
+
     /// Resolve the focused element and splice `text` at its cursor. Main
     /// thread; all AX refs are released on every path.
     unsafe fn ax_insert_at_cursor(text: &str) -> bool {
@@ -719,7 +1135,10 @@ mod macos {
         {
             return false;
         }
-        let mut range = CFRange { location: 0, length: 0 };
+        let mut range = CFRange {
+            location: 0,
+            length: 0,
+        };
         let got = AXValueGetValue(
             range_ref,
             KAX_VALUE_TYPE_CFRANGE,
@@ -756,8 +1175,129 @@ mod macos {
             location: (loc + ins.len()) as isize,
             length: 0,
         };
-        let caret_value =
-            AXValueCreate(KAX_VALUE_TYPE_CFRANGE, &caret as *const CFRange as *const c_void);
+        let caret_value = AXValueCreate(
+            KAX_VALUE_TYPE_CFRANGE,
+            &caret as *const CFRange as *const c_void,
+        );
+        if !caret_value.is_null() {
+            let _ = AXUIElementSetAttributeValue(
+                element,
+                &*range_attr as *const NSString as *const c_void,
+                caret_value,
+            );
+            CFRelease(caret_value);
+        }
+        true
+    }
+
+    /// Resolve the focused element and replace the `old` span ending at the
+    /// caret with `new`. Main thread; releases every AX ref on every path.
+    unsafe fn ax_replace_recent_insertion(old: &str, new: &str) -> bool {
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() {
+            return false;
+        }
+        let focus_attr = NSString::from_str("AXFocusedUIElement");
+        let mut focused: *const c_void = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            system,
+            &*focus_attr as *const NSString as *const c_void,
+            &mut focused,
+        );
+        CFRelease(system);
+        if err != KAX_ERROR_SUCCESS || focused.is_null() {
+            return false;
+        }
+        let ok = ax_replace_span_before_caret(focused, old, new);
+        CFRelease(focused);
+        ok
+    }
+
+    /// Read value + caret; if the `old.len()` UTF-16 units immediately before a
+    /// COLLAPSED caret equal `old`, replace that span with `new` and re-place
+    /// the caret after it. Any mismatch — caret moved, a selection is present,
+    /// the span isn't ours, or the value is unreadable — returns false and
+    /// touches nothing. This is the guard that makes the paste-first replace
+    /// safe in arbitrary apps.
+    unsafe fn ax_replace_span_before_caret(element: *const c_void, old: &str, new: &str) -> bool {
+        let value_attr = NSString::from_str("AXValue");
+        let range_attr = NSString::from_str("AXSelectedTextRange");
+
+        let mut value_ref: *const c_void = std::ptr::null();
+        if AXUIElementCopyAttributeValue(
+            element,
+            &*value_attr as *const NSString as *const c_void,
+            &mut value_ref,
+        ) != KAX_ERROR_SUCCESS
+            || value_ref.is_null()
+        {
+            return false;
+        }
+        let current: String = (*(value_ref as *const NSString)).to_string();
+        CFRelease(value_ref);
+
+        let mut range_ref: *const c_void = std::ptr::null();
+        if AXUIElementCopyAttributeValue(
+            element,
+            &*range_attr as *const NSString as *const c_void,
+            &mut range_ref,
+        ) != KAX_ERROR_SUCCESS
+            || range_ref.is_null()
+        {
+            return false;
+        }
+        let mut range = CFRange {
+            location: 0,
+            length: 0,
+        };
+        let got = AXValueGetValue(
+            range_ref,
+            KAX_VALUE_TYPE_CFRANGE,
+            &mut range as *mut CFRange as *mut c_void,
+        );
+        CFRelease(range_ref);
+        // Require a collapsed caret (no active selection) before we touch text.
+        if !got || range.length != 0 {
+            return false;
+        }
+
+        let cur: Vec<u16> = current.encode_utf16().collect();
+        let old16: Vec<u16> = old.encode_utf16().collect();
+        let caret = (range.location.max(0) as usize).min(cur.len());
+        if caret < old16.len() {
+            return false;
+        }
+        let start = caret - old16.len();
+        // GUARD: the span ending at the caret must be EXACTLY what we inserted.
+        if cur[start..caret] != old16[..] {
+            return false;
+        }
+
+        let new16: Vec<u16> = new.encode_utf16().collect();
+        let mut next: Vec<u16> = Vec::with_capacity(cur.len() - old16.len() + new16.len());
+        next.extend_from_slice(&cur[..start]);
+        next.extend_from_slice(&new16);
+        next.extend_from_slice(&cur[caret..]);
+        let new_value = String::from_utf16_lossy(&next);
+
+        let new_ns = NSString::from_str(&new_value);
+        if AXUIElementSetAttributeValue(
+            element,
+            &*value_attr as *const NSString as *const c_void,
+            &*new_ns as *const NSString as *const c_void,
+        ) != KAX_ERROR_SUCCESS
+        {
+            return false;
+        }
+
+        let new_caret = CFRange {
+            location: (start + new16.len()) as isize,
+            length: 0,
+        };
+        let caret_value = AXValueCreate(
+            KAX_VALUE_TYPE_CFRANGE,
+            &new_caret as *const CFRange as *const c_void,
+        );
         if !caret_value.is_null() {
             let _ = AXUIElementSetAttributeValue(
                 element,
@@ -783,7 +1323,10 @@ mod macos {
         target_pid: i32,
     ) -> Result<(), String> {
         let hold = on_main(app, move |mtm| write_transcript(&text, mtm)).await?;
-        tracing::info!(target_pid, "dictation: delivering transcript via ⌘V (HID tap, fallback)");
+        tracing::info!(
+            target_pid,
+            "dictation: delivering transcript via ⌘V (HID tap, fallback)"
+        );
 
         let source = EventSource(unsafe { CGEventSourceCreate(EVENT_SOURCE_COMBINED) });
         if !source.0.is_null() {
@@ -833,15 +1376,16 @@ mod macos {
             let _ = tx.send(f(mtm));
         })
         .map_err(|e| format!("main-thread hop failed: {e}"))?;
-        rx.await
-            .map_err(|_| "main-thread task dropped".to_string())
+        rx.await.map_err(|_| "main-thread task dropped".to_string())
     }
 }
 
 #[cfg(target_os = "macos")]
 pub use macos::{
     ax_prompt, ax_trusted, capture_front_target, collect_running_apps, copy_text_persistent,
-    finalize_app_infos, insert_text, AppInfo, FrontTarget,
+    decode_image_to_png, finalize_app_infos, insert_text, png_bytes_to_data_url,
+    replace_recent_insertion, replace_recent_insertion_via_keys, running_app_identities, AppInfo,
+    FrontTarget,
 };
 
 #[cfg(not(target_os = "macos"))]
@@ -874,6 +1418,24 @@ mod stub {
         Err("dictate-anywhere is macOS-only".into())
     }
 
+    pub async fn replace_recent_insertion(
+        _app: &tauri::AppHandle,
+        _old: &str,
+        _new: &str,
+        _target_pid: i32,
+    ) -> bool {
+        false
+    }
+
+    pub async fn replace_recent_insertion_via_keys(
+        _app: &tauri::AppHandle,
+        _old: &str,
+        _new: &str,
+        _target_pid: i32,
+    ) -> bool {
+        false
+    }
+
     /// See the macOS module; on other platforms there is no app picker.
     #[derive(Debug, Clone, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -885,4 +1447,108 @@ mod stub {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub use stub::{ax_trusted, copy_text_persistent, insert_text, AppInfo, FrontTarget};
+pub use stub::{
+    ax_trusted, copy_text_persistent, insert_text, replace_recent_insertion,
+    replace_recent_insertion_via_keys, AppInfo, FrontTarget,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::keyed_guard::*;
+
+    // span_chars — the "is any key ever posted" gate.
+
+    #[test]
+    fn span_chars_rejects_empty() {
+        assert_eq!(span_chars(""), None);
+    }
+
+    #[test]
+    fn span_chars_counts_single_char() {
+        assert_eq!(span_chars("a"), Some(1));
+    }
+
+    #[test]
+    fn span_chars_accepts_exactly_max() {
+        let s = "x".repeat(MAX_CHARS);
+        assert_eq!(span_chars(&s), Some(MAX_CHARS));
+    }
+
+    #[test]
+    fn span_chars_rejects_over_max() {
+        let s = "x".repeat(MAX_CHARS + 1);
+        assert_eq!(span_chars(&s), None);
+    }
+
+    #[test]
+    fn span_chars_counts_chars_not_bytes() {
+        // 4 chars, 13 bytes — each costs one ⇧← pair, so the unit must be
+        // chars; a byte count would over-select and fail the verify.
+        assert_eq!(span_chars("é🦀ü—"), Some(4));
+    }
+
+    // batch_boundary — where the burst pauses to re-probe focus.
+
+    #[test]
+    fn batch_boundary_fires_at_end_of_each_batch() {
+        assert!(batch_boundary(BATCH - 1));
+        assert!(batch_boundary(2 * BATCH - 1));
+    }
+
+    #[test]
+    fn batch_boundary_quiet_inside_a_batch() {
+        assert!(!batch_boundary(0));
+        assert!(!batch_boundary(BATCH - 2));
+        assert!(!batch_boundary(BATCH)); // first event of batch 2, not a boundary
+    }
+
+    // focus_still_target — gates both burst continuation and the collapse →.
+
+    #[test]
+    fn focus_matching_pid_continues() {
+        assert!(focus_still_target(Some(42), 42));
+    }
+
+    #[test]
+    fn focus_other_app_aborts() {
+        assert!(!focus_still_target(Some(43), 42));
+    }
+
+    #[test]
+    fn focus_probe_failure_aborts() {
+        // A failed frontmost probe must read as "lost": posting keys blind
+        // is never safe.
+        assert!(!focus_still_target(None, 42));
+    }
+
+    // selection_verified — the "may we paste over it" proof.
+
+    #[test]
+    fn verify_requires_full_burst_and_exact_match() {
+        assert!(selection_verified(5, 5, Some("hello"), "hello"));
+    }
+
+    #[test]
+    fn verify_fails_on_short_burst() {
+        // post_key failed mid-burst: even an exact read-back can't prove the
+        // selection covers the whole span we meant to select.
+        assert!(!selection_verified(4, 5, Some("hello"), "hello"));
+    }
+
+    #[test]
+    fn verify_fails_on_mismatched_selection() {
+        // Editor normalized whitespace / user typed — raw words must stay.
+        assert!(!selection_verified(5, 5, Some("hell o"), "hello"));
+    }
+
+    #[test]
+    fn verify_fails_on_unreadable_selection() {
+        assert!(!selection_verified(5, 5, None, "hello"));
+    }
+
+    #[test]
+    fn verify_fails_on_empty_selection_readback() {
+        // Collapsed caret reading back "" must not verify against any span.
+        assert!(!selection_verified(5, 5, Some(""), "hello"));
+    }
+}

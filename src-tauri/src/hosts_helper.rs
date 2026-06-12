@@ -565,6 +565,12 @@ pub fn request_allowed(request: &HelperRequest) -> Result<()> {
     }
 }
 
+/// Throttle for `Clear`, the helper's broadest mutation (drops every managed
+/// hosts entry at once). Legitimate flows clear at most once per user action;
+/// a rapid-fire stream of Clears is a misbehaving or hostile client.
+static LAST_CLEAR: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+const CLEAR_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub fn handle_request(request: HelperRequest, manager: &HostsManager) -> Result<HelperResponse> {
     request_allowed(&request)?;
     match request {
@@ -585,6 +591,20 @@ pub fn handle_request(request: HelperRequest, manager: &HostsManager) -> Result<
             Ok(HelperResponse::ok())
         }
         HelperRequest::Clear => {
+            {
+                let mut last = LAST_CLEAR.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(at) = *last {
+                    if at.elapsed() < CLEAR_COOLDOWN {
+                        return Err(HelperError::Protocol(
+                            "clear is rate-limited — try again in a few seconds".into(),
+                        ));
+                    }
+                }
+                *last = Some(std::time::Instant::now());
+            }
+            // Loud by design: the daemon's stderr lands in the LaunchDaemon
+            // log, so every wholesale wipe of managed entries is auditable.
+            eprintln!("portbay-hosts-helper: Clear requested — removing ALL managed hosts entries");
             manager.clear()?;
             Ok(HelperResponse::ok())
         }
@@ -645,6 +665,20 @@ fn ensure_valid_resolver_suffix(suffix: &str) -> Result<()> {
 /// portbay-hosts-helper …` with no installer): it keeps the socket world-
 /// connectable and skips the peer check, relying on the suffix guard alone.
 pub fn serve(socket_path: &Path, manager: HostsManager, allow_uid: Option<u32>) -> Result<()> {
+    // Fail closed on the production socket. `allow_uid` gates BOTH the 0600
+    // socket mode and the per-connection peer-uid check; `None` drops to a
+    // world-connectable 0666 socket with no peer check (the dev/manual path).
+    // That posture is only safe for an ad-hoc `sudo portbay-hosts-helper …`,
+    // never for the installed root daemon. So if we're asked to serve the
+    // well-known production socket without an owner uid — e.g. the static
+    // template plist (which carries no `--allow-uid`) was deployed directly
+    // instead of the dynamically-generated one from `install_daemon` — refuse,
+    // rather than expose a root `/etc/hosts` socket to every local process.
+    if allow_uid.is_none() && socket_path == std::path::Path::new(SOCKET_PATH) {
+        return Err(HelperError::Protocol(
+            "refusing to serve the production socket without --allow-uid (owner uid)".into(),
+        ));
+    }
     if socket_path.exists() {
         std::fs::remove_file(socket_path).map_err(|e| HelperError::io(socket_path, e))?;
     }

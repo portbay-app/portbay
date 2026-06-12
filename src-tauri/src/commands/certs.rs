@@ -291,24 +291,24 @@ pub async fn export_cert_bundle(
 
     // Resolve the leaf cert + key: custom mode uses the user-provided paths;
     // every other mode uses the mkcert-issued pair under certs_root.
-    let (cert_src, key_src) =
-        if project.https && project.ssl_mode() == SslMode::CustomCertificate {
-            let (cert, key) = project.custom_cert_paths().ok_or_else(|| {
-                AppError::BadInput(
-                    "custom certificate mode requires certificate and key paths".into(),
-                )
-            })?;
-            (std::path::PathBuf::from(cert), std::path::PathBuf::from(key))
-        } else {
-            let mkcert = state
-                .mkcert
-                .as_ref()
-                .ok_or_else(|| AppError::BadInput("mkcert binary not bundled".into()))?;
-            let paths = mkcert.cert_paths(&id).ok_or_else(|| {
-                AppError::NotFound(format!("no certificate issued for project '{id}' yet"))
-            })?;
-            (paths.certificate, paths.key)
-        };
+    let (cert_src, key_src) = if project.https && project.ssl_mode() == SslMode::CustomCertificate {
+        let (cert, key) = project.custom_cert_paths().ok_or_else(|| {
+            AppError::BadInput("custom certificate mode requires certificate and key paths".into())
+        })?;
+        (
+            std::path::PathBuf::from(cert),
+            std::path::PathBuf::from(key),
+        )
+    } else {
+        let mkcert = state
+            .mkcert
+            .as_ref()
+            .ok_or_else(|| AppError::BadInput("mkcert binary not bundled".into()))?;
+        let paths = mkcert.cert_paths(&id).ok_or_else(|| {
+            AppError::NotFound(format!("no certificate issued for project '{id}' yet"))
+        })?;
+        (paths.certificate, paths.key)
+    };
 
     if !cert_src.exists() {
         return Err(AppError::NotFound(format!(

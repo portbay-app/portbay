@@ -56,11 +56,17 @@ function createSshHostKeyPromptStore() {
    */
   async function start() {
     if (!browser) return;
-    unlisten = await listen<HostKeyPrompt>("portbay://ssh-hostkey-prompt", (event) => {
-      // If a new event arrives while one is already open, replace it. The old
-      // flow will time out backend-side (the backend fails closed).
-      prompt = event.payload;
-    });
+    unlisten = await listen<HostKeyPrompt>(
+      "portbay://ssh-hostkey-prompt",
+      (event) => {
+        // If a new event arrives while one is already open, replace it. The old
+        // flow will time out backend-side (the backend fails closed).
+        prompt = event.payload;
+      },
+      // The backend emits this point-to-point to the main window (the payload
+      // is secrets-adjacent); a targeted emit skips untargeted listeners.
+      { target: "main" },
+    );
   }
 
   /** Remove the Tauri event listener. Call from the component's onDestroy. */

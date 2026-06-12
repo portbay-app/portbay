@@ -41,7 +41,7 @@ dest="${bin_dir}/portbay-stt-${triple}"
 
 # Same chicken-and-egg seeding as build-afm.sh: tauri_build's externalBin
 # existence check runs before any of our own sidecars exist.
-for ours in portbay-hosts-helper portbay-mcp portbay-afm portbay-stt; do
+for ours in portbay-hosts-helper portbay-mcp portbay-afm portbay-stt portbay-imagegen portbay-capture; do
   ph="${bin_dir}/${ours}-${triple}"
   [ -f "$ph" ] || : >"$ph"
 done

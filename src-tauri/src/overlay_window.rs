@@ -214,8 +214,7 @@ mod macos {
                     .max(visible.origin.x)
                     .min(visible.origin.x + (visible.size.width - width).max(0.0));
                 let y = (visible.origin.y + BOTTOM_OFFSET).min(
-                    (visible.origin.y + visible.size.height - WINDOW_HEIGHT)
-                        .max(visible.origin.y),
+                    (visible.origin.y + visible.size.height - WINDOW_HEIGHT).max(visible.origin.y),
                 );
                 let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(width, WINDOW_HEIGHT));
                 unsafe {
@@ -318,10 +317,22 @@ mod tests {
 
     #[test]
     fn placement_from_pref_defaults_to_notch() {
-        assert!(matches!(OverlayPlacement::from_pref("bottom"), OverlayPlacement::Bottom));
-        assert!(matches!(OverlayPlacement::from_pref("notch"), OverlayPlacement::Notch));
+        assert!(matches!(
+            OverlayPlacement::from_pref("bottom"),
+            OverlayPlacement::Bottom
+        ));
+        assert!(matches!(
+            OverlayPlacement::from_pref("notch"),
+            OverlayPlacement::Notch
+        ));
         // Unknown / empty → notch (the default surface), never a panic.
-        assert!(matches!(OverlayPlacement::from_pref(""), OverlayPlacement::Notch));
-        assert!(matches!(OverlayPlacement::from_pref("weird"), OverlayPlacement::Notch));
+        assert!(matches!(
+            OverlayPlacement::from_pref(""),
+            OverlayPlacement::Notch
+        ));
+        assert!(matches!(
+            OverlayPlacement::from_pref("weird"),
+            OverlayPlacement::Notch
+        ));
     }
 }

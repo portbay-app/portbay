@@ -11,6 +11,7 @@
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import LighthouseLogo from "$lib/components/atoms/LighthouseLogo.svelte";
+  import ThirdPartyLicensesDialog from "./ThirdPartyLicensesDialog.svelte";
   import { licenseDialog } from "$lib/stores/licenseDialog.svelte";
   import { account } from "$lib/stores/account.svelte";
   import { entitlements } from "$lib/stores/entitlements.svelte";
@@ -27,6 +28,7 @@
 
   let dialogEl = $state<HTMLDivElement | null>(null);
   let lastFocused: HTMLElement | null = null;
+  let showLicenses = $state(false);
 
   const isPro = $derived(entitlements.isPro);
   const signedIn = $derived(entitlements.isSignedIn);
@@ -38,6 +40,8 @@
         return "Pro (offline grace)";
       case "free":
         return "Free account";
+      case "unknown-offline":
+        return "Signed in — offline (status will refresh when you're back online)";
       default:
         return "Not signed in";
     }
@@ -288,8 +292,11 @@
         <button type="button" onclick={() => void openUrl(LICENSE_URL)} class="hover:text-fg transition-colors">License</button>
         <button type="button" onclick={() => void openUrl(PRIVACY_URL)} class="hover:text-fg transition-colors">Privacy</button>
         <button type="button" onclick={() => void openUrl(TERMS_URL)} class="hover:text-fg transition-colors">Terms</button>
+        <button type="button" onclick={() => (showLicenses = true)} class="hover:text-fg transition-colors">Third-party licenses</button>
       </div>
-      <span class="text-fg-subtle">Manage account &amp; devices in Settings</span>
+      <span class="text-fg-subtle">Includes Cline (agent), WhisperKit &amp; FluidAudio (speech), Apple Stable Diffusion (images)</span>
     </footer>
   </div>
 {/if}
+
+<ThirdPartyLicensesDialog open={showLicenses} onClose={() => (showLicenses = false)} />

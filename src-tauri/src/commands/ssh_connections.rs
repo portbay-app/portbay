@@ -26,6 +26,7 @@ use crate::ssh::config_import::{parse_ssh_config, SshConfigCandidate};
 use crate::ssh::exec::run_command;
 use crate::ssh::interaction::{EventInteractor, SshInteractor};
 use crate::ssh::probe::{probe_connection, ProbeResult};
+use crate::ssh::secret::{nonblank_secret, secret_str};
 use crate::state::AppState;
 
 /// A saved connection plus the two derived facts the dashboard renders per host.
@@ -328,12 +329,11 @@ pub async fn ssh_connection_detect_os(
         // Fold in a borrowed identity (user / key / auth) before connecting.
         registry.effective_ssh_connection(raw)
     };
-    let nonblank = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    let password = match nonblank(password) {
+    let password = match nonblank_secret(password) {
         Some(p) => Some(p),
         None => load_stored_password(&conn.id)?,
     };
-    let passphrase = match nonblank(passphrase) {
+    let passphrase = match nonblank_secret(passphrase) {
         Some(p) => Some(p),
         None => load_stored_key_passphrase(&conn.id)?,
     };
@@ -342,9 +342,9 @@ pub async fn ssh_connection_detect_os(
     let interactor: Option<Arc<dyn SshInteractor>> = Some(EventInteractor::shared(app));
     let os = detect_os_string(
         &conn,
-        password.as_deref(),
-        proxy_password.as_deref(),
-        passphrase.as_deref(),
+        secret_str(&password),
+        secret_str(&proxy_password),
+        secret_str(&passphrase),
         interactor,
     )
     .await?;
@@ -353,9 +353,9 @@ pub async fn ssh_connection_detect_os(
     // must not wipe a value the user set manually for an undetectable host.
     let environment = detect_environment(
         &conn,
-        password.as_deref(),
-        proxy_password.as_deref(),
-        passphrase.as_deref(),
+        secret_str(&password),
+        secret_str(&proxy_password),
+        secret_str(&passphrase),
     )
     .await;
     // Best-effort: the real cloud provider + region (DMI vendor → cloud metadata
@@ -363,9 +363,9 @@ pub async fn ssh_connection_detect_os(
     // cPanel box on AWS still shows "AWS · us-east-1". Same non-fatal contract.
     let (provider, region) = detect_provider_region(
         &conn,
-        password.as_deref(),
-        proxy_password.as_deref(),
-        passphrase.as_deref(),
+        secret_str(&password),
+        secret_str(&proxy_password),
+        secret_str(&passphrase),
     )
     .await;
     touch_metadata(&state, &conn.id, |m| {

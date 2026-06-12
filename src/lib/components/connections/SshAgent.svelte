@@ -1652,7 +1652,7 @@
 
         // Restore persisted threads (dropping any whose brain the host no longer
         // offers), else seed the first thread with the best default provider.
-        const stored = loadThreadStore(connectionId);
+        const stored = await loadThreadStore(connectionId);
         const valid = stored?.threads.filter((t) => available.includes(t.provider)) ?? [];
         if (valid.length > 0 && stored) {
           threads = valid;

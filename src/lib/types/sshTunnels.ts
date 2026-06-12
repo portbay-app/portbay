@@ -43,6 +43,13 @@ export interface SaveSshTunnelInput {
   proxyJump?: string | null;
   keepAlive: boolean;
   autoReconnect: boolean;
+  /**
+   * Explicit confirmation that `localHost` may be a non-loopback bind address
+   * (e.g. `0.0.0.0`). Without it the backend rejects anything outside
+   * 127.0.0.1 / ::1 / localhost — the listener has no auth of its own, so a
+   * wide bind exposes the forwarded service to the network.
+   */
+  allowWideBind?: boolean;
 }
 
 export interface OpenSshTunnelDatabaseInput {

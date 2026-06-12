@@ -27,6 +27,14 @@ use crate::ssh::session::{connect_session, SshSessionHandle};
 // The destination handle is reached via `Deref` on the returned `SshSession`,
 // so a jump chain is transparent to the exec/deploy channel plumbing below.
 
+/// Hard cap on each full-capture buffer (stdout, stderr) in
+/// [`exec_on_streaming`]. Output past this is dropped from the captured
+/// result (the live streaming callback still sees everything) so a hostile
+/// server or a runaway deploy log can't exhaust app memory.
+const MAX_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
+/// Appended to a captured stream that hit [`MAX_CAPTURE_BYTES`].
+const TRUNCATION_MARKER: &str = "\n…[output truncated at 64 MiB]";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecResult {
@@ -135,7 +143,8 @@ pub async fn run_deploy_on_streaming(
     cancel: Option<Arc<AtomicBool>>,
     mut progress: impl FnMut(DeployProgress),
 ) -> Result<Vec<StepResult>> {
-    let cancelled = |c: &Option<Arc<AtomicBool>>| c.as_ref().is_some_and(|f| f.load(Ordering::SeqCst));
+    let cancelled =
+        |c: &Option<Arc<AtomicBool>>| c.as_ref().is_some_and(|f| f.load(Ordering::SeqCst));
     let mut results = Vec::with_capacity(steps.len());
     for (index, step) in steps.iter().enumerate() {
         if cancelled(&cancel) {
@@ -213,6 +222,8 @@ pub async fn exec_on_streaming(
 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
+    let mut stdout_truncated = false;
+    let mut stderr_truncated = false;
     // Bytes accumulated since the last flush to `on_output`, per stream.
     let mut pend_out: Vec<u8> = Vec::new();
     let mut pend_err: Vec<u8> = Vec::new();
@@ -221,6 +232,18 @@ pub async fn exec_on_streaming(
     let mut channel = channel;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // Append to a full-capture buffer, hard-capped so a hostile server (or a
+    // multi-GB deploy log) can't exhaust app memory. The streaming path stays
+    // unbounded — `pend_*` is flushed every ~100 ms / 16 KiB and the consumer
+    // (xterm scrollback, deploy log view) bounds its own retention.
+    fn capped_extend(buf: &mut Vec<u8>, data: &[u8], truncated: &mut bool) {
+        let room = MAX_CAPTURE_BYTES.saturating_sub(buf.len());
+        if data.len() > room {
+            *truncated = true;
+        }
+        buf.extend_from_slice(&data[..data.len().min(room)]);
+    }
 
     // Flush the valid-UTF-8 prefix of `pend`, keeping any trailing incomplete
     // multi-byte sequence buffered for the next flush.
@@ -246,7 +269,7 @@ pub async fn exec_on_streaming(
                 let Some(msg) = msg else { break };
                 match msg {
                     ChannelMsg::Data { ref data } => {
-                        stdout.extend_from_slice(data);
+                        capped_extend(&mut stdout, data, &mut stdout_truncated);
                         pend_out.extend_from_slice(data);
                         if pend_out.len() >= 16 * 1024 {
                             flush(&mut pend_out, false, &mut on_output);
@@ -254,7 +277,7 @@ pub async fn exec_on_streaming(
                     }
                     // ext type 1 is stderr (SSH_EXTENDED_DATA_STDERR).
                     ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                        stderr.extend_from_slice(data);
+                        capped_extend(&mut stderr, data, &mut stderr_truncated);
                         pend_err.extend_from_slice(data);
                         if pend_err.len() >= 16 * 1024 {
                             flush(&mut pend_err, true, &mut on_output);
@@ -283,9 +306,17 @@ pub async fn exec_on_streaming(
     flush(&mut pend_out, false, &mut on_output);
     flush(&mut pend_err, true, &mut on_output);
 
+    let mut stdout = String::from_utf8_lossy(&stdout).into_owned();
+    let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if stdout_truncated {
+        stdout.push_str(TRUNCATION_MARKER);
+    }
+    if stderr_truncated {
+        stderr.push_str(TRUNCATION_MARKER);
+    }
     Ok(ExecResult {
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout,
+        stderr,
         exit_code: code.map(|c| c as i32).unwrap_or(-1),
     })
 }

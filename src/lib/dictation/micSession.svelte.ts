@@ -104,6 +104,9 @@ class MicSessionController {
   /** Click timestamp of the current start attempt, for the latency
    * breadcrumb logged when the session goes live. */
   #armedAt = 0;
+  /** Prevents repeating the "no local model" notice every click — one toast
+   * per app session is enough; the bell keeps the record for later reference. */
+  #noModelNoticeShown = false;
 
   constructor() {
     // Register the OS-truth listeners NOW, not on first click — `listen()`
@@ -166,17 +169,25 @@ class MicSessionController {
     // falls back to macOS dictation so the mic still works, but say so instead
     // of silently switching engines. Points at the model picker (Settings →
     // Speech-to-Text on the AI page).
-    if (prefs.sttEngine === "local" && this.#engine !== "local") {
+    //
+    // Category "project-error" has toast:true in the default notification prefs
+    // so this lands as a visible bottom-right toast, not just the bell. Severity
+    // "warning" is appropriate: not broken, but action is needed. The
+    // `#noModelNoticeShown` flag keeps it to one toast per app session — the bell
+    // already deduplicates within a 2 s window, but repeated clicks would stack
+    // toasts over minutes without this guard.
+    if (prefs.sttEngine === "local" && this.#engine !== "local" && !this.#noModelNoticeShown) {
+      this.#noModelNoticeShown = true;
       errorBus.push({
         code: "DICTATION_NO_LOCAL_MODEL",
-        category: "agent-board",
-        whatHappened: "Using macOS dictation — no local model is set up",
+        category: "project-error",
+        whatHappened: "No local model selected — using Apple Speech",
         whyItMatters:
           "You picked the on-device speech engine but haven't chosen a model yet, " +
-          "so this session is running on macOS dictation. Set up a local model in " +
+          "so this session is running on Apple Speech. Download and select a local model in " +
           "Settings → Speech-to-Text to transcribe on-device.",
         whoCausedIt: "user",
-        severity: "info",
+        severity: "warning",
         actions: [],
       });
     }

@@ -61,8 +61,10 @@ pub fn resolve_stt_binary() -> Option<std::path::PathBuf> {
     use std::env::consts::{ARCH, OS};
 
     // Test/diagnostic override: point the sidecar at an arbitrary executable
-    // (a fake sidecar speaking the JSON protocol) without a real build. Only
-    // honored when set, so production resolution is unaffected.
+    // (a fake sidecar speaking the JSON protocol) without a real build.
+    // Debug builds only — in a release .app an attacker-set env var must not
+    // be able to swap the binary that gets mic audio.
+    #[cfg(debug_assertions)]
     if let Ok(path) = std::env::var("PORTBAY_STT_BIN") {
         let p = std::path::PathBuf::from(path);
         if p.exists() {
@@ -91,6 +93,12 @@ pub fn resolve_stt_binary() -> Option<std::path::PathBuf> {
         }
     }
 
+    // Dev-only fallback: a locally-built sidecar under the source tree's
+    // `binaries/`. `env!("CARGO_MANIFEST_DIR")` bakes the build machine's source
+    // path into the binary, so gate it out of release builds entirely — a
+    // shipped app resolves the sidecar beside `current_exe` (above) and must
+    // never reference a path that only exists on the developer's disk.
+    #[cfg(debug_assertions)]
     if let Some(triple) = triple {
         let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("binaries")
@@ -126,10 +134,10 @@ pub async fn check() -> SttStatus {
 
     let output = match output {
         Ok(out) => out,
-        Err(_) => return SttStatus::unavailable(exec_failure_reason()),
+        Err(_) => return SttStatus::unavailable(exec_failure_reason().await),
     };
     if !output.status.success() {
-        return SttStatus::unavailable(exec_failure_reason());
+        return SttStatus::unavailable(exec_failure_reason().await);
     }
 
     match serde_json::from_slice::<CheckOutput>(&output.stdout) {
@@ -149,12 +157,15 @@ pub async fn check() -> SttStatus {
 
 /// Distinguish "this Mac is too old to run the sidecar" from "the sidecar is
 /// broken": the binary's deployment target is macOS 14, so on 13 and older
-/// the exec fails by design. `sw_vers` is authoritative and cheap.
+/// the exec fails by design. `sw_vers` is authoritative and cheap — but still
+/// a process spawn, so it runs through tokio's async Command rather than
+/// blocking the shared worker.
 #[cfg(target_os = "macos")]
-fn exec_failure_reason() -> &'static str {
-    let major = std::process::Command::new("/usr/bin/sw_vers")
+async fn exec_failure_reason() -> &'static str {
+    let major = tokio::process::Command::new("/usr/bin/sw_vers")
         .arg("-productVersion")
         .output()
+        .await
         .ok()
         .and_then(|out| {
             String::from_utf8_lossy(&out.stdout)
@@ -206,8 +217,9 @@ mod client {
     /// Stdin handles of in-flight downloads, keyed by the app-chosen
     /// download id, so `stt_cancel_download` can reach into the right
     /// process. Entries are removed when the download task finishes.
-    static ACTIVE_DOWNLOADS: Lazy<Mutex<HashMap<String, Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>>>> =
-        Lazy::new(|| Mutex::new(HashMap::new()));
+    static ACTIVE_DOWNLOADS: Lazy<
+        Mutex<HashMap<String, Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>>>,
+    > = Lazy::new(|| Mutex::new(HashMap::new()));
 
     /// Download ids cancelled before their stdin was registered in
     /// `ACTIVE_DOWNLOADS`. Closes the race where a very fast cancel lands in
@@ -243,7 +255,15 @@ mod client {
         one_shot_op_with_timeout(request, OP_TIMEOUT).await
     }
 
-    async fn one_shot_op_with_timeout(request: Value, timeout: Duration) -> Result<Value, String> {
+    /// Like [`one_shot_op`] but with a caller-chosen ceiling. Synthesis
+    /// (`tts-synthesize`) cold-loads the Kokoro mlmodelc chain on the first
+    /// call, which legitimately runs well past the 20 s metadata ceiling — TTS
+    /// passes a generous timeout here so a slow first synth isn't reported as a
+    /// failure.
+    pub async fn one_shot_op_with_timeout(
+        request: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let op = request
             .get("op")
             .and_then(Value::as_str)
@@ -288,6 +308,20 @@ mod client {
         pub error: Option<String>,
     }
 
+    /// The engine/variant the sidecar needs to download a model, resolved
+    /// app-side from the PortBay Model Catalog. Passing it (rather than relying
+    /// on the sidecar's bundled catalog) is what lets the live catalog ship new
+    /// same-engine models with no sidecar rebuild. `None` = let the sidecar fall
+    /// back to its bundled `CATALOG` (the test sidecar, or a missing entry).
+    pub struct DownloadSpec {
+        pub engine: String,
+        pub repo_model: String,
+        pub parakeet_version: Option<String>,
+        /// Expected install-content digest from the signed catalog; the
+        /// sidecar verifies the download against it before sealing.
+        pub content_digest: Option<String>,
+    }
+
     /// Run one model download in a dedicated sidecar process, relaying each
     /// progress event into `on_progress(fraction, phase)`. Returns when the
     /// sidecar sends the download's terminal response (or dies).
@@ -295,18 +329,29 @@ mod client {
         models_dir: &str,
         model: &str,
         download_id: &str,
+        spec: Option<DownloadSpec>,
         mut on_progress: impl FnMut(f64, String),
     ) -> Result<DownloadOutcome, String> {
         let mut child = spawn_serve()?;
         let mut stdin = child.stdin.take().ok_or("sidecar stdin unavailable")?;
         let stdout = child.stdout.take().ok_or("sidecar stdout unavailable")?;
 
-        let request = serde_json::json!({
+        let mut request = serde_json::json!({
             "op": "download",
             "modelsDir": models_dir,
             "model": model,
             "downloadId": download_id,
         });
+        if let Some(spec) = spec {
+            request["engine"] = serde_json::Value::String(spec.engine);
+            request["repoModel"] = serde_json::Value::String(spec.repo_model);
+            if let Some(v) = spec.parakeet_version {
+                request["parakeetVersion"] = serde_json::Value::String(v);
+            }
+            if let Some(d) = spec.content_digest {
+                request["contentDigest"] = serde_json::Value::String(d);
+            }
+        }
         let mut line = serde_json::to_string(&request).map_err(|e| e.to_string())?;
         line.push('\n');
         stdin
@@ -497,6 +542,44 @@ mod client {
             .map_err(|e| format!("sidecar write failed: {e}"))
     }
 
+    /// Strip ASR special-token markup (`<|startoftranscript|>`, `<|0.00|>`, …)
+    /// from engine output. The Whisper decode now sets `skipSpecialTokens`, so
+    /// this is defence in depth at the process boundary: no engine output may
+    /// carry `<|…|>` markers into a paste — an engine/options regression
+    /// degrades to clean text instead of model markup typed into the user's
+    /// document (observed live 2026-06-09). An unterminated `<|` drops the
+    /// marker but keeps the words after it.
+    pub(crate) fn strip_asr_markup(text: &str) -> String {
+        if !text.contains("<|") {
+            return text.to_string();
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(start) = rest.find("<|") {
+            out.push_str(&rest[..start]);
+            rest = match rest[start + 2..].find("|>") {
+                Some(end) => &rest[start + 2 + end + 2..],
+                None => &rest[start + 2..],
+            };
+        }
+        out.push_str(rest);
+        // Collapse the space runs the removals leave behind (newlines kept).
+        let mut collapsed = String::with_capacity(out.len());
+        let mut prev_space = false;
+        for ch in out.chars() {
+            if ch == ' ' {
+                if prev_space {
+                    continue;
+                }
+                prev_space = true;
+            } else {
+                prev_space = false;
+            }
+            collapsed.push(ch);
+        }
+        collapsed.trim().to_string()
+    }
+
     /// Route one capture event to the active capture's channels / Tauri events.
     fn route_event(event: &str, value: &Value) {
         use tauri::Emitter;
@@ -512,26 +595,39 @@ mod client {
                 let _ = rt.app.emit("dictation://listening", ());
             }
             "partial" => {
-                let text = value.get("text").and_then(Value::as_str).unwrap_or("");
-                let _ = rt.app.emit("stt://partial", serde_json::json!({ "text": text }));
+                let text =
+                    strip_asr_markup(value.get("text").and_then(Value::as_str).unwrap_or(""));
+                let _ = rt
+                    .app
+                    .emit("stt://partial", serde_json::json!({ "text": text }));
             }
             "level" => {
                 let rms = value.get("rms").and_then(Value::as_f64).unwrap_or(0.0);
-                let _ = rt.app.emit("stt://level", serde_json::json!({ "rms": rms }));
+                let _ = rt
+                    .app
+                    .emit("stt://level", serde_json::json!({ "rms": rms }));
             }
             "final" => {
                 if let Some(tx) = rt.final_tx.take() {
-                    let _ = tx.send(
-                        value
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                    );
+                    let _ = tx.send(strip_asr_markup(
+                        value.get("text").and_then(Value::as_str).unwrap_or(""),
+                    ));
                 }
             }
             "ended" => {
                 let _ = rt.app.emit("dictation://ended", ());
+            }
+            "eou" => {
+                // Streaming-engine End-of-Utterance (sustained silence after
+                // speech). Forwarded off this reader via a spawn so the
+                // session driver's own locking never interleaves with the
+                // ROUTING guard held here; the driver decides whether it
+                // means hands-free auto-stop (preference-gated).
+                let _ = rt.app.emit("stt://eou", ());
+                let app = rt.app.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::dictation_anywhere::on_eou(&app);
+                });
             }
             _ => {}
         }
@@ -540,89 +636,141 @@ mod client {
     /// One reader per resident process: demux events + control responses until
     /// the process's stdout closes, then fail in-flight waiters and (if this is
     /// still the registered process) clear the slot so the next caller respawns.
+    /// The demux loop runs as its own task whose JoinHandle is awaited, so a
+    /// panic inside it is logged and STILL runs the cleanup — otherwise
+    /// ROUTING/CONTROL waiters would silently strand until their 60/180 s
+    /// timeouts.
     fn spawn_reader(stdout: tokio::process::ChildStdout, generation: u64) {
+        let read_loop = tokio::spawn(read_loop(stdout));
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                if let Some(event) = value.get("event").and_then(Value::as_str) {
-                    route_event(event, &value);
-                } else if let Some(op) = value.get("op").and_then(Value::as_str) {
-                    match op {
-                        // A start-capture response only arrives on FAILURE —
-                        // success is signalled by the `listening` event.
-                        "start-capture" => {
-                            let detail = value
-                                .get("error")
-                                .and_then(Value::as_str)
-                                .unwrap_or("capture failed to start")
-                                .to_string();
-                            if let Some(rt) =
-                                ROUTING.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
-                            {
-                                if let Some(tx) = rt.started_tx.take() {
-                                    let _ = tx.send(Err(detail));
-                                }
-                            }
-                        }
-                        "prewarm" => {
-                            if let Some(tx) =
-                                CONTROL.lock().unwrap_or_else(|e| e.into_inner()).take()
-                            {
-                                let _ = tx.send(value);
-                            }
-                        }
-                        // stop/cancel responses are unused (the `final` event
-                        // carries the text); metadata never comes through here.
-                        _ => {}
-                    }
-                }
+            if let Err(e) = read_loop.await {
+                tracing::error!(error = %e, "stt: serve reader task died");
             }
-            // EOF — the process died. Only the STILL-REGISTERED process cleans
-            // up: a superseded reader (its process replaced by a model switch)
-            // must not steal the new process's pending CONTROL/ROUTING waiters,
-            // which would spuriously fail the new engine.
-            let still_current = {
-                let mut engine = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-                if engine.as_ref().map(|e| e.generation) == Some(generation) {
-                    *engine = None;
-                    true
-                } else {
-                    false
-                }
-            };
-            if still_current {
-                if let Some(rt) = ROUTING.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                    if let Some(tx) = rt.started_tx {
-                        let _ = tx.send(Err("speech-to-text engine exited".into()));
-                    }
-                    // final_tx drops here → stop_capture's recv errors out.
-                }
-                if let Some(tx) = CONTROL.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                    let _ = tx.send(serde_json::json!({ "op": "prewarm", "ok": false, "error": "engine exited" }));
-                }
-            }
+            reader_cleanup(generation);
         });
     }
 
-    /// Ensure a resident serve process loaded with `model` exists, spawning +
-    /// prewarming one (or replacing a different-model process) on a miss.
-    /// Returns its stdin for the caller to drive start/stop against. Serialized
-    /// by `ENGINE_LOCK` so concurrent callers don't double-spawn.
+    /// The demux loop body — events and control responses until EOF.
+    async fn read_loop(stdout: tokio::process::ChildStdout) {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let Some(event) = value.get("event").and_then(Value::as_str) {
+                route_event(event, &value);
+            } else if let Some(op) = value.get("op").and_then(Value::as_str) {
+                match op {
+                    // A start-capture response only arrives on FAILURE —
+                    // success is signalled by the `listening` event.
+                    "start-capture" => {
+                        let detail = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("capture failed to start")
+                            .to_string();
+                        let late_failure_app = {
+                            let mut routing = ROUTING.lock().unwrap_or_else(|e| e.into_inner());
+                            match routing.as_mut() {
+                                Some(rt) => {
+                                    if let Some(tx) = rt.started_tx.take() {
+                                        let _ = tx.send(Err(detail.clone()));
+                                        None
+                                    } else {
+                                        // Mic-first capture: `listening` already
+                                        // resolved the start, and the engine load
+                                        // failed BEHIND the live mic. Tear the
+                                        // routing down (same as an engine crash)
+                                        // so a stop fails fast instead of waiting
+                                        // out FINAL_TIMEOUT, and tell the session
+                                        // driver so the notch reports it now.
+                                        let app = rt.app.clone();
+                                        *routing = None;
+                                        Some(app)
+                                    }
+                                }
+                                None => None,
+                            }
+                        };
+                        if let Some(app) = late_failure_app {
+                            drop(
+                                ACTIVE_CAPTURE
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .take(),
+                            );
+                            crate::dictation_anywhere::on_capture_lost(&app, detail);
+                        }
+                    }
+                    "prewarm" => {
+                        if let Some(tx) = CONTROL.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                            let _ = tx.send(value);
+                        }
+                    }
+                    // stop/cancel responses are unused (the `final` event
+                    // carries the text); metadata never comes through here.
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// EOF (or reader panic) — the process is gone. Only the STILL-REGISTERED
+    /// process cleans up: a superseded reader (its process replaced by a model
+    /// switch) must not steal the new process's pending CONTROL/ROUTING
+    /// waiters, which would spuriously fail the new engine.
+    fn reader_cleanup(generation: u64) {
+        let still_current = {
+            let mut engine = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+            if engine.as_ref().map(|e| e.generation) == Some(generation) {
+                *engine = None;
+                true
+            } else {
+                false
+            }
+        };
+        if still_current {
+            if let Some(rt) = ROUTING.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                if let Some(tx) = rt.started_tx {
+                    let _ = tx.send(Err("speech-to-text engine exited".into()));
+                }
+                // final_tx drops here → stop_capture's recv errors out.
+            }
+            if let Some(tx) = CONTROL.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = tx.send(
+                    serde_json::json!({ "op": "prewarm", "ok": false, "error": "engine exited" }),
+                );
+            }
+        }
+    }
+
+    /// Ensure a resident serve process for `model` exists, spawning one (or
+    /// replacing a different-model process) on a miss and sending the prewarm
+    /// op that loads the model. Does NOT wait for the load: the returned
+    /// receiver resolves with the prewarm response when it completes —
+    /// `prewarm()` awaits it; `start_capture` drops it, because the sidecar's
+    /// mic-first capture rides the load concurrently (audio buffers while the
+    /// model pages in). `None` = the fast path, model already resident (or its
+    /// load already in flight on this process — the sidecar coalesces).
+    /// Serialized by `ENGINE_LOCK` so concurrent callers don't double-spawn.
     async fn ensure_engine(
         models_dir: &str,
         model: &str,
-    ) -> Result<Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>, String> {
+    ) -> Result<
+        (
+            Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
+            Option<tokio::sync::oneshot::Receiver<Value>>,
+        ),
+        String,
+    > {
         let _guard = ENGINE_LOCK.lock().await;
 
-        // Fast path: a live process already holding this exact model.
+        // Fast path: a live process already holding (or loading) this model.
         {
             let engine = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(e) = engine.as_ref() {
                 if e.model == model && e.models_dir == models_dir {
-                    return Ok(e.stdin.clone());
+                    return Ok((e.stdin.clone(), None));
                 }
             }
         }
@@ -645,8 +793,8 @@ mod client {
         });
         spawn_reader(stdout, generation);
 
-        // Prewarm: load + cache the model resident in the sidecar so the first
-        // capture is instant. The reader resolves CONTROL with the response.
+        // Prewarm: load + cache the model resident in the sidecar. The reader
+        // resolves CONTROL with the response whenever the load finishes.
         let (tx, rx) = tokio::sync::oneshot::channel::<Value>();
         *CONTROL.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
         write_line(
@@ -654,20 +802,7 @@ mod client {
             serde_json::json!({ "op": "prewarm", "modelsDir": models_dir, "model": model }),
         )
         .await?;
-        let resp = tokio::time::timeout(START_TIMEOUT, rx)
-            .await
-            .map_err(|_| "engine prewarm timed out".to_string())?
-            .map_err(|_| "engine exited during prewarm".to_string())?;
-        if resp.get("ok").and_then(Value::as_bool) != Some(true) {
-            // Bad model / load failure: drop the process, surface the reason.
-            drop(ENGINE.lock().unwrap_or_else(|e| e.into_inner()).take());
-            return Err(resp
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("engine failed to load")
-                .to_string());
-        }
-        Ok(stdin)
+        Ok((stdin, Some(rx)))
     }
 
     /// Drop the resident engine process — call after deleting the model it
@@ -696,10 +831,19 @@ mod client {
     ) -> Result<(), String> {
         // Clear any orphan routing/active capture from a crashed flow.
         *ROUTING.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        drop(ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()).take());
+        drop(
+            ACTIVE_CAPTURE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+        );
 
-        // Reuse (or cold-spawn + prewarm) the resident process for this model.
-        let stdin = ensure_engine(models_dir, model).await?;
+        // Reuse (or cold-spawn) the resident process for this model. The
+        // prewarm receiver is deliberately dropped: the sidecar's start-capture
+        // is mic-first, so the capture starts (and buffers audio) while a cold
+        // model load runs — this is what makes the FIRST Fn-hold after launch
+        // work instead of silently eating the user's words.
+        let (stdin, _prewarm_rx) = ensure_engine(models_dir, model).await?;
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
         let (final_tx, final_rx) = tokio::sync::oneshot::channel::<String>();
@@ -732,7 +876,12 @@ mod client {
             // Failed start: clear the routing/active slots (the engine process
             // stays resident for the next attempt).
             *ROUTING.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            drop(ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()).take());
+            drop(
+                ACTIVE_CAPTURE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take(),
+            );
         }
         started
     }
@@ -747,12 +896,20 @@ mod client {
             .take()
             .ok_or("no capture session is active")?;
 
+        let stop_at = std::time::Instant::now();
         write_line(&active.stdin, serde_json::json!({ "op": "stop-capture" })).await?;
 
         let text = tokio::time::timeout(FINAL_TIMEOUT, active.final_rx)
             .await
             .map_err(|_| "transcription timed out".to_string())?
             .map_err(|_| "engine exited before finishing".to_string());
+        // The latency headline: stop → final transcript. Streaming engines
+        // (Parakeet EOU / Nemotron) should report tens of ms here regardless
+        // of dictation length; batch engines pay O(length).
+        tracing::info!(
+            ms = stop_at.elapsed().as_millis() as u64,
+            "stt: finalize latency (stop → final)"
+        );
         *ROUTING.lock().unwrap_or_else(|e| e.into_inner()) = None;
         text
     }
@@ -781,7 +938,12 @@ mod client {
     /// mic (and its TCC grant), and the resident model in RAM, until the OS
     /// reaps the orphan.
     pub fn shutdown_capture() {
-        drop(ACTIVE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()).take());
+        drop(
+            ACTIVE_CAPTURE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+        );
         *ROUTING.lock().unwrap_or_else(|e| e.into_inner()) = None;
         drop(ENGINE.lock().unwrap_or_else(|e| e.into_inner()).take());
     }
@@ -796,7 +958,24 @@ mod client {
         if PREWARMING.swap(true, Ordering::SeqCst) {
             return;
         }
-        let _ = ensure_engine(models_dir, model).await;
+        match ensure_engine(models_dir, model).await {
+            // Fresh spawn: wait the load out so PREWARMING reflects reality
+            // (and a load failure gets logged here rather than vanishing).
+            Ok((_stdin, Some(rx))) => match tokio::time::timeout(START_TIMEOUT, rx).await {
+                Ok(Ok(resp)) if resp.get("ok").and_then(Value::as_bool) == Some(true) => {}
+                Ok(Ok(resp)) => {
+                    let detail = resp
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("engine failed to load");
+                    tracing::warn!(model = %model, detail, "stt: prewarm failed");
+                }
+                Ok(Err(_)) => tracing::warn!(model = %model, "stt: engine exited during prewarm"),
+                Err(_) => tracing::warn!(model = %model, "stt: prewarm timed out"),
+            },
+            Ok((_stdin, None)) => {} // already resident (or loading)
+            Err(e) => tracing::warn!(model = %model, error = %e, "stt: prewarm spawn failed"),
+        }
         PREWARMING.store(false, Ordering::SeqCst);
     }
 }
@@ -804,6 +983,35 @@ mod client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_asr_markup_removes_special_tokens() {
+        // The exact leak shape observed live: chunked Whisper decodes joined
+        // with full special-token headers and timestamp markers.
+        let leaked = "<|startoftranscript|><|en|><|transcribe|><|0.00|> Okay, it works.<|3.20|><|3.20|> So it's showing up.<|5.16|>";
+        assert_eq!(
+            strip_asr_markup(leaked),
+            "Okay, it works. So it's showing up."
+        );
+    }
+
+    #[test]
+    fn strip_asr_markup_keeps_clean_text_and_lone_delimiters() {
+        assert_eq!(strip_asr_markup("plain text"), "plain text");
+        assert_eq!(strip_asr_markup("a < b | c > d"), "a < b | c > d");
+        assert_eq!(strip_asr_markup(""), "");
+        // Newlines survive; only space RUNS are collapsed (the segment's own
+        // leading space after a newline is kept as-is).
+        assert_eq!(
+            strip_asr_markup("line one\n<|2.00|> line two"),
+            "line one\n line two"
+        );
+    }
+
+    #[test]
+    fn strip_asr_markup_drops_unterminated_marker_keeps_words() {
+        assert_eq!(strip_asr_markup("tail <|unterminated"), "tail unterminated");
+    }
 
     #[test]
     fn status_serializes_camel_case_and_skips_empty() {
@@ -856,10 +1064,11 @@ printf '{\"op\":\"download\",\"ok\":true,\"code\":0}\\n'\n";
 
         let seen: std::sync::Arc<std::sync::Mutex<Vec<(f64, String)>>> = Default::default();
         let sink = std::sync::Arc::clone(&seen);
-        let outcome = crate::stt::run_download("/tmp/models", "tiny", "dl-1", move |frac, phase| {
-            sink.lock().unwrap().push((frac, phase));
-        })
-        .await;
+        let outcome =
+            crate::stt::run_download("/tmp/models", "tiny", "dl-1", None, move |frac, phase| {
+                sink.lock().unwrap().push((frac, phase));
+            })
+            .await;
 
         std::env::remove_var("PORTBAY_STT_BIN");
         let _ = std::fs::remove_file(&path);
@@ -870,7 +1079,8 @@ printf '{\"op\":\"download\",\"ok\":true,\"code\":0}\\n'\n";
         assert!(outcome.error.is_none());
         let seen = seen.lock().unwrap();
         assert!(
-            seen.iter().any(|(f, p)| (*f - 0.5).abs() < 1e-9 && p == "downloading"),
+            seen.iter()
+                .any(|(f, p)| (*f - 0.5).abs() < 1e-9 && p == "downloading"),
             "expected the progress event, saw {seen:?}"
         );
     }

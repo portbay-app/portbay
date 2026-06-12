@@ -21,7 +21,15 @@
   const isGrace = $derived(entitlements.state === "pro-grace");
 
   const tierLabel = $derived(
-    tier === "pro" ? (isGrace ? "Pro (offline)" : "Pro") : tier === "free" ? "Free" : "Not signed in",
+    tier === "pro"
+      ? isGrace
+        ? "Pro (offline)"
+        : "Pro"
+      : tier === "free"
+        ? "Free"
+        : entitlements.state === "unknown-offline"
+          ? "Offline — status unknown"
+          : "Not signed in",
   );
 
   // Usage meter fill (0–1). Unlimited shows a calm full-but-muted bar.

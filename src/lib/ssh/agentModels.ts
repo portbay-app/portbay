@@ -92,3 +92,54 @@ export function agentModelCatalog(agent: string): Promise<AgentModel[]> {
 export function resetModelCatalogCache(): void {
   cache.clear();
 }
+
+/** Agent kinds the dispatch layer knows how to launch. */
+export type AgentKind =
+  | "claude"
+  | "codex"
+  | "cursor"
+  | "gemini"
+  | "aider"
+  | "opencode"
+  | "amp"
+  | "qwen"
+  | "copilot"
+  | "antigravity"
+  | "ollama"
+  | "custom";
+
+/** One agent option for an agent picker (from `agents_installed`). */
+export interface AgentOption {
+  id: AgentKind;
+  label: string;
+  /** Dispatchable in at least one form (CLI or desktop app), or `custom`. */
+  installed: boolean;
+  /** The command-line tool is installed — the "<label> CLI" form. */
+  cliInstalled: boolean;
+  /** The desktop app/IDE form is installed — the "<label> Desktop" form. */
+  appInstalled: boolean;
+  /** Which form a dispatch uses now: `"cli"` or `"app"`. */
+  mode: "cli" | "app";
+  /** Absolute path the CLI resolved to (override or PATH), if found. */
+  path?: string | null;
+  /** True when `path` came from a user-set override (external drive / custom prefix). */
+  overridden?: boolean;
+}
+
+/**
+ * Bundled logo (under `static/apps/`) for each agent kind. `custom` has no mark
+ * (its program is user-defined) and falls back to a generic icon in the UI.
+ */
+export const AGENT_ICONS: Record<string, string> = {
+  claude: "/apps/claude.png",
+  codex: "/apps/codex.png",
+  cursor: "/apps/cursor.png",
+  gemini: "/apps/gemini.png",
+  aider: "/apps/aider.png",
+  opencode: "/apps/opencode.png",
+  amp: "/apps/amp.png",
+  qwen: "/apps/qwen.png",
+  copilot: "/apps/copilot.png",
+  antigravity: "/apps/antigravity.png",
+  ollama: "/apps/ollama.png",
+};

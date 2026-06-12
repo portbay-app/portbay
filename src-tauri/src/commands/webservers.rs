@@ -19,7 +19,7 @@ use std::process::Command;
 use serde::Serialize;
 use tauri::State;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::registry::{store, ProjectType, WebServer};
 use crate::state::AppState;
 use crate::webservers::{apache_binary, nginx_binary};
@@ -89,8 +89,19 @@ pub async fn webserver_overview(state: State<'_, AppState>) -> AppResult<Vec<Web
             .collect()
     };
 
-    let nginx_bin = nginx_binary();
-    let apache_bin = apache_binary();
+    // Binary discovery walks the filesystem and the version probe spawns
+    // `nginx -v` / `httpd -v` — blocking work, so it runs off the shared
+    // async workers.
+    let (nginx_bin, apache_bin, nginx_version, apache_version) =
+        tokio::task::spawn_blocking(|| {
+            let nginx_bin = nginx_binary();
+            let apache_bin = apache_binary();
+            let nginx_version = nginx_bin.as_deref().and_then(|p| binary_version(p, "-v"));
+            let apache_version = apache_bin.as_deref().and_then(|p| binary_version(p, "-v"));
+            (nginx_bin, apache_bin, nginx_version, apache_version)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("web-server probe task failed: {e}")))?;
 
     Ok(vec![
         WebServerInfo {
@@ -113,7 +124,7 @@ pub async fn webserver_overview(state: State<'_, AppState>) -> AppResult<Vec<Web
             bundled: false,
             installed: nginx_bin.is_some(),
             binary_path: nginx_bin.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            version: nginx_bin.as_deref().and_then(|p| binary_version(p, "-v")),
+            version: nginx_version,
             projects: projects_for(WebServer::Nginx),
             is_default: default == WebServer::Nginx,
         },
@@ -127,7 +138,7 @@ pub async fn webserver_overview(state: State<'_, AppState>) -> AppResult<Vec<Web
             binary_path: apache_bin
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
-            version: apache_bin.as_deref().and_then(|p| binary_version(p, "-v")),
+            version: apache_version,
             projects: projects_for(WebServer::Apache),
             is_default: default == WebServer::Apache,
         },

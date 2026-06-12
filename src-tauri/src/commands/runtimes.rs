@@ -34,7 +34,7 @@ const RUNTIME_MANIFEST_URL: &str =
     "https://github.com/portbay-app/portbay-runtimes/releases/latest/download/manifest.json";
 const RUNTIME_MANIFEST_SIGNATURE_URL: &str =
     "https://github.com/portbay-app/portbay-runtimes/releases/latest/download/manifest.json.sig";
-const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNBNEI4QjdFQzA4NkFBQjUKUldTMXFvYkFmb3RMT3J1MlZFdm51bDVlb3ZOU0cyNy94d0MvNjRKWGQ4eDRWUkxWR1poZ3VZMTgK";
+pub(crate) const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNBNEI4QjdFQzA4NkFBQjUKUldTMXFvYkFmb3RMT3J1MlZFdm51bDVlb3ZOU0cyNy94d0MvNjRKWGQ4eDRWUkxWR1poZ3VZMTgK";
 
 #[tauri::command]
 pub async fn list_runtimes(state: State<'_, AppState>) -> AppResult<Vec<LanguageView>> {

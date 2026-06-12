@@ -19,7 +19,7 @@
 
   import { Icon, StatusPill } from "$lib/components/atoms";
   import ProjectSelector from "$lib/components/shared/ProjectSelector.svelte";
-  import { safeInvoke } from "$lib/ipc";
+  import { invokeQuiet, safeInvoke } from "$lib/ipc";
   import { devTools } from "$lib/stores/devTools.svelte";
   import { errorBus } from "$lib/stores/errors.svelte";
   import { projects } from "$lib/stores/projects.svelte";
@@ -126,11 +126,23 @@
     if (!project) return;
     loading = true;
     try {
-      const raw = await safeInvoke<string[]>("tail_logs", {
-        id: project.id,
-        limit: 1000,
-      });
-      parsed = raw.map(parseLogLine);
+      // Replay the PortBay narration ring above the file snapshot — same
+      // rationale as LogViewer: the live proc-log event only reaches
+      // listeners that already exist, so a page opened after Play would
+      // otherwise miss "▶ Starting…" / "$ cmd". Narration-first matches the
+      // run's chronology (ring cleared + file truncated per Start/Restart).
+      const [history, raw] = await Promise.all([
+        invokeQuiet<ProcLogEvent[]>("proc_log_history", {
+          id: project.id,
+        }).catch(() => [] as ProcLogEvent[]),
+        safeInvoke<string[]>("tail_logs", {
+          id: project.id,
+          limit: 1000,
+        }),
+      ]);
+      parsed = history
+        .map((e) => eventLogLine(e.message, e.level as LogLevel))
+        .concat(raw.map(parseLogLine));
     } catch {
       parsed = [];
     } finally {

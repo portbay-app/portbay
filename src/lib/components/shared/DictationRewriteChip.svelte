@@ -60,7 +60,7 @@
       <Icon name="circle-alert" size={11} />
       <span
         class="whitespace-nowrap"
-        title="The rewrite model didn't return anything — check Settings → AI → Smart Dictation (is your provider reachable and a model selected?)."
+        title="The rewrite model didn't return anything — check AI → Speech-to-Text (is your provider reachable and a model selected?)."
         >Rewrite unavailable</span
       >
     {:else if rewriter.phase === "restored"}

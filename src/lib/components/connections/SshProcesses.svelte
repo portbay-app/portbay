@@ -8,6 +8,7 @@
   import Icon from "$lib/components/atoms/Icon.svelte";
   import { invokeQuiet } from "$lib/ipc";
   import { connectWithPrompt } from "$lib/ssh/connectWithPrompt";
+  import { isValidPid } from "$lib/ssh/pid";
   import { confirmDialog } from "$lib/stores/confirm.svelte";
   import { mlWatch } from "$lib/stores/mlWatch.svelte";
   import { relativeTime } from "$lib/ssh/hostFormat";
@@ -43,6 +44,9 @@
     for (const line of lines.slice(1)) {
       const cols = line.trim().split(/\s+/);
       if (cols.length < 11) continue;
+      // The PID feeds kill / watch commands later — digits only, or the row
+      // is garbage (wrapped line, header echo) and gets dropped.
+      if (!isValidPid(cols[1])) continue;
       out.push({
         user: cols[0],
         pid: cols[1],
@@ -97,6 +101,7 @@
   );
 
   async function kill(p: Proc) {
+    if (!isValidPid(p.pid)) return;
     const choice = await confirmDialog.open({
       title: `End process ${p.pid}?`,
       message: `${p.command}\n\nSends a signal to PID ${p.pid} on ${label}.`,

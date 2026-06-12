@@ -80,7 +80,18 @@ src-tauri/binaries/cloudflared-*
 src-tauri/binaries/portbay-hosts-helper-*
 # Built from source by scripts/build-mcp.sh, not committed.
 src-tauri/binaries/portbay-mcp-*
+# Built from source by scripts/build-afm.sh, not committed.
+src-tauri/binaries/portbay-afm-*
+# Built from source by scripts/build-stt.sh, not committed (SwiftPM build dir too).
+src-tauri/binaries/portbay-stt-*
+src-tauri/stt/.build/
+# Built from source by scripts/build-imagegen.sh, not committed (SwiftPM build dir too).
+src-tauri/binaries/portbay-imagegen-*
+src-tauri/imagegen/.build/
+# Built from source by scripts/build-portbay-agent.sh, not committed.
+src-tauri/binaries/portbay-agent-*
 .playwright-mcp/
+.playwright-cli/
 # Playwright E2E artifacts (interaction-latency harness).
 test-results/
 playwright-report/

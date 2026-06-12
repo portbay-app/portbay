@@ -65,11 +65,17 @@ path:.dev.vars
 # Signed/unsigned distributables belong on Releases, not in git.
 path:*.dmg
 path:*.app.zip
+# Internal compliance evidence (vendor DPA snapshots, secret-rotation runbooks).
+# These document our private vendor relationships and embed vendor reCAPTCHA
+# sitekeys / page hashes that secret scanners flag — they belong only in the
+# private repo, never in public history.
+path:docs/dpas/*
 
 # --- Visual Preview Editor (Pro, private) — never in the public repo ---
 # The Rust side is cfg-gated behind the private `visual-editor` feature, but
 # the Svelte side ships in source — these paths must never land here.
 path:src-tauri/src/live_preview/*
+path:src-tauri/src/commands/live_preview.rs
 path:src/lib/components/live-preview/*
 path:src/routes/live-preview/*
 path:src/lib/stores/livePreview.svelte.ts
@@ -77,4 +83,21 @@ path:src/lib/types/livePreview.ts
 path:src/lib/data/stylingHints.ts
 path:tests/e2e/visual-editor.spec.ts
 path:tests/stylingHints.test.ts
-path:docs/dpas/*
+# The browser-edit-bar vendored runtime helper (immerhin) ships only with the
+# private build; never publish the tarball.
+path:immerhin-*.tgz
+
+# --- Screen capture (Pro, private) — never in the public repo ---
+# The portbay-capture sidecar (ScreenCaptureKit + camera PiP recorder) and its
+# Rust supervisor / commands / UI ship only in the official Pro build. The
+# shared plists and the Integrations hub stay public; these capture-specific
+# paths do not.
+path:src-tauri/capture/*
+path:src-tauri/src/capture.rs
+path:src-tauri/src/commands/capture.rs
+path:src-tauri/binaries/portbay-capture-*
+path:scripts/build-capture.sh
+path:src/lib/components/settings/CapturePanel.svelte
+path:src/lib/components/settings/RecordingControls.svelte
+path:src/lib/components/permissions/CapturePermissionGate.svelte
+path:src/routes/capture/*

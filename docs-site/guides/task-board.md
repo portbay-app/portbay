@@ -33,7 +33,9 @@ A board isn't a database hidden inside the app. Each card is a Markdown file und
 
 PortBay does **not** ship a model of its own. It launches the coding agent you already have installed and points it at the card. Recognised out of the box:
 
-**Claude Code · Codex · Cursor · Gemini · Aider · Copilot · OpenCode · Amp · Qwen · Antigravity** — and a **Custom** option that runs any other CLI from a command template.
+**Claude Code · Codex · Cursor · Gemini · Aider · Copilot · OpenCode · Amp · Qwen · Antigravity · Ollama** — and a **Custom** option that runs any other CLI from a command template.
+
+When you choose **Ollama** for a local model, PortBay does not use a silent chat loop. It launches the bundled `portbay-agent` engine in a terminal with the Ollama provider and the model selected on the card, so local LMs get the same agentic read/edit/run workflow as the external coding CLIs.
 
 Most agents launch as a **CLI** subprocess; a few (e.g. Cursor) open as a **desktop app** on the project folder. PortBay auto-detects which agents are installed and lets you set the binary path manually for anything it can't find. You can:
 
@@ -71,6 +73,17 @@ The board is designed to fail safe when an agent gets something wrong:
 - **Crash recovery.** A running card holds a lease with a heartbeat. If the agent's process dies, the lease expires and the card is reclaimed back to the queue instead of getting stuck "in progress".
 - **Rejected is human-only.** Agents can advance cards to In Progress, Blocked, Review, or Done — but only a person can reject one.
 - **Optional auto-branch.** A card can create or switch to its own git branch on dispatch, so parallel agents don't fight over the working tree.
+
+## When a card keeps failing
+
+Failed runs don't retry forever. Each non-Done outcome adds a **strike**; at the configurable cap (default 3) the card stops auto-dispatching and lands in **Blocked** with a comment explaining why. Two opt-in escalations sit in front of the cap:
+
+- **Rescue attempt.** On the final pre-cap attempt, the card is switched to a (usually stronger) rescue agent — one last try with different firepower before a human is paged.
+- **Teacher escalation.** On strike-out, a background one-shot call to a stronger model (your own Claude/Codex/Gemini/Qwen CLI in print mode — your subscription, no API key) reads the failed run's trace and distills one portable lesson into the project rule-book. Strikes become training signal: the next agent on the project — often the same local model that struck out — inherits the lesson instead of re-hitting the wall.
+
+## The project rule-book
+
+Lessons live in `.portbay/LEARNINGS.md`, a rolling, size-capped rule-book every dispatched agent reads alongside the hand-off. Entries are deduped before writing — both exact repeats and reworded versions of a captured rule are skipped — and once the book grows, an occasional teacher audit consolidates near-duplicates and contradictions. A safety net rejects any audit that would remove more than half of the entries, so the project's memory can never be wiped by one bad model reply.
 
 ## Activity and notifications
 

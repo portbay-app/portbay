@@ -17,10 +17,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use russh::keys::{key::safe_rng, Algorithm, PrivateKey};
 use russh::server::{Auth, Handler as SshHandler, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
-use russh_keys::key::KeyPair;
 use russh_sftp::protocol::{
     Attrs, Data, File as SftpFile, FileAttributes, Handle as SftpHandle, Name, OpenFlags, Status,
     StatusCode,
@@ -56,7 +55,6 @@ struct SshConn {
     channels: HashMap<ChannelId, Channel<Msg>>,
 }
 
-#[async_trait]
 impl SshHandler for SshConn {
     type Error = russh::Error;
 
@@ -64,9 +62,7 @@ impl SshHandler for SshConn {
         if password == PASSWORD {
             Ok(Auth::Accept)
         } else {
-            Ok(Auth::Reject {
-                proceed_with_methods: None,
-            })
+            Ok(Auth::reject())
         }
     }
 
@@ -87,14 +83,14 @@ impl SshHandler for SshConn {
     ) -> Result<(), Self::Error> {
         if name == "sftp" {
             if let Some(channel) = self.channels.remove(&channel_id) {
-                session.channel_success(channel_id);
+                session.channel_success(channel_id)?;
                 russh_sftp::server::run(channel.into_stream(), SftpFs::new(self.root.clone()))
                     .await;
             } else {
-                session.channel_failure(channel_id);
+                session.channel_failure(channel_id)?;
             }
         } else {
-            session.channel_failure(channel_id);
+            session.channel_failure(channel_id)?;
         }
         Ok(())
     }
@@ -330,7 +326,7 @@ async fn start_server(root: PathBuf) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(russh::server::Config {
-        keys: vec![KeyPair::generate_ed25519().unwrap()],
+        keys: vec![PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap()],
         ..Default::default()
     });
     let mut server = SshServer { root };

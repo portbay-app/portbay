@@ -725,12 +725,13 @@ impl CliProvider {
 
 /// Claude Code's official `--permission-mode` values we expose. Anything else is
 /// dropped (the CLI falls back to its own default) so we never inject a mode the
-/// provider doesn't recognise.
+/// provider doesn't recognise. `bypassPermissions` is deliberately absent: the UI
+/// never offers it, and the IPC boundary (`ssh_agent_cli_chat`) rejects it too —
+/// this drop is the defense-in-depth layer.
 fn claude_permission_mode(mode: &str) -> Option<&'static str> {
     match mode {
         "plan" => Some("plan"),
         "acceptEdits" => Some("acceptEdits"),
-        "bypassPermissions" => Some("bypassPermissions"),
         "default" => Some("default"),
         _ => None,
     }
@@ -743,16 +744,16 @@ fn claude_permission_mode(mode: &str) -> Option<&'static str> {
 ///   read and reason but cannot write or run commands that escape the sandbox.
 /// - `acceptEdits` (Agent) → `--full-auto`: workspace-write sandbox, edits and
 ///   commands run without prompting (which Codex can't do in `exec` anyway).
-/// - `bypassPermissions` (full-auto override) →
-///   `--dangerously-bypass-approvals-and-sandbox`: no sandbox, full host access.
 ///
 /// `None`/unknown returns the empty string so Codex falls back to its own
 /// default — we never inject a flag the installed binary might not recognise.
+/// `bypassPermissions` (→ `--dangerously-bypass-approvals-and-sandbox`) is
+/// deliberately unmapped: the UI never offers it and the IPC boundary rejects
+/// it; falling through to "" here is the defense-in-depth layer.
 fn codex_sandbox_flags(permission_mode: Option<&str>) -> &'static str {
     match permission_mode {
         Some("plan") | Some("default") => " --sandbox read-only",
         Some("acceptEdits") => " --full-auto",
-        Some("bypassPermissions") => " --dangerously-bypass-approvals-and-sandbox",
         _ => "",
     }
 }
@@ -997,17 +998,25 @@ mod tests {
 
     #[test]
     fn codex_sandbox_flags_map_each_mode() {
-        // Read-only for the non-editing modes; full-auto for Agent; full bypass
-        // only for the explicit override; nothing (Codex default) when unset.
+        // Read-only for the non-editing modes; full-auto for Agent; nothing
+        // (Codex default) when unset or unknown. The dangerous bypass mode is
+        // never mapped — a renderer-supplied "bypassPermissions" must not
+        // reach the remote command line.
         assert_eq!(codex_sandbox_flags(Some("plan")), " --sandbox read-only");
         assert_eq!(codex_sandbox_flags(Some("default")), " --sandbox read-only");
         assert_eq!(codex_sandbox_flags(Some("acceptEdits")), " --full-auto");
-        assert_eq!(
-            codex_sandbox_flags(Some("bypassPermissions")),
-            " --dangerously-bypass-approvals-and-sandbox"
-        );
+        assert_eq!(codex_sandbox_flags(Some("bypassPermissions")), "");
         assert_eq!(codex_sandbox_flags(None), "");
         assert_eq!(codex_sandbox_flags(Some("nonsense")), "");
+    }
+
+    #[test]
+    fn claude_permission_mode_drops_bypass() {
+        assert_eq!(claude_permission_mode("plan"), Some("plan"));
+        assert_eq!(claude_permission_mode("acceptEdits"), Some("acceptEdits"));
+        assert_eq!(claude_permission_mode("default"), Some("default"));
+        assert_eq!(claude_permission_mode("bypassPermissions"), None);
+        assert_eq!(claude_permission_mode("nonsense"), None);
     }
 
     #[test]

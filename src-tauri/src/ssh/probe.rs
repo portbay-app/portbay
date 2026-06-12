@@ -16,9 +16,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use russh::client;
-use russh_keys::key;
+use russh::keys::{self, HashAlg, PublicKey};
 use serde::Serialize;
 use tokio::time::timeout;
 
@@ -99,19 +98,18 @@ struct ProbeHandler {
     captured: Arc<Mutex<Captured>>,
 }
 
-#[async_trait]
 impl client::Handler for ProbeHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &key::PublicKey,
+        server_public_key: &PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        let fingerprint = format!("SHA256:{}", server_public_key.fingerprint());
-        let trust = match russh_keys::check_known_hosts(&self.host, self.port, server_public_key) {
+        let fingerprint = server_public_key.fingerprint(HashAlg::Sha256).to_string();
+        let trust = match keys::check_known_hosts(&self.host, self.port, server_public_key) {
             Ok(true) => HostTrust::Trusted,
             Ok(false) => HostTrust::New,
-            Err(russh_keys::Error::KeyChanged { .. }) => HostTrust::Changed,
+            Err(keys::Error::KeyChanged { .. }) => HostTrust::Changed,
             Err(_) => HostTrust::Unknown,
         };
         if let Ok(mut c) = self.captured.lock() {

@@ -12,11 +12,17 @@
 # `.repo-boundary-allow`.
 #
 # Modes:
-#   (default)   Scan tracked + untracked-not-ignored files. Used by CI and
-#               `pre-push`. Catches a leak anywhere in the working tree.
-#   --staged    Scan only what is staged for commit (the exact blobs that would
-#               enter history). Used by the `pre-commit` hook so a bad commit is
-#               blocked BEFORE it is created — no force-clean, ever.
+#   (default)      Scan tracked + untracked-not-ignored files. Used by CI.
+#                  Catches a leak anywhere in the working tree.
+#   --staged       Scan only what is staged for commit (the exact blobs that
+#                  would enter history). Used by the `pre-commit` hook so a bad
+#                  commit is blocked BEFORE it is created — no force-clean, ever.
+#   --ref <commit> Scan the tree of <commit> (the exact blobs a push would
+#                  publish). Used by `pre-push` per outgoing ref, so local
+#                  working-tree WIP (e.g. private-overlay files sitting
+#                  uncommitted in the tree) can never false-block — and a
+#                  forbidden file that IS in the pushed tree always blocks,
+#                  whether or not it exists locally.
 #
 # Exit: 0 = clean   1 = boundary violation(s)   2 = misconfiguration
 #
@@ -26,10 +32,19 @@
 set -euo pipefail
 
 MODE="full"
+REF=""
 case "${1:-}" in
   --staged) MODE="staged" ;;
+  --ref)
+    MODE="ref"
+    REF="${2:-}"
+    if [ -z "$REF" ] || ! git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null; then
+      echo "usage: $0 --ref <commit>  (got: '${REF}')" >&2
+      exit 2
+    fi
+    ;;
   "" ) ;;
-  * ) echo "usage: $0 [--staged]" >&2; exit 2 ;;
+  * ) echo "usage: $0 [--staged | --ref <commit>]" >&2; exit 2 ;;
 esac
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -53,10 +68,28 @@ if [ "$MODE" = "staged" ]; then
   raw_list() { git diff --cached --name-only --diff-filter=ACMR; }
   # Read the STAGED blob (not the working tree) so partial `git add -p` is exact.
   read_file() { git show ":$1" 2>/dev/null || true; }
+elif [ "$MODE" = "ref" ]; then
+  # The committed tree being pushed — never the working tree.
+  raw_list() { git ls-tree -r --name-only "$REF"; }
+  read_file() { git show "$REF:$1" 2>/dev/null || true; }
 else
   raw_list() { git ls-files --cached --others --exclude-standard; }
   read_file() { cat "$1" 2>/dev/null || true; }
 fi
+
+# Content scan over the (allow-filtered) candidate list in one subprocess per
+# rule: plain grep on working files, `git grep <ref>` on a committed tree.
+# $1 = E|F (regex / fixed string), $2 = pattern. Empty list ⇒ no hits.
+grep_candidates() {
+  [ -s "$tmp_files" ] || return 0
+  if [ "$MODE" = "ref" ]; then
+    # shellcheck disable=SC2046
+    git grep -nI"$1" -e "$2" "$REF" -- $(cat "$tmp_files") 2>/dev/null || true
+  else
+    # shellcheck disable=SC2046
+    grep -nI"$1" -e "$2" $(cat "$tmp_files") /dev/null 2>/dev/null || true
+  fi
+}
 
 raw_list | while IFS= read -r f; do
   [ -z "$f" ] && continue
@@ -115,8 +148,7 @@ while IFS= read -r line; do
           fi
         done < "$tmp_files"
       else
-        # shellcheck disable=SC2046,SC2086
-        hits="$(grep -nIE -e "$pat" $(cat "$tmp_files") /dev/null 2>/dev/null || true)"
+        hits="$(grep_candidates E "$pat")"
         if [ -n "$hits" ]; then
           echo "✗ boundary violation — denylisted pattern: $line" >&2
           printf '%s\n' "$hits" | sed 's/^/    /' >&2
@@ -138,8 +170,7 @@ while IFS= read -r line; do
           fi
         done < "$tmp_files"
       else
-        # shellcheck disable=SC2046,SC2086
-        hits="$(grep -nIF -e "$pat" $(cat "$tmp_files") /dev/null 2>/dev/null || true)"
+        hits="$(grep_candidates F "$pat")"
         if [ -n "$hits" ]; then
           echo "✗ boundary violation — denylisted pattern: $line" >&2
           printf '%s\n' "$hits" | sed 's/^/    /' >&2
@@ -151,10 +182,17 @@ while IFS= read -r line; do
 done < "$DENYLIST"
 
 # ---- Dependency manifests must not reference private portbay-cloud packages ---
+dep_pat='@portbay-cloud/|portbay-cloud["'"'"']?[[:space:]]*[:=]'
 for dep in package.json pnpm-lock.yaml package-lock.json yarn.lock \
            src-tauri/Cargo.toml src-tauri/Cargo.lock; do
-  [ -f "$dep" ] || continue
-  if hits="$(grep -nIE '@portbay-cloud/|portbay-cloud["'"'"']?[[:space:]]*[:=]' -- "$dep" 2>/dev/null)"; then
+  if [ "$MODE" = "ref" ]; then
+    git cat-file -e "$REF:$dep" 2>/dev/null || continue
+    hits="$(read_file "$dep" | grep -nIE "$dep_pat" 2>/dev/null || true)"
+  else
+    [ -f "$dep" ] || continue
+    hits="$(grep -nIE "$dep_pat" -- "$dep" 2>/dev/null || true)"
+  fi
+  if [ -n "$hits" ]; then
     echo "✗ private dependency reference in $dep:" >&2
     printf '%s\n' "$hits" | sed 's/^/    /' >&2
     violations=$((violations + 1))

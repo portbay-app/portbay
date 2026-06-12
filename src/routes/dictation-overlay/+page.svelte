@@ -16,12 +16,19 @@
                        polished text forming during a "polish everywhere" pass
     stt://level        mic RMS for the waveform (every ~150 ms)
 
-  The shape is a 1:1 port of DynamicNotchKit's NotchShape (r-top 15,
-  r-bottom 20): a black shape growing out of the camera housing, top
-  corners flaring outward to meet the screen edge. The expanded recording
-  row is the VoiceInput reference design: the target app's icon, a 12-bar
-  frequency animation driven by real mic RMS, the mm:ss elapsed clock, and
-  a stop control (rotating square → invokes `dictation_overlay_stop`).
+  The shape is a 1:1 port of DynamicNotchKit's NotchShape (expanded r-top
+  15 / r-bottom 20): a black shape growing out of the camera housing, top
+  corners flaring outward to meet the screen edge. The expansion follows
+  the Dynamic Island's one rule — the black surface is "hardware", so it
+  never fades, blurs or transform-scales; it only changes shape. Hidden IS
+  the physical notch outline (pixel-aligned, invisible against it); showing
+  morphs width/height/corner-radii out of that outline on a single physical
+  spring (bouncy open / critically-damped close, the DynamicNotchKit +
+  boring.notch recipe), while the content melts in separately, trailing the
+  surface. The expanded recording row is the VoiceInput reference design:
+  the target app's icon, a 12-bar frequency animation driven by real mic
+  RMS, the mm:ss elapsed clock, and a stop control (rotating square →
+  invokes `dictation_overlay_stop`).
   Below it, the scrolling transcript preview (10 pt medium, white .75, max
   180×60, auto-scroll to bottom).
 
@@ -32,6 +39,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { Spring } from "svelte/motion";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -132,9 +140,14 @@
 
   // ---- Shape math (DynamicNotchKit NotchShape) ----------------------------
   /** Top corners flare OUTWARD (concave, meeting the screen edge); bottom
-   * corners are normal convex rounds. */
+   * corners are normal convex rounds. Expanded radii. */
   const R_TOP = 15;
   const R_BOTTOM = 20;
+  /** Collapsed radii (DynamicNotchKit's compact 6/14) — the hidden outline
+   * hugs the camera housing's own curvature, so at rest the shape is
+   * indistinguishable from the hardware it sits on. */
+  const RT_HIDDEN = 6;
+  const RB_HIDDEN = 14;
   /** Content column width (FluidVoice's ~176 pt notchContentWidth). */
   const CONTENT_WIDTH = 176;
 
@@ -154,16 +167,106 @@
   );
   const shapeH = $derived(notch.notchHeight + 6 + 18 + (previewVisible ? 6 + previewHeight : 0) + 10);
 
-  const shapePath = $derived(
-    `M 0 0` +
-      ` Q ${R_TOP} 0 ${R_TOP} ${R_TOP}` +
-      ` L ${R_TOP} ${shapeH - R_BOTTOM}` +
-      ` Q ${R_TOP} ${shapeH} ${R_TOP + R_BOTTOM} ${shapeH}` +
-      ` L ${shapeW - R_TOP - R_BOTTOM} ${shapeH}` +
-      ` Q ${shapeW - R_TOP} ${shapeH} ${shapeW - R_TOP} ${shapeH - R_BOTTOM}` +
-      ` L ${shapeW - R_TOP} ${R_TOP}` +
-      ` Q ${shapeW - R_TOP} 0 ${shapeW} 0 Z`,
+  // ---- Dynamic Island geometry spring ---------------------------------------
+  // The island illusion's one rule: the black surface reads as HARDWARE — it
+  // never fades, blurs or transform-scales; it only changes shape. So all
+  // four geometry channels (width, height, both radii) ride ONE physical
+  // spring, and the path is rebuilt from the spring's in-flight values every
+  // frame: the notch outline itself swells into the HUD and shrinks back.
+  // Parameters follow the references — DynamicNotchKit opens .bouncy(0.4) /
+  // closes .smooth(0.4); boring.notch opens spring(0.42, 0.8) / closes
+  // spring(0.45, 1.0). Open gets one visible micro-bounce, close none.
+  const SPRING_OPEN = { stiffness: 0.2, damping: 0.62 };
+  const SPRING_CLOSE = { stiffness: 0.24, damping: 1 };
+  /** In-session resizes (preview growing, hover) — snappy, tiny overshoot. */
+  const SPRING_RESIZE = { stiffness: 0.28, damping: 0.8 };
+
+  /** The exact physical-notch outline — the collapsed/rest geometry. The
+   * RT_HIDDEN flares stand in for the housing's own corner curvature. */
+  function collapsedGeo(n: NotchGeometry) {
+    return { w: n.notchWidth + RT_HIDDEN * 2, h: n.notchHeight, rt: RT_HIDDEN, rb: RB_HIDDEN };
+  }
+
+  /* svelte-ignore state_referenced_locally -- intentionally the initial
+     value: the spring seeds from the default outline; real geometry arrives
+     with arming and hard-resets it (see the phase handler). */
+  const geo = new Spring(collapsedGeo(notch), { ...SPRING_RESIZE, precision: 0.01 });
+
+  /** Hover micro-inflate — the island's "alive" response to the pointer
+   * (a few points of real geometry, never a pixel scale). */
+  let hovered = $state(false);
+  const hoverBoost = $derived(expanded && hovered ? 1 : 0);
+
+  const targetGeo = $derived(
+    expanded
+      ? { w: shapeW + hoverBoost * 6, h: shapeH + hoverBoost * 3, rt: R_TOP, rb: R_BOTTOM }
+      : collapsedGeo(notch),
   );
+
+  /** Which spring the next retarget rides — set by the phase handler (open /
+   * close), consumed once, then back to in-session resize. Plain let: it
+   * routes the effect below, it isn't rendered. */
+  let springMode: "open" | "close" | "resize" = "resize";
+  /** When the close started. A session landing shortly after must NOT
+   * teleport the spring to the collapsed outline — the window is still on
+   * screen mid-collapse, so the morph continues from wherever it is. After
+   * the window has been ordered out (rAF freezes for occluded windows) a
+   * fresh show hard-resets to the outline so frame 0 is exactly the notch. */
+  let closingSince = 0;
+
+  $effect(() => {
+    const target = targetGeo;
+    const params =
+      springMode === "open" ? SPRING_OPEN : springMode === "close" ? SPRING_CLOSE : SPRING_RESIZE;
+    springMode = "resize";
+    geo.stiffness = params.stiffness;
+    geo.damping = params.damping;
+    geo.target = target;
+  });
+
+  /** NotchShape path for the spring's in-flight geometry — same command
+   * structure at every size, radii clamped so overshoot can never fold the
+   * curves over themselves. */
+  function notchPath(w: number, h: number, rtRaw: number, rbRaw: number): string {
+    const rt = Math.max(0, Math.min(rtRaw, w / 2));
+    const rb = Math.max(0, Math.min(rbRaw, (w - rt * 2) / 2, h - rt));
+    const f = (n: number) => n.toFixed(2);
+    return (
+      `M 0 0` +
+      ` Q ${f(rt)} 0 ${f(rt)} ${f(rt)}` +
+      ` L ${f(rt)} ${f(h - rb)}` +
+      ` Q ${f(rt)} ${f(h)} ${f(rt + rb)} ${f(h)}` +
+      ` L ${f(w - rt - rb)} ${f(h)}` +
+      ` Q ${f(w - rt)} ${f(h)} ${f(w - rt)} ${f(h - rb)}` +
+      ` L ${f(w - rt)} ${f(rt)}` +
+      ` Q ${f(w - rt)} 0 ${f(w)} 0 Z`
+    );
+  }
+
+  const shapePath = $derived(notchPath(geo.current.w, geo.current.h, geo.current.rt, geo.current.rb));
+
+  /** Shadow rides the expansion progress (the radii are monotonic between
+   * the states, so they double as the progress signal): collapsed stays
+   * shadowless to blend with the housing; expanded gets the island's subtle
+   * lift against the wallpaper (boring.notch does the same — open only). */
+  const shadowAlpha = $derived(
+    0.5 * Math.min(Math.max((geo.current.rt - RT_HIDDEN) / (R_TOP - RT_HIDDEN), 0), 1),
+  );
+
+  /** Content choreography: the surface leads, the content melts in ~80 ms
+   * behind it (blur + scale + fade live on the inner column ONLY — never on
+   * the black shape). On close the content drops out fast while the
+   * critically-damped spring is still easing in, so the island always
+   * empties before it visibly shrinks — Apple's ordering. */
+  let contentIn = $state(false);
+  $effect(() => {
+    if (!expanded) {
+      contentIn = false;
+      return;
+    }
+    const t = setTimeout(() => (contentIn = true), 80);
+    return () => clearTimeout(t);
+  });
 
   // ---- Frequency bars (VoiceInput reference design) -------------------------
   /** 12 thin bars, 2 px wide with 2 px gaps, 2–13 px tall — amplitude comes
@@ -346,8 +449,22 @@
       listen<OverlayState>("anywhere://state", (event) => {
         const next = event.payload;
         const wasLive = phase === "live";
+        const wasHidden = phase === "hidden";
         phase = next.phase;
         if (next.notch) notch = next.notch;
+        // Geometry-spring routing: fresh shows morph OUT of the physical
+        // notch outline; hides morph back INTO it (see closingSince above
+        // for the mid-collapse re-arm exception).
+        if (next.phase !== "hidden" && wasHidden) {
+          if (performance.now() - closingSince > 800) {
+            void geo.set(collapsedGeo(notch), { instant: true });
+          }
+          springMode = "open";
+        } else if (next.phase === "hidden" && !wasHidden) {
+          springMode = "close";
+          closingSince = performance.now();
+          hovered = false;
+        }
         if (next.appName !== undefined && next.appName !== null) appName = next.appName;
         if (next.appIcon !== undefined && next.appIcon !== null) appIcon = next.appIcon;
         if (next.toggle !== undefined) toggleMode = next.toggle;
@@ -400,7 +517,12 @@
      controls); only the black wrapper differs. `topInset` is the physical
      notch spacer (0 for the bottom pill). -->
 {#snippet hudContent(topInset: number)}
-  <div class="content" style:padding-top="{topInset}px" style:width="{CONTENT_WIDTH}px">
+  <div
+    class="content"
+    class:in={contentIn}
+    style:padding-top="{topInset}px"
+    style:width="{CONTENT_WIDTH}px"
+  >
     <div class="row">
       <!-- Leading slot: the stop control while recording (the reference
            design's rotating square, where the mic/dot used to sit);
@@ -473,15 +595,32 @@
       {@render hudContent(0)}
     </div>
   {:else}
+    <!-- The drop-shadow lives on a host ABOVE the clip: a filter on the
+         clipped element itself would have its shadow cut away with the
+         overflow, while the host shadows the already-clipped composite, so
+         the lift follows the morphing outline exactly. -->
     <div
-      class="notch"
-      class:expanded
-      style:width="{shapeW}px"
-      style:height="{shapeH}px"
-      style:clip-path='path("{shapePath}")'
+      class="shadow-host"
+      style:filter={shadowAlpha > 0.004
+        ? `drop-shadow(0 3px 9px rgba(0, 0, 0, ${shadowAlpha.toFixed(3)}))`
+        : "none"}
     >
-      <!-- Content sits below the physical notch, inside the flare insets. -->
-      {@render hudContent(notch.notchHeight)}
+      <!-- Hover handlers drive the decorative micro-inflate only — the
+           real interactive element (the stop button) lives inside. -->
+      <div
+        class="notch"
+        class:expanded
+        class:ghost={!notch.hasNotch && !expanded}
+        style:width="{geo.current.w}px"
+        style:height="{geo.current.h}px"
+        style:clip-path='path("{shapePath}")'
+        role="presentation"
+        onmouseenter={() => (hovered = true)}
+        onmouseleave={() => (hovered = false)}
+      >
+        <!-- Content sits below the physical notch, inside the flare insets. -->
+        {@render hudContent(notch.notchHeight)}
+      </div>
     </div>
   {/if}
 </div>
@@ -502,30 +641,35 @@
     pointer-events: none;
   }
 
+  .shadow-host {
+    pointer-events: none;
+  }
+
+  /* The black surface — NO transform, NO blur, NO opacity animation. It is
+     "hardware": the geometry spring drives width/height/clip-path per frame
+     and the shape morphs out of (and back into) the physical notch outline.
+     Anything that fades or scales here breaks the island illusion. */
   .notch {
     background: #000;
     display: flex;
     justify-content: center;
     align-items: flex-start;
-    /* DynamicNotchKit's expanded transition: scale(y, anchor top) + blur +
-       opacity on a smooth spring. */
-    transform-origin: top center;
-    transform: scaleY(0.45) scaleX(0.92);
-    opacity: 0;
-    filter: blur(8px);
-    transition:
-      transform 0.4s cubic-bezier(0.32, 0.72, 0, 1),
-      opacity 0.3s ease-out,
-      filter 0.35s ease-out,
-      height 0.25s cubic-bezier(0.32, 0.72, 0, 1),
-      width 0.25s cubic-bezier(0.32, 0.72, 0, 1);
+    overflow: hidden;
+    opacity: 1;
+    transition: opacity 0.15s ease-out;
   }
 
   .notch.expanded {
-    transform: scaleY(1) scaleX(1);
-    opacity: 1;
-    filter: blur(0);
     pointer-events: auto;
+  }
+
+  /* Screens without a camera housing have nothing for the collapsed outline
+     to blend into — fade the surface at the TAIL of the collapse (the morph
+     still plays in full; this only hides the final notch-shaped sliver).
+     Never applied on notched screens. */
+  .notch.ghost {
+    opacity: 0;
+    transition: opacity 0.2s ease-in 0.26s;
   }
 
   /* Bottom placement: the same content in a floating pill anchored to the
@@ -558,12 +702,34 @@
     pointer-events: auto;
   }
 
+  /* The content layer carries ALL the fade/blur/scale (DynamicNotchKit's
+     expanded-content transition: blur(10) + scale(y 0.6, anchor top) +
+     opacity) — it melts in trailing the surface and drops out fast before
+     the surface shrinks, so the island always empties before collapsing. */
   .content {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 6px;
     padding-bottom: 4px;
+    opacity: 0;
+    filter: blur(10px);
+    transform: scaleY(0.6);
+    transform-origin: top center;
+    transition:
+      opacity 0.14s ease-in,
+      filter 0.14s ease-in,
+      transform 0.14s ease-in;
+  }
+
+  .content.in {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+    transition:
+      opacity 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+      filter 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+      transform 0.32s cubic-bezier(0.3, 1.25, 0.6, 1);
   }
 
   .row {
@@ -581,6 +747,22 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+  }
+
+  /* Phase swaps inside the row (stop control → app icon, clock appearing)
+     melt in the same way the island swaps content — a quick blur-and-scale
+     materialize, never a hard pop. */
+  .leading > *,
+  .clock {
+    animation: content-swap-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @keyframes content-swap-in {
+    from {
+      opacity: 0;
+      filter: blur(4px);
+      transform: scale(0.7);
+    }
   }
 
   .app-icon {

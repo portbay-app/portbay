@@ -95,6 +95,26 @@ impl Process {
             }
         }
     }
+
+    /// `true` when `portbay_status()` would land on `Unhealthy` *purely* on
+    /// the strength of the readiness probe — i.e. the process is up, has a
+    /// probe, isn't reporting Ready, and is past the grace window. This is the
+    /// one status the caller can override with its own liveness check: Process
+    /// Compose stops re-running a TCP probe after the failure threshold is
+    /// exhausted, so `is_ready` can pin to "Not Ready" forever even though the
+    /// server bound its port a moment after the last attempt (a cold Next/Vite
+    /// build that compiles past the allowance). When this returns true the
+    /// poller does its own cheap TCP connect before painting the row red — see
+    /// `events.rs`. Every other status (`Running`, `Starting`, `Crashed`, …) is
+    /// authoritative and must not be second-guessed.
+    pub fn unhealthy_is_probe_only(&self) -> bool {
+        self.is_running
+            && self.has_ready_probe
+            && self.is_ready != "Ready"
+            && self.is_ready != "Starting"
+            && !self.is_ready.is_empty()
+            && self.age / 1_000_000_000 >= READINESS_GRACE_SECS
+    }
 }
 
 /// True when the exit code looks like a signal-induced exit on UNIX.
@@ -214,6 +234,36 @@ mod tests {
             proc(false, "-", false, "Completed", -1).portbay_status(),
             ProjectStatus::Stopped
         );
+    }
+
+    #[test]
+    fn unhealthy_is_probe_only_gates_the_liveness_override() {
+        // The C3 case: running, probe present, not Ready, past grace ⇒
+        // portbay_status() says Unhealthy, but it's *probe-only* so the poller
+        // may override it with a live TCP connect.
+        let mut stuck = proc(true, "NotReady", true, "Running", 0);
+        stuck.age = (READINESS_GRACE_SECS + 5) * 1_000_000_000;
+        assert_eq!(stuck.portbay_status(), ProjectStatus::Unhealthy);
+        assert!(stuck.unhealthy_is_probe_only());
+
+        // Within the grace window it's still Starting, never overridden.
+        let mut warming = proc(true, "NotReady", true, "Running", 0);
+        warming.age = 5 * 1_000_000_000;
+        assert!(!warming.unhealthy_is_probe_only());
+
+        // Ready, no probe, and stopped processes are all authoritative —
+        // the override must never fire for them.
+        assert!(!proc(true, "Ready", true, "Running", 0).unhealthy_is_probe_only());
+        assert!(!proc(true, "-", false, "Running", 0).unhealthy_is_probe_only());
+        let mut dead = proc(false, "NotReady", true, "Completed", 1);
+        dead.age = (READINESS_GRACE_SECS + 5) * 1_000_000_000;
+        assert!(!dead.unhealthy_is_probe_only());
+
+        // "Starting" / empty readiness stays Starting in portbay_status(), so
+        // it's not a probe-only Unhealthy either.
+        let mut starting = proc(true, "Starting", true, "Running", 0);
+        starting.age = (READINESS_GRACE_SECS + 5) * 1_000_000_000;
+        assert!(!starting.unhealthy_is_probe_only());
     }
 
     #[test]

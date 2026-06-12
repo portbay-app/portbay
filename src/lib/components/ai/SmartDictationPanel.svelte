@@ -33,7 +33,7 @@
   const STT_ENGINES: { id: string; label: string; detail: string }[] = [
     {
       id: "macos",
-      label: "macOS Dictation",
+      label: "Apple Speech",
       detail: "Built into macOS — types as you speak, nothing to download.",
     },
     {
@@ -390,8 +390,8 @@
       {#if sttInfo !== null && !sttAvailable}
         <p class="mt-2 text-[11px] text-fg-subtle">
           {sttInfo.status.reason === "requires_macos_14"
-            ? "Local transcription needs macOS 14 or newer — dictation uses macOS Dictation on this Mac."
-            : "The local speech-to-text engine isn't available — dictation uses macOS Dictation."}
+            ? "Local transcription needs macOS 14 or newer — dictation uses Apple Speech on this Mac."
+            : "The local speech-to-text engine isn't available — dictation uses Apple Speech."}
         </p>
       {:else if dict.sttEngine === "local"}
         <div class="mt-2 flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
@@ -399,7 +399,7 @@
             <span class="text-[13px] text-fg">Speech model</span>
             <p class="text-[11px] text-fg-subtle mt-0.5">
               {#if sttInstalled.length === 0}
-                No models downloaded yet — dictation stays on macOS Dictation until one is.
+                No models downloaded yet — dictation stays on Apple Speech until one is.
               {:else}
                 Runs on the Neural Engine; streaming models show live captions while you talk.
               {/if}
@@ -690,6 +690,8 @@
           <p class="text-[11px] text-fg-subtle mt-0.5">
             Words dictation gets wrong — names, brands, jargon. Comma-separated;
             the first 12 are used, only when something like them was spoken.
+            Standard Whisper models (tiny/base/small) also hear these while
+            recognizing; other engines apply them as spelling fixes after.
           </p>
         </div>
         <input
@@ -702,6 +704,31 @@
           aria-label="Custom dictation terms"
           class="h-8 w-56 shrink-0 rounded-md bg-bg border border-border px-2.5 text-[12px] text-fg focus:outline-none focus:border-accent/60 transition-colors"
         />
+      </div>
+
+      <!-- Custom instructions — user style preferences appended AFTER the
+           built-in rewrite rules (which stay immutable, so a style tweak
+           can't break the core cleanup behavior). -->
+      <div class="py-2.5">
+        <span class="text-[13px] text-fg">Custom instructions</span>
+        <p class="text-[11px] text-fg-subtle mt-0.5 mb-1.5">
+          Optional style guidance for the rewrite — tone, formatting habits, sign-offs
+          ("keep sentences short", "write dates as 2026-06-09"). Applied after the
+          built-in cleanup rules; they never override them.
+        </p>
+        <textarea
+          value={dict.customInstructions}
+          onchange={(e) =>
+            void preferences.update({
+              dictation: { ...dict, customInstructions: (e.currentTarget as HTMLTextAreaElement).value },
+            })}
+          placeholder="e.g. Prefer short sentences. Spell my name as Nour."
+          spellcheck="false"
+          rows="2"
+          maxlength="2000"
+          aria-label="Custom rewrite instructions"
+          class="w-full resize-y rounded-md bg-bg border border-border px-2.5 py-1.5 text-[12px] text-fg focus:outline-none focus:border-accent/60 transition-colors"
+        ></textarea>
       </div>
 
       <!-- Reset learned vocabulary — the privacy control for the jargon the

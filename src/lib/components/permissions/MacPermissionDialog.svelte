@@ -24,7 +24,10 @@
     | "login-items"
     | "accessibility"
     | "screen-recording"
-    | "full-disk-access";
+    | "full-disk-access"
+    | "microphone"
+    | "camera"
+    | "screenshot-shortcuts";
 
   interface Props {
     open?: boolean;
@@ -46,8 +49,9 @@
     /** kind passed to `open_privacy_settings`. */
     settingsKind: string;
     /** "toggle" → animate the Login-Items switch; "drag" → animate dropping
-        the icon into a privacy list. */
-    gesture: "toggle" | "drag";
+        the icon into a privacy list; "uncheck" → animate ticking system
+        checkboxes OFF (the screenshot-keys takeover). */
+    gesture: "toggle" | "drag" | "uncheck";
     primaryLabel: string;
   }
 
@@ -92,7 +96,49 @@
       gesture: "drag",
       primaryLabel: "Open System Settings",
     },
+    // Mic differs from the drag kinds: after the first request PortBay is
+    // already in the Microphone list (switched off) — the user only flips
+    // the switch, no drag-to-add gesture exists for this pane.
+    microphone: {
+      title: "Microphone access required",
+      subtitle: "Grant in System Settings",
+      description:
+        "Local dictation records on this Mac, so PortBay needs the microphone. Switch PortBay on under Privacy & Security › Microphone — audio is transcribed on-device and never leaves the machine.",
+      settingsName: "Microphone",
+      settingsKind: "microphone",
+      gesture: "toggle",
+      primaryLabel: "Open System Settings",
+    },
+    // Like mic: requesting access already lists PortBay (switched off) in
+    // the Camera pane — the user only flips the switch.
+    camera: {
+      title: "Camera access required",
+      subtitle: "Grant in System Settings",
+      description:
+        "The webcam overlay records you alongside the screen, so PortBay needs the camera. Switch PortBay on under Privacy & Security › Camera — the picture goes only into your recording, never off this Mac.",
+      settingsName: "Camera",
+      settingsKind: "camera",
+      gesture: "toggle",
+      primaryLabel: "Open System Settings",
+    },
+    // Not a permission — the one-time takeover of macOS's own ⌘⇧3/4/5
+    // screenshot keys so PortBay's capture shortcuts can use them. The
+    // caller's onConfirm unticks them in one click (the same write System
+    // Settings does); the secondary opens the pane for the manual path.
+    "screenshot-shortcuts": {
+      title: "Take over the screenshot keys",
+      subtitle: "One-time change",
+      description:
+        "macOS keeps ⌘⇧3, ⌘⇧4 and ⌘⇧5 for its own screenshot tool, so PortBay's shortcuts misfire or stay silent until those are turned off. PortBay can switch them off for you — or untick them yourself in Keyboard Settings.",
+      settingsName: "Keyboard Shortcuts",
+      settingsKind: "keyboard-shortcuts",
+      gesture: "uncheck",
+      primaryLabel: "Turn them off for me",
+    },
   };
+
+  /** The rows the "uncheck" hero animates + the steps list names. */
+  const UNCHECK_KEYS = ["⌘⇧3", "⌘⇧4", "⌘⇧5"];
 
   const config = $derived(CONFIGS[kind]);
   let busy = $state(false);
@@ -211,6 +257,40 @@
           <p class="text-[11.5px] uppercase tracking-wide text-accent">{config.subtitle}</p>
         </div>
         <p class="text-[12px] text-fg-muted leading-relaxed">{config.description}</p>
+      {:else if config.gesture === "uncheck"}
+        <!-- Uncheck gesture (screenshot-keys takeover): a mini Shortcuts
+             list whose checkboxes animate OFF — the exact thing the user
+             does in System Settings. -->
+        <div class="relative flex w-full items-center justify-center gap-4 py-3">
+          <div class="perm-app relative">
+            <span class="perm-glow"></span>
+            <img src="/icon.png" alt="" aria-hidden="true" class="relative h-16 w-16 rounded-[16px]" />
+          </div>
+          <div class="perm-flow" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="perm-uncheck" aria-hidden="true">
+            {#each UNCHECK_KEYS as key, i (key)}
+              <div class="perm-uncheck-row" style="--delay: {i * 0.35}s">
+                <span class="perm-uncheck-box"><span class="perm-uncheck-tick">✓</span></span>
+                <span class="perm-uncheck-label">{key}</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <h2 class="text-[15px] font-semibold text-fg">{config.title}</h2>
+          <p class="text-[11.5px] uppercase tracking-wide text-accent">{config.subtitle}</p>
+        </div>
+        <p class="text-[12px] text-fg-muted leading-relaxed">{config.description}</p>
+
+        <ol class="w-full space-y-2 text-left">
+          {#each ["Click “Turn them off for me” and PortBay unticks them for you.", `Prefer the manual route? Open Keyboard Shortcuts → Screenshots and untick ${UNCHECK_KEYS.join(", ")}.`, "Done — PortBay's shortcuts work immediately, no restart needed."] as step, i (i)}
+            <li class="flex items-start gap-2.5">
+              <span class="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">{i + 1}</span>
+              <span class="text-[12px] text-fg-muted leading-relaxed">{step}</span>
+            </li>
+          {/each}
+        </ol>
       {:else if dropped}
         <!-- Dropped into the list. macOS only applies a newly-granted
              permission after the app relaunches, so guide the user to restart. -->
@@ -226,7 +306,7 @@
           PortBay was added to {config.settingsName}. macOS only applies a new
           permission after the app restarts — make sure PortBay is switched
           <span class="font-medium text-fg">on</span> in the list, then relaunch
-          to start using voice-to-text.
+          to finish granting access.
         </p>
       {:else}
         <!-- Drag-to-grant gesture: open the privacy pane, then physically drag
@@ -411,6 +491,42 @@
     55%, 100% { left: 14px; }
   }
 
+  /* Screenshot-keys takeover hero: a mini Shortcuts list whose ticks
+     animate off, staggered per row. */
+  .perm-uncheck {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 8px 10px; border-radius: 10px; width: 130px;
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+  }
+  .perm-uncheck-row { display: flex; align-items: center; gap: 7px; }
+  .perm-uncheck-box {
+    display: flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px; border-radius: 4px;
+    border: 1.5px solid var(--color-border-strong);
+    background: var(--color-accent);
+    animation: perm-box 3s ease-in-out infinite;
+    animation-delay: var(--delay, 0s);
+  }
+  .perm-uncheck-tick {
+    font-size: 9px; line-height: 1; color: #fff; font-weight: 700;
+    animation: perm-tick 3s ease-in-out infinite;
+    animation-delay: var(--delay, 0s);
+  }
+  .perm-uncheck-label {
+    font-size: 10.5px; color: var(--color-fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  @keyframes perm-box {
+    0%, 30% { background: var(--color-accent); border-color: var(--color-accent); }
+    55%, 85% { background: transparent; border-color: var(--color-border-strong); }
+    100% { background: var(--color-accent); border-color: var(--color-accent); }
+  }
+  @keyframes perm-tick {
+    0%, 30% { opacity: 1; }
+    55%, 85% { opacity: 0; }
+    100% { opacity: 1; }
+  }
+
   /* Privacy list (hero destination) with a blinking dashed drop row. */
   .perm-list {
     display: flex; flex-direction: column; gap: 6px;
@@ -447,8 +563,12 @@
 
   @media (prefers-reduced-motion: reduce) {
     .perm-card, .perm-app, .perm-glow, .perm-flow span,
-    .perm-toggle, .perm-knob, .perm-drag-chip, .perm-grip, .perm-row-drop { animation: none; }
+    .perm-toggle, .perm-knob, .perm-drag-chip, .perm-grip, .perm-row-drop,
+    .perm-uncheck-box, .perm-uncheck-tick { animation: none; }
     .perm-toggle { background: var(--color-status-running); }
     .perm-knob { left: 14px; }
+    /* Static end state: the boxes shown already unticked. */
+    .perm-uncheck-box { background: transparent; border-color: var(--color-border-strong); }
+    .perm-uncheck-tick { opacity: 0; }
   }
 </style>

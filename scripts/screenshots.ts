@@ -90,9 +90,9 @@ const SHOTS: Shot[] = [
   {
     name: "ai-dictation",
     route: "/ai",
-    title: "PortBay — Smart Dictation",
+    title: "PortBay — Speech-to-Text",
     prepare: async (page) => {
-      await page.getByRole("button", { name: "Smart Dictation", exact: true }).click();
+      await page.getByRole("button", { name: "Speech-to-Text", exact: true }).first().click();
       await page.waitForTimeout(400);
     },
   },

@@ -15,9 +15,11 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import FnKey from "$lib/components/atoms/FnKey.svelte";
   import Toggle from "$lib/components/atoms/Toggle.svelte";
   import { MacPermissionDialog } from "$lib/components/permissions";
+  import { grantPromptSession } from "$lib/components/permissions/grant-prompt-session";
   import { invokeQuiet } from "$lib/ipc";
   import { preferences, type AppContextRule } from "$lib/stores/preferences.svelte";
   import type { DictationAnywhereStatus } from "$lib/dictation/types";
@@ -63,6 +65,41 @@
   let sttInfo = $state<SttOverview | null>(null);
   const hasLocalModel = $derived((sttInfo?.installed.length ?? 0) > 0);
 
+  /** Only streaming engines emit the End-of-Utterance signal — for other
+   * models the auto-stop can never fire, so its toggle is disabled with an
+   * explanation instead of silently doing nothing. */
+  const selectedSupportsEou = $derived(
+    sttInfo?.catalog.find((m) => m.id === dict.sttModel)?.streaming ?? false,
+  );
+
+  /** Mic permission pre-flight (rides the same stt_overview probe). The
+   * capture runs in the sidecar but TCC attributes it to PortBay, so this is
+   * the effective state — surfacing it here means the grant happens before
+   * the first Fn-hold, not mid-session. */
+  const micPermission = $derived(sttInfo?.micPermission ?? "unknown");
+  const micDenied = $derived(micPermission === "denied" || micPermission === "restricted");
+  let micRequesting = $state(false);
+  let showMicDialog = $state(false);
+
+  async function requestMic() {
+    micRequesting = true;
+    try {
+      const granted = await invokeQuiet<boolean>("stt_request_mic_access");
+      if (!granted) showMicDialog = true;
+      await refreshSttInfo();
+    } finally {
+      micRequesting = false;
+    }
+  }
+
+  async function refreshSttInfo() {
+    try {
+      sttInfo = await invokeQuiet<SttOverview>("stt_overview");
+    } catch {
+      sttInfo = null;
+    }
+  }
+
   /** Platform support + Accessibility trust + live global monitors. `null`
    * means "not answered yet" — distinct from `{supported:false}` (genuinely
    * unsupported, render nothing). `probeFailed` separates a failed/errored
@@ -87,6 +124,10 @@
    * The permission gates the global Fn hotkey and typing into other apps —
    * the mic grant covers the speech engine itself. */
   let showAccessibilityDialog = $state(false);
+  /** First-success beat: right after the feature comes fully live (toggle on
+   * + trust present), invite an immediate real try — the smoke test that
+   * catches a half-configured setup before the user walks away. */
+  let showTryItHint = $state(false);
 
   async function setAnywhere(next: boolean) {
     await preferences.update({ dictation: { ...dict, anywhere: next } });
@@ -99,13 +140,65 @@
       await refreshAnywhereStatus(true, true);
       if (anywhereStatus?.supported && !anywhereStatus.trusted) {
         showAccessibilityDialog = true;
+      } else if (anywhereStatus?.trusted) {
+        showTryItHint = true;
       }
+    } else {
+      showTryItHint = false;
     }
   }
 
   async function setAnywhereDoubleTap(next: boolean) {
     await preferences.update({ dictation: { ...dict, anywhereDoubleTap: next } });
   }
+
+  async function setAnywhereAutoStop(next: boolean) {
+    await preferences.update({ dictation: { ...dict, anywhereAutoStop: next } });
+  }
+
+  async function setAnywhereTapToggle(next: boolean) {
+    await preferences.update({ dictation: { ...dict, anywhereTapToggle: next } });
+  }
+
+  async function setAnywhereCancelKey(code: number) {
+    await preferences.update({ dictation: { ...dict, anywhereCancelKey: code } });
+  }
+
+  /** Echo a cue choice out loud, like macOS's alert-sound list — the only
+   * way to know what "Glass" sounds like is to hear it. Fire-and-forget;
+   * "None" (empty) stays silent. */
+  function previewCue(sound: string, volume: number) {
+    if (!sound) return;
+    void invokeQuiet("dictation_preview_cue", { sound, volume });
+  }
+
+  async function setAnywhereCueSound(sound: string) {
+    previewCue(sound, dict.anywhereCueVolume);
+    await preferences.update({ dictation: { ...dict, anywhereCueSound: sound } });
+  }
+
+  async function setAnywhereCueVolume(volume: number) {
+    previewCue(dict.anywhereCueSound, volume);
+    await preferences.update({ dictation: { ...dict, anywhereCueVolume: volume } });
+  }
+
+  /** The cancel-key choices: Esc plus the F-keys that no app's text engine
+   * eats (vim/games swallow Esc; F13–F15 are free on full-size keyboards). */
+  const CANCEL_KEYS: { code: number; label: string }[] = [
+    { code: 53, label: "Esc" },
+    { code: 105, label: "F13" },
+    { code: 107, label: "F14" },
+    { code: 113, label: "F15" },
+  ];
+
+  /** Start-cue choices — bare names from /System/Library/Sounds. */
+  const CUE_SOUNDS: { value: string; label: string }[] = [
+    { value: "Tink", label: "Tink" },
+    { value: "Pop", label: "Pop" },
+    { value: "Glass", label: "Glass" },
+    { value: "Morse", label: "Morse" },
+    { value: "", label: "None" },
+  ];
 
   async function setAnywherePolish(next: boolean) {
     await preferences.update({ dictation: { ...dict, anywherePolish: next } });
@@ -149,18 +242,113 @@
     await preferences.update({ dictation: { ...dict, anywhereAppContexts: next } });
   }
 
+  // --- Site favicons in the notch (Automation consent) ---------------------
+  /** One running scriptable browser + PortBay's Automation consent for it
+   * (backend `BrowserConsent`). Empty = no scriptable browser running, and
+   * the row hides — nothing to enable against. */
+  interface BrowserConsent {
+    name: string;
+    bundleId: string;
+    consent: "granted" | "not_determined" | "denied" | "not_running";
+  }
+  let browserConsents = $state<BrowserConsent[]>([]);
+  let consentRequesting = $state(false);
+  const consentPending = $derived(
+    browserConsents.filter((b) => b.consent === "not_determined"),
+  );
+  const consentGranted = $derived(browserConsents.filter((b) => b.consent === "granted"));
+  const consentDenied = $derived(browserConsents.filter((b) => b.consent === "denied"));
+
+  async function refreshBrowserConsents() {
+    try {
+      browserConsents = (await invokeQuiet<BrowserConsent[]>("dictation_favicon_consent")) ?? [];
+    } catch {
+      browserConsents = [];
+    }
+  }
+
+  /** The explicit opt-in: fires macOS's own Automation dialog for each
+   * running browser that hasn't answered yet. This button is the ONLY thing
+   * that prompts — dictation itself never does (no consent = the notch just
+   * keeps the browser's app icon). */
+  async function requestBrowserConsents() {
+    consentRequesting = true;
+    try {
+      browserConsents =
+        (await invokeQuiet<BrowserConsent[]>("dictation_favicon_consent_request")) ?? [];
+    } catch {
+      await refreshBrowserConsents();
+    } finally {
+      consentRequesting = false;
+    }
+  }
+
+  /** When the feature is on and a local model exists but Accessibility is
+   * still missing, open the drag-to-grant sheet. This covers the production
+   * case the toggle's own prompt can't: `anywhere` was already enabled (synced
+   * prefs / a prior install), so the user never re-flips the toggle and the
+   * global Fn monitor stays silently uninstalled. We can't trigger off the Fn
+   * key itself — macOS withholds global key events from an untrusted process,
+   * so the key is unobservable until the grant exists — so the next-best
+   * moment is whenever this panel is seen or the app regains focus. */
+  function maybePromptForGrant() {
+    if (
+      preferences.value.dictation.anywhere &&
+      hasLocalModel &&
+      anywhereStatus?.supported &&
+      !anywhereStatus.trusted
+    ) {
+      // Mark the session so the root layout's boot check (which covers the
+      // "user never opens this panel" path) doesn't stack a second sheet.
+      grantPromptSession.shown = true;
+      showAccessibilityDialog = true;
+    }
+  }
+
+  /** Returning from System Settings: re-arm (no prompt) so a freshly granted
+   * permission installs the monitors live, without an app restart — and if the
+   * grant is still missing, re-surface the sheet. */
+  async function onWindowFocused() {
+    if (!preferences.value.dictation.anywhere || !hasLocalModel) return;
+    await refreshAnywhereStatus(true);
+    // A mic grant flipped in System Settings should clear the warning row
+    // the moment the user comes back.
+    void refreshSttInfo();
+    // Same for an Automation grant (or a browser launched meanwhile).
+    void refreshBrowserConsents();
+    maybePromptForGrant();
+  }
+
   onMount(() => {
     // The root layout loads preferences once; only load here if they haven't
     // landed yet, so each host (AI page + Settings) doesn't re-fetch.
     const ready = preferences.loaded ? Promise.resolve() : preferences.load();
-    void ready.then(() => {
-      void refreshAnywhereStatus();
-      invokeQuiet<SttOverview>("stt_overview")
-        .then((info) => (sttInfo = info))
-        .catch(() => (sttInfo = null));
+    void ready.then(async () => {
+      // Resolve status AND the local-model probe before deciding whether to
+      // surface the grant sheet — both gate it.
+      await Promise.all([
+        refreshAnywhereStatus(),
+        invokeQuiet<SttOverview>("stt_overview")
+          .then((info) => (sttInfo = info))
+          .catch(() => (sttInfo = null)),
+      ]);
       // Per-app overrides only matter when polishing — load the picker then.
       if (preferences.value.dictation.anywherePolish) void loadApps();
+      void refreshBrowserConsents();
+      maybePromptForGrant();
     });
+
+    // Re-arm on focus so granting in System Settings takes effect immediately.
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) void onWindowFocused();
+      })
+      .then((fn) => (unlisten = fn))
+      .catch(() => {
+        /* not in a Tauri window (simulator) — nothing to listen to */
+      });
+    return () => unlisten?.();
   });
 </script>
 
@@ -200,25 +388,167 @@
       </div>
     {/if}
 
-    {#if dict.anywhere && hasLocalModel}
+    {#if hasLocalModel && micDenied}
       <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
         <div class="min-w-0">
+          <span class="text-[12px] text-status-unhealthy">Microphone access is off for PortBay</span>
+          <p class="text-[11px] text-fg-subtle mt-0.5">
+            Dictation can't hear you until PortBay is switched on under
+            Privacy &amp; Security › Microphone.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="shrink-0 h-8 px-2.5 rounded-md border border-border text-[12px] text-fg hover:bg-surface-2 transition-colors"
+          onclick={() => (showMicDialog = true)}
+        >
+          Open Privacy Settings…
+        </button>
+      </div>
+    {:else if hasLocalModel && dict.anywhere && micPermission === "not_determined"}
+      <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
+        <p class="min-w-0 text-[11px] text-fg-subtle">
+          macOS will ask for microphone access on your first dictation — grant it now so
+          your first Fn-hold isn't interrupted.
+        </p>
+        <button
+          type="button"
+          class="shrink-0 h-8 px-2.5 rounded-md border border-accent/40 text-[12px] text-accent hover:bg-accent/10 transition-colors disabled:opacity-50"
+          disabled={micRequesting}
+          onclick={() => void requestMic()}
+        >
+          {micRequesting ? "Waiting for macOS…" : "Enable microphone"}
+        </button>
+      </div>
+    {/if}
+
+    {#if showTryItHint && dict.anywhere && hasLocalModel && anywhereStatus?.trusted}
+      <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
+        <p class="text-[11px] text-status-running">
+          You're set — hold <FnKey /> in any app and speak; release to paste. Esc cancels.
+        </p>
+        <button
+          type="button"
+          class="h-7 shrink-0 px-2 rounded-md text-[11px] text-fg-subtle hover:bg-surface-2"
+          onclick={() => (showTryItHint = false)}
+        >
+          Got it
+        </button>
+      </div>
+    {/if}
+
+    {#if dict.anywhere && hasLocalModel}
+      <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
+        <div class="min-w-0" class:opacity-60={dict.anywhereTapToggle}>
           <span class="text-[12px] text-fg">Hands-free with a double-tap</span>
           <p class="text-[11px] text-fg-subtle mt-0.5">
             Double-tap <FnKey /> to start without holding the key; tap <FnKey /> (or the
             stop in the notch) when you're done. Turn off if your Fn key's double-tap is
-            taken — e.g. macOS Dictation's own shortcut.
+            taken — e.g. Apple Speech's own shortcut.
           </p>
         </div>
         <Toggle
-          checked={dict.anywhereDoubleTap}
+          checked={dict.anywhereDoubleTap && !dict.anywhereTapToggle}
+          disabled={dict.anywhereTapToggle}
           label="Hands-free with a double-tap"
           onchange={(next) => void setAnywhereDoubleTap(next)}
+        />
+      </div>
+
+      <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
+        <div class="min-w-0">
+          <span class="text-[12px] text-fg">Automatic: tap to go hands-free</span>
+          <p class="text-[11px] text-fg-subtle mt-0.5">
+            One quick <FnKey /> tap starts a hands-free session; holding stays push-to-talk
+            — the same key, resolved when you release. Replaces the double-tap. Best with
+            the system Fn key set to "Do Nothing", or every accidental tap starts a session.
+          </p>
+        </div>
+        <Toggle
+          checked={dict.anywhereTapToggle}
+          label="Automatic: tap to go hands-free"
+          onchange={(next) => void setAnywhereTapToggle(next)}
+        />
+      </div>
+    {/if}
+
+    {#if dict.anywhere && hasLocalModel && (dict.anywhereDoubleTap || dict.anywhereTapToggle)}
+      <div
+        class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5"
+        title={selectedSupportsEou
+          ? undefined
+          : "Your selected model can't detect the end of an utterance — pick a streaming model (e.g. Parakeet EOU) to use auto-stop."}
+      >
+        <div class="min-w-0" class:opacity-60={!selectedSupportsEou}>
+          <span class="text-[12px] text-fg">Stop when you stop talking</span>
+          <p class="text-[11px] text-fg-subtle mt-0.5">
+            Hands-free sessions end on their own after a pause — no closing tap. Works
+            with the streaming Parakeet EOU model, which detects the end of an
+            utterance on-device; other models keep the tap-to-stop.
+          </p>
+        </div>
+        <Toggle
+          checked={dict.anywhereAutoStop && selectedSupportsEou}
+          disabled={!selectedSupportsEou}
+          label="Stop when you stop talking"
+          onchange={(next) => void setAnywhereAutoStop(next)}
         />
       </div>
     {/if}
 
     {#if dict.anywhere && hasLocalModel}
+      <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
+        <div class="min-w-0">
+          <span class="text-[12px] text-fg">Cancel key</span>
+          <p class="text-[11px] text-fg-subtle mt-0.5">
+            Cancels a session in flight — nothing is pasted. Pick an F-key if the app you
+            dictate into uses Esc itself (vim, games).
+          </p>
+        </div>
+        <select
+          class="h-7 shrink-0 rounded-md border border-border bg-surface px-1.5 text-[12px] text-fg"
+          value={String(dict.anywhereCancelKey)}
+          aria-label="Cancel key"
+          onchange={(e) => void setAnywhereCancelKey(Number(e.currentTarget.value))}
+        >
+          {#each CANCEL_KEYS as key (key.code)}
+            <option value={String(key.code)}>{key.label}</option>
+          {/each}
+        </select>
+      </div>
+
+      <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
+        <div class="min-w-0">
+          <span class="text-[12px] text-fg">Start sound</span>
+          <p class="text-[11px] text-fg-subtle mt-0.5">
+            Played when the mic goes live. The volume is independent of your output volume.
+          </p>
+        </div>
+        <span class="flex shrink-0 items-center gap-2">
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={dict.anywhereCueVolume}
+            aria-label="Start sound volume"
+            class="w-20 accent-accent"
+            disabled={!dict.anywhereCueSound}
+            onchange={(e) => void setAnywhereCueVolume(Number(e.currentTarget.value))}
+          />
+          <select
+            class="h-7 rounded-md border border-border bg-surface px-1.5 text-[12px] text-fg"
+            value={dict.anywhereCueSound}
+            aria-label="Start sound"
+            onchange={(e) => void setAnywhereCueSound(e.currentTarget.value)}
+          >
+            {#each CUE_SOUNDS as sound (sound.value)}
+              <option value={sound.value}>{sound.label}</option>
+            {/each}
+          </select>
+        </span>
+      </div>
+
       <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
         <div class="min-w-0">
           <span class="text-[12px] text-fg">Polish dictation everywhere</span>
@@ -313,6 +643,40 @@
       </div>
     {/if}
 
+    {#if dict.anywhere && hasLocalModel && browserConsents.length > 0}
+      <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
+        <div class="min-w-0">
+          <span class="text-[12px] text-fg">Site icons in the notch</span>
+          <p class="text-[11px] text-fg-subtle mt-0.5">
+            When you dictate into a browser, show the site's own icon (ChatGPT, GitHub…)
+            instead of the browser's. macOS asks once per browser for permission to read
+            the active tab's address — it never leaves this Mac.
+          </p>
+        </div>
+        {#if consentPending.length > 0}
+          <button
+            type="button"
+            class="shrink-0 h-8 px-2.5 rounded-md border border-accent/40 text-[12px] text-accent hover:bg-accent/10 transition-colors disabled:opacity-50"
+            disabled={consentRequesting}
+            onclick={() => void requestBrowserConsents()}
+          >
+            {consentRequesting
+              ? "Waiting for macOS…"
+              : `Enable for ${consentPending.map((b) => b.name).join(", ")}`}
+          </button>
+        {:else if consentGranted.length > 0}
+          <span class="shrink-0 text-[11px] text-status-running">
+            On for {consentGranted.map((b) => b.name).join(", ")}
+          </span>
+        {:else if consentDenied.length > 0}
+          <span class="shrink-0 text-[11px] text-fg-subtle max-w-[40%] text-right">
+            Turned off for {consentDenied.map((b) => b.name).join(", ")} — switch PortBay on
+            under Privacy &amp; Security › Automation.
+          </span>
+        {/if}
+      </div>
+    {/if}
+
     {#if dict.anywhere && hasLocalModel && anywhereStatus && !anywhereStatus.trusted}
       <div class="flex items-center justify-between gap-3 border-t border-border/60 py-2.5">
         <div class="min-w-0">
@@ -387,5 +751,14 @@
   onClose={() => {
     showAccessibilityDialog = false;
     void refreshAnywhereStatus(true);
+  }}
+/>
+
+<MacPermissionDialog
+  open={showMicDialog}
+  kind="microphone"
+  onClose={() => {
+    showMicDialog = false;
+    void refreshSttInfo();
   }}
 />

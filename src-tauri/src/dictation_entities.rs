@@ -151,10 +151,7 @@ fn parse_cardinal(atoms: &[Atom]) -> Option<(u64, usize)> {
             total += if current == 0 { 1000 } else { current * 1000 };
             current = 0;
             any = true;
-        } else if w == "and"
-            && any
-            && atoms.get(k + 1).is_some_and(|a| is_number_word(&a.core))
-        {
+        } else if w == "and" && any && atoms.get(k + 1).is_some_and(|a| is_number_word(&a.core)) {
             // "two hundred and five" — skip the connective, keep parsing.
         } else {
             break;
@@ -218,7 +215,11 @@ fn match_time(atoms: &[Atom], a: usize) -> Option<(usize, String)> {
     }
     match unit_kind(&atoms.get(unit)?.core) {
         Unit::Am | Unit::Pm => {
-            let mer = if unit_kind(&atoms[unit].core) == Unit::Am { "AM" } else { "PM" };
+            let mer = if unit_kind(&atoms[unit].core) == Unit::Am {
+                "AM"
+            } else {
+                "PM"
+            };
             let repl = match minute {
                 Some(m) => format!("{hour}:{m:02} {mer}"),
                 None => format!("{hour} {mer}"),
@@ -251,7 +252,9 @@ fn word_spans(text: &str) -> Vec<(usize, usize)> {
 }
 
 fn leading_punct(word: &str) -> String {
-    word.chars().take_while(|c| !c.is_ascii_alphanumeric()).collect()
+    word.chars()
+        .take_while(|c| !c.is_ascii_alphanumeric())
+        .collect()
 }
 
 fn trailing_punct(word: &str) -> String {
@@ -293,7 +296,11 @@ pub fn normalize_entities(text: &str) -> String {
             let last_span = atoms[last].span;
             let lead = leading_punct(words[first_span]);
             let trail = trailing_punct(words[last_span]);
-            edits.push((spans[first_span].0, spans[last_span].1, format!("{lead}{repl}{trail}")));
+            edits.push((
+                spans[first_span].0,
+                spans[last_span].1,
+                format!("{lead}{repl}{trail}"),
+            ));
             i = last + 1;
         } else {
             i += 1;
@@ -320,14 +327,17 @@ mod tests {
 
     #[test]
     fn currency_words_and_digits() {
-        assert_eq!(normalize_entities("it costs twenty five dollars"), "it costs $25");
-        assert_eq!(normalize_entities("anything over five hundred dollars"), "anything over $500");
+        assert_eq!(
+            normalize_entities("it costs twenty five dollars"),
+            "it costs $25"
+        );
+        assert_eq!(
+            normalize_entities("anything over five hundred dollars"),
+            "anything over $500"
+        );
         assert_eq!(normalize_entities("just 25 dollars"), "just $25");
         assert_eq!(normalize_entities("one dollar please"), "$1 please");
-        assert_eq!(
-            normalize_entities("five dollars and fifty cents"),
-            "$5.50"
-        );
+        assert_eq!(normalize_entities("five dollars and fifty cents"), "$5.50");
         assert_eq!(
             normalize_entities("two thousand five hundred dollars"),
             "$2500"
@@ -337,12 +347,24 @@ mod tests {
     #[test]
     fn clock_times() {
         assert_eq!(normalize_entities("meet at three pm"), "meet at 3 PM");
-        assert_eq!(normalize_entities("call at three thirty pm"), "call at 3:30 PM");
-        assert_eq!(normalize_entities("by eleven am tomorrow"), "by 11 AM tomorrow");
+        assert_eq!(
+            normalize_entities("call at three thirty pm"),
+            "call at 3:30 PM"
+        );
+        assert_eq!(
+            normalize_entities("by eleven am tomorrow"),
+            "by 11 AM tomorrow"
+        );
         assert_eq!(normalize_entities("starts at 3 pm"), "starts at 3 PM");
-        assert_eq!(normalize_entities("the ten o'clock standup"), "the 10 o'clock standup");
+        assert_eq!(
+            normalize_entities("the ten o'clock standup"),
+            "the 10 o'clock standup"
+        );
         // Minute that isn't followed by am/pm is not a time.
-        assert_eq!(normalize_entities("three thirty meeting"), "three thirty meeting");
+        assert_eq!(
+            normalize_entities("three thirty meeting"),
+            "three thirty meeting"
+        );
     }
 
     #[test]
@@ -354,7 +376,10 @@ mod tests {
     #[test]
     fn punctuation_is_preserved() {
         assert_eq!(normalize_entities("it was twenty dollars."), "it was $20.");
-        assert_eq!(normalize_entities("meet at three pm, then lunch"), "meet at 3 PM, then lunch");
+        assert_eq!(
+            normalize_entities("meet at three pm, then lunch"),
+            "meet at 3 PM, then lunch"
+        );
         assert_eq!(normalize_entities("pm. note"), "pm. note"); // no number → no fire
     }
 
@@ -417,7 +442,11 @@ mod tests {
         let mut checked = 0;
         for entry in entries {
             let path = entry.expect("dir entry").path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
             if !(name.starts_with('j') || name.starts_with('t')) || !name.ends_with(".txt") {
                 continue;
             }
@@ -432,7 +461,10 @@ mod tests {
             }
             checked += 1;
         }
-        assert!(checked >= 30, "expected the full corpus, only saw {checked} files");
+        assert!(
+            checked >= 30,
+            "expected the full corpus, only saw {checked} files"
+        );
         assert_eq!(
             changed,
             vec!["j15-biz-qb-mangled.txt".to_string()],

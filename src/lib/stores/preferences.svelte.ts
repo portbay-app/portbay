@@ -68,6 +68,9 @@ export interface DictationPrefs {
    * words and niche brands dictation garbles that no harvest can supply.
    * The prompt takes the first 12. */
   customTerms: string[];
+  /** User-written rewrite style instructions, appended to the system prompt
+   * AFTER the built-in rules (which stay immutable). Empty = no addendum. */
+  customInstructions: string;
   /** Transcription engine: "macos" (system dictation types into the field,
    * the default) or "local" (the bundled sidecar captures the mic and runs
    * a downloaded Whisper/Parakeet model on-device). */
@@ -84,6 +87,23 @@ export interface DictationPrefs {
    * the notch's stop button, or Esc) finishes it. On by default within the
    * anywhere opt-in. */
   anywhereDoubleTap: boolean;
+  /** Auto-stop for hands-free sessions: when the streaming recognizer flags
+   * End-of-Utterance (sustained silence after speech), the session finishes
+   * itself — no closing Fn tap. Off by default; only the streaming EOU
+   * engine emits the signal, and hold sessions always ignore it. */
+  anywhereAutoStop: boolean;
+  /** Automatic activation: a quick Fn tap starts a hands-free session (hold
+   * stays push-to-talk; resolved at release time). Off by default — every
+   * accidental Fn tap would otherwise open a session. Supersedes the
+   * double-tap gesture while on. */
+  anywhereTapToggle: boolean;
+  /** macOS virtual key code that cancels a session in flight. Esc (53) by
+   * default; F13/F14/F15 offered for apps that eat Esc. */
+  anywhereCancelKey: number;
+  /** System sound for the capture-live cue ("Tink" default; "" = silent). */
+  anywhereCueSound: string;
+  /** Cue volume 0–1, independent of system output volume. */
+  anywhereCueVolume: number;
   /** Recording-overlay placement: "notch" (camera-housing HUD, default) or
    * "bottom" (floating pill near the bottom of the pointer's screen — for
    * Macs without a notch). */
@@ -161,6 +181,9 @@ export interface Preferences {
   /** Terminal that hosts interactive agent dispatches (id from `installed_dev_tools`,
    * e.g. "warp" | "iterm" | "ghostty" | "terminal"). null → first detected. */
   preferredTerminal: string | null;
+  /** Terminal multiplexer interactive dispatches run inside, so a run survives
+   * its window closing. "tmux" opts in; null/"none" runs directly in the window. */
+  dispatchMultiplexer: string | null;
   /** Global default dispatch agent (kind id) for boards without their own config. null → Claude. */
   preferredAgent: string | null;
   /** Per-agent absolute binary path overrides, keyed by agent id (external drive / custom prefix). */
@@ -222,6 +245,7 @@ const DEFAULTS: Preferences = {
   defaultStartBehavior: "manual",
   defaultWebServer: null,
   preferredTerminal: null,
+  dispatchMultiplexer: null,
   preferredAgent: null,
   agentPaths: {},
   manageHostsAutomatically: true,
@@ -267,10 +291,16 @@ const DEFAULTS: Preferences = {
     model: "",
     pushToTalk: true,
     customTerms: [],
+    customInstructions: "",
     sttEngine: "macos",
     sttModel: "",
     anywhere: false,
     anywhereDoubleTap: true,
+    anywhereAutoStop: false,
+    anywhereTapToggle: false,
+    anywhereCancelKey: 53,
+    anywhereCueSound: "Tink",
+    anywhereCueVolume: 0.3,
     overlayPosition: "notch",
     overlayNoiseFloor: 0.01,
     overlayPreviewChars: 150,

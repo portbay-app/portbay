@@ -100,7 +100,20 @@ The workflow currently has a guard (`if: vars.RELEASE_SIGNING_ENABLED == 'true'`
 > generate`, then update both the `pubkey` in `tauri.conf.json` and the two
 > `TAURI_SIGNING_*` secrets).
 
-Until the guard is lifted, releases are built and signed manually on a maintainer machine using `pnpm tauri build` with the Developer ID cert present in the local Keychain, then the DMG is attached to the GitHub Release manually.
+Until the guard is lifted, releases are built and signed manually on a maintainer machine using `pnpm tauri build` with the Developer ID cert present in the local Keychain (`scripts/release-dmg-local.sh`), then the DMG is attached to the GitHub Release manually.
+
+> **Manual-flow checklist — `latest.json` must match what CI would emit.**
+> When assembling the updater manifest by hand, include ALL of:
+> `version`, **`min_version`** (default `0.1.2` — v0.1.4 originally shipped
+> without it and had to be re-uploaded), `notes`, `pub_date`, and the
+> `platforms.darwin-aarch64` entry with the verbatim `.app.tar.gz.sig`
+> contents as `signature`. Upload the **version-named** updater tarball
+> (`PortBay_X.Y.Z_aarch64.app.tar.gz` — `release-dmg-local.sh` produces it;
+> never the bundler's bare `PortBay.app.tar.gz`) and point the manifest `url`
+> at that name, so every downloadable asset identifies its version. Also add the release's section to `CHANGELOG.md`
+> (mandatory gate, §1.3) and verify the tap cask carries
+> `depends_on arch: :arm64` — the v0.1.4 manual cask edit dropped it and
+> Intel installs crashed at launch.
 
 ### 3.2 Release artifacts
 

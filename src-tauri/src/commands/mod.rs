@@ -14,6 +14,7 @@
 pub mod artifacts;
 pub mod auth;
 pub mod certs;
+pub mod cli;
 pub mod databases;
 pub mod dbconn;
 pub mod deploy;
@@ -25,12 +26,19 @@ pub mod entitlements;
 pub mod events;
 pub mod groups;
 pub mod http_inspector;
+pub mod hwfit;
+pub mod imagegen;
+pub mod imageplayground;
 pub mod import;
 pub mod integrations;
 pub mod lifecycle;
+#[cfg(feature = "visual-editor")]
+pub mod live_preview;
 pub mod localfs;
 pub mod log_stream;
 pub mod metrics;
+pub mod mobile;
+pub mod model_catalog;
 pub mod notifications;
 pub mod ollama;
 pub mod ollama_library;
@@ -54,6 +62,7 @@ pub mod system;
 #[cfg(feature = "tasks")]
 pub mod tasks;
 pub mod telemetry;
+pub mod tts;
 pub mod tunnel;
 pub mod updater;
 pub mod webservers;

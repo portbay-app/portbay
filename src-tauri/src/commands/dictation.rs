@@ -16,9 +16,9 @@ use tauri::{AppHandle, State};
 use tokio::sync::Notify;
 
 use crate::dictation::{
-    build_edit_prompt, build_edit_user, build_prompt, build_user, output_budget,
-    sanitize_output, InputSource, ProviderConfig, ProviderStatus, RewriteContext, RewriteError,
-    RewriteMode, RewriteProvider,
+    build_edit_prompt, build_edit_user, build_prompt, build_user, output_budget, sanitize_output,
+    InputSource, ProviderConfig, ProviderStatus, RewriteContext, RewriteError, RewriteMode,
+    RewriteProvider,
 };
 use crate::error::AppResult;
 use crate::state::AppState;
@@ -162,11 +162,7 @@ pub async fn recognizer_terms(
             custom,
             profile: crate::dictation_context::profile_terms(),
             surface: Vec::new(),
-            learned: crate::dictation_vocab::top_terms(
-                &registry_path,
-                context,
-                project.as_deref(),
-            ),
+            learned: crate::dictation_vocab::top_terms(&registry_path, context, project.as_deref()),
             projects: registry_project_terms(&registry_path, &domain_suffix),
         });
         crate::dictation_context::dedup_cap(merged, crate::dictation_context::RECOGNIZER_CAP)
@@ -266,6 +262,18 @@ pub async fn run_rewrite(
             detail: Some("transcript too short to rewrite".into()),
         };
     }
+    // A model pass can't improve ≤4 words ("thank you", "send it to John") —
+    // Whisper/Parakeet already punctuate and case them — but it CAN hallucinate
+    // on them, and even warm it costs seconds of "Polishing…" for nothing.
+    // The deterministic layers (voice commands, term correction, entities)
+    // still run; only the LLM is skipped.
+    if text.split_whitespace().count() <= 4 {
+        return RewriteOutcome {
+            status: "failed",
+            text: None,
+            detail: Some("transcript too short to rewrite".into()),
+        };
+    }
 
     let cancel = register(request_id);
     let _in_flight = InFlightGuard { request_id };
@@ -284,13 +292,24 @@ pub async fn run_rewrite(
     // fact — paste these two lines into scripts/probe-afm/ and the rewrite
     // is exactly reproducible (greedy sampling, no randomness).
     tracing::debug!(transcript = %text, vocabulary = ?vocabulary, ?context, "dictation rewrite input");
-    let system = build_prompt(
+    let mut system = build_prompt(
         mode,
         context,
         &vocabulary,
         crate::dictation::PromptFlavor::for_provider(&provider.kind),
         source,
     );
+    // User style instructions ride as a delimited addendum AFTER the built-in
+    // rules (hidden-base / editable-body: users tune style, the load-bearing
+    // core stays immutable and byte-pinned). Capped so a pasted essay can't
+    // crowd the context window.
+    let custom = state.preferences_snapshot().dictation.custom_instructions;
+    let custom = custom.trim();
+    if !custom.is_empty() {
+        let capped: String = custom.chars().take(2000).collect();
+        system.push_str("\n\nAdditional style instructions from the user — apply them only where they don't conflict with the rules above:\n");
+        system.push_str(&capped);
+    }
     // Framed, not raw — the "Transcript:" prefix keeps instruction-shaped
     // speech being cleaned rather than answered (see `build_user`).
     let user = build_user(text);
@@ -311,9 +330,11 @@ pub async fn run_rewrite(
     // parse with workspace jargon (observed live on a garbled transcript) —
     // keep the raw transcript instead.
     if outcome.status == "rewritten" {
-        if let Some(term) =
-            crate::dictation::vocabulary_injection(outcome.text.as_deref().unwrap_or(""), text, &vocabulary)
-        {
+        if let Some(term) = crate::dictation::vocabulary_injection(
+            outcome.text.as_deref().unwrap_or(""),
+            text,
+            &vocabulary,
+        ) {
             tracing::debug!(%term, "dictation rewrite injected an unspoken vocabulary term; keeping raw");
             return RewriteOutcome {
                 status: "failed",
@@ -324,10 +345,9 @@ pub async fn run_rewrite(
         // Invented-fact guard: a color/day/month in the output that was
         // never spoken is fabrication (observed live: "from blue to yellow"
         // for speech that only said red and yellow). Keep the raw transcript.
-        if let Some(word) = crate::dictation::introduced_fact_word(
-            outcome.text.as_deref().unwrap_or(""),
-            text,
-        ) {
+        if let Some(word) =
+            crate::dictation::introduced_fact_word(outcome.text.as_deref().unwrap_or(""), text)
+        {
             tracing::debug!(%word, "dictation rewrite invented a fact word; keeping raw");
             return RewriteOutcome {
                 status: "failed",
@@ -346,7 +366,9 @@ pub async fn run_rewrite(
             return RewriteOutcome {
                 status: "failed",
                 text: None,
-                detail: Some(format!("output introduced unspoken technical token '{token}'")),
+                detail: Some(format!(
+                    "output introduced unspoken technical token '{token}'"
+                )),
             };
         }
     }
@@ -490,7 +512,9 @@ pub async fn dictation_edit(
             return Ok(RewriteOutcome {
                 status: "failed",
                 text: None,
-                detail: Some(format!("output introduced unspoken technical token '{token}'")),
+                detail: Some(format!(
+                    "output introduced unspoken technical token '{token}'"
+                )),
             });
         }
     }
@@ -587,7 +611,8 @@ pub async fn dictation_list_apps(app: AppHandle) -> AppResult<Vec<crate::typing:
         // made the "Polish everywhere" toggle jank when it loaded this list.
         let (tx, rx) = tokio::sync::oneshot::channel();
         let dispatched = app.run_on_main_thread(move || {
-            let mtm = objc2::MainThreadMarker::new().expect("run_on_main_thread is the main thread");
+            let mtm =
+                objc2::MainThreadMarker::new().expect("run_on_main_thread is the main thread");
             let _ = tx.send(crate::typing::collect_running_apps(mtm));
         });
         if dispatched.is_err() {

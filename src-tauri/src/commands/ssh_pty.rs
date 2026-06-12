@@ -28,6 +28,7 @@ use crate::commands::ssh_tunnels::{
 use crate::error::{AppError, AppResult};
 use crate::registry::SshConnectionId;
 use crate::ssh::pty::{open_shell_channel, PtyControl};
+use crate::ssh::secret::{nonblank_secret, secret_str};
 use crate::ssh::session::SshSession;
 use crate::state::AppState;
 
@@ -95,12 +96,11 @@ pub async fn ssh_pty_open(
         // Fold in a borrowed identity (user / key / auth) before connecting.
         registry.effective_ssh_connection(raw)
     };
-    let nonblank = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    let password = match nonblank(input.password) {
+    let password = match nonblank_secret(input.password) {
         Some(p) => Some(p),
         None => load_stored_password(&conn.id)?,
     };
-    let passphrase = match nonblank(input.passphrase) {
+    let passphrase = match nonblank_secret(input.passphrase) {
         Some(p) => Some(p),
         None => load_stored_key_passphrase(&conn.id)?,
     };
@@ -118,9 +118,9 @@ pub async fn ssh_pty_open(
         let mut mgr = state.exec.lock().await;
         mgr.session_for(
             &conn,
-            password.as_deref(),
-            proxy_password.as_deref(),
-            passphrase.as_deref(),
+            secret_str(&password),
+            secret_str(&proxy_password),
+            secret_str(&passphrase),
             Some(crate::ssh::EventInteractor::shared(app)),
         )
         .await

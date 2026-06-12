@@ -7,7 +7,8 @@ import "./custom.css";
 
 export default {
   extends: DefaultTheme,
-  // "Was this helpful?" widget at the bottom of every docs page.
+  // "Was this helpful?" widget — floats in once the reader has scrolled 70%
+  // of a docs page (doc layout only, so never on the home landing page).
   Layout: () =>
     h(DefaultTheme.Layout, null, {
       "doc-after": () => h(FeedbackWidget),

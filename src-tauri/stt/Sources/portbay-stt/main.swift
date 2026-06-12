@@ -56,6 +56,8 @@
 // macOS 14 — FluidAudio's floor).
 
 import AVFoundation
+import CoreML
+import CryptoKit
 import Foundation
 import FluidAudio
 import WhisperKit
@@ -74,6 +76,24 @@ struct Request: Decodable {
     /// `DecodingOptions.promptTokens`; engines without a text-prompt seam ignore
     /// them. Absent / empty = no bias.
     let biasTerms: [String]?
+    /// Optional model spec carried by the request (download/prewarm/capture).
+    /// When present, the sidecar uses these instead of looking the id up in its
+    /// bundled `CATALOG` — this is what lets the live PortBay Model Catalog
+    /// (Rust-owned) ship new same-engine models with NO sidecar rebuild. Absent
+    /// = fall back to `CATALOG`, then to the spec persisted at download time.
+    let engine: String?
+    let repoModel: String?
+    /// Parakeet model generation ("v2" | "v3"); ignored by other engines.
+    let parakeetVersion: String?
+    let approxSizeBytes: Int64?
+    /// Expected install-content digest from the signed catalog (see
+    /// `directoryContentDigest`). When present, the download is verified
+    /// against it before the install is sealed; absent = no verification
+    /// (entries adopt digests incrementally as the catalog publishes them).
+    let contentDigest: String?
+    /// Text-to-speech: the text to synthesize and the voice id (`tts-synthesize`).
+    let text: String?
+    let voice: String?
 }
 
 /// Terminal response for a request. Encoded as one stdout line.
@@ -87,6 +107,8 @@ struct Response: Encodable {
     /// Echoed on download terminals so the app can match a response to its
     /// (concurrent) download when several run back-to-back.
     var downloadId: String? = nil
+    /// `tts-synthesize` result: base64 of a 24 kHz mono 16-bit PCM WAV.
+    var wavBase64: String? = nil
 }
 
 /// Sidecar-initiated event line (capture stream, download progress).
@@ -123,6 +145,12 @@ struct CatalogModel: Encodable {
     /// Whether capture emits live partial transcripts. Batch models show a
     /// clock + "transcribing…" instead.
     let streaming: Bool
+    /// Parakeet generation ("v2" | "v3") — selects the FluidAudio download
+    /// version. nil for Whisper (and defaults to v3 for Parakeet if unset).
+    var parakeetVersion: String? = nil
+    /// Expected install-content digest (live catalog only; the bundled
+    /// CATALOG carries none). Verified before the install is sealed.
+    var contentDigest: String? = nil
 }
 
 /// Curated, static — STT models don't live in any registry PortBay could
@@ -130,6 +158,20 @@ struct CatalogModel: Encodable {
 /// shortlist. Order is display order. Sizes verified against the HF repos
 /// when download lands (Phase 2); until then they are honest approximations.
 let CATALOG: [CatalogModel] = [
+    CatalogModel(
+        id: "parakeet-eou-streaming",
+        engine: "parakeet-eou",
+        displayName: "Parakeet EOU 120M (streaming)",
+        // StreamingModelVariant raw value — selects the 320 ms chunk tier
+        // (the balanced export: lower WER than batch TDT on short-form, with
+        // chunk-level latency). Other tiers can ship via the live catalog.
+        repoModel: "parakeet-eou-320ms",
+        approxSizeBytes: 300_000_000,
+        languages: "English",
+        speedNote: "True streaming — words decode while you speak, so the text is ready the instant you stop.",
+        recommended: true,
+        streaming: true
+    ),
     CatalogModel(
         id: "parakeet-tdt-v3",
         engine: "parakeet",
@@ -139,7 +181,20 @@ let CATALOG: [CatalogModel] = [
         languages: "25 European languages",
         speedNote: "Fastest on Apple Silicon — near-instant transcription on the Neural Engine.",
         recommended: true,
-        streaming: false
+        streaming: false,
+        parakeetVersion: "v3"
+    ),
+    CatalogModel(
+        id: "parakeet-tdt-v2",
+        engine: "parakeet",
+        displayName: "Parakeet TDT v2 (0.6B, English)",
+        repoModel: "parakeet-tdt-0.6b-v2-coreml",
+        approxSizeBytes: 2_400_000_000,
+        languages: "English",
+        speedNote: "English-only Parakeet — highest accuracy on English at the same near-instant speed.",
+        recommended: false,
+        streaming: false,
+        parakeetVersion: "v2"
     ),
     CatalogModel(
         id: "whisper-large-v3-turbo",
@@ -185,6 +240,39 @@ let CATALOG: [CatalogModel] = [
         recommended: false,
         streaming: true
     ),
+    CatalogModel(
+        id: "whisper-small",
+        engine: "whisper",
+        displayName: "Whisper Small",
+        repoModel: "small",
+        approxSizeBytes: 466_000_000,
+        languages: "Multilingual (99 languages)",
+        speedNote: "Light multilingual download — quicker and smaller than the large models.",
+        recommended: false,
+        streaming: true
+    ),
+    CatalogModel(
+        id: "whisper-base",
+        engine: "whisper",
+        displayName: "Whisper Base",
+        repoModel: "base",
+        approxSizeBytes: 142_000_000,
+        languages: "Multilingual (99 languages)",
+        speedNote: "Tiny footprint, fast — good for quick notes where accuracy is less critical.",
+        recommended: false,
+        streaming: true
+    ),
+    CatalogModel(
+        id: "whisper-tiny",
+        engine: "whisper",
+        displayName: "Whisper Tiny",
+        repoModel: "tiny",
+        approxSizeBytes: 75_000_000,
+        languages: "Multilingual (99 languages)",
+        speedNote: "Smallest, fastest Whisper — lowest accuracy; for constrained machines.",
+        recommended: false,
+        streaming: true
+    ),
 ]
 
 // MARK: - Installed models
@@ -201,22 +289,163 @@ struct InstalledModel: Encodable {
 /// fails at load with a much worse error than "not installed").
 let COMPLETE_MARKER = ".portbay-complete"
 
+/// Written next to [`COMPLETE_MARKER`] at download time so capture, prewarm,
+/// and installed-detection work for models that aren't in the bundled
+/// [`CATALOG`] — i.e. models the live PortBay Model Catalog added without a
+/// sidecar rebuild. The download op already knows the engine/repoModel/version
+/// (from the request or `CATALOG`); persisting them removes the only reason the
+/// sidecar still needed a static catalog.
+let SPEC_MARKER = ".portbay-spec.json"
+
+struct ModelSpec: Codable {
+    let engine: String
+    let repoModel: String
+    var parakeetVersion: String? = nil
+}
+
 /// Per-model install root: `<modelsDir>/<catalog id>/`. Each engine library
 /// is pointed inside this folder, so delete is one directory removal.
 func modelRoot(_ modelsDir: String, _ id: String) -> URL {
     URL(fileURLWithPath: modelsDir).appendingPathComponent(id, isDirectory: true)
 }
 
+func writeSpec(_ root: URL, _ entry: CatalogModel) {
+    let spec = ModelSpec(
+        engine: entry.engine, repoModel: entry.repoModel, parakeetVersion: entry.parakeetVersion)
+    if let data = try? JSONEncoder().encode(spec) {
+        try? data.write(to: root.appendingPathComponent(SPEC_MARKER))
+    }
+}
+
+func readSpec(_ root: URL) -> ModelSpec? {
+    guard let data = try? Data(contentsOf: root.appendingPathComponent(SPEC_MARKER)) else {
+        return nil
+    }
+    return try? JSONDecoder().decode(ModelSpec.self, from: data)
+}
+
+// MARK: - Install-content digest
+
+enum DigestError: Error, CustomStringConvertible {
+    case mismatch(expected: String, actual: String)
+    case unreadable(String)
+    var description: String {
+        switch self {
+        case .mismatch(let expected, let actual):
+            return "downloaded model failed integrity verification "
+                + "(expected \(expected.prefix(12))…, got \(actual.prefix(12))…) — "
+                + "delete and re-download, or update PortBay"
+        case .unreadable(let path):
+            return "could not read \(path) while verifying the download"
+        }
+    }
+}
+
+/// Streaming SHA-256 of one file (weights run to multiple GB — never load
+/// them whole).
+func fileSHA256(_ url: URL) throws -> String {
+    guard let handle = try? FileHandle(forReadingFrom: url) else {
+        throw DigestError.unreadable(url.lastPathComponent)
+    }
+    defer { try? handle.close() }
+    var hasher = SHA256()
+    while true {
+        let chunk = autoreleasepool { handle.readData(ofLength: 8 << 20) }
+        if chunk.isEmpty { break }
+        hasher.update(data: chunk)
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+}
+
+/// Canonical content digest of an install root: SHA-256 over the sorted
+/// `relative-path:sha256` lines of every regular file (PortBay's own
+/// `.portbay-*` markers excluded). Engine downloads are multi-file HF
+/// snapshots with no single artifact to pin, so the catalog pins this
+/// directory digest instead — the same role the sha256-pinned runtimes
+/// manifest plays for binaries. Deterministic: path-sorted, content-only
+/// (no mtimes/permissions).
+func directoryContentDigest(_ root: URL) throws -> String {
+    let fm = FileManager.default
+    var lines: [String] = []
+    guard
+        let it = fm.enumerator(
+            at: root, includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles])
+    else {
+        throw DigestError.unreadable(root.path)
+    }
+    let prefix = root.standardizedFileURL.path + "/"
+    for case let url as URL in it {
+        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        else { continue }
+        let rel = String(url.standardizedFileURL.path.dropFirst(prefix.count))
+        if rel == COMPLETE_MARKER || rel == SPEC_MARKER { continue }
+        lines.append("\(rel):\(try fileSHA256(url))")
+    }
+    lines.sort()
+    let manifest = Data(lines.joined(separator: "\n").utf8)
+    return SHA256.hash(data: manifest).map { String(format: "%02x", $0) }.joined()
+}
+
+/// Verify a finished download against the catalog's expected digest, when one
+/// was provided. Throwing here means the install is NOT sealed (no
+/// `.portbay-complete`), so a tampered or corrupted download can never load.
+func verifyContentDigest(_ root: URL, _ entry: CatalogModel) throws {
+    guard let expected = entry.contentDigest?.lowercased(), !expected.isEmpty else { return }
+    let actual = try directoryContentDigest(root)
+    if actual != expected {
+        throw DigestError.mismatch(expected: expected, actual: actual)
+    }
+}
+
+/// Resolve the engine/repoModel/version for an op. Priority: spec carried by
+/// the request (live catalog) → the bundled `CATALOG` → the spec persisted on
+/// disk at download time. nil means "not enough to act".
+func resolveEntry(modelsDir: String?, request: Request) -> CatalogModel? {
+    guard let id = request.model, !id.isEmpty else { return nil }
+    if let engine = request.engine, !engine.isEmpty,
+        let repo = request.repoModel, !repo.isEmpty
+    {
+        return CatalogModel(
+            id: id, engine: engine, displayName: id, repoModel: repo,
+            approxSizeBytes: request.approxSizeBytes ?? 0, languages: "", speedNote: "",
+            recommended: false, streaming: streamingEngine(engine),
+            parakeetVersion: request.parakeetVersion,
+            contentDigest: request.contentDigest)
+    }
+    if let entry = CATALOG.first(where: { $0.id == id }) { return entry }
+    if let dir = modelsDir, !dir.isEmpty, let spec = readSpec(modelRoot(dir, id)) {
+        return CatalogModel(
+            id: id, engine: spec.engine, displayName: id, repoModel: spec.repoModel,
+            approxSizeBytes: 0, languages: "", speedNote: "", recommended: false,
+            streaming: streamingEngine(spec.engine), parakeetVersion: spec.parakeetVersion)
+    }
+    return nil
+}
+
+/// Whether an engine streams live partials during capture. Whisper streams by
+/// re-transcription; the EOU/Nemotron families stream natively (cache-aware
+/// chunk decode). Batch engines (Parakeet TDT, Qwen3, Cohere) don't.
+func streamingEngine(_ engine: String) -> Bool {
+    engine == "whisper" || engine == "parakeet-eou" || engine == "nemotron"
+}
+
 /// A model is installed when its root exists AND carries the completion
-/// marker.
+/// marker. Scans the models dir from disk (not `CATALOG`) so live-catalog
+/// models show as installed too; engine comes from the persisted spec, falling
+/// back to the bundled catalog for pre-spec installs.
 func scanInstalled(modelsDir: String) -> [InstalledModel] {
     let fm = FileManager.default
-    return CATALOG.compactMap { entry in
-        let root = modelRoot(modelsDir, entry.id)
+    guard let ids = try? fm.contentsOfDirectory(atPath: modelsDir) else { return [] }
+    return ids.compactMap { id in
+        let root = modelRoot(modelsDir, id)
         guard fm.fileExists(atPath: root.appendingPathComponent(COMPLETE_MARKER).path) else {
             return nil
         }
-        return InstalledModel(id: entry.id, engine: entry.engine, sizeBytes: directorySize(root.path))
+        let engine = readSpec(root)?.engine
+            ?? CATALOG.first(where: { $0.id == id })?.engine
+            ?? "whisper"
+        return InstalledModel(id: id, engine: engine, sizeBytes: directorySize(root.path))
     }
 }
 
@@ -341,9 +570,10 @@ func runDownload(modelsDir: String, entry: CatalogModel, downloadId: String) asy
             // is given (repoPath) — pass <root>/<repo folder> so files land
             // inside the model root and load() gets the identical path.
             let target = root.appendingPathComponent(entry.repoModel, isDirectory: true)
+            let version: AsrModelVersion = entry.parakeetVersion == "v2" ? .v2 : .v3
             _ = try await AsrModels.download(
                 to: target,
-                version: .v3,
+                version: version,
                 progressHandler: { progress in
                     let phase: String
                     switch progress.phase {
@@ -362,6 +592,12 @@ func runDownload(modelsDir: String, entry: CatalogModel, downloadId: String) asy
             return
         }
         try Task.checkCancellation()
+        // Verify against the catalog's expected digest (no-op when absent)
+        // BEFORE sealing — a corrupted/tampered download must never load.
+        try verifyContentDigest(root, entry)
+        // Persist the spec so capture/prewarm/installed work for this model
+        // even when it isn't in the bundled CATALOG (live-catalog models).
+        writeSpec(root, entry)
         // Seal the install — only now does the model count as installed.
         FileManager.default.createFile(atPath: root.appendingPathComponent(COMPLETE_MARKER).path, contents: nil)
         out.send(Response(op: "download", ok: true, downloadId: downloadId))
@@ -382,6 +618,224 @@ func runDownload(modelsDir: String, entry: CatalogModel, downloadId: String) asy
     await ActiveDownloads.shared.finished(downloadId)
 }
 
+/// Download a Qwen3 / Cohere / Nemotron model. Each uses its own FluidAudio
+/// downloader; files land under the install root and load locates them by
+/// scanning for `.mlmodelc` (see `loadEngine`).
+func runAdvancedDownload(modelsDir: String, entry: CatalogModel, downloadId: String) async {
+    let out = LineWriter.shared
+    let root = modelRoot(modelsDir, entry.id)
+    let gate = ProgressGate()
+    let progress: DownloadUtils.ProgressHandler = { p in
+        gate.relay(downloadId, p.fractionCompleted, phase: "downloading")
+    }
+    do {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        switch entry.engine {
+        case "qwen3":
+            guard #available(macOS 15, *) else {
+                throw SttError.badEngine("Qwen3-ASR requires macOS 15 or newer")
+            }
+            _ = try await Qwen3AsrModels.download(variant: .f32, to: root, progressHandler: progress)
+        case "cohere":
+            try await DownloadUtils.downloadRepo(.cohereTranscribeCoreml, to: root, progressHandler: progress)
+        case "parakeet-eou":
+            // Tier selected by repoModel (StreamingModelVariant raw value) so
+            // load gets the matching chunk-size export. 320 ms is the curated
+            // default (better WER than batch TDT at a fraction of the size).
+            let variant = StreamingModelVariant(rawValue: entry.repoModel) ?? .parakeetEou320ms
+            try await DownloadUtils.downloadRepo(variant.repo, to: root, progressHandler: progress)
+        case "nemotron":
+            // Honor a tier carried as a StreamingModelVariant raw value; the
+            // original catalog entry carries the HF repo name instead, which
+            // keeps the historical 1120 ms tier.
+            let repo = StreamingModelVariant(rawValue: entry.repoModel)?.repo ?? .nemotronStreaming1120
+            try await DownloadUtils.downloadRepo(repo, to: root, progressHandler: progress)
+        default:
+            throw SttError.badEngine(entry.engine)
+        }
+        try Task.checkCancellation()
+        try verifyContentDigest(root, entry)
+        writeSpec(root, entry)
+        FileManager.default.createFile(
+            atPath: root.appendingPathComponent(COMPLETE_MARKER).path, contents: nil)
+        out.send(Response(op: "download", ok: true, downloadId: downloadId))
+    } catch {
+        if Task.isCancelled || error is CancellationError {
+            out.send(
+                Response(op: "download", ok: false, code: 6, error: "cancelled", downloadId: downloadId))
+        } else {
+            out.send(
+                Response(
+                    op: "download", ok: false, code: 5,
+                    error: "download failed: \(error.localizedDescription)", downloadId: downloadId))
+        }
+    }
+    await ActiveDownloads.shared.finished(downloadId)
+}
+
+// MARK: - Text-to-Speech (Kokoro via FluidAudio)
+
+/// The 28 English Kokoro voices (af/am = American, bf/bm = British). FluidAudio's
+/// English ANE bundle ships ONLY `af_heart`; the rest are byte-identical
+/// `[510,256]` fp32 voice packs from the upstream Kokoro repo. We stage them into
+/// the model root so FluidAudio's on-demand `ensureVoicePack` finds them locally
+/// instead of 404ing against the CoreML repo (which has only af_heart).
+let KOKORO_EN_VOICES: [String] = [
+    "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore",
+    "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
+    "am_onyx", "am_puck", "am_santa",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+]
+
+/// Pinned to a commit (not `main`) so the fetched bytes are reproducible. These
+/// are voice-embedding tensors, not code.
+let KOKORO_VOICE_BASE_URL =
+    "https://raw.githubusercontent.com/hexgrad/kokoro/dfb907a02bba8152ca444717ca5d78747ccb4bec/kokoro.js/voices"
+
+/// `[510, 256]` fp32 — the exact size FluidAudio's voice-pack loader expects.
+/// Used to reject a 404 HTML body or a truncated transfer.
+let KOKORO_VOICE_PACK_BYTES = 510 * 256 * 4
+
+enum KokoroVoiceError: Error { case badDownload(String, Int) }
+
+/// Stage one English Kokoro voice pack into `root` (idempotent). No-op when the
+/// file is already present at the expected size.
+func fetchKokoroVoiceIfNeeded(_ voice: String, into root: URL) async throws {
+    let dest = root.appendingPathComponent("\(voice).bin")
+    if let attrs = try? FileManager.default.attributesOfItem(atPath: dest.path),
+        (attrs[.size] as? Int) == KOKORO_VOICE_PACK_BYTES
+    {
+        return
+    }
+    guard KOKORO_EN_VOICES.contains(voice),
+        let url = URL(string: "\(KOKORO_VOICE_BASE_URL)/\(voice).bin")
+    else { return }
+    let (data, response) = try await URLSession(configuration: .ephemeral).data(from: url)
+    guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+        data.count == KOKORO_VOICE_PACK_BYTES
+    else {
+        throw KokoroVoiceError.badDownload(voice, data.count)
+    }
+    try data.write(to: dest, options: [.atomic])
+}
+
+/// Stage all English Kokoro voice packs into `repoDir` (the dir `ensureModels`
+/// returns, where FluidAudio's flat English layout looks for `<voice>.bin`),
+/// reporting a "voices" phase. Throws on the first failure so a fresh install
+/// surfaces it; the synth-time net (`fetchKokoroVoiceIfNeeded`) recovers any
+/// that were skipped.
+func ensureKokoroEnglishVoices(repoDir: URL, downloadId: String?) async throws {
+    let gate = ProgressGate()
+    let total = KOKORO_EN_VOICES.count
+    for (i, voice) in KOKORO_EN_VOICES.enumerated() {
+        try Task.checkCancellation()
+        try await fetchKokoroVoiceIfNeeded(voice, into: repoDir)
+        if let id = downloadId {
+            gate.relay(id, Double(i + 1) / Double(total), phase: "voices")
+        }
+    }
+}
+
+/// Download the Kokoro mlmodelc chain for a TTS catalog entry. Mirrors
+/// `runDownload`'s shape (progress events + seal + spec) so the app's STT
+/// download UI works unchanged for voices. Voices themselves are small `.bin`
+/// packs fetched on demand at first synth.
+func runTtsDownload(modelsDir: String, entry: CatalogModel, downloadId: String) async {
+    let out = LineWriter.shared
+    let root = modelRoot(modelsDir, entry.id)
+    let gate = ProgressGate()
+    do {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // `ensureModels` returns the actual repo dir (root/<repo.folderName>),
+        // which is where the English voice packs must live — not `root` itself.
+        let repoDir = try await KokoroAneResourceDownloader.ensureModels(
+            variant: .english,
+            directory: root,
+            progressHandler: { progress in
+                gate.relay(downloadId, progress.fractionCompleted, phase: "downloading")
+            }
+        )
+        try Task.checkCancellation()
+        // Stage the full English voice set (af_heart already arrived above).
+        // Best-effort: a transient voice fetch must not fail the multi-hundred-MB
+        // model install — the synth-time net re-fetches any that were missed.
+        do {
+            try await ensureKokoroEnglishVoices(repoDir: repoDir, downloadId: downloadId)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            FileHandle.standardError.write(
+                Data("portbay-stt: some Kokoro voices deferred to first use: \(error)\n".utf8))
+        }
+        // Verify (no-op without a catalog digest). The digest covers the
+        // model snapshot AND the staged voice packs, so a catalog entry
+        // carrying one must be computed after the full voice set is staged.
+        try verifyContentDigest(root, entry)
+        writeSpec(root, entry)
+        FileManager.default.createFile(
+            atPath: root.appendingPathComponent(COMPLETE_MARKER).path, contents: nil)
+        out.send(Response(op: "download", ok: true, downloadId: downloadId))
+    } catch {
+        if Task.isCancelled || error is CancellationError {
+            out.send(
+                Response(op: "download", ok: false, code: 6, error: "cancelled", downloadId: downloadId))
+        } else {
+            out.send(
+                Response(
+                    op: "download", ok: false, code: 5,
+                    error: "synthesis model download failed: \(error.localizedDescription)",
+                    downloadId: downloadId))
+        }
+    }
+    await ActiveDownloads.shared.finished(downloadId)
+}
+
+/// One resident Kokoro synthesizer, reused across synths (the 7 mlmodelcs stay
+/// loaded). Re-keys when the model dir changes.
+actor TtsCache {
+    static let shared = TtsCache()
+    private var manager: KokoroAneManager?
+    private var key: String?
+
+    func synthesizer(modelsDir: String, id: String) async throws -> KokoroAneManager {
+        let root = modelRoot(modelsDir, id)
+        if let m = manager, key == root.path {
+            return m
+        }
+        let m = KokoroAneManager(variant: .english, directory: root)
+        try await m.initialize()
+        manager = m
+        key = root.path
+        return m
+    }
+}
+
+/// Synthesize `text` to a base64 WAV (24 kHz mono 16-bit PCM). `voice` is a
+/// Kokoro voice id (e.g. "af_heart"); nil uses the variant default. The voice
+/// pack is fetched on demand by the synthesizer if missing.
+func synthesizeTts(modelsDir: String, id: String, text: String, voice: String?) async throws
+    -> String
+{
+    // Safety net for models installed before the full voice set shipped (or any
+    // voice the bulk stage skipped): make sure the requested pack is on disk
+    // before FluidAudio looks for it — otherwise it 404s against the CoreML repo.
+    // `ensureModels` is a cache-hit here (the model is already installed) and
+    // returns the same repo dir the synthesizer reads voices from.
+    if let v = voice, !v.isEmpty {
+        let root = modelRoot(modelsDir, id)
+        if let repoDir = try? await KokoroAneResourceDownloader.ensureModels(
+            variant: .english, directory: root)
+        {
+            try? await fetchKokoroVoiceIfNeeded(v, into: repoDir)
+        }
+    }
+    let manager = try await TtsCache.shared.synthesizer(modelsDir: modelsDir, id: id)
+    let wav = try await manager.synthesize(text: text, voice: voice)
+    return wav.base64EncodedString()
+}
+
 // MARK: - Engines
 
 /// A loaded transcription engine. Both run a plain "transcribe these 16 kHz
@@ -395,9 +849,27 @@ func runDownload(modelsDir: String, entry: CatalogModel, downloadId: String) asy
 /// never drops our highest-priority terms (the app sends them priority-first).
 let BIAS_TOKEN_BUDGET = 100
 
+/// A FluidAudio ASR engine that isn't Whisper or Parakeet — Qwen3, Cohere, or
+/// Nemotron. Boxed behind a protocol so [`LoadedEngine`] (which is used on the
+/// macOS-14 capture path) can hold one even though some conformers
+/// (`Qwen3Engine`) are `@available(macOS 15)`: the existential type is available
+/// on 14, only *constructing* an instance is gated (see `loadEngine`).
+protocol AdvancedAsrEngine: AnyObject {
+    func transcribe(_ samples: [Float]) async throws -> String
+}
+
 enum LoadedEngine {
     case whisper(WhisperKit)
     case parakeet(AsrManager)
+    /// Qwen3 / Cohere via FluidAudio — batch transcribe, no text-prompt bias
+    /// seam, no incremental commit.
+    case advanced(AdvancedAsrEngine)
+    /// True streaming ASR (Parakeet EOU / Nemotron) — cache-aware encoders
+    /// that decode chunk-by-chunk DURING capture, so at stop only the final
+    /// partial chunk remains to decode (~tens of ms), independent of
+    /// dictation length. The capture session drives these through their own
+    /// feed loop (`CaptureSession`'s streaming path), not `transcribe`.
+    case streaming(any StreamingAsrManager)
 
     /// Tokenize recognizer bias terms into Whisper prompt tokens — or `nil` when
     /// the engine can't take a text prompt (Parakeet/TDT has no such seam), the
@@ -431,6 +903,13 @@ enum LoadedEngine {
             let options = DecodingOptions(
                 task: .transcribe,
                 usePrefillPrompt: true,
+                // WhisperKit defaults this to false, which leaves
+                // `<|startoftranscript|>` / `<|0.00|>` markers in `.text` —
+                // they leaked into pastes verbatim. Timestamp tokens are
+                // special tokens too, so this cleans the text while the
+                // segment timing metadata (incremental-commit boundaries)
+                // is unaffected.
+                skipSpecialTokens: true,
                 promptTokens: promptTokens,
                 chunkingStrategy: finalPass ? .vad : nil
             )
@@ -445,8 +924,88 @@ enum LoadedEngine {
             var state = try TdtDecoderState()
             let result = try await manager.transcribe(samples, decoderState: &state)
             return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .advanced(let engine):
+            // promptTokens unused — these engines have no text-prompt bias seam.
+            let text = try await engine.transcribe(samples)
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .streaming(let manager):
+            // Batch adaptation for completeness only — live capture feeds the
+            // manager incrementally and never lands here. Reset first so a
+            // prior session's decoder state can't leak into this pass.
+            try await manager.reset()
+            if let buffer = makePCMBuffer(samples) {
+                try await manager.appendAudio(buffer)
+                try await manager.processBufferedAudio()
+            }
+            let text = try await manager.finish()
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
+
+    /// Whisper-only: VAD-segment a window and hand back the raw segments (text +
+    /// end time + no-speech probability). The incremental commit pass uses the
+    /// segment end times to freeze whole words on silence boundaries, and the
+    /// no-speech probabilities to reuse the same hallucination guard. Returns an
+    /// empty array for Parakeet, which stays on the full-buffer finalize path.
+    func whisperSegments(_ samples: [Float], promptTokens: [Int]?) async throws
+        -> [TranscriptionSegment]
+    {
+        guard case .whisper(let kit) = self else { return [] }
+        let options = DecodingOptions(
+            task: .transcribe,
+            usePrefillPrompt: true,
+            skipSpecialTokens: true,
+            promptTokens: promptTokens,
+            chunkingStrategy: .vad
+        )
+        let results = try await kit.transcribe(audioArray: samples, decodeOptions: options)
+        return results.flatMap(\.segments)
+    }
+}
+
+// MARK: - Advanced FluidAudio engines (Qwen3 / Cohere / Nemotron)
+
+/// Qwen3-ASR — clean batch pipeline (macOS 15+).
+@available(macOS 15, *)
+final class Qwen3Engine: AdvancedAsrEngine {
+    private let manager: Qwen3AsrManager
+    init(_ manager: Qwen3AsrManager) { self.manager = manager }
+    func transcribe(_ samples: [Float]) async throws -> String {
+        try await manager.transcribe(audioSamples: samples, language: nil as String?)
+    }
+}
+
+/// Cohere Transcribe (cohere-transcribe-03-2026) — encoder/decoder CoreML
+/// pipeline, batch transcribe (macOS 14+).
+final class CohereEngine: AdvancedAsrEngine {
+    private let pipeline: CoherePipeline
+    private let models: CoherePipeline.LoadedModels
+    init(pipeline: CoherePipeline, models: CoherePipeline.LoadedModels) {
+        self.pipeline = pipeline
+        self.models = models
+    }
+    func transcribe(_ samples: [Float]) async throws -> String {
+        try await pipeline.transcribe(audio: samples, models: models).text
+    }
+}
+
+/// Build a 16 kHz mono Float32 `AVAudioPCMBuffer` from raw samples — the
+/// streaming managers take buffers, not `[Float]`.
+func makePCMBuffer(_ samples: [Float], sampleRate: Double = 16_000) -> AVAudioPCMBuffer? {
+    guard !samples.isEmpty,
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1,
+            interleaved: false),
+        let buffer = AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))
+    else { return nil }
+    buffer.frameLength = AVAudioFrameCount(samples.count)
+    if let channel = buffer.floatChannelData {
+        samples.withUnsafeBufferPointer { src in
+            channel[0].update(from: src.baseAddress!, count: samples.count)
+        }
+    }
+    return buffer
 }
 
 /// Whisper hallucinates stock YouTube-caption phrases on silence and breath
@@ -503,6 +1062,47 @@ func findWhisperModelFolder(_ root: URL) -> URL? {
     return nil
 }
 
+/// Locate the directory containing a named marker file anywhere under `root`.
+/// The streaming repos nest their tier folder (e.g.
+/// `<root>/parakeet-realtime-eou-120m-coreml/320ms/`), and the generic
+/// first-`.mlmodelc` scan can land INSIDE a nested bundle (Nemotron keeps its
+/// encoder under `encoder/<file>.mlmodelc`), so each streaming engine looks
+/// for a file that only exists at its model dir's top level.
+func findModelFolder(_ root: URL, containing marker: String) -> URL? {
+    let fm = FileManager.default
+    guard
+        let walker = fm.enumerator(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles])
+    else { return nil }
+    for case let url as URL in walker {
+        if url.lastPathComponent == marker {
+            return url.deletingLastPathComponent()
+        }
+    }
+    return nil
+}
+
+/// EOU auto-stop debounce: how long speech must stay absent before the model
+/// flags End-of-Utterance. The library default (1280 ms) is tuned for
+/// turn-taking; 900 ms keeps hands-free auto-stop snappy without clipping
+/// normal mid-sentence pauses.
+let EOU_DEBOUNCE_MS = 900
+
+/// An `MLModelConfiguration` pinned to CPU+ANE. The bare default (`.all`)
+/// lets CoreML route quantized streaming ops to the GPU, which measures ~10×
+/// slower than the ANE path for these encoders (the Nemotron manager applies
+/// the same pin internally when given no configuration).
+func aneConfiguration() -> MLModelConfiguration {
+    let config = MLModelConfiguration()
+    config.computeUnits = .cpuAndNeuralEngine
+    // The few ops CoreML still routes to the GPU may accumulate in fp16 —
+    // measurably faster on quantized kernels, no accuracy impact for ASR
+    // (FluidVoice ships the same flag on its streaming engines).
+    config.allowLowPrecisionAccumulationOnGPU = true
+    return config
+}
+
 /// Load a model for capture/prewarm. Only sealed installs load (unless the
 /// download op itself is doing its verification load via `allowUnsealed`) —
 /// both engine libraries silently fall back to DOWNLOADING a missing model
@@ -533,10 +1133,48 @@ func loadEngine(modelsDir: String, entry: CatalogModel, allowUnsealed: Bool = fa
         return .whisper(try await WhisperKit(config))
     case "parakeet":
         let target = root.appendingPathComponent(entry.repoModel, isDirectory: true)
-        let models = try await AsrModels.load(from: target)
+        let version: AsrModelVersion = entry.parakeetVersion == "v2" ? .v2 : .v3
+        let models = try await AsrModels.load(from: target, version: version)
         let manager = AsrManager(config: .default)
         try await manager.loadModels(models)
         return .parakeet(manager)
+    case "qwen3":
+        guard #available(macOS 15, *) else {
+            throw SttError.badEngine("Qwen3-ASR requires macOS 15 or newer")
+        }
+        let dir = findWhisperModelFolder(root) ?? root
+        let manager = Qwen3AsrManager()
+        try await manager.loadModels(from: dir)
+        return .advanced(Qwen3Engine(manager))
+    case "cohere":
+        let dir = findWhisperModelFolder(root) ?? root
+        let pipeline = CoherePipeline()
+        let models = try await CoherePipeline.loadModels(
+            encoderDir: dir, decoderDir: dir, vocabDir: dir)
+        return .advanced(CohereEngine(pipeline: pipeline, models: models))
+    case "parakeet-eou":
+        // `repoModel` carries the StreamingModelVariant raw value (e.g.
+        // "parakeet-eou-320ms") so the live catalog can ship other chunk
+        // tiers without a sidecar rebuild. The chunk size MUST match the
+        // downloaded tier — each tier is a separately exported encoder.
+        let variant = StreamingModelVariant(rawValue: entry.repoModel) ?? .parakeetEou320ms
+        guard let dir = findModelFolder(root, containing: "streaming_encoder.mlmodelc") else {
+            throw SttError.notInstalled
+        }
+        let manager = StreamingEouAsrManager(
+            configuration: aneConfiguration(),
+            chunkSize: variant.eouChunkSize ?? .ms320,
+            eouDebounceMs: EOU_DEBOUNCE_MS)
+        try await manager.loadModels(from: dir)
+        return .streaming(manager)
+    case "nemotron":
+        // The tier folder's metadata.json carries the chunk configuration, so
+        // the manager self-configures to whichever tier was downloaded.
+        let dir = findModelFolder(root, containing: "metadata.json")
+            ?? findWhisperModelFolder(root) ?? root
+        let manager = StreamingNemotronAsrManager()
+        try await manager.loadModels(from: dir)
+        return .streaming(manager)
     default:
         throw SttError.badEngine(entry.engine)
     }
@@ -559,6 +1197,11 @@ actor EngineCache {
 
     private var key: String?
     private var engine: LoadedEngine?
+    /// In-flight load, keyed like `key`. Actor methods interleave at `await`,
+    /// so without this two concurrent `resident` calls for the same model (a
+    /// boot prewarm racing a mic-first capture) would page the multi-GB
+    /// weights in twice — instead the second caller awaits the first's load.
+    private var loading: (key: String, task: Task<LoadedEngine, Error>)?
 
     /// The resident engine for this model, loading + caching it on a miss.
     /// A different key evicts the previous engine before loading the new one,
@@ -568,14 +1211,31 @@ actor EngineCache {
         if wanted == key, let engine {
             return engine
         }
+        if let loading, loading.key == wanted {
+            return try await loading.task.value
+        }
         // Drop the old engine first so its CoreML weights are released before
         // the new load pages in (avoids briefly holding two multi-GB models).
         engine = nil
         key = nil
-        let loaded = try await loadEngine(modelsDir: modelsDir, entry: entry)
-        engine = loaded
-        key = wanted
-        return loaded
+        let task = Task { try await loadEngine(modelsDir: modelsDir, entry: entry) }
+        loading = (wanted, task)
+        do {
+            let loaded = try await task.value
+            // Cache only if a different-model load didn't replace this one
+            // while we were suspended.
+            if loading?.key == wanted {
+                engine = loaded
+                key = wanted
+                loading = nil
+            }
+            return loaded
+        } catch {
+            if loading?.key == wanted {
+                loading = nil
+            }
+            throw error
+        }
     }
 
     /// Release the resident engine (model deleted, or shutting down). The next
@@ -610,7 +1270,11 @@ enum SttError: Error, CustomStringConvertible {
 /// The tap callback runs on Core Audio's thread; the lock guards the sample
 /// buffer against the transcription passes reading snapshots.
 final class AudioCapture: @unchecked Sendable {
-    private let engine = AVAudioEngine()
+    /// Optional only so `stop()` can hand the engine to a background queue
+    /// for deallocation: tearing down an `AVAudioEngine` whose device just
+    /// disappeared (Bluetooth drop, display-audio unplug) can block inside
+    /// CoreAudio — releasing it off-thread keeps the serve loop responsive.
+    private var engine: AVAudioEngine? = AVAudioEngine()
     private let lock = NSLock()
     private var samples: [Float] = []
     private var converter: AVAudioConverter?
@@ -627,6 +1291,9 @@ final class AudioCapture: @unchecked Sendable {
     static let maxSamples = Int(sampleRate) * 60 * 30
 
     func start() throws {
+        guard let engine else {
+            throw SttError.badEngine("audio engine already released")
+        }
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
         guard
@@ -647,8 +1314,13 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     func stop() {
+        guard let engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        self.engine = nil
+        DispatchQueue.global(qos: .utility).async {
+            _ = engine
+        }
     }
 
     /// Snapshot of everything captured so far.
@@ -725,28 +1397,151 @@ actor CaptureSession {
         func clear() {
             session = nil
         }
+
+        /// Clear only if `candidate` still owns the slot — the engine-attach
+        /// failure path must not evict a successor session that already
+        /// replaced this one via stop/cancel + a fresh start.
+        func clear(ifCurrent candidate: CaptureSession) {
+            if session === candidate {
+                session = nil
+            }
+        }
     }
 
     private let capture = AudioCapture()
-    private let engine: LoadedEngine
-    /// Recognizer bias prompt tokens, computed once at session start (nil for
-    /// engines/inputs without a bias). Reused for every partial + the final
-    /// pass so the whole session is biased identically.
-    private let promptTokens: [Int]?
+    /// The engine, possibly STILL LOADING when the mic goes hot: mic-first
+    /// capture starts buffering immediately and `attachEngine` wires the
+    /// decode loops when the load resolves, so a cold start (first dictation
+    /// after launch) can't eat the user's first words.
+    private let engineTask: Task<LoadedEngine, Error>
+    /// Recognizer bias terms, tokenized once the engine arrives.
+    private let biasTerms: [String]
+    /// Resolved by `attachEngine`; nil while loading (or after a failed load).
+    private var engine: LoadedEngine?
+    /// Recognizer bias prompt tokens, computed once the engine attaches (nil
+    /// for engines/inputs without a bias). Reused for every partial + the
+    /// final pass so the whole session is biased identically.
+    private var promptTokens: [Int]?
+    /// Set by finish/cancel — a late engine attach must not start loops, and
+    /// an engine-load failure after teardown has nothing left to clean up.
+    private var torndown = false
     /// How much partial audio Whisper re-reads per pass: its native window.
     /// Parakeet TDT re-reads everything — at ~110× realtime a full pass is
     /// cheaper than Whisper's single window.
     private let partialWindowSeconds = 25.0
     private var partialTask: Task<Void, Never>?
 
-    init(engine: LoadedEngine, promptTokens: [Int]? = nil) {
-        self.engine = engine
-        self.promptTokens = promptTokens
+    /// Incremental commit (Whisper only). Audio older than `commitLagSeconds`
+    /// behind the live edge is transcribed once and frozen into `committedText`,
+    /// so the release-time `finish()` pass only re-reads the short trailing tail
+    /// instead of the whole buffer — the long-dictation latency win. Parakeet
+    /// keeps `commitBoundary == 0` and finalizes the whole buffer (already
+    /// ~110× realtime, so a full pass is cheap and stitching buys nothing).
+    private let commitLagSeconds = 3.0
+    /// Don't bother committing fewer than ~1 s of new stable audio.
+    private let minCommitSamples = 16_000
+    /// A VAD segment is only safe to freeze if it ended at least this long
+    /// before the window edge — i.e. real silence followed it, so we're not
+    /// cutting a word still in progress.
+    private let commitTrailingGapSeconds = 0.25
+    private var committedText = ""
+    /// Sample offset such that `audio[0..<commitBoundary]` == `committedText`.
+    private var commitBoundary = 0
+    /// Re-entrancy guard: actor methods interleave at `await`, so this stops a
+    /// commit pass and a partial pass both advancing state across a suspension.
+    private var committing = false
+    private var isWhisper: Bool {
+        if case .whisper? = engine { return true }
+        return false
     }
 
-    func start() throws {
+    /// The true-streaming manager when this session runs a cache-aware
+    /// engine (Parakeet EOU / Nemotron); nil keeps the re-transcribe path.
+    private var streamingManager: (any StreamingAsrManager)?
+    /// How many accumulated samples have been fed to the streaming manager —
+    /// the feed loop appends only the delta each tick.
+    private var fedSamples = 0
+    /// Consecutive failed streaming feed ticks — surfaced (once) so a
+    /// degraded manager can't eat audio silently.
+    private var streamFeedFailures = 0
+    /// Last partial sent, to skip duplicate lines while the speaker pauses.
+    private var lastStreamPartial = ""
+
+    init(engineTask: Task<LoadedEngine, Error>, biasTerms: [String]) {
+        self.engineTask = engineTask
+        self.biasTerms = biasTerms
+    }
+
+    /// Rate-limits the `eou` event so a chatty End-of-Utterance detector
+    /// (it can re-flag across consecutive silent chunks) emits at most one
+    /// line per second. The app gates what an `eou` means (hands-free
+    /// auto-stop, preference-controlled); the sidecar just reports.
+    private final class EouGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var last = Date.distantPast
+        func fire() {
+            lock.lock()
+            defer { lock.unlock() }
+            guard Date().timeIntervalSince(last) >= 1.0 else { return }
+            last = Date()
+            LineWriter.shared.send(Event(event: "eou"))
+        }
+    }
+
+    /// Mic-hot NOW, before the engine resolves: start buffering and tell the
+    /// app — `listening` is its mic-hot signal, so the notch goes live and a
+    /// cold model load can't lose what the user says in the meantime.
+    func startListening() throws {
         try capture.start()
         LineWriter.shared.send(Event(event: "listening"))
+    }
+
+    /// Second half of the mic-first start: await the (possibly cold) engine
+    /// load, then wire the decode loops behind the already-running mic. A
+    /// load failure stops the mic and rethrows for the handler to report; a
+    /// session finished/cancelled mid-load returns quietly (the resolved
+    /// engine stays cached for the next session).
+    func attachEngine() async throws {
+        let engine: LoadedEngine
+        do {
+            engine = try await engineTask.value
+        } catch {
+            failBehindMic()
+            throw error
+        }
+        guard !torndown else { return }
+        self.engine = engine
+        self.promptTokens = engine.biasPromptTokens(biasTerms)
+        if case .streaming(let manager) = engine {
+            // Clean decoder/cache state from any prior session on this
+            // resident engine, and hook EOU before the loop feeds audio.
+            do {
+                try await manager.reset()
+            } catch {
+                failBehindMic()
+                throw error
+            }
+            if let eou = manager as? StreamingEouAsrManager {
+                let gate = EouGate()
+                await eou.setEouCallback { _ in gate.fire() }
+            }
+            // finish/cancel may have landed across the awaits above.
+            guard !torndown else { return }
+            self.streamingManager = manager
+            // Feed cadence: ~4×/s keeps the manager's internal chunker fed
+            // (320 ms tiers decode roughly every other tick) and the overlay
+            // partial fresh; a slow pass just delays the next tick. The first
+            // tick's delta is everything buffered during the load.
+            partialTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if Task.isCancelled { break }
+                    guard let self else { break }
+                    await self.pumpStreaming(manager)
+                }
+            }
+            return
+        }
         partialTask = Task { [weak self] in
             // Re-transcribe cadence: 2 s of silence-tolerance keeps the
             // overlay honest without saturating the ANE. A pass that takes
@@ -757,54 +1552,213 @@ actor CaptureSession {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 if Task.isCancelled { break }
                 guard let self else { break }
+                // Freeze stable audio first (Whisper only), then show the live
+                // tail on top of the frozen prefix.
+                await self.commitStable()
                 lastCount = await self.emitPartial(ifGrownPast: lastCount)
             }
         }
     }
 
-    /// One partial pass. Returns the sample count it saw, so the loop skips
-    /// passes while the mic is silent (count unchanged).
-    private func emitPartial(ifGrownPast lastCount: Int) async -> Int {
+    /// Engine setup failed behind a live mic: release it and tell the app
+    /// the session ended (the handler's failure response says why). No-op
+    /// when finish/cancel already tore the session down.
+    private func failBehindMic() {
+        guard !torndown else { return }
+        torndown = true
+        capture.stop()
+        LineWriter.shared.send(Event(event: "ended"))
+    }
+
+    /// One streaming tick: hand the manager the new audio since last tick,
+    /// let it decode any complete chunks, and surface the accumulated
+    /// hypothesis. The work-per-tick is bounded by the tick interval (only
+    /// the delta is appended), so release-time latency stays O(one chunk)
+    /// no matter how long the dictation ran.
+    private func pumpStreaming(_ manager: any StreamingAsrManager) async {
         let all = capture.snapshot()
-        // Sub-half-second audio transcribes to noise; wait for real speech.
+        guard all.count > fedSamples else { return }
+        let delta = Array(all[fedSamples..<all.count])
+        guard let buffer = makePCMBuffer(delta) else { return }
+        do {
+            try await manager.appendAudio(buffer)
+            try await manager.processBufferedAudio()
+            // Advance only after the manager accepted the chunk — advancing
+            // before a throw would permanently skip this delta's audio.
+            fedSamples = all.count
+            streamFeedFailures = 0
+        } catch {
+            // Recoverable: fedSamples didn't advance, so the next tick
+            // re-feeds the same delta from the accumulator. A degraded
+            // manager must not eat audio silently — say so once per run.
+            streamFeedFailures += 1
+            if streamFeedFailures == 8 {
+                FileHandle.standardError.write(
+                    Data(
+                        "portbay-stt: streaming feed failing repeatedly (\(streamFeedFailures) ticks): \(error)\n"
+                            .utf8))
+            }
+            return
+        }
+        let text = await manager.getPartialTranscript()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty, text != lastStreamPartial {
+            lastStreamPartial = text
+            LineWriter.shared.send(Event(event: "partial", text: text))
+        }
+    }
+
+    /// Join the frozen prefix to a freshly-transcribed tail for display/final.
+    private func joinCommitted(with tail: String) -> String {
+        let t = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if committedText.isEmpty { return t }
+        if t.isEmpty { return committedText }
+        return committedText + " " + t
+    }
+
+    /// Freeze stable audio (Whisper only). Transcribes the uncommitted region up
+    /// to `commitLagSeconds` behind the live edge, commits whole VAD segments
+    /// that ended on silence, and advances `commitBoundary` only to the last
+    /// such segment's end — so a word in progress at the window edge stays in
+    /// the tail for next time. No-op for Parakeet, and skipped while a pass is
+    /// already in flight.
+    private func commitStable() async {
+        guard let engine, isWhisper, !committing else { return }
+        let all = capture.snapshot()
+        let lag = Int(commitLagSeconds * AudioCapture.sampleRate)
+        let stableEnd = all.count - lag
+        guard stableEnd - commitBoundary >= minCommitSamples else { return }
+        let window = Array(all[commitBoundary..<stableEnd])
+        committing = true
+        defer { committing = false }
+        guard
+            let segments = try? await engine.whisperSegments(window, promptTokens: promptTokens),
+            !segments.isEmpty
+        else { return }
+        // Keep only segments that clearly ended before the window edge (silence
+        // after them); a segment running to the edge may be mid-word.
+        let windowDur = Double(window.count) / AudioCapture.sampleRate
+        let safe = segments.filter { Double($0.end) <= windowDur - commitTrailingGapSeconds }
+        guard let last = safe.last else { return }
+        let raw = safe.map(\.text).joined()
+        // Same silence-hallucination guard the final pass uses.
+        let text = filterWhisperHallucination(raw, segments: safe)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        committedText = committedText.isEmpty ? text : committedText + " " + text
+        commitBoundary += Int(Double(last.end) * AudioCapture.sampleRate)
+    }
+
+    /// One partial pass for the overlay. Whisper transcribes only the
+    /// uncommitted tail and shows it on top of the frozen `committedText`;
+    /// Parakeet re-reads the whole buffer. Returns the sample count it saw, so
+    /// the loop skips passes while the mic is silent (count unchanged).
+    private func emitPartial(ifGrownPast lastCount: Int) async -> Int {
+        guard let engine else { return lastCount }
+        let all = capture.snapshot()
         guard all.count > lastCount, all.count >= Int(AudioCapture.sampleRate / 2) else {
             return lastCount
         }
         let window: [Float]
-        if case .whisper = engine {
+        if isWhisper {
+            let tail = Array(all[min(commitBoundary, all.count)..<all.count])
+            // Tail too short to transcribe cleanly — just show what's frozen.
+            if tail.count < Int(AudioCapture.sampleRate / 2) {
+                if !committedText.isEmpty {
+                    LineWriter.shared.send(Event(event: "partial", text: committedText))
+                }
+                return all.count
+            }
             let cap = Int(partialWindowSeconds * AudioCapture.sampleRate)
-            window = all.count > cap ? Array(all.suffix(cap)) : all
+            window = tail.count > cap ? Array(tail.suffix(cap)) : tail
         } else {
             window = all
         }
-        if let text = try? await engine.transcribe(window, finalPass: false, promptTokens: promptTokens),
-            !text.isEmpty
-        {
-            LineWriter.shared.send(Event(event: "partial", text: text))
+        if let text = try? await engine.transcribe(window, finalPass: false, promptTokens: promptTokens) {
+            let combined = isWhisper ? joinCommitted(with: text) : text
+            if !combined.isEmpty {
+                LineWriter.shared.send(Event(event: "partial", text: combined))
+            }
         }
         return all.count
     }
 
-    /// Stop the mic, run the final full-buffer pass, emit final + ended.
+    /// Stop the mic, finalize only the uncommitted tail (Whisper), the last
+    /// partial chunk (streaming engines), or the whole buffer (Parakeet TDT),
+    /// emit final + ended. For Whisper the frozen `committedText` — and for
+    /// streaming engines the chunk-by-chunk decode that already happened —
+    /// means release-time latency tracks tail length, never total length.
     func finish() async -> String {
+        torndown = true
         partialTask?.cancel()
         partialTask = nil
         capture.stop()
-        let all = capture.snapshot()
-        var text = ""
-        if all.count >= Int(AudioCapture.sampleRate / 4) {
-            text = (try? await engine.transcribe(all, finalPass: true, promptTokens: promptTokens)) ?? ""
+        // Mic-first: the engine may still be loading — the words are already
+        // safe in the accumulator, so wait the load out and transcribe. A
+        // failed load has nothing to decode with; the start-capture failure
+        // response (and the app's teardown on it) carries the reason.
+        var resolved = self.engine
+        if resolved == nil {
+            resolved = try? await engineTask.value
         }
-        LineWriter.shared.send(Event(event: "final", text: text))
+        guard let engine = resolved else {
+            LineWriter.shared.send(Event(event: "final", text: ""))
+            LineWriter.shared.send(Event(event: "ended"))
+            return ""
+        }
+        // Stopped before `attachEngine` finished wiring: tokenize the bias
+        // now so the one-shot final pass below is biased like a live session.
+        if promptTokens == nil {
+            promptTokens = engine.biasPromptTokens(biasTerms)
+        }
+        if case .streaming(let manager) = engine {
+            // attachEngine never ran (stopped mid-load): clean state first —
+            // the whole buffer is then the un-fed delta below.
+            if streamingManager == nil {
+                try? await manager.reset()
+            }
+            // Feed whatever landed after the last tick, then flush: the
+            // manager pads + decodes only the final partial chunk (~tens of
+            // ms), everything earlier was decoded live.
+            let all = capture.snapshot()
+            if all.count > fedSamples, let buffer = makePCMBuffer(Array(all[fedSamples..<all.count])) {
+                try? await manager.appendAudio(buffer)
+            }
+            fedSamples = all.count
+            let flushed = (try? await manager.finish())?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // A failed flush still has the live hypothesis — degrade to it
+            // rather than dropping the user's words.
+            let full = (flushed?.isEmpty == false) ? flushed! : lastStreamPartial
+            LineWriter.shared.send(Event(event: "final", text: full))
+            LineWriter.shared.send(Event(event: "ended"))
+            return full
+        }
+        let all = capture.snapshot()
+        let tailStart = min(commitBoundary, all.count)
+        let tail = Array(all[tailStart..<all.count])
+        var tailText = ""
+        if tail.count >= Int(AudioCapture.sampleRate / 4) {
+            tailText = (try? await engine.transcribe(tail, finalPass: true, promptTokens: promptTokens)) ?? ""
+        }
+        let full = joinCommitted(with: tailText)
+        LineWriter.shared.send(Event(event: "final", text: full))
         LineWriter.shared.send(Event(event: "ended"))
-        return text
+        return full
     }
 
     /// Tear down without a final pass (the words are discarded by design).
     func cancel() {
+        torndown = true
         partialTask?.cancel()
         partialTask = nil
         capture.stop()
+        if let manager = streamingManager {
+            // Clear decoder/cache state so the discarded words can't leak
+            // into the next session on this resident engine (start() resets
+            // too — this just frees the state promptly).
+            Task { try? await manager.reset() }
+        }
         LineWriter.shared.send(Event(event: "ended"))
     }
 }
@@ -820,6 +1774,26 @@ func requestMicAccess() async -> Bool {
 }
 
 // MARK: - --check
+
+// MARK: - --digest (maintainer tool)
+
+// Print the canonical content digest of an installed model directory —
+// `portbay-stt --digest <modelsDir>/<id>`. This is how the live PortBay
+// Model Catalog gets its `contentDigest` values: download the model once on
+// a trusted machine, digest it here, publish the hash in the signed
+// manifest. Clients then verify every download against it before sealing.
+if let i = CommandLine.arguments.firstIndex(of: "--digest"),
+    CommandLine.arguments.indices.contains(i + 1)
+{
+    let root = URL(fileURLWithPath: CommandLine.arguments[i + 1], isDirectory: true)
+    do {
+        print(try directoryContentDigest(root))
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("portbay-stt: digest failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
 
 if CommandLine.arguments.contains("--check") {
     // The deployment target (macOS 14) already gates launch — if this code
@@ -865,8 +1839,11 @@ func handle(_ request: Request) async {
             out.send(badRequest("delete", "modelsDir and model are required"))
             return
         }
-        guard CATALOG.contains(where: { $0.id == model }) else {
-            out.send(badRequest("delete", "unknown model id: \(model)"))
+        // No catalog membership check: the live PortBay Model Catalog can list
+        // models the bundled CATALOG doesn't, and a sealed install on disk is
+        // authoritative. Reject only a traversal-shaped id.
+        guard !model.contains("/"), !model.contains("..") else {
+            out.send(badRequest("delete", "invalid model id: \(model)"))
             return
         }
         let target = (dir as NSString).appendingPathComponent(model)
@@ -890,14 +1867,24 @@ func handle(_ request: Request) async {
             out.send(badRequest("download", "modelsDir, model and downloadId are required"))
             return
         }
-        guard let entry = CATALOG.first(where: { $0.id == model }) else {
+        guard let entry = resolveEntry(modelsDir: dir, request: request) else {
             out.send(badRequest("download", "unknown model id: \(model)"))
             return
         }
         // Detached so the serve loop keeps reading (cancel-download must be
         // able to land mid-download). The task sends its own terminal line.
+        // Route by engine: Whisper/Parakeet, the advanced FluidAudio ASR
+        // engines, and TTS (Kokoro) each have their own downloader.
+        let engine = entry.engine
         let task = Task.detached {
-            await runDownload(modelsDir: dir, entry: entry, downloadId: downloadId)
+            switch engine {
+            case "kokoro":
+                await runTtsDownload(modelsDir: dir, entry: entry, downloadId: downloadId)
+            case "qwen3", "cohere", "nemotron", "parakeet-eou":
+                await runAdvancedDownload(modelsDir: dir, entry: entry, downloadId: downloadId)
+            default:
+                await runDownload(modelsDir: dir, entry: entry, downloadId: downloadId)
+            }
         }
         await ActiveDownloads.shared.register(downloadId, task)
 
@@ -910,48 +1897,66 @@ func handle(_ request: Request) async {
         out.send(Response(op: "cancel-download", ok: true, downloadId: downloadId))
 
     case "prewarm":
-        guard let dir = request.modelsDir, !dir.isEmpty, let model = request.model, !model.isEmpty,
-            let entry = CATALOG.first(where: { $0.id == model })
+        guard let dir = request.modelsDir, !dir.isEmpty, request.model?.isEmpty == false,
+            let entry = resolveEntry(modelsDir: dir, request: request)
         else {
             out.send(badRequest("prewarm", "modelsDir and a known model are required"))
             return
         }
-        do {
-            // Load + KEEP resident: pages weights in, re-validates CoreML's
-            // specialization cache (evicted on OS updates), and holds the
-            // engine in `EngineCache` so the next `start-capture` reuses it
-            // for an instant mic-hot instead of reloading. The Rust side keeps
-            // this serve process alive across captures so the residency lasts.
-            _ = try await EngineCache.shared.resident(modelsDir: dir, entry: entry)
-            out.send(Response(op: "prewarm", ok: true))
-        } catch {
-            out.send(Response(op: "prewarm", ok: false, code: 2, error: "\(error)"))
+        // Load + KEEP resident: pages weights in, re-validates CoreML's
+        // specialization cache (evicted on OS updates), and holds the
+        // engine in `EngineCache` so the next `start-capture` reuses it
+        // for an instant mic-hot instead of reloading. The Rust side keeps
+        // this serve process alive across captures so the residency lasts.
+        // Detached so the serve loop keeps reading while a cold multi-GB
+        // load runs: a mic-first start-capture must be able to land mid-load
+        // (its own `resident` call coalesces onto this load). Responses are
+        // op-keyed on the Rust side, so an out-of-order terminal is fine.
+        Task {
+            do {
+                _ = try await EngineCache.shared.resident(modelsDir: dir, entry: entry)
+                out.send(Response(op: "prewarm", ok: true))
+            } catch {
+                out.send(Response(op: "prewarm", ok: false, code: 2, error: "\(error)"))
+            }
         }
 
     case "start-capture":
-        guard let dir = request.modelsDir, !dir.isEmpty, let model = request.model, !model.isEmpty,
-            let entry = CATALOG.first(where: { $0.id == model })
+        guard let dir = request.modelsDir, !dir.isEmpty, request.model?.isEmpty == false,
+            let entry = resolveEntry(modelsDir: dir, request: request)
         else {
             out.send(badRequest("start-capture", "modelsDir and a known model are required"))
             return
         }
         do {
             guard await requestMicAccess() else { throw SttError.micDenied }
-            // Reuse the resident engine when prewarm (or a prior capture)
-            // already loaded this model — the fast path that makes Fn-hold
-            // instant; a cold miss loads + caches it here.
-            let engine = try await EngineCache.shared.resident(modelsDir: dir, entry: entry)
-            // Recognizer bias: tokenize the resolved terms for the Whisper
-            // decoder; nil for Parakeet (graceful degrade — the rewrite layer
-            // still corrects spellings downstream).
-            let promptTokens = engine.biasPromptTokens(request.biasTerms ?? [])
-            let session = CaptureSession(engine: engine, promptTokens: promptTokens)
+            // Mic-first: the capture starts buffering (and `listening`
+            // resolves the app's start) BEFORE the engine resolves, so a cold
+            // model load — first dictation after launch — can't eat the
+            // user's first words. The load coalesces with any in-flight boot
+            // prewarm via EngineCache and attaches behind the live mic.
+            let engineTask = Task {
+                try await EngineCache.shared.resident(modelsDir: dir, entry: entry)
+            }
+            let session = CaptureSession(engineTask: engineTask, biasTerms: request.biasTerms ?? [])
             try await CaptureSession.shared.begin(session)
             do {
-                try await session.start()
+                try await session.startListening()
             } catch {
                 await CaptureSession.shared.clear()
                 throw error
+            }
+            // Detached: the serve loop must keep reading (stop/cancel may
+            // land mid-load and are ordered behind the slot, not this task).
+            // The failure response doubles as the app's signal that a
+            // mic-first session died behind the `listening` it already saw.
+            Task {
+                do {
+                    try await session.attachEngine()
+                } catch {
+                    await CaptureSession.shared.clear(ifCurrent: session)
+                    out.send(Response(op: "start-capture", ok: false, code: 2, error: "\(error)"))
+                }
             }
             // No terminal line on success — the `listening` event is the
             // confirmation; the terminal comes from stop/cancel.
@@ -975,6 +1980,22 @@ func handle(_ request: Request) async {
             out.send(Response(op: "cancel-capture", ok: true))
         } catch {
             out.send(Response(op: "cancel-capture", ok: false, code: 4, error: "\(error)"))
+        }
+
+    case "tts-synthesize":
+        guard let dir = request.modelsDir, !dir.isEmpty,
+            let model = request.model, !model.isEmpty,
+            let text = request.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            out.send(badRequest("tts-synthesize", "modelsDir, model and text are required"))
+            return
+        }
+        do {
+            let wav = try await synthesizeTts(
+                modelsDir: dir, id: model, text: text, voice: request.voice)
+            out.send(Response(op: "tts-synthesize", ok: true, wavBase64: wav))
+        } catch {
+            out.send(Response(op: "tts-synthesize", ok: false, code: 2, error: "\(error)"))
         }
 
     default:

@@ -1,9 +1,10 @@
 <!--
-  ModelMark — a small brand mark for an AI model family, mirroring the
-  HostMark / StackIcon pattern. Maps a catalog family id (qwen25, llama,
-  deepseek, …) to the vendor logo bundled under `static/ai/<vendor>.svg`;
-  ids with no licensing-clean asset fall back to a monogram chip, and the
-  functional groupings (embeddings, vision) to a neutral Icon glyph.
+  ModelMark — a small brand mark for an AI model family OR engine, mirroring
+  the HostMark / StackIcon pattern. Maps a catalog family id (qwen25, llama,
+  deepseek, …) OR a speech/image engine id (whisper, parakeet, kokoro, flux, …)
+  to the vendor logo bundled under `static/ai/<vendor>.svg`; ids with no
+  licensing-clean asset fall back to a monogram chip, and the functional
+  groupings (embeddings, vision) to a neutral Icon glyph.
 
   Logos sit centred on a white rounded tile (like HostMark) so dark brand
   marks (Ollama, Moonshot black) stay legible on the dark shell. Sources +
@@ -20,7 +21,8 @@
   }
   let { family = null, size = 18, class: cls = "" }: Props = $props();
 
-  /** Ids with a real bundled vendor logo under static/ai/. */
+  /** Ids with a real bundled vendor logo under static/ai/. Keyed by family id
+      (qwen25, llama, …) AND speech/image engine id (qwen3, parakeet, …). */
   const LOGOS: Record<string, string> = {
     qwen25: "/ai/qwen.svg",
     qwen3: "/ai/qwen.svg",
@@ -31,6 +33,10 @@
     mistral: "/ai/mistral.svg",
     exaone: "/ai/lg.svg",
     other: "/ai/ollama.svg",
+    // Speech-to-text engines: Parakeet + Nemotron are NVIDIA models.
+    nvidia: "/ai/nvidia.svg",
+    parakeet: "/ai/nvidia.svg",
+    nemotron: "/ai/nvidia.svg",
   };
 
   // Functional groupings (not brands) render a neutral glyph.
@@ -39,10 +45,23 @@
     vision: "eye",
   };
 
-  // Monogram chip fallback for vendors with no licensing-clean logo asset
-  // (Simple Icons dropped Microsoft marks, so Phi gets a chip).
+  // Monogram chip fallback for vendors with no licensing-clean logo asset.
+  // Simple Icons dropped Microsoft (Phi) and several AI-lab marks (OpenAI,
+  // Cohere, Stability AI, Black Forest Labs), so those render as brand-tinted
+  // monogram chips — same stance as the documented Phi chip.
   const CHIPS: Record<string, { bg: string; fg: string; label: string }> = {
     phi: { bg: "#0078D4", fg: "#ffffff", label: "Phi" },
+    // Speech engines.
+    whisper: { bg: "#10A37F", fg: "#ffffff", label: "Wh" }, // OpenAI Whisper
+    cohere: { bg: "#39594D", fg: "#ffffff", label: "Co" },
+    kokoro: { bg: "#5B8DEF", fg: "#ffffff", label: "Ko" },
+    // Image-generation engines.
+    flux: { bg: "#1A1A1A", fg: "#ffffff", label: "FL" }, // Black Forest Labs
+    sd: { bg: "#762FBF", fg: "#ffffff", label: "SD" }, // Stability AI
+    sdxl: { bg: "#762FBF", fg: "#ffffff", label: "SD" },
+    "stable-diffusion": { bg: "#762FBF", fg: "#ffffff", label: "SD" },
+    // Apple Image Playground — the  glyph (U+F8FF) renders the Apple logo on macOS.
+    apple: { bg: "#000000", fg: "#ffffff", label: "\u{F8FF}" },
   };
 
   const id = $derived((family ?? "").toLowerCase());

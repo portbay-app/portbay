@@ -15,12 +15,11 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use russh::keys::{key::safe_rng, Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{
     Auth, Config as ServerConfig, Handler as SshHandler, Msg, Server as _, Session,
 };
-use russh::{Channel, ChannelId, CryptoVec};
-use russh_keys::key::{KeyPair, PublicKey};
+use russh::{Channel, ChannelId};
 
 use portbay_lib::registry::{SshAuthKind, SshConnection, SshConnectionId};
 use portbay_lib::ssh::exec::run_command;
@@ -53,7 +52,6 @@ struct JumpConn {
     allow_key: bool,
 }
 
-#[async_trait]
 impl SshHandler for JumpConn {
     type Error = russh::Error;
 
@@ -62,12 +60,11 @@ impl SshHandler for JumpConn {
         _user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
-        if self.allow_key && public_key.fingerprint() == self.trusted_fp {
+        if self.allow_key && public_key.fingerprint(HashAlg::Sha256).to_string() == self.trusted_fp
+        {
             Ok(Auth::Accept)
         } else {
-            Ok(Auth::Reject {
-                proceed_with_methods: None,
-            })
+            Ok(Auth::reject())
         }
     }
 
@@ -112,7 +109,6 @@ impl russh::server::Server for ExecServer {
 
 struct ExecConn;
 
-#[async_trait]
 impl SshHandler for ExecConn {
     type Error = russh::Error;
 
@@ -123,18 +119,14 @@ impl SshHandler for ExecConn {
         _user: &str,
         _public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
-        Ok(Auth::Reject {
-            proceed_with_methods: None,
-        })
+        Ok(Auth::reject())
     }
 
     async fn auth_password(&mut self, _user: &str, password: &str) -> Result<Auth, Self::Error> {
         if password == PASSWORD {
             Ok(Auth::Accept)
         } else {
-            Ok(Auth::Reject {
-                proceed_with_methods: None,
-            })
+            Ok(Auth::reject())
         }
     }
 
@@ -153,13 +145,10 @@ impl SshHandler for ExecConn {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).to_string();
-        session.data(
-            channel,
-            CryptoVec::from(format!("via-jump: {command}\n").into_bytes()),
-        );
-        session.exit_status_request(channel, 0);
-        session.eof(channel);
-        session.close(channel);
+        session.data(channel, format!("via-jump: {command}\n").into_bytes())?;
+        session.exit_status_request(channel, 0)?;
+        session.eof(channel)?;
+        session.close(channel)?;
         Ok(())
     }
 }
@@ -172,7 +161,7 @@ async fn start_jump(trusted_fp: String, allow_key: bool) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(ServerConfig {
-        keys: vec![KeyPair::generate_ed25519().unwrap()],
+        keys: vec![PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap()],
         ..Default::default()
     });
     let mut server = JumpServer {
@@ -189,7 +178,7 @@ async fn start_exec() -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(ServerConfig {
-        keys: vec![KeyPair::generate_ed25519().unwrap()],
+        keys: vec![PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap()],
         ..Default::default()
     });
     let mut server = ExecServer;
@@ -201,10 +190,13 @@ async fn start_exec() -> u16 {
 
 /// Generate an ed25519 client key as a PKCS#8 PEM and return `(path, fp)`.
 fn write_client_key(dir: &std::path::Path) -> (String, String) {
-    let keypair = KeyPair::generate_ed25519().unwrap();
-    let fingerprint = keypair.clone_public_key().unwrap().fingerprint();
+    let keypair = PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap();
+    let fingerprint = keypair
+        .public_key()
+        .fingerprint(HashAlg::Sha256)
+        .to_string();
     let mut pem = Vec::new();
-    russh_keys::encode_pkcs8_pem(&keypair, &mut pem).unwrap();
+    russh::keys::encode_pkcs8_pem(&keypair, &mut pem).unwrap();
     let path = dir.join("id_ed25519");
     std::fs::write(&path, &pem).unwrap();
     (path.to_string_lossy().into_owned(), fingerprint)

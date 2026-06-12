@@ -63,12 +63,13 @@ pub enum RewriteContext {
 /// probed INERT on those cells — the tails were the only working lever).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptFlavor {
-    /// Apple FoundationModels 3B — the probed v16 ceiling. Byte-identical to
-    /// `scripts/probe-afm/prompts/system-v16*.txt`; never edit without
-    /// re-probing.
+    /// Apple FoundationModels 3B. The base head + examples are pinned
+    /// byte-identical to `scripts/probe-afm/prompts/system-v20*.txt` (v16
+    /// ceiling + the 2026-06-08 literal-quoting/parallel-bullets revision);
+    /// never edit without re-probing.
     Afm,
     /// Local Ollama, tuned on qwen2.5:7b (the recommended model) —
-    /// `scripts/probe-afm/prompts/system-v16-qwen-*.txt`. Same re-probe rule
+    /// `scripts/probe-afm/prompts/system-v20-qwen-*.txt`. Same re-probe rule
     /// via `ollama-probe.sh`.
     Qwen,
 }
@@ -469,65 +470,64 @@ impl RewriteProvider for OllamaProvider {
             response: String,
         }
 
-        let request = async {
-            let mut resp = self
-                .client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| RewriteError::Provider(format!("ollama request failed: {e}")))?;
-            if !resp.status().is_success() {
-                return Err(RewriteError::Provider(format!(
-                    "ollama returned HTTP {}",
-                    resp.status()
-                )));
-            }
-            if !stream {
-                return resp
-                    .json::<GenerateResponse>()
+        let request =
+            async {
+                let mut resp = self
+                    .client
+                    .post(&url)
+                    .json(&body)
+                    .send()
                     .await
-                    .map(|g| g.response)
-                    .map_err(|e| {
-                        RewriteError::Provider(format!("ollama response unreadable: {e}"))
-                    });
-            }
-            // Streaming: `/api/generate` with `stream:true` returns
-            // newline-delimited JSON, one object per chunk
-            // (`{"response":"…","done":false}` … final `{"done":true}`).
-            // Accumulate `response` deltas, pushing the running text to the
-            // progress sink; `chunk()` needs no extra reqwest feature.
-            let mut acc = String::new();
-            let mut buf: Vec<u8> = Vec::new();
-            let feed_line = |line: &[u8], acc: &mut String| {
-                if line.is_empty() {
-                    return;
+                    .map_err(|e| RewriteError::Provider(format!("ollama request failed: {e}")))?;
+                if !resp.status().is_success() {
+                    return Err(RewriteError::Provider(format!(
+                        "ollama returned HTTP {}",
+                        resp.status()
+                    )));
                 }
-                if let Ok(part) = serde_json::from_slice::<GenerateResponse>(line) {
-                    if !part.response.is_empty() {
-                        acc.push_str(&part.response);
-                        if let Some(sink) = progress {
-                            sink(acc);
+                if !stream {
+                    return resp
+                        .json::<GenerateResponse>()
+                        .await
+                        .map(|g| g.response)
+                        .map_err(|e| {
+                            RewriteError::Provider(format!("ollama response unreadable: {e}"))
+                        });
+                }
+                // Streaming: `/api/generate` with `stream:true` returns
+                // newline-delimited JSON, one object per chunk
+                // (`{"response":"…","done":false}` … final `{"done":true}`).
+                // Accumulate `response` deltas, pushing the running text to the
+                // progress sink; `chunk()` needs no extra reqwest feature.
+                let mut acc = String::new();
+                let mut buf: Vec<u8> = Vec::new();
+                let feed_line = |line: &[u8], acc: &mut String| {
+                    if line.is_empty() {
+                        return;
+                    }
+                    if let Ok(part) = serde_json::from_slice::<GenerateResponse>(line) {
+                        if !part.response.is_empty() {
+                            acc.push_str(&part.response);
+                            if let Some(sink) = progress {
+                                sink(acc);
+                            }
                         }
                     }
+                };
+                while let Some(chunk) = resp.chunk().await.map_err(|e| {
+                    RewriteError::Provider(format!("ollama stream read failed: {e}"))
+                })? {
+                    buf.extend_from_slice(&chunk);
+                    while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                        let line: Vec<u8> = buf.drain(..=nl).collect();
+                        feed_line(&line[..line.len() - 1], &mut acc);
+                    }
                 }
+                // A final line without a trailing newline (the `done:true` object
+                // usually carries no `response`, but parse it for completeness).
+                feed_line(&buf, &mut acc);
+                Ok(acc)
             };
-            while let Some(chunk) = resp
-                .chunk()
-                .await
-                .map_err(|e| RewriteError::Provider(format!("ollama stream read failed: {e}")))?
-            {
-                buf.extend_from_slice(&chunk);
-                while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
-                    let line: Vec<u8> = buf.drain(..=nl).collect();
-                    feed_line(&line[..line.len() - 1], &mut acc);
-                }
-            }
-            // A final line without a trailing newline (the `done:true` object
-            // usually carries no `response`, but parse it for completeness).
-            feed_line(&buf, &mut acc);
-            Ok(acc)
-        };
 
         // reqwest futures are cancel-safe: dropping the branch aborts the
         // connection, so a cancelled rewrite stops burning tokens immediately.
@@ -598,6 +598,10 @@ fn resolve_afm_binary() -> Option<std::path::PathBuf> {
         }
     }
 
+    // Dev-only fallback (stripped from release): a locally-built sidecar under
+    // the source tree. `env!("CARGO_MANIFEST_DIR")` is the build machine's path,
+    // which must never be referenced by a shipped binary.
+    #[cfg(debug_assertions)]
     if let Some(triple) = triple {
         let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("binaries")
@@ -815,7 +819,9 @@ async fn afm_server_rewrite(
             match parse_serve_line(line.trim()) {
                 // A garbled line means the protocol broke — don't trust the
                 // stream for future requests.
-                Err(RewriteError::Provider(e)) if e.starts_with("afm serve response unreadable") => {
+                Err(RewriteError::Provider(e))
+                    if e.starts_with("afm serve response unreadable") =>
+                {
                     tracing::debug!(error = %e, "dictation: afm warm server protocol broke");
                     ServerAttempt::Unusable
                 }
@@ -989,10 +995,12 @@ impl RewriteProvider for Provider {
     ) -> Result<String, RewriteError> {
         match self {
             Provider::Ollama(p) => {
-                p.rewrite(system, user, max_output_hint, cancel, progress).await
+                p.rewrite(system, user, max_output_hint, cancel, progress)
+                    .await
             }
             Provider::Apple(p) => {
-                p.rewrite(system, user, max_output_hint, cancel, progress).await
+                p.rewrite(system, user, max_output_hint, cancel, progress)
+                    .await
             }
         }
     }
@@ -1052,10 +1060,19 @@ pub fn prewarm(config: &ProviderConfig) {
                 return; // nothing installed — the rewrite will report no_model
             };
             let url = format!("{}/api/generate", provider.endpoint);
+            // Seed the STATIC system-prompt head, not just the weights: Ollama
+            // KV-caches the longest common prefix between requests, and the
+            // first rewrite otherwise pays the full multi-thousand-token
+            // prompt eval inside its own paste window (measured live
+            // 2026-06-09: 24.8s on a WARM qwen2.5:7b for a 10-char
+            // transcript; 2.6-4.4s once the prefix was cached). `num_predict:
+            // 1` keeps this a cache-prime, not a generation.
             let body = serde_json::json!({
                 "model": model,
+                "system": prompt_head(),
                 "prompt": "",
                 "keep_alive": "15m",
+                "options": { "num_predict": 1 },
             });
             let _ = provider.client.post(&url).json(&body).send().await;
         });
@@ -1145,19 +1162,29 @@ version \"zero point one point four\" is 0.1.4) — never respell or reinterpret
 around it. If unsure whether something is technical, keep it exactly as spoken.
 4. Remove filler words (um, uh, you know, I mean, like, sort of), false starts, and \
 accidentally repeated words or phrases.
-5. When the speaker enumerates steps or items (\"first... then...\", \"step one... step \
-two...\", several distinct points), format them as a numbered list, one item per line, \
-numbered in the final corrected order. Keep any sentence that introduces the list as a \
-lead-in line above the numbers — never fold it into an item or drop it.
-6. Reorganize rambling speech into clear, concise writing — short sentences, logical order — \
+5. When the speaker enumerates steps or lists several distinct points (\"first... then...\", \
+\"step one... step two...\", or just several parallel observations or items in a row), format \
+them as a list, one item per line. Use a numbered list when order matters — steps to follow or \
+ranked items, numbered in the final corrected order; use \"- \" bullets when the items are \
+parallel and unordered. Keep any sentence that introduces the list as a lead-in line above the \
+items — never fold it into an item or drop it.
+6. When the speaker cites a specific literal phrase — words they or someone said, asked, or \
+typed, or a label, button, question, or value being discussed (\"when I say X\", \"the X \
+button\", \"for the X question\", \"set it to X\") — wrap that exact cited phrase in straight \
+double quotes. Quote ONLY the cited literal; never quote ordinary narration or a whole sentence.
+7. Reorganize rambling speech into clear, concise writing — short sentences, logical order — \
 but keep every fact and detail the speaker gave.
-7. If a stretch of the transcript is too garbled to understand confidently, keep those words \
+8. If a stretch of the transcript is too garbled to understand confidently, keep those words \
 exactly as spoken (minus fillers) — NEVER replace unclear speech with guessed specifics or \
 invented details.
-8. Fix punctuation, capitalization, and sentence boundaries. Keep the language the transcript \
+9. Fix punctuation, capitalization, and sentence boundaries. Keep the language the transcript \
 was spoken in.
-9. If the transcript is short and already reads clean, return it unchanged apart from \
-punctuation and capitalization — keep the speaker's wording and order.";
+10. If the transcript is short and already reads clean, return it unchanged apart from \
+punctuation and capitalization — keep the speaker's wording and order.
+11. When the speaker clearly dictates an emoji by name (\"thumbs up emoji\", \"smiley face\", \
+\"heart emoji\"), write the emoji itself (\u{1F44D}, \u{1F642}, \u{2764}\u{FE0F}). Expand casual spoken contractions \
+(\"gonna\" \u{2192} \"going to\", \"wanna\" \u{2192} \"want to\", \"kinda\" \u{2192} \"kind of\") — but never inside a \
+quoted literal phrase, and never change technical content.";
 
 /// Few-shot examples for smart mode. The shapes are deliberate, probed
 /// against real failure cases:
@@ -1191,7 +1218,15 @@ Transcript: um summarize this in in two sentences for the team
 Output: Summarize this in two sentences for the team.
 
 Transcript: divide this into three steps so its easier to follow along
-Output: Divide this into three steps so it's easier to follow along.";
+Output: Divide this into three steps so it's easier to follow along.
+
+Transcript: so for the A question the answer was ok but for the B question it asked me something instead
+Output:
+- For \"A\", the answer was ok.
+- For \"B\", it asked me something instead.
+
+Transcript: when I say A the title should be B
+Output: When I say \"A\", the title should be \"B\".";
 
 const LIGHT_RULES: &str = "\
 Mode: LIGHT CLEANUP. Make only the minimal edits — fillers, punctuation, capitalization, \
@@ -1212,9 +1247,9 @@ const CLEAN_LAYOUT_RULES: &str = "\
 This text came from an accurate speech-to-text model: it is already punctuated and largely \
 free of filler and false starts. So your main job is to ARRANGE it for readability, not to \
 clean it. Group related sentences into short paragraphs, and start a new paragraph whenever \
-the topic clearly shifts; separate paragraphs with a blank line. Keep following the list \
-and structure rules above exactly — only add paragraph breaks, never change which content \
-becomes a list. Do not add, drop, or reword any fact, name, number, date, or technical \
+the topic clearly shifts; separate paragraphs with a blank line. Keep following the list, \
+quoting, and structure rules above exactly — only add paragraph breaks, never change which \
+content becomes a list. Do not add, drop, or reword any fact, name, number, date, or technical \
 reference.";
 
 /// Cap on injected vocabulary terms. Small local models lose the thread on
@@ -1255,10 +1290,11 @@ fn push_vocabulary(prompt: &mut String, vocabulary: &[String]) {
 /// Build the system prompt for one rewrite.
 ///
 /// Smart is ADAPTIVE (2026-06-06, user decision — the Off/Light/Smart picker
-/// is gone from Settings): the model itself scales the intervention — rule 8
-/// keeps short, clean speech untouched; rules 5–6 restructure rambling or
-/// enumerated speech. ⌘Z restores the raw transcript either way. `Light`
-/// stays for wire/pref-file compatibility but no UI sets it anymore.
+/// is gone from Settings): the model itself scales the intervention — rule 10
+/// keeps short, clean speech untouched; rules 5–7 restructure rambling or
+/// enumerated speech (rule 6 quotes cited literals). ⌘Z restores the raw
+/// transcript either way. `Light` stays for wire/pref-file compatibility but no
+/// UI sets it anymore.
 ///
 /// `flavor` keys the per-model context tails (see [`PromptFlavor`]); the
 /// head is shared, so `prompt_head()` prewarming stays flavor-independent.
@@ -1515,14 +1551,42 @@ pub fn vocabulary_injection<'v>(
 /// coverage — by design; a false reject only costs "kept as spoken".
 const FACT_WORDS: &[&str] = &[
     // Colors.
-    "red", "orange", "yellow", "green", "blue", "purple", "pink", "black",
-    "white", "gray", "grey", "brown", "violet", "cyan", "magenta",
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "blue",
+    "purple",
+    "pink",
+    "black",
+    "white",
+    "gray",
+    "grey",
+    "brown",
+    "violet",
+    "cyan",
+    "magenta",
     // Weekdays.
-    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
     // Months — minus "may", which is overwhelmingly the modal verb in
     // rewritten text ("you may want to…") and would false-reject constantly.
-    "january", "february", "march", "april", "june", "july", "august",
-    "september", "october", "november", "december",
+    "january",
+    "february",
+    "march",
+    "april",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
 ];
 
 /// Lowercase alphabetic tokens of `text` (splitting on everything else), so
@@ -1567,10 +1631,7 @@ pub fn invented_technical_token(
     vocabulary: &[String],
 ) -> Option<String> {
     let squashes = anchor_squashes(input);
-    let vocab_lower: Vec<String> = vocabulary
-        .iter()
-        .map(|v| v.trim().to_lowercase())
-        .collect();
+    let vocab_lower: Vec<String> = vocabulary.iter().map(|v| v.trim().to_lowercase()).collect();
     for token in crate::dictation_vocab::extract_terms(output, 32) {
         let squashed = squash(&token);
         // Too short to anchor reliably — the vocabulary guard skips these
@@ -1762,19 +1823,37 @@ mod tests {
 
     #[test]
     fn prompt_varies_by_mode_and_context() {
-        let light = build_prompt(RewriteMode::Light, RewriteContext::TodoTask, &[], PromptFlavor::Afm, InputSource::Raw);
+        let light = build_prompt(
+            RewriteMode::Light,
+            RewriteContext::TodoTask,
+            &[],
+            PromptFlavor::Afm,
+            InputSource::Raw,
+        );
         assert!(light.contains("LIGHT CLEANUP"));
         assert!(!light.contains("to-do board"));
         // Light is minimal-edit: no few-shot examples.
         assert!(!light.contains("Examples"));
 
-        let smart = build_prompt(RewriteMode::Smart, RewriteContext::TodoTask, &[], PromptFlavor::Afm, InputSource::Raw);
+        let smart = build_prompt(
+            RewriteMode::Smart,
+            RewriteContext::TodoTask,
+            &[],
+            PromptFlavor::Afm,
+            InputSource::Raw,
+        );
         assert!(smart.contains("to-do board"));
         // Smart carries the probed few-shot block and the self-correction rule.
         assert!(smart.contains("Examples"));
         assert!(smart.contains("self-corrections"));
 
-        let commit = build_prompt(RewriteMode::Smart, RewriteContext::GitCommit, &[], PromptFlavor::Afm, InputSource::Raw);
+        let commit = build_prompt(
+            RewriteMode::Smart,
+            RewriteContext::GitCommit,
+            &[],
+            PromptFlavor::Afm,
+            InputSource::Raw,
+        );
         assert!(commit.contains("72 characters"));
         // The never-invent rule leads every prompt.
         for p in [&light, &smart, &commit] {
@@ -1802,22 +1881,86 @@ mod tests {
             RewriteContext::BugReport,
         ] {
             assert_eq!(
-                build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Afm, InputSource::Raw),
-                build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Qwen, InputSource::Raw),
+                build_prompt(
+                    RewriteMode::Smart,
+                    context,
+                    &[],
+                    PromptFlavor::Afm,
+                    InputSource::Raw
+                ),
+                build_prompt(
+                    RewriteMode::Smart,
+                    context,
+                    &[],
+                    PromptFlavor::Qwen,
+                    InputSource::Raw
+                ),
             );
         }
         for context in [RewriteContext::TodoTask, RewriteContext::AgentPrompt] {
-            let afm = build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Afm, InputSource::Raw);
-            let qwen = build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Qwen, InputSource::Raw);
+            let afm = build_prompt(
+                RewriteMode::Smart,
+                context,
+                &[],
+                PromptFlavor::Afm,
+                InputSource::Raw,
+            );
+            let qwen = build_prompt(
+                RewriteMode::Smart,
+                context,
+                &[],
+                PromptFlavor::Qwen,
+                InputSource::Raw,
+            );
             assert_ne!(afm, qwen);
             // Same head — only the tail swaps (prewarm relies on this).
             assert!(qwen.starts_with(&prompt_head()));
         }
         // Light mode has no context tail, so no flavor either.
         assert_eq!(
-            build_prompt(RewriteMode::Light, RewriteContext::TodoTask, &[], PromptFlavor::Afm, InputSource::Raw),
-            build_prompt(RewriteMode::Light, RewriteContext::TodoTask, &[], PromptFlavor::Qwen, InputSource::Raw),
+            build_prompt(
+                RewriteMode::Light,
+                RewriteContext::TodoTask,
+                &[],
+                PromptFlavor::Afm,
+                InputSource::Raw
+            ),
+            build_prompt(
+                RewriteMode::Light,
+                RewriteContext::TodoTask,
+                &[],
+                PromptFlavor::Qwen,
+                InputSource::Raw
+            ),
         );
+    }
+
+    // Regenerates the v20 probe snapshots from the current prompt consts. Run
+    // manually after editing BASE_RULES / SMART_EXAMPLES / a context tail /
+    // CLEAN_LAYOUT_RULES, then re-probe with scripts/probe-afm:
+    //   cargo test -p portbay regenerate_probe_snapshots -- --ignored
+    #[test]
+    #[ignore = "writes probe snapshot files; run by hand after a prompt edit"]
+    fn regenerate_probe_snapshots() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/probe-afm/prompts/");
+        let write = |name: &str, body: String| {
+            std::fs::write(format!("{dir}{name}"), format!("{body}\n")).unwrap();
+        };
+        use InputSource::{Clean, Raw};
+        use PromptFlavor::{Afm, Qwen};
+        use RewriteContext::{AgentPrompt, BugReport, DeployNote, GeneralNote, TodoTask};
+        use RewriteMode::Smart;
+        let p = |c, f, s| build_prompt(Smart, c, &[], f, s);
+        write("system-v20-qwen-agent.txt", p(AgentPrompt, Qwen, Raw));
+        write("system-v20-qwen-todo.txt", p(TodoTask, Qwen, Raw));
+        write(
+            "system-v20-clean-qwen-agent.txt",
+            p(AgentPrompt, Qwen, Clean),
+        );
+        write("system-v20-clean-general.txt", p(GeneralNote, Afm, Clean));
+        write("system-v20-clean-agent.txt", p(AgentPrompt, Afm, Clean));
+        write("system-v20-clean-bug.txt", p(BugReport, Afm, Clean));
+        write("system-v20-clean-deploy.txt", p(DeployNote, Afm, Clean));
     }
 
     #[test]
@@ -1827,18 +1970,30 @@ mod tests {
         // files end with the newline `probe.sh`'s $(cat …) strips).
         let agent = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../scripts/probe-afm/prompts/system-v16-qwen-agent.txt"
+            "/../scripts/probe-afm/prompts/system-v20-qwen-agent.txt"
         ));
         assert_eq!(
-            build_prompt(RewriteMode::Smart, RewriteContext::AgentPrompt, &[], PromptFlavor::Qwen, InputSource::Raw),
+            build_prompt(
+                RewriteMode::Smart,
+                RewriteContext::AgentPrompt,
+                &[],
+                PromptFlavor::Qwen,
+                InputSource::Raw
+            ),
             agent.trim_end_matches('\n'),
         );
         let todo = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../scripts/probe-afm/prompts/system-v16-qwen-todo.txt"
+            "/../scripts/probe-afm/prompts/system-v20-qwen-todo.txt"
         ));
         assert_eq!(
-            build_prompt(RewriteMode::Smart, RewriteContext::TodoTask, &[], PromptFlavor::Qwen, InputSource::Raw),
+            build_prompt(
+                RewriteMode::Smart,
+                RewriteContext::TodoTask,
+                &[],
+                PromptFlavor::Qwen,
+                InputSource::Raw
+            ),
             todo.trim_end_matches('\n'),
         );
     }
@@ -1855,7 +2010,13 @@ mod tests {
             RewriteContext::GitCommit,
             RewriteContext::TerminalCommand,
         ] {
-            let raw = build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Afm, InputSource::Raw);
+            let raw = build_prompt(
+                RewriteMode::Smart,
+                context,
+                &[],
+                PromptFlavor::Afm,
+                InputSource::Raw,
+            );
             assert!(
                 !raw.contains(CLEAN_LAYOUT_RULES),
                 "raw source must reproduce the shipped prompt for {context:?}"
@@ -1868,7 +2029,13 @@ mod tests {
             RewriteContext::DeployNote,
             RewriteContext::BugReport,
         ] {
-            let clean = build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Afm, InputSource::Clean);
+            let clean = build_prompt(
+                RewriteMode::Smart,
+                context,
+                &[],
+                PromptFlavor::Afm,
+                InputSource::Clean,
+            );
             assert!(
                 clean.contains(CLEAN_LAYOUT_RULES),
                 "clean source must add the layout addendum for {context:?}"
@@ -1876,8 +2043,17 @@ mod tests {
             // …after the context tail, so the head is byte-identical to raw —
             // prewarm (which seeds prompt_head()) stays source-independent.
             assert!(clean.starts_with(&prompt_head()));
-            let raw = build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Afm, InputSource::Raw);
-            assert!(clean.starts_with(&raw), "clean is raw + the appended addendum");
+            let raw = build_prompt(
+                RewriteMode::Smart,
+                context,
+                &[],
+                PromptFlavor::Afm,
+                InputSource::Raw,
+            );
+            assert!(
+                clean.starts_with(&raw),
+                "clean is raw + the appended addendum"
+            );
         }
         // …but NOT to the fixed-shape contexts (commit / shell command) NOR
         // TodoTask (probed regression — see clean_layout_addendum).
@@ -1886,7 +2062,13 @@ mod tests {
             RewriteContext::TerminalCommand,
             RewriteContext::TodoTask,
         ] {
-            let clean = build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Afm, InputSource::Clean);
+            let clean = build_prompt(
+                RewriteMode::Smart,
+                context,
+                &[],
+                PromptFlavor::Afm,
+                InputSource::Clean,
+            );
             assert!(
                 !clean.contains(CLEAN_LAYOUT_RULES),
                 "context {context:?} must not get paragraph layout"
@@ -1894,13 +2076,31 @@ mod tests {
             // Unchanged from raw entirely.
             assert_eq!(
                 clean,
-                build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Afm, InputSource::Raw)
+                build_prompt(
+                    RewriteMode::Smart,
+                    context,
+                    &[],
+                    PromptFlavor::Afm,
+                    InputSource::Raw
+                )
             );
         }
         // Light mode never lays out, regardless of source.
         assert_eq!(
-            build_prompt(RewriteMode::Light, RewriteContext::GeneralNote, &[], PromptFlavor::Afm, InputSource::Clean),
-            build_prompt(RewriteMode::Light, RewriteContext::GeneralNote, &[], PromptFlavor::Afm, InputSource::Raw),
+            build_prompt(
+                RewriteMode::Light,
+                RewriteContext::GeneralNote,
+                &[],
+                PromptFlavor::Afm,
+                InputSource::Clean
+            ),
+            build_prompt(
+                RewriteMode::Light,
+                RewriteContext::GeneralNote,
+                &[],
+                PromptFlavor::Afm,
+                InputSource::Raw
+            ),
         );
     }
 
@@ -1912,16 +2112,34 @@ mod tests {
         // its raw one and needs no separate snapshot.
         let agent = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../scripts/probe-afm/prompts/system-v19-clean-qwen-agent.txt"
+            "/../scripts/probe-afm/prompts/system-v20-clean-qwen-agent.txt"
         ));
         assert_eq!(
-            build_prompt(RewriteMode::Smart, RewriteContext::AgentPrompt, &[], PromptFlavor::Qwen, InputSource::Clean),
+            build_prompt(
+                RewriteMode::Smart,
+                RewriteContext::AgentPrompt,
+                &[],
+                PromptFlavor::Qwen,
+                InputSource::Clean
+            ),
             agent.trim_end_matches('\n'),
         );
         // TodoTask clean == TodoTask raw on every flavor now.
         assert_eq!(
-            build_prompt(RewriteMode::Smart, RewriteContext::TodoTask, &[], PromptFlavor::Qwen, InputSource::Clean),
-            build_prompt(RewriteMode::Smart, RewriteContext::TodoTask, &[], PromptFlavor::Qwen, InputSource::Raw),
+            build_prompt(
+                RewriteMode::Smart,
+                RewriteContext::TodoTask,
+                &[],
+                PromptFlavor::Qwen,
+                InputSource::Clean
+            ),
+            build_prompt(
+                RewriteMode::Smart,
+                RewriteContext::TodoTask,
+                &[],
+                PromptFlavor::Qwen,
+                InputSource::Raw
+            ),
         );
     }
 
@@ -1937,34 +2155,40 @@ mod tests {
                 RewriteContext::GeneralNote,
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../scripts/probe-afm/prompts/system-v19-clean-general.txt"
+                    "/../scripts/probe-afm/prompts/system-v20-clean-general.txt"
                 )),
             ),
             (
                 RewriteContext::AgentPrompt,
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../scripts/probe-afm/prompts/system-v19-clean-agent.txt"
+                    "/../scripts/probe-afm/prompts/system-v20-clean-agent.txt"
                 )),
             ),
             (
                 RewriteContext::BugReport,
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../scripts/probe-afm/prompts/system-v19-clean-bug.txt"
+                    "/../scripts/probe-afm/prompts/system-v20-clean-bug.txt"
                 )),
             ),
             (
                 RewriteContext::DeployNote,
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../scripts/probe-afm/prompts/system-v19-clean-deploy.txt"
+                    "/../scripts/probe-afm/prompts/system-v20-clean-deploy.txt"
                 )),
             ),
         ];
         for (context, snapshot) in cases {
             assert_eq!(
-                build_prompt(RewriteMode::Smart, context, &[], PromptFlavor::Afm, InputSource::Clean),
+                build_prompt(
+                    RewriteMode::Smart,
+                    context,
+                    &[],
+                    PromptFlavor::Afm,
+                    InputSource::Clean
+                ),
                 snapshot.trim_end_matches('\n'),
                 "AFM clean snapshot drifted for {context:?}",
             );
@@ -1982,7 +2206,13 @@ mod tests {
     #[test]
     fn vocabulary_is_deduped_capped_and_optional() {
         // No vocabulary → no vocabulary section.
-        let bare = build_prompt(RewriteMode::Light, RewriteContext::GeneralNote, &[], PromptFlavor::Afm, InputSource::Raw);
+        let bare = build_prompt(
+            RewriteMode::Light,
+            RewriteContext::GeneralNote,
+            &[],
+            PromptFlavor::Afm,
+            InputSource::Raw,
+        );
         assert!(!bare.contains("Workspace vocabulary"));
         // Blank-only terms count as none.
         let blank = build_prompt(
@@ -1999,7 +2229,13 @@ mod tests {
             "portbay-landing".to_string(), // duplicate
             "citizen-admin.portbay.test".to_string(),
         ];
-        let prompt = build_prompt(RewriteMode::Light, RewriteContext::GeneralNote, &vocab, PromptFlavor::Afm, InputSource::Raw);
+        let prompt = build_prompt(
+            RewriteMode::Light,
+            RewriteContext::GeneralNote,
+            &vocab,
+            PromptFlavor::Afm,
+            InputSource::Raw,
+        );
         assert!(prompt.contains("Workspace vocabulary"));
         assert_eq!(prompt.matches("- portbay-landing\n").count(), 1);
         assert!(prompt.contains("- citizen-admin.portbay.test\n"));
@@ -2008,7 +2244,13 @@ mod tests {
         // TAIL: callers order terms most-relevant-first (surface, then
         // registry), so the head must survive.
         let many: Vec<String> = (0..200).map(|i| format!("project-{i:03}")).collect();
-        let capped = build_prompt(RewriteMode::Light, RewriteContext::GeneralNote, &many, PromptFlavor::Afm, InputSource::Raw);
+        let capped = build_prompt(
+            RewriteMode::Light,
+            RewriteContext::GeneralNote,
+            &many,
+            PromptFlavor::Afm,
+            InputSource::Raw,
+        );
         assert_eq!(capped.matches("\n- ").count(), VOCAB_CAP);
         assert!(capped.contains("- project-000\n"));
         assert!(capped.contains("- project-039\n"));
@@ -2021,9 +2263,19 @@ mod tests {
             "aaa-registry-project".to_string(),
             "ZZ-PENDING-CMD".to_string(),
         ];
-        let prompt = build_prompt(RewriteMode::Light, RewriteContext::GeneralNote, &mixed, PromptFlavor::Afm, InputSource::Raw);
-        let zz = prompt.find("- zz-pending-cmd").expect("surface term present");
-        let aaa = prompt.find("- aaa-registry-project").expect("registry term present");
+        let prompt = build_prompt(
+            RewriteMode::Light,
+            RewriteContext::GeneralNote,
+            &mixed,
+            PromptFlavor::Afm,
+            InputSource::Raw,
+        );
+        let zz = prompt
+            .find("- zz-pending-cmd")
+            .expect("surface term present");
+        let aaa = prompt
+            .find("- aaa-registry-project")
+            .expect("registry term present");
         assert!(zz < aaa, "surface term must stay ahead of the registry");
         assert!(!prompt.contains("ZZ-PENDING-CMD"));
     }
@@ -2154,7 +2406,10 @@ mod tests {
         );
         // An input that already carries a backtick keeps the output's.
         assert_eq!(
-            sanitize_output("Quote it as `x` in the docs.", "quote it as `x` in the docs"),
+            sanitize_output(
+                "Quote it as `x` in the docs.",
+                "quote it as `x` in the docs"
+            ),
             Some("Quote it as `x` in the docs.".to_string())
         );
     }
@@ -2172,7 +2427,10 @@ mod tests {
         );
         // Budget ran out mid-think (no closing tag) → all reasoning, reject.
         assert_eq!(
-            sanitize_output("<think>Let me analyze the request step by step", "fix the login bug"),
+            sanitize_output(
+                "<think>Let me analyze the request step by step",
+                "fix the login bug"
+            ),
             None
         );
     }
@@ -2224,7 +2482,13 @@ mod tests {
         let head = prompt_head();
         // Exactly the shared head every smart prompt starts with — so the
         // prewarmed instructions match what rewrites actually send.
-        let smart = build_prompt(RewriteMode::Smart, RewriteContext::GeneralNote, &[], PromptFlavor::Afm, InputSource::Raw);
+        let smart = build_prompt(
+            RewriteMode::Smart,
+            RewriteContext::GeneralNote,
+            &[],
+            PromptFlavor::Afm,
+            InputSource::Raw,
+        );
         assert!(smart.starts_with(&head));
         assert!(head.contains("NEVER add facts"));
         assert!(head.contains("Examples"));

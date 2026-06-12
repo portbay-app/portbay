@@ -5,7 +5,7 @@
 //! per-step exit codes come back for display.
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +18,7 @@ use crate::commands::ssh_tunnels::{
 use crate::error::{AppError, AppResult};
 use crate::registry::{SshConnection, SshConnectionId};
 use crate::ssh::exec::{exec_on, run_deploy_on_streaming, DeployProgress, ExecResult, StepResult};
+use crate::ssh::secret::{nonblank_secret, secret_str, SecretString};
 use crate::state::AppState;
 
 /// Channel for live deploy progress (ad-hoc and project deploys both emit
@@ -132,7 +133,9 @@ pub fn emit_deploy_progress(app: &AppHandle, run_id: &str, p: DeployProgress) {
             duration_ms,
         },
     };
-    let _ = app.emit(DEPLOY_CHANNEL, ev);
+    // Deploy output is raw remote stdout/stderr — main window only, never
+    // broadcast (see `events::emit_to_main`).
+    let _ = crate::commands::events::emit_to_main(app, DEPLOY_CHANNEL, ev);
 }
 
 /// Flag an in-flight deploy run for cancellation. Queued steps are skipped and
@@ -170,9 +173,8 @@ pub type DeploySnippetMap = std::collections::BTreeMap<String, Vec<DeploySnippet
 /// .app lands in different containers and the snippets "vanish". A plain file
 /// under the PortBay data dir survives all of that.
 fn deploy_snippets_path() -> std::io::Result<std::path::PathBuf> {
-    let mut dir = dirs::data_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no platform data dir")
-    })?;
+    let mut dir = dirs::data_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no platform data dir"))?;
     dir.push("PortBay");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("ssh-deploy-snippets.json"))
@@ -249,9 +251,9 @@ pub struct SshDeployInput {
 
 struct ConnContext {
     conn: SshConnection,
-    password: Option<String>,
-    proxy_password: Option<String>,
-    passphrase: Option<String>,
+    password: Option<SecretString>,
+    proxy_password: Option<SecretString>,
+    passphrase: Option<SecretString>,
 }
 
 /// Resolve a connection and its secrets. `password_override` / `passphrase_override`
@@ -279,18 +281,17 @@ fn connection(
         .ok_or_else(|| AppError::BadInput(format!("SSH connection `{id}` not found")))?;
     // Fold in a borrowed identity (user / key / auth) before connecting.
     let conn = registry.effective_ssh_connection(raw);
-    let nonblank = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    let password = match nonblank(password_override) {
+    let password = match nonblank_secret(password_override) {
         Some(p) => Some(p),
         None => load_stored_password(&conn.id)?,
     };
     let passphrase = match passphrase_override {
-        Some(ref s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Some(ref s) if !s.trim().is_empty() => Some(SecretString::new(s.trim().to_string())),
         // An explicit *empty* override means the user chose "Skip" on the
         // passphrase prompt: forward it as a declined passphrase (`Some("")`)
         // so the backend skips the key and asks for the password instead of
         // re-prompting — and don't silently fall back to a stored passphrase.
-        Some(_) => Some(String::new()),
+        Some(_) => Some(SecretString::new(String::new())),
         None => load_stored_key_passphrase(&conn.id)?,
     };
     let proxy_password = load_stored_proxy_password(&conn.id)?;
@@ -322,9 +323,9 @@ pub async fn ssh_exec_run(
         let mut mgr = state.exec.lock().await;
         mgr.session_for(
             &cx.conn,
-            cx.password.as_deref(),
-            cx.proxy_password.as_deref(),
-            cx.passphrase.as_deref(),
+            secret_str(&cx.password),
+            secret_str(&cx.proxy_password),
+            secret_str(&cx.passphrase),
             Some(crate::ssh::EventInteractor::shared(app)),
         )
         .await
@@ -361,9 +362,9 @@ pub async fn ssh_deploy_run(
         let mut mgr = state.exec.lock().await;
         mgr.session_for(
             &cx.conn,
-            cx.password.as_deref(),
-            cx.proxy_password.as_deref(),
-            cx.passphrase.as_deref(),
+            secret_str(&cx.password),
+            secret_str(&cx.proxy_password),
+            secret_str(&cx.passphrase),
             Some(crate::ssh::EventInteractor::shared(app.clone())),
         )
         .await

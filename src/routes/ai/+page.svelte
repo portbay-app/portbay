@@ -1,14 +1,21 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { page } from "$app/state";
   import { Channel } from "@tauri-apps/api/core";
 
-  import Icon from "$lib/components/atoms/Icon.svelte";
+  import Icon, { type IconName } from "$lib/components/atoms/Icon.svelte";
   import ModelMark from "$lib/components/atoms/ModelMark.svelte";
   import Toggle from "$lib/components/atoms/Toggle.svelte";
   import SmartDictationPanel from "$lib/components/ai/SmartDictationPanel.svelte";
+  import TtsPlayground from "$lib/components/ai/TtsPlayground.svelte";
+  import SttPlayground from "$lib/components/ai/SttPlayground.svelte";
+  import EmbeddingsPlayground from "$lib/components/ai/EmbeddingsPlayground.svelte";
+  import ImagegenPlayground from "$lib/components/ai/ImagegenPlayground.svelte";
+  import { scoreVariant, useCaseFor, type HardwareProfile, type VariantFit } from "$lib/hwfit";
   import { invokeQuiet, safeInvoke } from "$lib/ipc";
   import { openUrl } from "$lib/security/openUrl";
   import { confirmDialog } from "$lib/stores/confirm.svelte";
+  import { imagegenDownload as imagegenDownloadFlag } from "$lib/stores/imagegenDownloads.svelte";
   import { preferences } from "$lib/stores/preferences.svelte";
   import type {
     AiPrefs,
@@ -24,6 +31,9 @@
     PullEvent,
     SttDownloadEvent,
     SttOverview,
+    TtsOverview,
+    ImagegenOverview,
+    ImagePlaygroundStatus,
   } from "$lib/types/ai";
 
   type AiView = "home" | "models" | "test" | "dictation" | "config" | "logs";
@@ -41,7 +51,7 @@
     updated: string | null;
     recommended?: boolean;
   };
-  type VariantSort = "popular" | "updated" | "size-asc" | "size-desc";
+  type VariantSort = "popular" | "best-fit" | "updated" | "size-asc" | "size-desc";
   type ModelFamily = {
     id: string;
     label: string;
@@ -329,7 +339,22 @@
   let detailsData = $state<Record<string, unknown> | null>(null);
   let detailsLoading = $state<boolean>(false);
   let smokePrompt = $state<string>("Reply with one short sentence confirming Ollama is ready.");
-  // ---- Test prompt: live streaming run state ("test" view) ----
+  // ---- Playground: the unified test ground across model modalities. The
+  // "Text" tab is the original prompt-streaming test (the solid base); the
+  // others test the matching local engines. Image + embeddings are scaffolded
+  // until their catalog/engines land. ----
+  type PlaygroundTab = "text" | "stt" | "tts" | "image" | "embeddings";
+  const PLAYGROUND_TABS: { id: PlaygroundTab; label: string; icon: IconName; ready: boolean; blurb: string }[] = [
+    { id: "text", label: "Text", icon: "message-square", ready: true, blurb: "Stream a chat/completion from an installed model, with latency and tokens/sec." },
+    { id: "tts", label: "Text to Speech", icon: "audio-lines", ready: true, blurb: "Synthesize natural speech on-device and play it back." },
+    { id: "stt", label: "Speech to Text", icon: "mic", ready: true, blurb: "Record from the mic and transcribe on-device with Whisper or Parakeet." },
+    { id: "image", label: "Image", icon: "image", ready: true, blurb: "Generate images on-device from a text prompt with a diffusion model." },
+    { id: "embeddings", label: "Embeddings", icon: "layers", ready: true, blurb: "Turn text into a vector and compare two inputs by cosine similarity." },
+  ];
+  let playgroundTab = $state<PlaygroundTab>("text");
+  const activePlaygroundTab = $derived(PLAYGROUND_TABS.find((t) => t.id === playgroundTab) ?? PLAYGROUND_TABS[0]);
+
+  // ---- Test prompt: live streaming run state (Playground "Text" tab) ----
   type TestPhase = "idle" | "waiting" | "streaming" | "done" | "error" | "stopped";
   let testPhase = $state<TestPhase>("idle");
   let testOutput = $state<string>("");
@@ -432,6 +457,10 @@
   let mainEl: HTMLElement | null = null;
   /** Download size / context per pullable tag, filled lazily per family. */
   let tagInfo = $state<Record<string, LibraryTag>>({});
+  /** This machine's chip / RAM / memory-bandwidth profile, for the fit badges
+   * and tokens/sec estimates on catalog rows. Null until loaded (or when the
+   * command fails) — rows simply render without fit info. */
+  let hwProfile = $state<HardwareProfile | null>(null);
   const tagsRequested = new Set<string>();
   /** Streamed progress from the `ollama_install` backend command (same event
    * shape as the language runtime installer). */
@@ -457,6 +486,38 @@
   /** Terminal failure of the last download, keyed by model id. */
   let sttDownloadError = $state<{ model: string; detail: string } | null>(null);
   let sttBusy = $state<string | null>(null);
+
+  // ---- Local text-to-speech (Kokoro via the same sidecar) ----
+  let ttsInfo = $state<TtsOverview | null>(null);
+  let ttsLoading = $state<boolean>(false);
+  let ttsDownloadingModel = $state<string>("");
+  let ttsDownloadId = $state<string>("");
+  let ttsProgress = $state<{ fraction: number; phase: string } | null>(null);
+  let ttsDownloadError = $state<{ model: string; detail: string } | null>(null);
+  let ttsBusy = $state<string | null>(null);
+
+  // ---- Local image generation (Stable Diffusion / SDXL via the portbay-imagegen sidecar) ----
+  let imagegenInfo = $state<ImagegenOverview | null>(null);
+  let imagegenLoading = $state<boolean>(false);
+  let imagegenDownloadingModel = $state<string>("");
+  let imagegenDownloadId = $state<string>("");
+  let imagegenProgress = $state<{ fraction: number; phase: string } | null>(null);
+  let imagegenDownloadError = $state<{ model: string; detail: string } | null>(null);
+  let imagegenBusy = $state<string | null>(null);
+  // Apple Image Playground — system generator (no model download); a card in the
+  // image family alongside the downloadable Core ML models.
+  let imageplaygroundStatus = $state<ImagePlaygroundStatus | null>(null);
+
+  // ---- Filter/sort for the on-device media catalogs (STT/TTS/image) — the
+  // same affordance the LLM family header has, so every category browses the
+  // same way. Recommended-first by default; size sorts use approxSizeBytes. ---
+  type MediaSort = "recommended" | "size-asc" | "size-desc" | "name";
+  let sttFilter = $state<string>("");
+  let sttSort = $state<MediaSort>("recommended");
+  let ttsFilter = $state<string>("");
+  let ttsSort = $state<MediaSort>("recommended");
+  let imageFilter = $state<string>("");
+  let imageSort = $state<MediaSort>("recommended");
 
   const running = $derived(
     overview?.status.state === "running_managed" ||
@@ -617,6 +678,21 @@
       (a, b) => (FAMILY_TILE_PRIORITY[a.id] ?? 2) - (FAMILY_TILE_PRIORITY[b.id] ?? 2),
     ),
   );
+  /** Fit info for a catalog row, scored for what the family is for (coding /
+   * embedding / general). Null until the hardware profile loads, and for rows
+   * that can't be sized (cloud tags, no size badge AND no tags fetch yet) —
+   * those render without fit info instead of guessing. */
+  function variantFitFor(variant: ModelVariant, familyId: string): VariantFit | null {
+    if (!hwProfile || variant.sizeHint.includes("Cloud")) return null;
+    const gb = parseGb(tagInfo[variant.name]?.size);
+    const fit = scoreVariant(
+      variant.sizeHint,
+      hwProfile,
+      useCaseFor(familyId, variant.model),
+      Number.isFinite(gb) ? gb : undefined,
+    );
+    return fit.level === "unknown" ? null : fit;
+  }
   const visibleVariants = $derived.by(() => {
     const q = variantFilter.trim().toLowerCase();
     const list = q
@@ -628,6 +704,15 @@
     const sorted = [...list];
     if (variantSort === "updated") {
       sorted.sort((a, b) => updatedDays(a.updated) - updatedDays(b.updated));
+      return sorted;
+    }
+    if (variantSort === "best-fit") {
+      // Composite hardware-fit score, best first; unscorable rows sink.
+      sorted.sort(
+        (a, b) =>
+          (variantFitFor(b, selectedFamily.id)?.score ?? -1) -
+          (variantFitFor(a, selectedFamily.id)?.score ?? -1),
+      );
       return sorted;
     }
     // Size sorts prefer the exact download GB (once the tags fetch fills it
@@ -648,6 +733,28 @@
     });
     return sorted;
   });
+  // Shared filter+sort for the on-device media catalogs (STT/TTS). Same shape
+  // as `visibleVariants` but over the curated catalog (filter on display name +
+  // speed note; size sorts on the exact `approxSizeBytes`).
+  function filterMedia<T extends { displayName: string; speedNote: string; approxSizeBytes: number; recommended: boolean }>(
+    catalog: T[],
+    query: string,
+    sort: MediaSort,
+  ): T[] {
+    const q = query.trim().toLowerCase();
+    const list = q
+      ? catalog.filter((m) => m.displayName.toLowerCase().includes(q) || m.speedNote.toLowerCase().includes(q))
+      : catalog;
+    const sorted = [...list];
+    if (sort === "size-asc") sorted.sort((a, b) => a.approxSizeBytes - b.approxSizeBytes);
+    else if (sort === "size-desc") sorted.sort((a, b) => b.approxSizeBytes - a.approxSizeBytes);
+    else if (sort === "name") sorted.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    else sorted.sort((a, b) => Number(b.recommended) - Number(a.recommended)); // recommended first
+    return sorted;
+  }
+  const visibleSttModels = $derived(stt ? filterMedia(stt.catalog, sttFilter, sttSort) : []);
+  const visibleTtsModels = $derived(ttsInfo ? filterMedia(ttsInfo.catalog, ttsFilter, ttsSort) : []);
+  const visibleImageModels = $derived(imagegenInfo ? filterMedia(imagegenInfo.catalog, imageFilter, imageSort) : []);
   const installedModelNames = $derived(new Set(overview?.installedModels.map((model) => model.name) ?? []));
   /** Local manifest digests by installed model name (from `/api/tags`). */
   const installedDigests = $derived(
@@ -746,7 +853,8 @@
   // header drops the Ollama logo, the running/stopped pill, and the
   // Start/Stop/Restart controls, which only ever acted on Ollama.
   const sttContext = $derived(
-    activeView === "dictation" || (activeView === "models" && selectedFamilyId === "stt"),
+    activeView === "dictation" ||
+      (activeView === "models" && (selectedFamilyId === "stt" || selectedFamilyId === "tts")),
   );
 
   // Pull download sizes (GB) for the selected family's models from their
@@ -798,11 +906,41 @@
     }
   });
 
+  $effect(() => {
+    if (activeView === "models" && selectedFamilyId === "tts" && !ttsInfo && !ttsLoading) {
+      void refreshTts();
+    }
+  });
+
+  $effect(() => {
+    if (activeView === "models" && selectedFamilyId === "image" && !imagegenInfo && !imagegenLoading) {
+      void refreshImagegen();
+    }
+  });
+
   onMount(() => {
+    // Deep links (Integrations hub and elsewhere): `?view=` lands on a section,
+    // `?playground=` jumps straight to a playground tab. Read once on mount —
+    // in-page navigation stays plain state, not URL-driven.
+    const viewParam = page.url.searchParams.get("view");
+    if (viewParam && (AI_VIEWS as readonly string[]).includes(viewParam)) {
+      activeView = viewParam as AiView;
+    }
+    const playgroundParam = page.url.searchParams.get("playground");
+    if (playgroundParam && PLAYGROUND_TABS.some((t) => t.id === playgroundParam)) {
+      activeView = "test";
+      playgroundTab = playgroundParam as PlaygroundTab;
+    }
     // Preferences are loaded once at the root layout; no page-level reload (it
     // raced the layout's load and the panel/controls loads on every visit).
     void refresh();
     void loadLibrary();
+    // Hardware never changes mid-session — fetch once, quietly. Without a
+    // profile the catalog simply shows no fit badges.
+    void invokeQuiet<HardwareProfile>("hardware_profile").then(
+      (profile) => (hwProfile = profile),
+      () => {},
+    );
     // The sidebar's "Installed models" list includes downloaded
     // speech-to-text models, so the STT inventory loads at mount too —
     // quietly; an unavailable sidecar just means no STT rows.
@@ -823,6 +961,12 @@
     return () => {
       window.clearInterval(poll);
       stopTestTimer();
+      // An orphaned stall timer would fire stt_cancel_download minutes after
+      // navigation, aborting a download the user never cancelled.
+      clearSttStallTimer();
+      // Detach the log tail so the backend thread stops feeding a dead pane
+      // (LogViewer's teardown pattern).
+      channel.onmessage = () => {};
     };
   });
 
@@ -1153,17 +1297,32 @@
    * instead of leaving the bar frozen forever. Generous because the
    * Neural-Engine compile phase reports sparsely. */
   const STT_STALL_MS = 180_000;
+  /** Soft hint well before the hard stall: progress has been quiet long
+   * enough that the user starts doubting the bar (HF unreachable over a VPN
+   * is a real, observed case) — say it's slow, keep trying. Cleared by the
+   * next progress event. */
+  const STT_SLOW_HINT_MS = 45_000;
   let sttStallTimer: number | null = null;
+  let sttSlowHintTimer: number | null = null;
+  let sttSlowHint = $state(false);
 
   function clearSttStallTimer() {
     if (sttStallTimer !== null) {
       window.clearTimeout(sttStallTimer);
       sttStallTimer = null;
     }
+    if (sttSlowHintTimer !== null) {
+      window.clearTimeout(sttSlowHintTimer);
+      sttSlowHintTimer = null;
+    }
+    sttSlowHint = false;
   }
 
   function armSttStallTimer(id: string, model: string) {
     clearSttStallTimer();
+    sttSlowHintTimer = window.setTimeout(() => {
+      if (sttDownloadId === id) sttSlowHint = true;
+    }, STT_SLOW_HINT_MS);
     sttStallTimer = window.setTimeout(() => {
       if (sttDownloadId !== id) return;
       sttDownloadId = "";
@@ -1250,6 +1409,163 @@
       await refreshStt(false);
     } finally {
       sttBusy = null;
+    }
+  }
+
+  // ---- Text-to-speech family (download/manage; testing lives in the Playground) ----
+  async function refreshTts(showSpinner = true) {
+    if (showSpinner) ttsLoading = true;
+    try {
+      ttsInfo = await invokeQuiet<TtsOverview>("tts_overview");
+    } catch {
+      // Quiet — the family view renders its own fallback off null.
+    } finally {
+      ttsLoading = false;
+    }
+  }
+
+  async function ttsDownload(model: string) {
+    if (ttsDownloadingModel) return;
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    ttsDownloadId = id;
+    ttsDownloadingModel = model;
+    ttsDownloadError = null;
+    ttsProgress = { fraction: 0, phase: "starting" };
+    const channel = new Channel<SttDownloadEvent>();
+    channel.onmessage = (event) => {
+      if (ttsDownloadId !== id) return;
+      if (event.kind === "progress") {
+        ttsProgress = { fraction: event.fraction, phase: event.phase };
+      } else {
+        if (!event.success && !event.cancelled) {
+          ttsDownloadError = { model, detail: event.error ?? "download failed" };
+        }
+        ttsDownloadingModel = "";
+        ttsProgress = null;
+        void refreshTts(false);
+      }
+    };
+    try {
+      await invokeQuiet<void>("tts_download_model", { model, downloadId: id, onEvent: channel });
+    } catch (e) {
+      if (ttsDownloadId === id && ttsDownloadingModel) {
+        ttsDownloadError = { model, detail: e instanceof Error ? e.message : String(e) };
+        ttsDownloadingModel = "";
+        ttsProgress = null;
+      }
+    }
+  }
+
+  async function ttsCancelDownload() {
+    if (!ttsDownloadId) return;
+    const id = ttsDownloadId;
+    ttsDownloadId = "";
+    ttsDownloadingModel = "";
+    ttsProgress = null;
+    // Same sidecar/download registry as STT — the cancel op is engine-agnostic.
+    await safeInvoke<void>("stt_cancel_download", { downloadId: id });
+    void refreshTts(false);
+  }
+
+  async function ttsDelete(modelId: string) {
+    const entry = ttsInfo?.catalog.find((m) => m.id === modelId);
+    const choice = await confirmDialog.open({
+      title: `Delete ${entry?.displayName ?? modelId}?`,
+      message: "Removes the downloaded voice model from disk. You can download it again later.",
+      destructive: true,
+      actions: [{ label: "Delete model", value: "delete", tone: "destructive" }],
+    });
+    if (choice !== "delete") return;
+    ttsBusy = `delete:${modelId}`;
+    try {
+      await safeInvoke<void>("tts_delete_model", { model: modelId });
+      await refreshTts(false);
+    } finally {
+      ttsBusy = null;
+    }
+  }
+
+  // ---- Image generation family (download/manage; generating lives in the Playground) ----
+  async function refreshImagegen(showSpinner = true) {
+    if (showSpinner) imagegenLoading = true;
+    try {
+      imagegenInfo = await invokeQuiet<ImagegenOverview>("imagegen_overview");
+    } catch {
+      // Quiet — the family view renders its own fallback off null.
+    } finally {
+      imagegenLoading = false;
+    }
+    try {
+      imageplaygroundStatus = await invokeQuiet<ImagePlaygroundStatus>("imageplayground_check");
+    } catch {
+      imageplaygroundStatus = { available: false };
+    }
+  }
+
+  async function imagegenDownload(model: string) {
+    if (imagegenDownloadingModel) return;
+    // Cross-surface guard: the Image playground may already be downloading
+    // against the same sidecar.
+    if (imagegenDownloadFlag.active) return;
+    imagegenDownloadFlag.active = true;
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    imagegenDownloadId = id;
+    imagegenDownloadingModel = model;
+    imagegenDownloadError = null;
+    imagegenProgress = { fraction: 0, phase: "starting" };
+    const channel = new Channel<SttDownloadEvent>();
+    channel.onmessage = (event) => {
+      if (imagegenDownloadId !== id) return;
+      if (event.kind === "progress") {
+        imagegenProgress = { fraction: event.fraction, phase: event.phase };
+      } else {
+        if (!event.success && !event.cancelled) {
+          imagegenDownloadError = { model, detail: event.error ?? "download failed" };
+        }
+        imagegenDownloadingModel = "";
+        imagegenProgress = null;
+        imagegenDownloadFlag.active = false;
+        void refreshImagegen(false);
+      }
+    };
+    try {
+      await invokeQuiet<void>("imagegen_download_model", { model, downloadId: id, onEvent: channel });
+    } catch (e) {
+      if (imagegenDownloadId === id && imagegenDownloadingModel) {
+        imagegenDownloadError = { model, detail: e instanceof Error ? e.message : String(e) };
+        imagegenDownloadingModel = "";
+        imagegenProgress = null;
+      }
+      imagegenDownloadFlag.active = false;
+    }
+  }
+
+  async function imagegenCancelDownload() {
+    if (!imagegenDownloadId) return;
+    const id = imagegenDownloadId;
+    imagegenDownloadId = "";
+    imagegenDownloadingModel = "";
+    imagegenProgress = null;
+    imagegenDownloadFlag.active = false;
+    await safeInvoke<void>("imagegen_cancel_download", { downloadId: id });
+    void refreshImagegen(false);
+  }
+
+  async function imagegenDelete(modelId: string) {
+    const entry = imagegenInfo?.catalog.find((m) => m.id === modelId);
+    const choice = await confirmDialog.open({
+      title: `Delete ${entry?.displayName ?? modelId}?`,
+      message: "Removes the downloaded model files from disk. You can download it again later.",
+      destructive: true,
+      actions: [{ label: "Delete model", value: "delete", tone: "destructive" }],
+    });
+    if (choice !== "delete") return;
+    imagegenBusy = `delete:${modelId}`;
+    try {
+      await safeInvoke<void>("imagegen_delete_model", { model: modelId });
+      await refreshImagegen(false);
+    } finally {
+      imagegenBusy = null;
     }
   }
 
@@ -1665,7 +1981,7 @@
           <Icon name="package" size={13} /> Models
         </button>
         <button type="button" class={navClass("test")} onclick={() => (activeView = "test")}>
-          <Icon name="message-square" size={13} /> Test prompt
+          <Icon name="message-square" size={13} /> Playground
         </button>
         <button type="button" class={navClass("dictation")} onclick={() => (activeView = "dictation")}>
           <Icon name="audio-lines" size={13} /> Speech-to-Text
@@ -1771,7 +2087,7 @@
         <div class="flex flex-wrap gap-2">
           <button
             type="button"
-            class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-on-accent disabled:opacity-50"
+            class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
             disabled={!canStart}
             title={overview && !overview.binary.detected
               ? "Ollama binary not found — download it on Server home, or set a custom binary path in Configuration."
@@ -1905,7 +2221,7 @@
                   <div class="mt-2.5 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-on-accent disabled:opacity-50"
+                      class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
                       disabled={installing}
                       onclick={() => void installOllama()}
                     >
@@ -1936,7 +2252,7 @@
                       {#if updateCheck?.updateAvailable}
                         <button
                           type="button"
-                          class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:opacity-50"
+                          class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
                           disabled={installing}
                           onclick={() => void installOllama()}
                         >
@@ -1997,12 +2313,15 @@
               <Icon name="link" size={13} class="text-fg-muted" />
               <h2 class="text-[13px] font-semibold text-fg">Where this local server is used</h2>
             </header>
-            <div class="grid gap-2 md:grid-cols-2">
+            <div class="grid gap-2 md:grid-cols-3">
               <button type="button" class="rounded-md border border-border px-3 py-2 text-left text-[12px] text-fg hover:bg-surface-2" onclick={() => (activeView = "dictation")}>
                 <Icon name="mic" size={13} class="inline mr-2 text-accent" /> Speech-to-Text rewrites
               </button>
               <a class="rounded-md border border-border px-3 py-2 text-[12px] text-fg hover:bg-surface-2" href="/ssh">
                 <Icon name="terminal" size={13} class="inline mr-2 text-accent" /> SSH agent local-model workflows
+              </a>
+              <a class="rounded-md border border-border px-3 py-2 text-[12px] text-fg hover:bg-surface-2" href="/tasks">
+                <Icon name="square-kanban" size={13} class="inline mr-2 text-accent" /> Task dispatch with local models
               </a>
             </div>
           </article>
@@ -2035,8 +2354,9 @@
               disabled={pulling || !running}
             />
             <button
-              class="rounded-md bg-accent px-3 py-2 text-[12px] font-semibold text-on-accent disabled:opacity-50"
+              class="rounded-md bg-accent px-3 py-2 text-[12px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
               disabled={pulling || !running || !pullName.trim()}
+              title={!running ? "Start Ollama to download models" : pulling ? "Wait for the current download to finish" : undefined}
               onclick={() => pullModel()}
             >
               Download
@@ -2048,7 +2368,7 @@
               <p><span class="font-mono">{pullPrompt}</span> is already installed.</p>
               <p class="mt-0.5 text-fg-muted">Checking for updates re-pulls from ollama.com and downloads only what changed — an up-to-date model finishes instantly.</p>
               <div class="mt-2 flex flex-wrap gap-2">
-                <button class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:opacity-50" type="button" disabled={!running || pulling} onclick={() => updateModel(pullPrompt!)}>Check for updates</button>
+                <button class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed" type="button" disabled={!running || pulling} onclick={() => updateModel(pullPrompt!)}>Check for updates</button>
                 <button class="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-fg hover:bg-surface-2" type="button" onclick={dismissPull}>Dismiss</button>
               </div>
             </div>
@@ -2099,7 +2419,7 @@
               {:else if pullPhase === "error" || pullPhase === "cancelled"}
                 <div class="mt-2 flex flex-wrap items-center gap-2">
                   <button
-                    class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:opacity-50"
+                    class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
                     type="button"
                     disabled={!running || pulling || !lastPullModel}
                     onclick={resumePull}
@@ -2189,9 +2509,7 @@
             >
               <span class="flex items-center justify-between gap-2">
                 <span class="flex min-w-0 items-center gap-2">
-                  <span class="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded bg-surface-2">
-                    <Icon name="audio-lines" size={12} class="text-fg-muted" />
-                  </span>
+                  <ModelMark family="whisper" size={18} class="shrink-0" />
                   <span class="truncate text-[13px] font-semibold {selectedFamilyId === 'stt' ? 'text-accent' : 'text-fg'}">Speech-to-Text</span>
                 </span>
                 <span class="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-fg-subtle">on-device</span>
@@ -2200,6 +2518,47 @@
                 Whisper · Parakeet{stt ? ` · ${stt.catalog.length} options · ${stt.installed.length} installed` : ""}
               </span>
               <span class="mt-1 block text-[11px] leading-relaxed text-fg-muted">Transcription models for dictation — run on the Neural Engine.</span>
+            </button>
+            <!-- Text-to-Speech: the matching on-device synthesis category. -->
+            <button
+              type="button"
+              class="rounded-lg border px-3 py-2.5 text-left transition-colors {selectedFamilyId === 'tts'
+                ? 'border-accent/60 bg-accent/[0.08]'
+                : 'border-border hover:border-border-strong hover:bg-surface-2'}"
+              onclick={() => selectFamily("tts")}
+            >
+              <span class="flex items-center justify-between gap-2">
+                <span class="flex min-w-0 items-center gap-2">
+                  <ModelMark family="kokoro" size={18} class="shrink-0" />
+                  <span class="truncate text-[13px] font-semibold {selectedFamilyId === 'tts' ? 'text-accent' : 'text-fg'}">Text-to-Speech</span>
+                </span>
+                <span class="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-fg-subtle">on-device</span>
+              </span>
+              <span class="mt-1 block text-[11px] text-fg-subtle">
+                Kokoro{ttsInfo ? ` · ${ttsInfo.catalog.length} model${ttsInfo.catalog.length === 1 ? "" : "s"} · ${ttsInfo.installed.length} installed` : ""}
+              </span>
+              <span class="mt-1 block text-[11px] leading-relaxed text-fg-muted">Natural speech synthesis — try it in the Playground.</span>
+            </button>
+            <!-- Image generation: on-device diffusion (FLUX / SD3). A sibling
+                 category to the multimodal Vision LLMs — different modality. -->
+            <button
+              type="button"
+              class="rounded-lg border px-3 py-2.5 text-left transition-colors {selectedFamilyId === 'image'
+                ? 'border-accent/60 bg-accent/[0.08]'
+                : 'border-border hover:border-border-strong hover:bg-surface-2'}"
+              onclick={() => selectFamily("image")}
+            >
+              <span class="flex items-center justify-between gap-2">
+                <span class="flex min-w-0 items-center gap-2">
+                  <ModelMark family="flux" size={18} class="shrink-0" />
+                  <span class="truncate text-[13px] font-semibold {selectedFamilyId === 'image' ? 'text-accent' : 'text-fg'}">Image generation</span>
+                </span>
+                <span class="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-fg-subtle">on-device</span>
+              </span>
+              <span class="mt-1 block text-[11px] text-fg-subtle">
+                FLUX · SD3{imagegenInfo ? ` · ${imagegenInfo.catalog.length} model${imagegenInfo.catalog.length === 1 ? "" : "s"} · ${imagegenInfo.installed.length} installed` : ""}
+              </span>
+              <span class="mt-1 block text-[11px] leading-relaxed text-fg-muted">Generate images from a prompt — runs on the GPU/Neural Engine.</span>
             </button>
             {#each orderedFamilies as family}
               {@const active = selectedFamilyId === family.id}
@@ -2281,8 +2640,9 @@
                       </button>
                     {:else}
                       <button
-                        class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:opacity-50"
+                        class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
                         disabled={!running || pulling || installed}
+                        title={installed ? "Already installed" : !running ? "Start Ollama to download models" : pulling ? "Wait for the current download to finish" : undefined}
                         onclick={() => pullModel(match.name)}
                       >
                         {installed ? "Installed" : "Download"}
@@ -2296,6 +2656,7 @@
                 <div class="grid gap-3 px-4 py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
                   <div class="min-w-0">
                     <span class="flex flex-wrap items-center gap-2">
+                      <ModelMark family={model.engine} size={16} class="shrink-0" />
                       <span class="font-mono text-[13px] font-semibold text-fg">{model.displayName}</span>
                       <button
                         type="button"
@@ -2343,7 +2704,7 @@
               <h2 class="text-[14px] font-semibold text-fg">Local Speech-to-Text isn't available</h2>
               <p class="mt-1.5 text-[12px] leading-relaxed text-fg-muted">
                 {stt.status.reason === "requires_macos_14"
-                  ? "Local transcription needs macOS 14 or newer — dictation keeps using macOS Dictation on this Mac."
+                  ? "Local transcription needs macOS 14 or newer — dictation keeps using Apple Speech on this Mac."
                   : stt.status.reason === "sidecar_missing"
                     ? "The bundled speech-to-text helper is missing — reinstall PortBay."
                     : stt.status.reason === "unsupported"
@@ -2358,40 +2719,67 @@
               <div class="border-b border-border px-4 py-3">
                 <div class="flex flex-wrap items-center justify-between gap-3">
                   <div class="flex items-center gap-3">
-                    <span class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-2">
-                      <Icon name="audio-lines" size={18} class="text-fg-muted" />
-                    </span>
+                    <ModelMark family="whisper" size={36} class="shrink-0" />
                     <div>
                       <h2 class="text-[14px] font-semibold text-fg">Transcription models</h2>
                       <p class="mt-0.5 text-[11px] text-fg-subtle">
                         Run entirely on this Mac's Neural Engine — audio never leaves the machine.
                         {stt.installed.length} of {stt.catalog.length} installed.
+                        {#if stt.catalogSource === "bundled"}
+                          · <span title="The live model catalog couldn't be reached — showing the list built into this version of PortBay.">Using built-in catalog</span>
+                        {/if}
                       </p>
+                      {#if stt.catalogStale && stt.catalogSource !== "bundled"}
+                        <p class="mt-0.5 inline-flex items-center gap-1.5 text-[10.5px] text-amber-500">
+                          <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                          Couldn't refresh the model catalog — showing a cached list that may be out of date.
+                        </p>
+                      {/if}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onclick={() => void refreshStt()}
-                    disabled={sttLoading}
-                    class="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-border bg-surface
-                           text-[12px] text-fg-muted hover:bg-surface-2 hover:text-fg transition-colors
-                           disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <Icon name="refresh-cw" size={11} class={sttLoading ? "animate-spin" : ""} />
-                    Refresh
-                  </button>
+                  <div class="flex items-center gap-2">
+                    <input
+                      class="w-36 rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] text-fg placeholder:text-fg-subtle"
+                      bind:value={sttFilter}
+                      placeholder="Filter models…"
+                      spellcheck="false"
+                      aria-label="Filter speech-to-text models"
+                    />
+                    <select
+                      class="rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] text-fg"
+                      bind:value={sttSort}
+                      aria-label="Sort speech-to-text models"
+                    >
+                      <option value="recommended">Recommended</option>
+                      <option value="size-asc">Smallest first</option>
+                      <option value="size-desc">Largest first</option>
+                      <option value="name">Name (A–Z)</option>
+                    </select>
+                    <button
+                      type="button"
+                      onclick={() => void refreshStt()}
+                      disabled={sttLoading}
+                      class="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-border bg-surface
+                             text-[12px] text-fg-muted hover:bg-surface-2 hover:text-fg transition-colors
+                             disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Icon name="refresh-cw" size={11} class={sttLoading ? "animate-spin" : ""} />
+                      Refresh
+                    </button>
+                  </div>
                 </div>
               </div>
               <div class="grid divide-y divide-border">
-                {#each stt.catalog as model}
+                {#each visibleSttModels as model}
                   {@const installedEntry = stt.installed.find((m) => m.id === model.id)}
                   {@const downloading = sttDownloadingModel === model.id}
                   {@const failed = sttDownloadError?.model === model.id}
                   <div class="grid gap-3 px-4 py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
                     <div class="min-w-0">
                       <span class="flex flex-wrap items-center gap-2">
+                        <ModelMark family={model.engine} size={16} class="shrink-0" />
                         <span class="font-mono text-[13px] font-semibold text-fg">{model.displayName}</span>
-                        <span class="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-fg-subtle">{model.engine === "parakeet" ? "Parakeet · NVIDIA" : "Whisper · OpenAI"}</span>
+                        <span class="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-fg-subtle">{({ parakeet: "Parakeet · NVIDIA", qwen3: "Qwen3 · Alibaba", cohere: "Cohere", nemotron: "Nemotron · NVIDIA" })[model.engine] ?? "Whisper · OpenAI"}</span>
                         {#if model.recommended}
                           <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">Recommended</span>
                         {/if}
@@ -2401,6 +2789,9 @@
                       </span>
                       <span class="mt-1 block text-[11px] text-fg-subtle">
                         {model.languages} · {installedEntry ? bytes(installedEntry.sizeBytes) : `~${bytes(model.approxSizeBytes)} download`}{model.streaming ? " · live partial text" : ""}
+                        {#if model.licenseUrl}
+                          · <button type="button" class="underline-offset-2 hover:text-fg hover:underline" onclick={() => { if (model.licenseUrl) void openUrl(model.licenseUrl); }}>{model.license ?? "Model license"}</button>
+                        {/if}
                       </span>
                       <span class="mt-1 block text-[11px] leading-relaxed text-fg-muted">{model.speedNote}</span>
                       {#if downloading && sttProgress}
@@ -2410,6 +2801,11 @@
                         <p class="mt-1 text-[10.5px] text-fg-subtle">
                           {Math.round(sttProgress.fraction * 100)}% · {sttProgress.phase === "compiling" ? "Compiling for the Neural Engine…" : sttProgress.phase === "starting" ? "Contacting huggingface.co…" : "Downloading…"}
                         </p>
+                        {#if sttSlowHint}
+                          <p class="mt-0.5 text-[10.5px] text-status-unhealthy">
+                            Taking longer than expected — still trying. A VPN or an unreachable huggingface.co is the usual cause.
+                          </p>
+                        {/if}
                       {:else if failed}
                         <p class="mt-1.5 text-[11px] text-status-unhealthy">{sttDownloadError?.detail}</p>
                       {/if}
@@ -2434,9 +2830,10 @@
                         </button>
                       {:else}
                         <button
-                          class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:opacity-50"
+                          class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
                           type="button"
                           disabled={sttDownloadingModel !== ""}
+                          title={sttDownloadingModel !== "" ? "Wait for the current download to finish" : undefined}
                           onclick={() => void sttDownload(model.id)}
                         >
                           {failed ? "Retry download" : "Download"}
@@ -2444,6 +2841,8 @@
                       {/if}
                     </div>
                   </div>
+                {:else}
+                  <div class="px-4 py-8 text-center text-[12px] text-fg-subtle">No models match "{sttFilter}".</div>
                 {/each}
               </div>
             </div>
@@ -2453,7 +2852,293 @@
               <p class="text-[12px] text-fg-muted leading-relaxed">
                 Installed models become selectable as the
                 <button type="button" class="text-accent hover:underline" onclick={() => (activeView = "dictation")}>Speech-to-Text</button>
-                transcription engine — replacing macOS Dictation with on-device Whisper or Parakeet while the rewrite layer stays unchanged.
+                transcription engine — replacing Apple Speech with on-device Whisper or Parakeet while the rewrite layer stays unchanged.
+              </p>
+            </div>
+          {/if}
+          {:else if selectedFamilyId === "tts"}
+          <!-- Text-to-Speech — downloaded and managed here; tested in the Playground. -->
+          {#if !ttsInfo}
+            <div class="rounded-lg border border-border bg-surface px-4 py-8 text-center text-[12px] text-fg-subtle">
+              {ttsLoading ? "Checking the speech engine…" : "Text-to-speech overview unavailable."}
+            </div>
+          {:else if !ttsInfo.status.available}
+            <div class="rounded-lg border border-border bg-surface p-4">
+              <h2 class="text-[14px] font-semibold text-fg">Local Text-to-Speech isn't available</h2>
+              <p class="mt-1.5 text-[12px] leading-relaxed text-fg-muted">
+                On-device speech synthesis needs the bundled helper (macOS 14 or newer).
+              </p>
+            </div>
+          {:else}
+            <div class="rounded-lg border border-border bg-surface">
+              <div class="border-b border-border px-4 py-3">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <div class="flex items-center gap-3">
+                    <ModelMark family="kokoro" size={36} class="shrink-0" />
+                    <div>
+                      <h2 class="text-[14px] font-semibold text-fg">Speech models</h2>
+                      <p class="mt-0.5 text-[11px] text-fg-subtle">
+                        Synthesize speech entirely on this Mac. {ttsInfo.installed.length} of {ttsInfo.catalog.length} installed.
+                        {#if ttsInfo.catalogSource === "bundled"}
+                          · <span title="The live model catalog couldn't be reached — showing the list built into this version of PortBay.">Using built-in catalog</span>
+                        {/if}
+                      </p>
+                      {#if ttsInfo.catalogStale && ttsInfo.catalogSource !== "bundled"}
+                        <p class="mt-0.5 inline-flex items-center gap-1.5 text-[10.5px] text-amber-500">
+                          <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                          Couldn't refresh the model catalog — showing a cached list that may be out of date.
+                        </p>
+                      {/if}
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <input
+                      class="w-36 rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] text-fg placeholder:text-fg-subtle"
+                      bind:value={ttsFilter}
+                      placeholder="Filter models…"
+                      spellcheck="false"
+                      aria-label="Filter text-to-speech models"
+                    />
+                    <select
+                      class="rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] text-fg"
+                      bind:value={ttsSort}
+                      aria-label="Sort text-to-speech models"
+                    >
+                      <option value="recommended">Recommended</option>
+                      <option value="size-asc">Smallest first</option>
+                      <option value="size-desc">Largest first</option>
+                      <option value="name">Name (A–Z)</option>
+                    </select>
+                    <button
+                      type="button"
+                      onclick={() => void refreshTts()}
+                      disabled={ttsLoading}
+                      class="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-border bg-surface text-[12px] text-fg-muted hover:bg-surface-2 hover:text-fg transition-colors disabled:opacity-50"
+                    >
+                      <Icon name="refresh-cw" size={11} class={ttsLoading ? "animate-spin" : ""} />
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="grid divide-y divide-border">
+                {#each visibleTtsModels as model}
+                  {@const installedEntry = ttsInfo.installed.find((m) => m.id === model.id)}
+                  {@const downloading = ttsDownloadingModel === model.id}
+                  {@const failed = ttsDownloadError?.model === model.id}
+                  <div class="grid gap-3 px-4 py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+                    <div class="min-w-0">
+                      <span class="flex flex-wrap items-center gap-2">
+                        <ModelMark family={model.engine} size={16} class="shrink-0" />
+                        <span class="font-mono text-[13px] font-semibold text-fg">{model.displayName}</span>
+                        <span class="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-fg-subtle">Kokoro</span>
+                        {#if model.recommended}
+                          <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">Recommended</span>
+                        {/if}
+                        {#if installedEntry}
+                          <span class="rounded bg-status-running/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-running">Installed</span>
+                        {/if}
+                      </span>
+                      <span class="mt-1 block text-[11px] text-fg-subtle">
+                        {model.languages} · {installedEntry ? bytes(installedEntry.sizeBytes) : `~${bytes(model.approxSizeBytes)} download`} · {model.voices.length} voices
+                        {#if model.licenseUrl}
+                          · <button type="button" class="underline-offset-2 hover:text-fg hover:underline" onclick={() => { if (model.licenseUrl) void openUrl(model.licenseUrl); }}>{model.license ?? "Model license"}</button>
+                        {/if}
+                      </span>
+                      <span class="mt-1 block text-[11px] leading-relaxed text-fg-muted">{model.speedNote}</span>
+                      {#if downloading && ttsProgress}
+                        <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-bg">
+                          <div class="h-full bg-accent transition-all" style={`width:${Math.max(2, Math.round(ttsProgress.fraction * 100))}%`}></div>
+                        </div>
+                        <p class="mt-1 text-[10.5px] text-fg-subtle">{Math.round(ttsProgress.fraction * 100)}% · Downloading…</p>
+                      {:else if failed}
+                        <p class="mt-1.5 text-[11px] text-status-unhealthy">{ttsDownloadError?.detail}</p>
+                      {/if}
+                    </div>
+                    <div class="flex flex-wrap gap-2 lg:justify-end">
+                      {#if downloading}
+                        <button class="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-fg hover:bg-surface-2" type="button" onclick={() => void ttsCancelDownload()}>Cancel</button>
+                      {:else if installedEntry}
+                        <button class="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-fg hover:bg-surface-2" type="button" onclick={() => (activeView = "test", playgroundTab = "tts")}>Open in Playground</button>
+                        <button class="rounded-md border border-status-unhealthy/40 px-2.5 py-1.5 text-[11px] text-status-unhealthy hover:bg-status-unhealthy/10 disabled:opacity-50" type="button" disabled={ttsBusy === `delete:${model.id}`} onclick={() => void ttsDelete(model.id)}>Delete</button>
+                      {:else}
+                        <button class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed" type="button" disabled={ttsDownloadingModel !== ""} title={ttsDownloadingModel !== "" ? "Wait for the current download to finish" : undefined} onclick={() => void ttsDownload(model.id)}>{failed ? "Retry download" : "Download"}</button>
+                      {/if}
+                    </div>
+                  </div>
+                {:else}
+                  <div class="px-4 py-8 text-center text-[12px] text-fg-subtle">No models match "{ttsFilter}".</div>
+                {/each}
+              </div>
+            </div>
+            <div class="rounded-lg border border-border bg-surface px-4 py-3">
+              <p class="text-[12px] text-fg-muted leading-relaxed">
+                Once installed, synthesize speech in the
+                <button type="button" class="text-accent hover:underline" onclick={() => (activeView = "test", playgroundTab = "tts")}>Playground</button>.
+              </p>
+            </div>
+          {/if}
+          {:else if selectedFamilyId === "image"}
+          <!-- Image generation — on-device diffusion (Stable Diffusion / SDXL
+               via the portbay-imagegen sidecar). Downloaded/managed here;
+               generating lives in the Playground. -->
+          {#if imageplaygroundStatus}
+            <div class="mb-4 rounded-lg border border-border bg-surface p-4">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div class="flex items-center gap-3">
+                  <ModelMark family="apple" size={36} class="shrink-0" />
+                  <div>
+                    <h2 class="text-[14px] font-semibold text-fg">Apple Image Playground</h2>
+                    <p class="mt-0.5 text-[11px] text-fg-subtle">
+                      System image generator (Apple Intelligence) — nothing to download. Pick it in the Playground and generate inline.
+                    </p>
+                  </div>
+                </div>
+                {#if imageplaygroundStatus.available}
+                  <span class="rounded bg-status-running/15 px-2 py-1 text-[11px] font-semibold text-status-running">Available</span>
+                {:else}
+                  <span class="rounded bg-surface-2 px-2 py-1 text-[11px] text-fg-subtle">
+                    {imageplaygroundStatus.reason === "requires_macos_15_4"
+                      ? "Needs macOS 15.4+"
+                      : imageplaygroundStatus.reason === "apple_intelligence_unavailable"
+                        ? "Turn on Apple Intelligence"
+                        : imageplaygroundStatus.reason === "unsupported_device"
+                          ? "Not supported on this Mac"
+                          : "Unavailable"}
+                  </span>
+                {/if}
+              </div>
+              {#if imageplaygroundStatus.available}
+                <div class="mt-3">
+                  <button type="button" class="text-[12px] text-accent hover:underline" onclick={() => (activeView = "test", playgroundTab = "image")}>Open in Playground →</button>
+                </div>
+              {/if}
+            </div>
+          {/if}
+          {#if !imagegenInfo}
+            <div class="rounded-lg border border-border bg-surface px-4 py-8 text-center text-[12px] text-fg-subtle">
+              {imagegenLoading ? "Checking the image engine…" : "Image-generation overview unavailable."}
+            </div>
+          {:else if !imagegenInfo.status.available}
+            <div class="rounded-lg border border-border bg-surface p-4">
+              <h2 class="text-[14px] font-semibold text-fg">Local image generation isn't available</h2>
+              <p class="mt-1.5 text-[12px] leading-relaxed text-fg-muted">
+                {imagegenInfo.status.reason === "requires_macos_14"
+                  ? "On-device image generation needs macOS 14 or newer."
+                  : imagegenInfo.status.reason === "sidecar_missing"
+                    ? "On-device image generation isn't included in this build. Reinstalling PortBay should restore it."
+                    : imagegenInfo.status.reason === "unsupported"
+                      ? "Local image generation is macOS-only."
+                      : "The bundled image-generation helper didn't respond — reinstall PortBay."}
+              </p>
+            </div>
+          {:else}
+            <div class="rounded-lg border border-border bg-surface">
+              <div class="border-b border-border px-4 py-3">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <div class="flex items-center gap-3">
+                    <ModelMark family="sd" size={36} class="shrink-0" />
+                    <div>
+                      <h2 class="text-[14px] font-semibold text-fg">Image models</h2>
+                      <p class="mt-0.5 text-[11px] text-fg-subtle">
+                        Generate entirely on this Mac — prompts and images never leave the machine.
+                        {imagegenInfo.installed.length} of {imagegenInfo.catalog.length} installed.
+                        {#if imagegenInfo.catalogSource === "bundled"}
+                          · <span title="The live model catalog couldn't be reached — showing the list built into this version of PortBay.">Using built-in catalog</span>
+                        {/if}
+                      </p>
+                      {#if imagegenInfo.catalogStale && imagegenInfo.catalogSource !== "bundled"}
+                        <p class="mt-0.5 inline-flex items-center gap-1.5 text-[10.5px] text-amber-500">
+                          <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                          Couldn't refresh the model catalog — showing a cached list that may be out of date.
+                        </p>
+                      {/if}
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <input
+                      class="w-36 rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] text-fg placeholder:text-fg-subtle"
+                      bind:value={imageFilter}
+                      placeholder="Filter models…"
+                      spellcheck="false"
+                      aria-label="Filter image models"
+                    />
+                    <select
+                      class="rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] text-fg"
+                      bind:value={imageSort}
+                      aria-label="Sort image models"
+                    >
+                      <option value="recommended">Recommended</option>
+                      <option value="size-asc">Smallest first</option>
+                      <option value="size-desc">Largest first</option>
+                      <option value="name">Name (A–Z)</option>
+                    </select>
+                    <button
+                      type="button"
+                      onclick={() => void refreshImagegen()}
+                      disabled={imagegenLoading}
+                      class="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-border bg-surface text-[12px] text-fg-muted hover:bg-surface-2 hover:text-fg transition-colors disabled:opacity-50"
+                    >
+                      <Icon name="refresh-cw" size={11} class={imagegenLoading ? "animate-spin" : ""} />
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="grid divide-y divide-border">
+                {#each visibleImageModels as model}
+                  {@const installedEntry = imagegenInfo.installed.find((m) => m.id === model.id)}
+                  {@const downloading = imagegenDownloadingModel === model.id}
+                  {@const failed = imagegenDownloadError?.model === model.id}
+                  <div class="grid gap-3 px-4 py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+                    <div class="min-w-0">
+                      <span class="flex flex-wrap items-center gap-2">
+                        <ModelMark family={model.engine} size={16} class="shrink-0" />
+                        <span class="font-mono text-[13px] font-semibold text-fg">{model.displayName}</span>
+                        <span class="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-fg-subtle">{model.engine === "flux" ? "FLUX · Black Forest Labs" : "Stable Diffusion · Stability AI"}</span>
+                        {#if model.recommended}
+                          <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">Recommended</span>
+                        {/if}
+                        {#if installedEntry}
+                          <span class="rounded bg-status-running/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-running">Installed</span>
+                        {/if}
+                      </span>
+                      <span class="mt-1 block text-[11px] text-fg-subtle">
+                        {installedEntry ? bytes(installedEntry.sizeBytes) : `~${bytes(model.approxSizeBytes)} download`} · {model.defaultSteps} steps · {model.defaultSize}px
+                        {#if model.licenseUrl}
+                          · <button type="button" class="underline-offset-2 hover:text-fg hover:underline" onclick={() => { if (model.licenseUrl) void openUrl(model.licenseUrl); }}>{model.license ?? "Model license"}</button>
+                        {/if}
+                      </span>
+                      <span class="mt-1 block text-[11px] leading-relaxed text-fg-muted">{model.speedNote}</span>
+                      {#if downloading && imagegenProgress}
+                        <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-bg">
+                          <div class="h-full bg-accent transition-all" style={`width:${Math.max(2, Math.round(imagegenProgress.fraction * 100))}%`}></div>
+                        </div>
+                        <p class="mt-1 text-[10.5px] text-fg-subtle">{Math.round(imagegenProgress.fraction * 100)}% · Downloading…</p>
+                      {:else if failed}
+                        <p class="mt-1.5 text-[11px] text-status-unhealthy">{imagegenDownloadError?.detail}</p>
+                      {/if}
+                    </div>
+                    <div class="flex flex-wrap gap-2 lg:justify-end">
+                      {#if downloading}
+                        <button class="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-fg hover:bg-surface-2" type="button" onclick={() => void imagegenCancelDownload()}>Cancel</button>
+                      {:else if installedEntry}
+                        <button class="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-fg hover:bg-surface-2" type="button" onclick={() => (activeView = "test", playgroundTab = "image")}>Open in Playground</button>
+                        <button class="rounded-md border border-status-unhealthy/40 px-2.5 py-1.5 text-[11px] text-status-unhealthy hover:bg-status-unhealthy/10 disabled:opacity-50" type="button" disabled={imagegenBusy === `delete:${model.id}`} onclick={() => void imagegenDelete(model.id)}>Delete</button>
+                      {:else}
+                        <button class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed" type="button" disabled={imagegenDownloadingModel !== ""} title={imagegenDownloadingModel !== "" ? "Wait for the current download to finish" : undefined} onclick={() => void imagegenDownload(model.id)}>{failed ? "Retry download" : "Download"}</button>
+                      {/if}
+                    </div>
+                  </div>
+                {:else}
+                  <div class="px-4 py-8 text-center text-[12px] text-fg-subtle">No models match "{imageFilter}".</div>
+                {/each}
+              </div>
+            </div>
+            <div class="rounded-lg border border-border bg-surface px-4 py-3">
+              <p class="text-[12px] text-fg-muted leading-relaxed">
+                Once installed, generate images in the
+                <button type="button" class="text-accent hover:underline" onclick={() => (activeView = "test", playgroundTab = "image")}>Playground</button>.
               </p>
             </div>
           {/if}
@@ -2468,6 +3153,13 @@
                     <p class="mt-0.5 text-[11px] text-fg-subtle">
                       {selectedFamily.vendor} · {installedCatalogCount} of {selectedFamily.variants.length} installed locally
                     </p>
+                    {#if hwProfile}
+                      <p class="mt-0.5 text-[11px] text-fg-subtle">
+                        Fit badges for {hwProfile.chip} · {Math.round(hwProfile.totalRamGb)} GB memory, ~{Math.round(hwProfile.budgetGb)} GB usable for models{hwProfile.bandwidthGbps
+                          ? ` · ${hwProfile.estimated ? "~" : ""}${Math.round(hwProfile.bandwidthGbps)} GB/s`
+                          : ""}
+                      </p>
+                    {/if}
                   </div>
                 </div>
                 <div class="flex items-center gap-2">
@@ -2484,6 +3176,7 @@
                     aria-label="Sort model variants"
                   >
                     <option value="popular">Most popular</option>
+                    <option value="best-fit">Best fit for this Mac</option>
                     <option value="updated">Recently updated</option>
                     <option value="size-asc">Smallest first</option>
                     <option value="size-desc">Largest first</option>
@@ -2502,11 +3195,29 @@
                 </div>
               </div>
             </div>
+            {#if !running}
+              <!-- Every Download in the list below is disabled while Ollama is
+                   down — say so once up here instead of leaving a wall of
+                   greyed buttons to explain themselves. -->
+              <div class="flex flex-wrap items-center gap-2 border-b border-border bg-status-unhealthy/10 px-4 py-2">
+                <span class="text-[11px] text-status-unhealthy">Ollama isn't running — downloads are disabled until it starts.</span>
+                {#if canStart}
+                  <button
+                    type="button"
+                    class="rounded-md border border-status-unhealthy/40 px-2 py-1 text-[10.5px] font-semibold text-status-unhealthy hover:bg-status-unhealthy/10"
+                    onclick={() => runAction("ollama_start")}
+                  >
+                    Start Ollama
+                  </button>
+                {/if}
+              </div>
+            {/if}
             <div class="grid divide-y divide-border">
               {#each visibleVariants as variant}
                 {@const installed = installedModelNames.has(variant.name)}
                 {@const tag = tagInfo[variant.name]}
                 {@const rowPulling = pulling && lastPullModel === variant.name}
+                {@const hwfit = variantFitFor(variant, selectedFamily.id)}
                 <div class="grid gap-3 px-4 py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
                   <button
                     class="min-w-0 text-left"
@@ -2517,6 +3228,7 @@
                     }}
                   >
                     <span class="flex flex-wrap items-center gap-2">
+                      <ModelMark family={selectedFamily.id} size={16} class="shrink-0" />
                       <span class="font-mono text-[13px] font-semibold text-fg">{variant.name}</span>
                       {#if variant.recommended}
                         <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">Recommended</span>
@@ -2524,9 +3236,16 @@
                       {#if installed}
                         <span class="rounded bg-status-running/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-running">Installed</span>
                       {/if}
+                      {#if hwfit?.level === "fits"}
+                        <span class="rounded bg-status-running/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-running" title={`Needs ~${hwfit.requiredGb.toFixed(1)} GB of ~${hwProfile?.budgetGb.toFixed(0)} GB usable`}>Runs well</span>
+                      {:else if hwfit?.level === "tight"}
+                        <span class="rounded bg-status-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-warning" title={`Needs ~${hwfit.requiredGb.toFixed(1)} GB of ~${hwProfile?.budgetGb.toFixed(0)} GB usable — little headroom left`}>Tight fit</span>
+                      {:else if hwfit?.level === "too-tight"}
+                        <span class="rounded bg-status-unhealthy/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-unhealthy" title={`Needs ~${hwfit.requiredGb.toFixed(1)} GB but only ~${hwProfile?.budgetGb.toFixed(0)} GB is usable on this Mac`}>Too tight</span>
+                      {/if}
                     </span>
                     <span class="mt-1 block text-[11px] text-fg-subtle">
-                      {variant.workload} · {tag?.size ?? variant.sizeHint}{tag?.context ? ` · ${tag.context} context` : ""}{variant.updated ? ` · updated ${variant.updated}` : ""}
+                      {variant.workload} · {tag?.size ?? variant.sizeHint}{tag?.context ? ` · ${tag.context} context` : ""}{hwfit?.tps ? ` · ≈${hwfit.tps < 10 ? hwfit.tps.toFixed(1) : Math.round(hwfit.tps)} tok/s` : ""}{variant.updated ? ` · updated ${variant.updated}` : ""}
                     </span>
                     <span class="mt-1 block text-[11px] leading-relaxed text-fg-muted">{variant.fit}</span>
                   </button>
@@ -2546,7 +3265,7 @@
                         <!-- Only rendered when ollama.com's manifest digest
                              differs from the local one — a real update. -->
                         <button
-                          class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:opacity-50"
+                          class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
                           disabled={pulling || !running}
                           title="A newer build is on ollama.com — downloads only the changed layers"
                           onclick={() => updateModel(variant.name)}
@@ -2572,8 +3291,9 @@
                       <button class="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-fg hover:bg-surface-2" type="button" onclick={cancelPull}>Cancel</button>
                     {:else}
                       <button
-                        class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:opacity-50"
+                        class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
                         disabled={!running || pulling}
+                        title={!running ? "Start Ollama to download models" : pulling ? "Wait for the current download to finish" : undefined}
                         onclick={() => pullModel(variant.name)}
                       >
                         Download
@@ -2626,7 +3346,7 @@
                         </button>
                       {:else if hasUpdate(model.name)}
                         <button
-                          class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:opacity-50"
+                          class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
                           disabled={pulling || !running}
                           title="A newer build is on ollama.com — downloads only the changed layers"
                           onclick={() => updateModel(model.name)}
@@ -2649,12 +3369,44 @@
         </div>
       </section>
       {:else if activeView === "test"}
-      <!-- minmax(0,…) on both tracks is load-bearing: without it the long curl
-           <pre> blocks on the right force their track wider than the viewport,
-           spilling the page into horizontal scroll and starving this hero
-           column. The prompt+response is the important part, so it takes the
-           larger share. -->
-      <section id="test" class="grid scroll-mt-4 gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
+      <section id="test" class="w-full scroll-mt-4 space-y-4">
+        <!-- Playground header — title + blurb track the active modality so each
+             sub-page reads as its own tool, not a generic "Test prompt". -->
+        <div class="flex items-center gap-3">
+          <span class="inline-grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-surface-2 text-fg-muted">
+            <Icon name={activePlaygroundTab.icon} size={18} />
+          </span>
+          <div class="min-w-0">
+            <h1 class="text-[15px] font-semibold text-fg">{activePlaygroundTab.label} playground</h1>
+            <p class="text-[11px] text-fg-subtle">{activePlaygroundTab.blurb}</p>
+          </div>
+        </div>
+        <!-- Modality tabs — the unified playground for every local model type. -->
+        <div role="tablist" aria-label="Playground modality" class="flex flex-wrap gap-1 rounded-lg border border-border bg-surface p-1">
+          {#each PLAYGROUND_TABS as t (t.id)}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={playgroundTab === t.id}
+              class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors {playgroundTab === t.id ? 'bg-accent text-accent-fg' : 'text-fg-muted hover:bg-surface-2'}"
+              onclick={() => (playgroundTab = t.id)}
+            >
+              <Icon name={t.icon} size={13} />
+              {t.label}
+              {#if !t.ready}
+                <span class="rounded bg-surface-2 px-1 py-0.5 text-[9px] text-fg-subtle">soon</span>
+              {/if}
+            </button>
+          {/each}
+        </div>
+
+        {#if playgroundTab === "text"}
+        <!-- minmax(0,…) on both tracks is load-bearing: without it the long curl
+             <pre> blocks on the right force their track wider than the viewport,
+             spilling the page into horizontal scroll and starving this hero
+             column. The prompt+response is the important part, so it takes the
+             larger share. -->
+        <div class="grid gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
         <!-- Live run: prompt in, tokens streamed out, with latency + tokens/sec
              so the test reads like a real-world generation, not a black box. -->
         <div class="min-w-0 rounded-lg border border-border bg-surface p-4">
@@ -2752,7 +3504,7 @@
               </button>
             {:else}
               <button
-                class="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-on-accent disabled:opacity-50"
+                class="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
                 disabled={!selectedModel || !running}
                 onclick={() => void runTestStream()}
               >
@@ -2969,6 +3721,16 @@
             </div>
           </div>
         </div>
+        </div>
+        {:else if playgroundTab === "tts"}
+        <TtsPlayground />
+        {:else if playgroundTab === "stt"}
+        <SttPlayground />
+        {:else if playgroundTab === "embeddings"}
+        <EmbeddingsPlayground models={overview.installedModels.map((m) => m.name)} {running} />
+        {:else if playgroundTab === "image"}
+        <ImagegenPlayground onManageModels={() => { activeView = "models"; selectedFamilyId = "image"; }} />
+        {/if}
       </section>
       {:else if activeView === "dictation"}
       <section id="dictation" class="w-full">
@@ -2993,7 +3755,7 @@
               <button class="rounded-md border border-border px-3 py-1.5 text-[12px] text-fg hover:bg-surface-2 disabled:opacity-50" disabled={busy !== null} onclick={() => refresh()}>
                 <Icon name="refresh-cw" size={12} class="inline mr-1" /> Refresh model list
               </button>
-              <button class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-on-accent disabled:opacity-50" disabled={!configDirty || busy === "save"} onclick={saveConfig}>Save changes</button>
+              <button class="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed" disabled={!configDirty || busy === "save"} onclick={saveConfig}>Save changes</button>
             </div>
           </div>
           {#if external}

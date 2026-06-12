@@ -7,17 +7,20 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use russh::client;
-use russh_keys::key;
-use tokio::io::copy_bidirectional;
+use russh::keys::{self, HashAlg, PublicKey};
+use tokio::io::{copy_bidirectional, AsyncWriteExt};
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::registry::{
     SshAuthKind, SshConnection, SshConnectionId, SshForwardKind, SshTunnelConnection, SshTunnelId,
 };
-use crate::ssh::interaction::{HostKeyDecision, HostKeyPrompt, HostKeyState, SshInteractor};
+use crate::ssh::interaction::{
+    HostKeyDecision, HostKeyPrompt, HostKeyState, SshInteractor, PROMPT_TIMEOUT,
+};
+use crate::ssh::probe::HostTrust;
+use crate::ssh::secret::SecretString;
 
 /// A fully-resolved tunnel: an [`SshTunnelConnection`] joined with its
 /// [`SshConnection`]. Carries everything the command/spawn builders read, so
@@ -139,13 +142,25 @@ pub enum SshError {
 
     #[error("system ssh is not installed")]
     BinaryMissing,
+
+    /// The user declined the host-key trust prompt (or it timed out). Fail
+    /// closed: no credentials were sent and nothing was written to
+    /// `known_hosts`.
+    #[error("the host key for {0} was not accepted")]
+    HostKeyRejected(String),
 }
 
 pub type Result<T> = std::result::Result<T, SshError>;
 
 #[derive(Debug)]
 pub enum SshProcess {
-    System(std::process::Child),
+    System {
+        child: std::process::Child,
+        /// Keeps a Trust-Once pinned known_hosts file alive (auto-deleted on
+        /// drop) for the child's lifetime, so `ssh` can re-read it and nothing
+        /// is persisted past the session.
+        pinned_known_hosts: Option<tempfile::TempPath>,
+    },
     Russh {
         running: Arc<AtomicBool>,
         alive: Arc<AtomicBool>,
@@ -155,7 +170,7 @@ pub enum SshProcess {
 impl SshProcess {
     pub fn stop(&mut self) {
         match self {
-            Self::System(child) => {
+            Self::System { child, .. } => {
                 let _ = child.kill();
             }
             Self::Russh { running, .. } => {
@@ -166,7 +181,7 @@ impl SshProcess {
 
     pub fn is_running(&mut self) -> bool {
         match self {
-            Self::System(child) => match child.try_wait() {
+            Self::System { child, .. } => match child.try_wait() {
                 Ok(Some(_)) | Err(_) => false,
                 Ok(None) => true,
             },
@@ -188,8 +203,9 @@ pub struct RusshClientHandler {
     pub(crate) ssh_host: String,
     pub(crate) ssh_port: u16,
     /// Decides untrusted host keys. `None` preserves the legacy silent TOFU
-    /// (learn a new key, reject a changed one) for headless callers — tunnels
-    /// and the MCP agent — that have no window to prompt.
+    /// (learn a new key, reject a changed one) for truly headless callers —
+    /// the MCP agent — that have no window to prompt. UI-triggered paths
+    /// (sessions, tunnels, connection tests) must pass a real interactor.
     interactor: Option<Arc<dyn SshInteractor>>,
 }
 
@@ -207,8 +223,8 @@ impl RusshClientHandler {
     }
 
     /// Persist a host key to `known_hosts`, logging (not failing) on error.
-    fn learn(&self, key: &key::PublicKey) {
-        if let Err(e) = russh_keys::learn_known_hosts(&self.ssh_host, self.ssh_port, key) {
+    fn learn(&self, key: &PublicKey) {
+        if let Err(e) = keys::known_hosts::learn_known_hosts(&self.ssh_host, self.ssh_port, key) {
             tracing::warn!(
                 host = %self.ssh_host,
                 port = self.ssh_port,
@@ -220,10 +236,7 @@ impl RusshClientHandler {
 
     /// First-contact key. With no interactor, keep the legacy silent learn;
     /// with one, ask the user and honour their choice.
-    async fn decide_new_key(
-        &self,
-        key: &key::PublicKey,
-    ) -> std::result::Result<bool, russh::Error> {
+    async fn decide_new_key(&self, key: &PublicKey) -> std::result::Result<bool, russh::Error> {
         let Some(interactor) = &self.interactor else {
             self.learn(key);
             return Ok(true);
@@ -247,7 +260,7 @@ impl RusshClientHandler {
     /// explicitly approves replacing the stored key.
     async fn decide_changed_key(
         &self,
-        key: &key::PublicKey,
+        key: &PublicKey,
         line: usize,
     ) -> std::result::Result<bool, russh::Error> {
         let Some(interactor) = &self.interactor else {
@@ -295,8 +308,8 @@ impl RusshClientHandler {
     /// Build the prompt payload for the frontend (the interactor fills in the
     /// `flow_id`). For a changed key, look up the previously-trusted key of the
     /// same algorithm so the dialog can show old-vs-new fingerprints.
-    fn prompt(&self, key: &key::PublicKey, state: HostKeyState) -> HostKeyPrompt {
-        let key_type = key.name().to_string();
+    fn prompt(&self, key: &PublicKey, state: HostKeyState) -> HostKeyPrompt {
+        let key_type = key.algorithm().as_str().to_string();
         let expected_fingerprint = match state {
             HostKeyState::Changed => crate::ssh::known_hosts::stored_fingerprint(
                 &self.ssh_host,
@@ -310,28 +323,27 @@ impl RusshClientHandler {
             port: self.ssh_port,
             state,
             key_type,
-            fingerprint: format!("SHA256:{}", key.fingerprint()),
+            fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
             expected_fingerprint,
         }
     }
 }
 
-#[async_trait]
 impl client::Handler for RusshClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &key::PublicKey,
+        server_public_key: &PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        match russh_keys::check_known_hosts(&self.ssh_host, self.ssh_port, server_public_key) {
+        match keys::check_known_hosts(&self.ssh_host, self.ssh_port, server_public_key) {
             // Already trusted — proceed silently.
             Ok(true) => Ok(true),
             // First contact: trust-on-first-use, surfacing the decision when a UI
             // interactor is present.
             Ok(false) => self.decide_new_key(server_public_key).await,
             // Mismatch with the recorded key: reject unless the user approves.
-            Err(russh_keys::Error::KeyChanged { line }) => {
+            Err(keys::Error::KeyChanged { line }) => {
                 self.decide_changed_key(server_public_key, line).await
             }
             Err(e) => {
@@ -363,13 +375,222 @@ pub fn build_tunnel_key(
     format!("{ssh_user}@{ssh_host}:{ssh_port}:{remote_host}->{remote_port}")
 }
 
+/// How a spawned system `ssh` should verify the server's host key.
+#[derive(Debug)]
+pub enum SystemHostTrust {
+    /// Legacy `accept-new`: silently learn unknown keys, reject changed ones.
+    /// Used when there is no interactor (headless callers), the host sits
+    /// behind a `ProxyJump` (we can't dial it directly to pre-flight), or the
+    /// pre-flight handshake itself failed (russh may lack an algorithm the
+    /// server requires — never regress a tunnel system `ssh` could open).
+    AcceptNew,
+    /// The key is in `known_hosts` (already trusted, or the user just chose
+    /// Trust & Save): enforce strictly so a swap after the pre-flight fails.
+    Strict,
+    /// Trust Once: pin exactly the key the user approved via a throwaway
+    /// known_hosts file; nothing is persisted past this process.
+    PinnedOnce(tempfile::TempPath),
+}
+
+impl SystemHostTrust {
+    fn args(&self) -> Vec<String> {
+        match self {
+            Self::AcceptNew => vec!["-o".into(), "StrictHostKeyChecking=accept-new".into()],
+            Self::Strict => vec!["-o".into(), "StrictHostKeyChecking=yes".into()],
+            Self::PinnedOnce(path) => vec![
+                "-o".into(),
+                "StrictHostKeyChecking=yes".into(),
+                // Only the pinned file: a Trust-Once on a *changed* key must
+                // not trip over the stale entry still in ~/.ssh/known_hosts.
+                "-o".into(),
+                format!("UserKnownHostsFile={}", path.display()),
+                "-o".into(),
+                "GlobalKnownHostsFile=/dev/null".into(),
+            ],
+        }
+    }
+}
+
+/// What the pre-flight handshake captures off the server's host key. Strings
+/// only (no `PublicKey`), so learning/pinning is a plain line write in
+/// the standard OpenSSH format.
+struct CapturedHostKey {
+    key_type: String,
+    key_base64: String,
+    fingerprint: String,
+    trust: HostTrust,
+}
+
+/// Read-only handler that records the server key and lets the handshake
+/// complete (we never authenticate on this connection) — the probe's twin,
+/// but keeping the raw key material so the caller can learn or pin it.
+#[derive(Clone)]
+struct KeyCaptureHandler {
+    host: String,
+    port: u16,
+    captured: Arc<std::sync::Mutex<Option<CapturedHostKey>>>,
+}
+
+impl client::Handler for KeyCaptureHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        key: &PublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
+        use russh::keys::PublicKeyBase64;
+        let trust = match keys::check_known_hosts(&self.host, self.port, key) {
+            Ok(true) => HostTrust::Trusted,
+            Ok(false) => HostTrust::New,
+            Err(keys::Error::KeyChanged { .. }) => HostTrust::Changed,
+            Err(_) => HostTrust::Unknown,
+        };
+        *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = Some(CapturedHostKey {
+            key_type: key.algorithm().as_str().to_string(),
+            key_base64: key.public_key_base64(),
+            fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+            trust,
+        });
+        Ok(true)
+    }
+}
+
+/// Pre-flight the host key for a system-`ssh` spawn. With a UI interactor we
+/// fetch the server key over a throwaway unauthenticated handshake, surface
+/// new/changed keys through the same Trust dialog the russh path uses, and
+/// return the strictness the child should run with. Every fallback to
+/// `AcceptNew` is the pre-2026-06 status quo, never something weaker.
+async fn resolve_system_host_trust(
+    profile: &EffectiveSshTunnel,
+    interactor: Option<&Arc<dyn SshInteractor>>,
+) -> Result<SystemHostTrust> {
+    let Some(interactor) = interactor else {
+        return Ok(SystemHostTrust::AcceptNew);
+    };
+    if profile
+        .proxy_jump
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        return Ok(SystemHostTrust::AcceptNew);
+    }
+
+    let captured: Arc<std::sync::Mutex<Option<CapturedHostKey>>> = Arc::default();
+    let handler = KeyCaptureHandler {
+        host: profile.ssh_host.clone(),
+        port: profile.ssh_port,
+        captured: Arc::clone(&captured),
+    };
+    let config = Arc::new(client::Config::default());
+    let addr = format!("{}:{}", profile.ssh_host, profile.ssh_port);
+    // The handle (when the handshake completes) drops immediately — this
+    // connection never authenticates.
+    let _ = tokio::time::timeout(START_TIMEOUT, client::connect(config, addr, handler)).await;
+
+    let Some(captured) = captured.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        tracing::warn!(
+            host = %profile.ssh_host,
+            port = profile.ssh_port,
+            "host-key pre-flight captured no key; falling back to accept-new"
+        );
+        return Ok(SystemHostTrust::AcceptNew);
+    };
+
+    let state = match captured.trust {
+        HostTrust::Trusted => return Ok(SystemHostTrust::Strict),
+        HostTrust::New => HostKeyState::New,
+        HostTrust::Changed => HostKeyState::Changed,
+        HostTrust::Unknown => {
+            tracing::warn!(
+                host = %profile.ssh_host,
+                "known_hosts unreadable during pre-flight; falling back to accept-new"
+            );
+            return Ok(SystemHostTrust::AcceptNew);
+        }
+    };
+
+    let prompt = HostKeyPrompt {
+        host: profile.ssh_host.clone(),
+        port: profile.ssh_port,
+        state,
+        key_type: captured.key_type.clone(),
+        fingerprint: captured.fingerprint.clone(),
+        expected_fingerprint: match state {
+            HostKeyState::Changed => crate::ssh::known_hosts::stored_fingerprint(
+                &profile.ssh_host,
+                profile.ssh_port,
+                &captured.key_type,
+            ),
+            HostKeyState::New => None,
+        },
+    };
+
+    match interactor.host_key_decision(prompt).await {
+        HostKeyDecision::TrustAndSave => {
+            if matches!(state, HostKeyState::Changed) {
+                if let Err(e) =
+                    crate::ssh::known_hosts::remove_host(&profile.ssh_host, profile.ssh_port)
+                {
+                    tracing::warn!(
+                        host = %profile.ssh_host,
+                        error = %e,
+                        "couldn't remove stale known_hosts entry before replacing"
+                    );
+                }
+            }
+            crate::ssh::known_hosts::append_host(
+                &profile.ssh_host,
+                profile.ssh_port,
+                &captured.key_type,
+                &captured.key_base64,
+            )
+            .map_err(|e| SshError::Russh(format!("could not persist host key: {e}")))?;
+            Ok(SystemHostTrust::Strict)
+        }
+        HostKeyDecision::TrustOnce => {
+            use std::io::Write;
+            let mut tmp = tempfile::NamedTempFile::new()
+                .map_err(|e| SshError::Russh(format!("could not pin host key: {e}")))?;
+            writeln!(
+                tmp,
+                "{} {} {}",
+                crate::ssh::known_hosts::host_entry_name(&profile.ssh_host, profile.ssh_port),
+                captured.key_type,
+                captured.key_base64
+            )
+            .map_err(|e| SshError::Russh(format!("could not pin host key: {e}")))?;
+            Ok(SystemHostTrust::PinnedOnce(tmp.into_temp_path()))
+        }
+        HostKeyDecision::Reject => Err(SshError::HostKeyRejected(profile.ssh_host.clone())),
+    }
+}
+
+/// Blocking wrapper for [`resolve_system_host_trust`] — the spawn paths run on
+/// dedicated/blocking threads (never the async worker pool), so a private
+/// runtime here is the same pattern as [`spawn_russh_local_forward`].
+fn resolve_system_host_trust_blocking(
+    profile: &EffectiveSshTunnel,
+    interactor: Option<&Arc<dyn SshInteractor>>,
+) -> Result<SystemHostTrust> {
+    if interactor.is_none() {
+        return Ok(SystemHostTrust::AcceptNew);
+    }
+    let runtime = Runtime::new().map_err(|e| SshError::Russh(e.to_string()))?;
+    runtime.block_on(resolve_system_host_trust(profile, interactor))
+}
+
 pub fn ssh_args(profile: &EffectiveSshTunnel) -> Vec<String> {
+    ssh_args_with_trust(profile, &SystemHostTrust::AcceptNew)
+}
+
+fn ssh_args_with_trust(profile: &EffectiveSshTunnel, trust: &SystemHostTrust) -> Vec<String> {
     let mut args = Vec::with_capacity(24);
     args.push("-N".into());
     args.push("-o".into());
     args.push("BatchMode=yes".into());
-    args.push("-o".into());
-    args.push("StrictHostKeyChecking=accept-new".into());
+    args.extend(trust.args());
     args.push("-o".into());
     args.push("ExitOnForwardFailure=yes".into());
 
@@ -390,9 +611,19 @@ pub fn ssh_args(profile: &EffectiveSshTunnel) -> Vec<String> {
         }
         SshForwardKind::Reverse => {
             args.push("-R".into());
+            // Always name the remote bind address. Without one, a server
+            // running `GatewayPorts yes` (common on bastions) binds the
+            // wildcard address and the user's local service becomes reachable
+            // through the server with zero indication in the UI. `local_host`
+            // is the listen-bind address in both directions (-L binds it
+            // locally, -R requests it server-side); it's loopback unless the
+            // user explicitly opted into a wider bind at save time.
             args.push(format!(
-                "{}:{}:{}",
-                profile.local_port, profile.remote_host, profile.remote_port
+                "{}:{}:{}:{}",
+                reverse_bind_host(profile),
+                profile.local_port,
+                profile.remote_host,
+                profile.remote_port
             ));
         }
         SshForwardKind::Socks => {
@@ -430,16 +661,32 @@ pub fn ssh_args(profile: &EffectiveSshTunnel) -> Vec<String> {
     args
 }
 
+/// The bind address a reverse (-R) forward requests on the server: the
+/// tunnel's `local_host`, falling back to loopback for pre-existing entries
+/// saved before `local_host` applied to reverse forwards. Never empty — an
+/// empty bind address means "all interfaces" to OpenSSH.
+fn reverse_bind_host(profile: &EffectiveSshTunnel) -> &str {
+    let host = profile.local_host.trim();
+    if host.is_empty() {
+        "127.0.0.1"
+    } else {
+        host
+    }
+}
+
 pub fn equivalent_ssh_command(profile: &EffectiveSshTunnel) -> String {
     let mut parts = vec!["ssh".to_string()];
     parts.extend(ssh_args(profile).into_iter().map(|arg| shell_quote(&arg)));
     parts.join(" ")
 }
 
-pub fn spawn_system_ssh(profile: &EffectiveSshTunnel) -> Result<std::process::Child> {
+pub fn spawn_system_ssh(
+    profile: &EffectiveSshTunnel,
+    trust: &SystemHostTrust,
+) -> Result<std::process::Child> {
     let ssh = system_ssh_path()?;
     let mut cmd = StdCommand::new(ssh);
-    cmd.args(ssh_args(profile))
+    cmd.args(ssh_args_with_trust(profile, trust))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -448,24 +695,38 @@ pub fn spawn_system_ssh(profile: &EffectiveSshTunnel) -> Result<std::process::Ch
         .map_err(|e| SshError::SpawnFailed(e.to_string()))
 }
 
-pub fn spawn_tunnel(profile: &EffectiveSshTunnel, password: Option<&str>) -> Result<SshProcess> {
+pub fn spawn_tunnel(
+    profile: &EffectiveSshTunnel,
+    password: Option<&str>,
+    interactor: Option<Arc<dyn SshInteractor>>,
+) -> Result<SshProcess> {
     if should_use_system_ssh(password) {
-        return spawn_system_ssh(profile).map(SshProcess::System);
+        let trust = resolve_system_host_trust_blocking(profile, interactor.as_ref())?;
+        let child = spawn_system_ssh(profile, &trust)?;
+        let pinned_known_hosts = match trust {
+            SystemHostTrust::PinnedOnce(path) => Some(path),
+            _ => None,
+        };
+        return Ok(SshProcess::System {
+            child,
+            pinned_known_hosts,
+        });
     }
 
     if !matches!(profile.forward_kind, SshForwardKind::Local) {
         return Err(SshError::PasswordForwardUnsupported);
     }
-    spawn_russh_local_forward(profile, password)
+    spawn_russh_local_forward(profile, password, interactor)
 }
 
 fn spawn_russh_local_forward(
     profile: &EffectiveSshTunnel,
     password: Option<&str>,
+    interactor: Option<Arc<dyn SshInteractor>>,
 ) -> Result<SshProcess> {
     let password = password
-        .map(str::to_owned)
         .filter(|p| !p.trim().is_empty())
+        .map(|p| SecretString::new(p.to_owned()))
         .ok_or(SshError::PasswordRequired)?;
     let listener = TcpListener::bind((profile.local_host.as_str(), profile.local_port))
         .map_err(|e| SshError::Russh(format!("failed to bind local port: {e}")))?;
@@ -479,6 +740,13 @@ fn spawn_russh_local_forward(
     let alive_for_thread = alive.clone();
     let profile_for_thread = profile.clone();
     let (ready_tx, ready_rx) = mpsc::channel();
+    // A host-key prompt can legitimately park the handshake for up to
+    // PROMPT_TIMEOUT; only the promptless path keeps the tight deadline.
+    let ready_timeout = if interactor.is_some() {
+        START_TIMEOUT + PROMPT_TIMEOUT
+    } else {
+        START_TIMEOUT
+    };
 
     thread::spawn(move || {
         let runtime = match Runtime::new() {
@@ -503,8 +771,10 @@ fn spawn_russh_local_forward(
                 RusshClientHandler {
                     ssh_host: profile_for_thread.ssh_host.clone(),
                     ssh_port: profile_for_thread.ssh_port,
-                    // Port-forward tunnels are headless — keep silent TOFU.
-                    interactor: None,
+                    // Password tunnels prompt like any interactive connect: a
+                    // first-contact MITM here would capture the password, so an
+                    // unknown key must be the user's call, never silent TOFU.
+                    interactor,
                 },
             )
             .await
@@ -512,11 +782,12 @@ fn spawn_russh_local_forward(
 
             let authenticated = tokio::time::timeout(
                 AUTH_TIMEOUT,
-                handle.authenticate_password(&profile_for_thread.ssh_user, &password),
+                handle.authenticate_password(&profile_for_thread.ssh_user, password.as_str()),
             )
             .await
             .map_err(|_| "SSH password authentication timed out".to_string())?
-            .map_err(|e| format!("SSH password authentication failed: {e}"))?;
+            .map_err(|e| format!("SSH password authentication failed: {e}"))?
+            .success();
 
             if !authenticated {
                 return Err("SSH password authentication failed".to_string());
@@ -574,6 +845,12 @@ fn spawn_russh_local_forward(
                     if let Err(e) = copy_bidirectional(&mut stream, &mut channel_stream).await {
                         tracing::debug!(error = %e, "SSH tunnel copy finished with error");
                     }
+                    // Shut both sides down explicitly. `copy_bidirectional`
+                    // returns on the first EOF/error without closing the other
+                    // direction, and a half-closed keep-alive client can pin
+                    // the SSH channel open (the session caps channels at 128).
+                    let _ = stream.shutdown().await;
+                    let _ = channel_stream.shutdown().await;
                 });
             }
 
@@ -586,10 +863,16 @@ fn spawn_russh_local_forward(
         }
     });
 
-    match ready_rx.recv_timeout(START_TIMEOUT) {
+    match ready_rx.recv_timeout(ready_timeout) {
         Ok(Ok(())) => Ok(SshProcess::Russh { running, alive }),
         Ok(Err(err)) => Err(SshError::Russh(err)),
-        Err(_) => Err(SshError::ReadinessTimeout(profile.local_port)),
+        Err(_) => {
+            // Tell the worker to wind down — otherwise a connect that resolves
+            // *after* this deadline would keep serving on an orphaned listener
+            // no manager entry owns.
+            running.store(false, Ordering::Relaxed);
+            Err(SshError::ReadinessTimeout(profile.local_port))
+        }
     }
 }
 
@@ -610,15 +893,14 @@ pub fn wait_for_ready(child: &mut std::process::Child, local_port: u16) -> Resul
     }
 }
 
-pub fn test_system_connection(profile: &EffectiveSshTunnel) -> Result<()> {
+pub fn test_system_connection(profile: &EffectiveSshTunnel, trust: &SystemHostTrust) -> Result<()> {
     let ssh = system_ssh_path()?;
     let mut args = Vec::with_capacity(18);
     args.push("-o".to_string());
     args.push("BatchMode=yes".to_string());
     args.push("-o".to_string());
     args.push("ConnectTimeout=10".to_string());
-    args.push("-o".to_string());
-    args.push("StrictHostKeyChecking=accept-new".to_string());
+    args.extend(trust.args());
     if profile.ssh_port != DEFAULT_SSH_PORT {
         args.push("-p".to_string());
         args.push(profile.ssh_port.to_string());
@@ -661,17 +943,27 @@ pub fn test_system_connection(profile: &EffectiveSshTunnel) -> Result<()> {
     }
 }
 
-pub fn test_connection(profile: &EffectiveSshTunnel, password: Option<&str>) -> Result<()> {
+pub fn test_connection(
+    profile: &EffectiveSshTunnel,
+    password: Option<&str>,
+    interactor: Option<Arc<dyn SshInteractor>>,
+) -> Result<()> {
     if should_use_system_ssh(password) {
-        return test_system_connection(profile);
+        let trust = resolve_system_host_trust_blocking(profile, interactor.as_ref())?;
+        // `trust` (and any Trust-Once pin file) lives until the child exits.
+        return test_system_connection(profile, &trust);
     }
-    test_russh_connection(profile, password)
+    test_russh_connection(profile, password, interactor)
 }
 
-fn test_russh_connection(profile: &EffectiveSshTunnel, password: Option<&str>) -> Result<()> {
+fn test_russh_connection(
+    profile: &EffectiveSshTunnel,
+    password: Option<&str>,
+    interactor: Option<Arc<dyn SshInteractor>>,
+) -> Result<()> {
     let password = password
-        .map(str::to_owned)
         .filter(|p| !p.trim().is_empty())
+        .map(|p| SecretString::new(p.to_owned()))
         .ok_or(SshError::PasswordRequired)?;
     let profile = profile.clone();
     thread::spawn(move || {
@@ -685,8 +977,9 @@ fn test_russh_connection(profile: &EffectiveSshTunnel, password: Option<&str>) -
                 RusshClientHandler {
                     ssh_host: profile.ssh_host.clone(),
                     ssh_port: profile.ssh_port,
-                    // Port-forward tunnels are headless — keep silent TOFU.
-                    interactor: None,
+                    // The test path sends the real password — an unknown key
+                    // must go through the trust prompt, same as a real connect.
+                    interactor,
                 },
             )
             .await
@@ -694,11 +987,12 @@ fn test_russh_connection(profile: &EffectiveSshTunnel, password: Option<&str>) -
 
             let authenticated = tokio::time::timeout(
                 AUTH_TIMEOUT,
-                handle.authenticate_password(&profile.ssh_user, &password),
+                handle.authenticate_password(&profile.ssh_user, password.as_str()),
             )
             .await
             .map_err(|_| SshError::Russh("SSH password authentication timed out".into()))?
-            .map_err(|e| SshError::Russh(format!("SSH password authentication failed: {e}")))?;
+            .map_err(|e| SshError::Russh(format!("SSH password authentication failed: {e}")))?
+            .success();
             if authenticated {
                 Ok(())
             } else {
@@ -789,6 +1083,46 @@ mod tests {
     }
 
     #[test]
+    fn host_trust_maps_to_strictness_args() {
+        assert_eq!(
+            SystemHostTrust::AcceptNew.args(),
+            vec!["-o", "StrictHostKeyChecking=accept-new"]
+        );
+        assert_eq!(
+            SystemHostTrust::Strict.args(),
+            vec!["-o", "StrictHostKeyChecking=yes"]
+        );
+
+        let pin = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let pin_display = pin.display().to_string();
+        let args = SystemHostTrust::PinnedOnce(pin).args();
+        assert!(args.contains(&"StrictHostKeyChecking=yes".to_string()));
+        assert!(args.contains(&format!("UserKnownHostsFile={pin_display}")));
+        // The stale ~/.ssh entry must not veto a Trust-Once on a changed key,
+        // and the global file must not re-open a hole either.
+        assert!(args.contains(&"GlobalKnownHostsFile=/dev/null".to_string()));
+    }
+
+    #[test]
+    fn display_command_keeps_legacy_accept_new() {
+        // `equivalent_ssh_command` (UI display / legacy headless) goes through
+        // `ssh_args`, which must stay on accept-new — strictness is decided per
+        // spawn by the pre-flight, not baked into the shown command.
+        let cmd = equivalent_ssh_command(&profile());
+        assert!(cmd.contains("StrictHostKeyChecking=accept-new"));
+    }
+
+    #[test]
+    fn rejecting_host_key_is_a_dedicated_error() {
+        // The UI matches on this message shape to explain a declined prompt.
+        let err = SshError::HostKeyRejected("db.example.com".into());
+        assert_eq!(
+            err.to_string(),
+            "the host key for db.example.com was not accepted"
+        );
+    }
+
+    #[test]
     fn tunnel_key_matches_expected_shape() {
         assert_eq!(
             build_tunnel_key("deploy", "bastion", 22, "db", 5432),
@@ -828,5 +1162,28 @@ mod tests {
         let command = equivalent_ssh_command(&p);
         assert!(command.contains("-D 127.0.0.1:15432"));
         assert!(!command.contains("-L"));
+    }
+
+    /// Pins the P1-2 fix from the 2026-06-10 assessment: a reverse forward
+    /// must always name its server-side bind address. Without one, a server
+    /// running `GatewayPorts yes` binds the wildcard address and exposes the
+    /// forwarded local service to the network.
+    #[test]
+    fn reverse_forward_always_names_a_bind_address() {
+        let mut p = profile();
+        p.forward_kind = SshForwardKind::Reverse;
+        let command = equivalent_ssh_command(&p);
+        assert!(command.contains("-R 127.0.0.1:15432:db.internal:5432"));
+
+        // Pre-existing entries saved before local_host applied to reverse
+        // forwards (or with a blank host) still get loopback, never "".
+        p.local_host = "  ".into();
+        let command = equivalent_ssh_command(&p);
+        assert!(command.contains("-R 127.0.0.1:15432:db.internal:5432"));
+
+        // An explicitly saved wide bind (allow_wide_bind opt-in) is honored.
+        p.local_host = "0.0.0.0".into();
+        let command = equivalent_ssh_command(&p);
+        assert!(command.contains("-R 0.0.0.0:15432:db.internal:5432"));
     }
 }

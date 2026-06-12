@@ -117,6 +117,12 @@ export interface SmokeTestResult {
   totalDurationMs: number | null;
 }
 
+/** Result of `ollama_embed` — one vector per input, for the Embeddings playground. */
+export interface OllamaEmbedResult {
+  model: string;
+  embeddings: number[][];
+}
+
 /** Streamed events from `ollama_test_stream` — the live Test prompt run.
  * Tagged by `kind`, mirroring the install/pull channels. */
 export type GenerateEvent =
@@ -191,12 +197,18 @@ export interface SttStatus {
   engines?: string[];
 }
 
-/** One curated speech-to-text catalog entry (static, ships with the sidecar). */
+/**
+ * One speech-to-text catalog entry from the live PortBay Model Catalog (signed
+ * manifest + cache + bundled fallback — see `commands/model_catalog.rs`).
+ */
 export interface SttCatalogModel {
   id: string;
-  engine: "whisper" | "parakeet";
+  /** "whisper" | "parakeet" | "qwen3" | "cohere" | "nemotron". */
+  engine: string;
   displayName: string;
   repoModel: string;
+  /** Parakeet generation ("v2" | "v3"); absent for Whisper. */
+  parakeetVersion?: string;
   /** Display-only approximation; the installed size is measured on disk. */
   approxSizeBytes: number;
   languages: string;
@@ -204,6 +216,10 @@ export interface SttCatalogModel {
   recommended: boolean;
   /** Whether capture emits live partial transcripts (batch models don't). */
   streaming: boolean;
+  /** Model-weights license label (e.g. "MIT", "CC-BY-4.0"). */
+  license?: string;
+  /** Authoritative license/model card URL. */
+  licenseUrl?: string;
 }
 
 /** One installed (fully downloaded) STT model. */
@@ -220,9 +236,106 @@ export interface SttOverview {
   installed: SttInstalledModel[];
   modelsDir: string;
   disk: DiskUsage;
+  /** Catalog served from cache/bundled after a failed live refresh. */
+  catalogStale: boolean;
+  /** Provenance of `catalog`: "live" | "cache" | "bundled". */
+  catalogSource: string;
+  /** Microphone TCC status for PortBay: "authorized" | "denied" |
+   * "restricted" | "not_determined" | "unknown". */
+  micPermission: string;
 }
 
 /** Channel events streamed by `stt_download_model`. */
 export type SttDownloadEvent =
   | { kind: "progress"; fraction: number; phase: string }
   | { kind: "done"; success: boolean; cancelled: boolean; error: string | null };
+
+/** One selectable text-to-speech voice. */
+export interface TtsVoice {
+  id: string;
+  label: string;
+}
+
+/** One text-to-speech model from the PortBay Model Catalog (Kokoro today). */
+export interface TtsCatalogModel {
+  id: string;
+  engine: string;
+  displayName: string;
+  repoModel: string;
+  approxSizeBytes: number;
+  languages: string;
+  speedNote: string;
+  recommended: boolean;
+  voices: TtsVoice[];
+  defaultVoice?: string;
+  /** Model-weights license label. */
+  license?: string;
+  /** Authoritative license/model card URL. */
+  licenseUrl?: string;
+}
+
+/** Everything the AI page's Text-to-Speech playground renders, one call. */
+export interface TtsOverview {
+  status: SttStatus;
+  catalog: TtsCatalogModel[];
+  installed: SttInstalledModel[];
+  modelsDir: string;
+  catalogStale: boolean;
+  /** Provenance of the catalog list: "live" | "cache" | "bundled". */
+  catalogSource: string;
+}
+
+/** One on-device image-generation model from the PortBay Model Catalog
+ *  (FLUX / SD3 today, via the portbay-imagegen DiffusionKit sidecar). */
+export interface ImageCatalogModel {
+  id: string;
+  engine: string; // "flux" | "sd" | "sdxl" | "stable-diffusion"
+  displayName: string;
+  repoModel: string;
+  approxSizeBytes: number;
+  /** Default diffusion steps for this model (FLUX-schnell ≈ 4, SD ≈ 25). */
+  defaultSteps: number;
+  /** Native/recommended square resolution (e.g. 1024). */
+  defaultSize: number;
+  speedNote: string;
+  recommended: boolean;
+  /** Optional override for the HF glob the sidecar fetches (community layouts
+   *  like SD-Turbo's `original/compiled/`); omitted = engine default. */
+  compiledGlob?: string;
+  /** Model-weights license label. */
+  license?: string;
+  /** Authoritative license/model card URL. */
+  licenseUrl?: string;
+}
+
+/** Apple Image Playground availability (the `imageplayground_check` command).
+ *  `reason` ∈ requires_macos_15_4 | apple_intelligence_unavailable |
+ *  unsupported_device | sidecar_missing | sidecar_failed | unsupported. */
+export interface ImagePlaygroundStatus {
+  available: boolean;
+  reason?: string | null;
+}
+
+export interface ImagegenInstalledModel {
+  id: string;
+  engine: string;
+  sizeBytes: number;
+}
+
+/** Everything the Image-generation category + playground render, one call. */
+export interface ImagegenOverview {
+  status: SttStatus;
+  catalog: ImageCatalogModel[];
+  installed: ImagegenInstalledModel[];
+  modelsDir: string;
+  catalogStale: boolean;
+  /** "live" (verified manifest), "cache", or "bundled". */
+  catalogSource: string;
+}
+
+/** Channel events streamed by `imagegen_generate` — per-step diffusion
+ *  progress, then a terminal frame carrying the base64 PNG. */
+export type ImagegenGenerateEvent =
+  | { kind: "progress"; fraction: number; step: number; totalSteps: number }
+  | { kind: "done"; imageBase64: string }
+  | { kind: "error"; message: string };

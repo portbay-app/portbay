@@ -98,7 +98,11 @@ impl WebServer {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Readiness {
-    /// HTTP GET against a path. The most common case for Next, Vite, PHP.
+    /// "Serving HTTP on the project port" — the most common case for Next,
+    /// Vite, PHP. NOTE: the supervisor probes this at the TCP layer (see
+    /// `readiness_to_pc_probe`): the probe recurs every 2 s for the life of
+    /// the process, and real GETs make framework dev servers re-render and
+    /// spam every HMR client with rebuild cycles.
     Http {
         path: String,
         #[serde(default = "default_readiness_timeout")]

@@ -4,14 +4,12 @@
 # change. The LAST matching pattern wins, so order matters (general first,
 # specific last).
 #
-# SETUP NOTE: the @portbay-app/* teams below are placeholders. Create them under
-# the portbay-app org (or replace each with an individual @handle) for these
-# rules to take effect. Until the teams exist, GitHub silently ignores unknown
-# owners. Branch protection should require CODEOWNERS review on the sensitive
-# paths (licensing, core runtime, cloud boundary, CI) — see
+# The @portbay-app/* teams exist in the org (created 2026-06-05, compliance
+# C-16): maintainers (maintain), core-maintainers (push), app-maintainers
+# (push). Branch protection on `main` requires the core CI checks plus one
+# code-owner review on PRs (admins exempt while the project is solo-maintained;
+# tighten enforce_admins when a second maintainer joins). See
 # docs/maintainers/review-checklist.md.
-#
-# TODO(maintainers): replace the default owner with the real maintainer handle.
 
 # ----------------------------------------------------------------------------
 # Default owner for everything not matched more specifically.

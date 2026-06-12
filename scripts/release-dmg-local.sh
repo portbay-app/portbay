@@ -36,7 +36,8 @@ KEY_ID="${KEY_ID:-LLRT66A2TF}"
 
 SIGNING_IDENTITY="Developer ID Application: Tribal House LLC (V2CYH6HZT8)"
 TARGET="aarch64-apple-darwin"
-REPO_DIR="/Volumes/DevSSD/projects/Clients/portbay"
+# Self-relative (the pattern the other scripts use) — no machine-local path.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd "$REPO_DIR"
 
@@ -73,6 +74,20 @@ echo "==> Preparing sidecar binaries..."
 TARGET_TRIPLE="$TARGET" ./scripts/build-hosts-helper.sh
 TARGET_TRIPLE="$TARGET" ./scripts/build-mcp.sh
 TARGET_TRIPLE="$TARGET" ./scripts/build-afm.sh
+# PortBay agent sidecar (Cline-derived fork TUI): rebuild only when the
+# vendored fork checkout is reachable (private dev machines). A checkout
+# without it bundles whatever src-tauri/binaries/ already holds — same
+# posture as the other locally-built AI sidecars. Tauri then signs it with
+# Entitlements.plist (the bun binary needs its allow-jit under hardened
+# runtime, or it dies on launch in the notarized bundle).
+agent_fork_dir="${PORTBAY_CLINE_DIR:-${REPO_DIR}/../portbay-cline}"
+if [ -f "${agent_fork_dir}/apps/cli/package.json" ]; then
+  # build-portbay-agent.sh runs the check-agent-branding ship gate itself.
+  TARGET_TRIPLE="$TARGET" PORTBAY_CLINE_DIR="$agent_fork_dir" ./scripts/build-portbay-agent.sh
+else
+  echo "==> portbay-cline fork not found at ${agent_fork_dir} — bundling existing portbay-agent binary as-is."
+  ./scripts/check-agent-branding.sh "src-tauri/binaries/portbay-agent-${TARGET}"
+fi
 
 # ---- macOS 26 Liquid Glass icon is wired statically via bundle.resources +
 # src-tauri/Info.plist (compiled/Assets.car is committed), so a plain build
@@ -113,7 +128,29 @@ echo "==> Verifying..."
 xcrun stapler validate "$DMG"
 spctl -a -t open --context context:primary-signature -vv "$DMG"
 
+# ---- Version-name the updater artifacts. Tauri emits the updater tarball as
+# an unversioned `PortBay.app.tar.gz`; every asset a user downloads must carry
+# the version in its filename (v0.1.4 shipped a versionless tarball). The DMG
+# is already versioned by the bundler (`PortBay_X.Y.Z_aarch64.dmg`).
+VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json | head -1)"
+[[ -n "$VERSION" ]] || die "Couldn't read version from src-tauri/tauri.conf.json"
+MACOS_BUNDLE_DIR="src-tauri/target/$TARGET/release/bundle/macos"
+TARBALL="$(ls -t "$MACOS_BUNDLE_DIR/"*.app.tar.gz 2>/dev/null | head -1 || true)"
+VERSIONED_TARBALL=""
+if [[ -n "$TARBALL" && "$(basename "$TARBALL")" != *"$VERSION"* ]]; then
+  VERSIONED_TARBALL="$MACOS_BUNDLE_DIR/PortBay_${VERSION}_aarch64.app.tar.gz"
+  cp "$TARBALL" "$VERSIONED_TARBALL"
+  [[ -f "$TARBALL.sig" ]] && cp "$TARBALL.sig" "$VERSIONED_TARBALL.sig"
+elif [[ -n "$TARBALL" ]]; then
+  VERSIONED_TARBALL="$TARBALL"
+fi
+
 echo ""
 echo "DONE. Branded, signed, notarized, stapled DMG:"
 echo "  $DMG"
-echo "Open it to confirm the branded window, then ship it."
+if [[ -n "$VERSIONED_TARBALL" ]]; then
+  echo "Updater tarball (versioned — upload THIS name and reference it in latest.json):"
+  echo "  $VERSIONED_TARBALL"
+  echo "  $VERSIONED_TARBALL.sig"
+fi
+echo "Open the DMG to confirm the branded window, then ship it."

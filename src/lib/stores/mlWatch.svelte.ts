@@ -16,6 +16,7 @@
  * doesn't survive an app restart.
  */
 import { invokeQuiet } from "$lib/ipc";
+import { isValidPid } from "$lib/ssh/pid";
 import { errorBus } from "$lib/stores/errors.svelte";
 import type { ExecResult } from "$lib/types/sshTunnels";
 
@@ -133,7 +134,11 @@ function createMlWatch() {
   }
 
   async function pollHost(connectionId: string, hostWatches: Watch[]) {
-    const pids = hostWatches.filter((w) => w.kind === "process").map((w) => w.ref);
+    // Refs are interpolated into a shell `for` loop below — digits only.
+    const pids = hostWatches
+      .filter((w) => w.kind === "process")
+      .map((w) => w.ref)
+      .filter(isValidPid);
     const gpuWatched = hostWatches.some((w) => w.kind === "gpu");
 
     const parts: string[] = [];
@@ -200,10 +205,13 @@ function createMlWatch() {
   async function fireProcess(connectionId: string, w: Watch) {
     // Best-effort crash signal: did the OOM-killer take it? That's the one
     // failure we can read for a process we don't parent (and the #1 ML crash).
-    const oom = await exec(
-      connectionId,
-      `(dmesg 2>/dev/null || journalctl -k --no-pager 2>/dev/null) | grep -iE "killed process ${w.ref}\\b|out of memory.*${w.ref}\\b" | tail -1`,
-    );
+    // The ref lands inside a grep pattern — only a pure-digit PID may go there.
+    const oom = isValidPid(w.ref)
+      ? await exec(
+          connectionId,
+          `(dmesg 2>/dev/null || journalctl -k --no-pager 2>/dev/null) | grep -iE "killed process ${w.ref}\\b|out of memory.*${w.ref}\\b" | tail -1`,
+        )
+      : null;
     const oomKilled = !!oom && oom.trim().length > 0;
 
     if (oomKilled) {

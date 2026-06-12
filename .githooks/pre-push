@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# PortBay pre-push hook — the last gate before the public remote. Runs the
-# full-tree boundary check so nothing forbidden reaches GitHub even if it slipped
-# past an earlier commit. Nothing is sent to the remote if this fails.
+# PortBay pre-push hook — the last gate before the public remote. Gates exactly
+# what is outgoing: the boundary check runs against the TREE of each pushed
+# commit and the secret scan against the pushed COMMIT RANGE. Nothing is sent
+# to the remote if either fails.
 #
 # Installed via core.hooksPath=.githooks. Bypass: `git push --no-verify` — don't.
 
@@ -14,33 +15,49 @@ cd "$(git rev-parse --show-toplevel)"
 remote_name="${1:-}"
 remote_url="${2:-${1:-}}"
 
+# The refs being pushed arrive on stdin, one line per ref:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# Read them once; both gates below consume the same list.
+pushes=""
+while IFS= read -r line; do
+  [ -n "$line" ] && pushes="${pushes}${line}
+"
+done
+
+zero=0000000000000000000000000000000000000000
 fail=0
 
-# The tree-wide boundary scan gates the PUBLIC repo only (its documented
-# intent). It scans untracked files too, so on a dev machine the private
-# overlay WIP (e.g. the visual editor) would otherwise block pushes to the
-# private `cloud` remote — where that code is exactly where it belongs.
-# Fail-closed: only the known private overlay repo skips the scan; any other
-# remote (origin or something new) is treated as public and gated.
+# Boundary gate — PUBLIC remotes only (its documented intent). It scans the
+# committed tree of each outgoing ref (`--ref`), never the working tree: local
+# private-overlay WIP sitting uncommitted in the tree can't false-block a push
+# of a branch that doesn't contain it, and a forbidden file that IS in the
+# pushed tree always blocks, whether or not it exists locally. Fail-closed:
+# only the known private overlay repo skips the gate; any other remote (origin
+# or something new) is treated as public.
 case "$remote_url" in
   *portbay-cloud*) ;;
   *)
-    if ! bash scripts/check-repo-boundaries.sh; then
-      fail=1
-    fi
+    while IFS=' ' read -r _local_ref local_sha _remote_ref _remote_sha; do
+      [ -z "${local_sha:-}" ] && continue
+      [ "$local_sha" = "$zero" ] && continue # ref deletion — nothing outgoing
+      if ! bash scripts/check-repo-boundaries.sh --ref "$local_sha"; then
+        echo "✗ boundary violation in pushed ref ${_local_ref} (${local_sha})." >&2
+        fail=1
+      fi
+    done <<EOF
+$pushes
+EOF
     ;;
 esac
 
-# Secret scan scoped to the commits actually being pushed. The push range
-# arrives on stdin (one `<local ref> <local sha> <remote ref> <remote sha>`
-# line per ref). Scanning only the outgoing range matters in two ways: an
-# unscoped `gitleaks detect` walks EVERY ref in the object store — in a linked
-# worktree (the public graft) that's the whole private overlay, so unrelated
-# private-branch findings would false-block a clean public push — and a scoped
-# scan is what the "range being pushed" gate was always documented to be.
-zero=0000000000000000000000000000000000000000
+# Secret scan scoped to the commits actually being pushed. Scanning only the
+# outgoing range matters: an unscoped `gitleaks detect` walks EVERY ref in the
+# object store — in a linked worktree (the public graft) that's the whole
+# private overlay, so unrelated private-branch findings would false-block a
+# clean public push — and a scoped scan is what the "range being pushed" gate
+# was always documented to be.
 if command -v gitleaks >/dev/null 2>&1; then
-  while read -r _local_ref local_sha _remote_ref remote_sha; do
+  while IFS=' ' read -r _local_ref local_sha _remote_ref remote_sha; do
     [ -z "${local_sha:-}" ] && continue
     [ "$local_sha" = "$zero" ] && continue # ref deletion — nothing outgoing
     if [ "$remote_sha" = "$zero" ]; then
@@ -57,7 +74,9 @@ if command -v gitleaks >/dev/null 2>&1; then
       echo "✗ gitleaks found a secret in the outgoing commits ($log_opts)." >&2
       fail=1
     fi
-  done
+  done <<EOF
+$pushes
+EOF
 fi
 
 if [ "$fail" -ne 0 ]; then

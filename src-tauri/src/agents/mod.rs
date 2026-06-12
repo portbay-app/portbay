@@ -31,6 +31,10 @@ pub enum AgentKind {
     Qwen,
     Copilot,
     Antigravity,
+    /// PortBay's bundled Cline-derived agent engine. The wire id is lowercase
+    /// `portbay`; parsing is case-insensitive so CLI/user input can be
+    /// `PortBay`, `PORTBAY`, or `portbay`.
+    PortBay,
     /// Local Ollama model run as a chat (not an agentic CLI): dispatch opens
     /// `ollama run <model>` as an interactive REPL with the prompt on the
     /// clipboard. No MCP/tools — it's a chat model, not a file-editing agent.
@@ -39,7 +43,10 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
-    /// Every dispatchable agent, in display order.
+    /// Every user-selectable dispatch agent, in display order.
+    ///
+    /// `PortBay` is intentionally not listed here: it is the internal dispatch
+    /// engine for local-model/Ollama cards, not a separate picker row.
     pub const ALL: [AgentKind; 12] = [
         AgentKind::Claude,
         AgentKind::Codex,
@@ -68,6 +75,7 @@ impl AgentKind {
             AgentKind::Qwen => "qwen",
             AgentKind::Copilot => "copilot",
             AgentKind::Antigravity => "antigravity",
+            AgentKind::PortBay => "portbay",
             AgentKind::Ollama => "ollama",
             AgentKind::Custom => "custom",
         }
@@ -86,6 +94,7 @@ impl AgentKind {
             AgentKind::Qwen => "Qwen Code",
             AgentKind::Copilot => "Copilot CLI",
             AgentKind::Antigravity => "Antigravity",
+            AgentKind::PortBay => "PortBay",
             AgentKind::Ollama => "Ollama",
             AgentKind::Custom => "Custom",
         }
@@ -104,6 +113,7 @@ impl AgentKind {
             "qwen" => AgentKind::Qwen,
             "copilot" => AgentKind::Copilot,
             "antigravity" | "gravity" => AgentKind::Antigravity,
+            "portbay" => AgentKind::PortBay,
             "ollama" => AgentKind::Ollama,
             "custom" => AgentKind::Custom,
             _ => return None,

@@ -178,11 +178,12 @@
       <button
         type="button"
         onclick={reveal}
+        title="Reveal in Finder"
         class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px]
                text-fg-muted hover:text-fg hover:bg-surface-2 transition-colors"
         role="menuitem"
       >
-        <Icon name="folder" size={12} /> Reveal in Finder
+        <Icon name="finder" size={12} /> Reveal
       </button>
       <button
         type="button"

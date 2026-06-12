@@ -20,9 +20,16 @@ export async function listenDeploy(
   onEvent: (ev: DeployEvent) => void,
 ): Promise<() => void> {
   const { listen } = await import("@tauri-apps/api/event");
-  return listen<DeployEvent>("portbay://deploy", (ev) => {
-    if (ev.payload.runId === runId) onEvent(ev.payload);
-  });
+  return listen<DeployEvent>(
+    "portbay://deploy",
+    (ev) => {
+      if (ev.payload.runId === runId) onEvent(ev.payload);
+    },
+    // The backend emits deploy progress point-to-point to the main window
+    // (chunks are raw remote output); a targeted emit skips untargeted
+    // listeners.
+    { target: "main" },
+  );
 }
 
 /** Flag an in-flight deploy run for cancellation (skips queued steps and

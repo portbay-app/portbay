@@ -45,10 +45,11 @@ use crate::commands::ssh_tunnels::{
 };
 use crate::error::{AppError, AppResult};
 use crate::registry::SshConnectionId;
+use crate::ssh::secret::{secret_str, SecretString};
 use crate::state::AppState;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// Channel the streaming transfer command emits progress on.
@@ -162,28 +163,28 @@ async fn session_with(
     let nonblank = |s: Option<&str>| {
         s.map(str::trim)
             .filter(|v| !v.is_empty())
-            .map(str::to_owned)
+            .map(|v| SecretString::new(v.to_owned()))
     };
     let password = match nonblank(password_override) {
         Some(p) => Some(p),
         None => load_stored_password(&conn.id)?,
     };
     let passphrase = match passphrase_override {
-        Some(s) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+        Some(s) if !s.trim().is_empty() => Some(SecretString::new(s.trim().to_owned())),
         // An explicit *empty* override means the user chose "Skip" on the
         // passphrase prompt: forward it as a declined passphrase (`Some("")`)
         // so the backend skips the key and asks for the password instead of
         // re-prompting — and don't silently fall back to a stored passphrase.
-        Some(_) => Some(String::new()),
+        Some(_) => Some(SecretString::new(String::new())),
         None => load_stored_key_passphrase(&conn.id)?,
     };
     let proxy_password = load_stored_proxy_password(&conn.id)?;
     let mut mgr = state.sftp.lock().await;
     mgr.session_for(
         &conn,
-        password.as_deref(),
-        proxy_password.as_deref(),
-        passphrase.as_deref(),
+        secret_str(&password),
+        secret_str(&proxy_password),
+        secret_str(&passphrase),
         interactor,
     )
     .await
@@ -669,7 +670,8 @@ pub async fn sftp_search(
                 }
                 // Stream what we have every ~250 ms so the UI fills in live.
                 if last_emit.elapsed().as_millis() >= 250 {
-                    let _ = app.emit(
+                    let _ = crate::commands::events::emit_to_main(
+                        &app,
                         SFTP_SEARCH_CHANNEL,
                         &SftpSearchBatch {
                             id: input.id.clone(),
@@ -686,7 +688,10 @@ pub async fn sftp_search(
     }
 
     deregister_cancel(&input.id);
-    let _ = app.emit(
+    // Remote file names/paths — main window only, never broadcast (see
+    // `events::emit_to_main`).
+    let _ = crate::commands::events::emit_to_main(
+        &app,
         SFTP_SEARCH_CHANNEL,
         &SftpSearchBatch {
             id: input.id,
@@ -1051,7 +1056,8 @@ fn emit_progress(
     paused: bool,
     error: Option<String>,
 ) {
-    let _ = app.emit(
+    let _ = crate::commands::events::emit_to_main(
+        app,
         SFTP_PROGRESS_CHANNEL,
         SftpProgress {
             id: id.to_string(),

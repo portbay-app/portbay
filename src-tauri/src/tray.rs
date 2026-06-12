@@ -259,12 +259,10 @@ fn build_fallback_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .text(ID_SHOW_WINDOW, "Show PortBay window")
         .text(ID_PREFERENCES, "Preferences…");
     if let Some(latest) = crate::dictation_history::latest() {
-        menu = menu
-            .separator()
-            .text(
-                ID_PASTE_DICTATION,
-                format!("Paste Last Dictation — “{}”", preview_label(&latest.text)),
-            );
+        menu = menu.separator().text(
+            ID_PASTE_DICTATION,
+            format!("Paste Last Dictation — “{}”", preview_label(&latest.text)),
+        );
     }
     menu.separator().text(ID_QUIT, "Quit PortBay").build()
 }

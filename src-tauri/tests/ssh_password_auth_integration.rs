@@ -6,10 +6,9 @@ use std::sync::Arc;
 
 use std::borrow::Cow;
 
-use async_trait::async_trait;
+use russh::keys::{key::safe_rng, Algorithm, PrivateKey};
 use russh::server::{Auth, Handler as SshHandler, Msg, Response, Session};
-use russh::{Channel, MethodSet};
-use russh_keys::key::KeyPair;
+use russh::{Channel, MethodKind, MethodSet};
 
 use portbay_lib::registry::{SshAuthKind, SshConnection, SshConnectionId};
 use portbay_lib::ssh::connect_session;
@@ -29,7 +28,6 @@ impl russh::server::Server for PasswordServer {
 
 struct PasswordConn;
 
-#[async_trait]
 impl SshHandler for PasswordConn {
     type Error = russh::Error;
 
@@ -37,9 +35,7 @@ impl SshHandler for PasswordConn {
         if password == GOOD_PASSWORD {
             Ok(Auth::Accept)
         } else {
-            Ok(Auth::Reject {
-                proceed_with_methods: None,
-            })
+            Ok(Auth::reject())
         }
     }
 
@@ -66,14 +62,16 @@ impl russh::server::Server for KiServer {
 
 struct KiConn;
 
-#[async_trait]
 impl SshHandler for KiConn {
     type Error = russh::Error;
 
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
         // Decline password; tell the client to try keyboard-interactive.
         Ok(Auth::Reject {
-            proceed_with_methods: Some(MethodSet::KEYBOARD_INTERACTIVE),
+            proceed_with_methods: Some(MethodSet::from(
+                &[MethodKind::KeyboardInteractive][..],
+            )),
+            partial_success: false,
         })
     }
 
@@ -81,7 +79,7 @@ impl SshHandler for KiConn {
         &mut self,
         _user: &str,
         _submethods: &str,
-        response: Option<Response<'async_trait>>,
+        response: Option<Response<'_>>,
     ) -> Result<Auth, Self::Error> {
         match response {
             // First call: send a single password prompt.
@@ -94,14 +92,12 @@ impl SshHandler for KiConn {
             Some(mut response) => {
                 let answer = response
                     .next()
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
                     .unwrap_or_default();
                 if answer == GOOD_PASSWORD {
                     Ok(Auth::Accept)
                 } else {
-                    Ok(Auth::Reject {
-                        proceed_with_methods: None,
-                    })
+                    Ok(Auth::reject())
                 }
             }
         }
@@ -123,7 +119,7 @@ where
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(russh::server::Config {
-        keys: vec![KeyPair::generate_ed25519().unwrap()],
+        keys: vec![PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap()],
         ..Default::default()
     });
     let mut server = server;
