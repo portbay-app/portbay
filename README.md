@@ -70,7 +70,7 @@ to your editor and browser without being noticed.
 - **A sandboxed runner** — run an untrusted or freshly-cloned project inside a macOS sandbox, inspect it, then promote it to a normal local run.
 - **A managed local AI server** — PortBay installs, starts, and supervises [Ollama](https://ollama.com), pulls models from the live catalog, and shares one local endpoint with dictation, agents, and your own tools. Nothing leaves your Mac.
 - **Speech-to-Text** — hold Fn 🌐 and talk: an on-device speech model plus a local AI rewrite turn spoken thoughts into clean task cards, commits, and prompts. ⌘Z always restores your exact words — and with a local speech model it works in **any app on your Mac**, not just PortBay.
-- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 69 agent tools.
+- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 66 agent tools across 14 toolsets.
 - **A declarative registry** — projects live in JSON; the daemon reconciles reality to match.
 - **Live logs, status, and metrics** per project, plus a macOS menu-bar mode.
 - **Already using Herd, ServBay, or MAMP?** Import your existing sites in one step — no re-entering paths, ports, and PHP versions.
@@ -206,7 +206,7 @@ and worked on by AI agents.
 | Container-free | ✅ | ✅ | ✅ | ❌ |
 | Local HTTPS + `.test` | ✅ | ✅ | ✅ | Manual |
 | Multi-runtime (Node/PHP/Python) | ✅ | PHP-first | ✅ | ✅ |
-| MCP server for agents | ✅ 69 tools | ✅ | ❌ | ✅ |
+| MCP server for agents | ✅ 66 tools | ✅ | ❌ | ✅ |
 | AI agent task board — write a card, an agent does the work | ✅ | ❌ | ❌ | ❌ |
 | Agent handoff memory between runs | ✅ | ❌ | ❌ | ❌ |
 | Managed local LLM server (Ollama) | ✅ | ❌ | ✅ | Manual |
@@ -275,7 +275,7 @@ pnpm install
 
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, full CLI. *Shipped.*
 - **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, an SSH workspace (terminal, SFTP, port-forward tunnels), and one-step import from Herd / ServBay / MAMP. *Shipped.*
-- **AI & automation** — an MCP server (69 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed, and a per-project task board hands cards to the coding agent of your choice. *Shipped.*
+- **AI & automation** — an MCP server (66 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed, and a per-project task board hands cards to the coding agent of your choice. *Shipped.*
 - **Local AI** — a managed Ollama server with a live model catalog, plus Speech-to-Text: on-device transcription (Whisper / Parakeet on the Neural Engine), local AI transcript rewrites, and system-wide dictation into any app. *Shipped.*
 - **Release** — signed & notarized DMG, Homebrew cask, and in-app auto-update. *Shipped.*
 

@@ -180,6 +180,8 @@ export default defineConfig({
           { text: "Sandboxed Projects", link: "/guides/sandbox" },
           { text: "Local AI (Ollama)", link: "/guides/local-ai" },
           { text: "Speech-to-Text", link: "/guides/speech-to-text" },
+          { text: "Text-to-Speech", link: "/guides/text-to-speech" },
+          { text: "Image Generation", link: "/guides/image-generation" },
         ],
       },
       {
