@@ -20,7 +20,7 @@ PortBay is an open-source (AGPL-3.0), container-free local dev manager for macOS
 | Reverse proxy | Caddy (automatic) | Nginx (automatic) |
 | Footprint | Small (native) | Small (native) |
 | Platform | macOS (Apple Silicon) | macOS + Windows |
-| Automation | CLI + MCP (69 tools) | CLI + MCP server |
+| Automation | CLI + MCP (66 tools) | CLI + MCP server |
 | AI agent task board | ✅ Markdown cards + handoff memory | ❌ |
 
 ## What they share
@@ -59,7 +59,7 @@ Herd's paid Pro tier offers extras like Expose (public tunnels), Valet-compatibl
 - You mix Node (Next.js, Vite, plain Node APIs) with PHP projects and need one tool to manage both.
 - Open source matters — you want to read the code, contribute, or run a fork.
 - You want your coding agents *working* — a per-project task board that dispatches cards to Claude Code, Codex, Cursor, or Gemini, with handoff memory between runs.
-- You want CLI-first automation and a 69-tool MCP server for AI-assisted workflows.
+- You want CLI-first automation and a 66-tool MCP server for AI-assisted workflows.
 - You prefer Caddy's declarative config model over Nginx.
 - Pro access via contribution (not subscription) fits your preferences.
 

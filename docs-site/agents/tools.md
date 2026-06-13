@@ -1,5 +1,5 @@
 ---
-title: PortBay MCP Tool Reference — All 69 Tools
+title: PortBay MCP Tool Reference
 description: "Complete reference for every tool and resource exposed by portbay-mcp: project registration, lifecycle controls, diagnostics, scaffolding, databases, groups, DNS, certificates, sandbox, runtimes, tunnels, HTTP inspector, and migration import."
 ---
 
@@ -9,9 +9,13 @@ The full surface exposed by `portbay-mcp`. Every tool returns `structuredContent
 
 Tools are grouped into [toolsets](./index.md#governance) you can enable or disable with `--toolsets`.
 
-**69 tools · 4 static resources · 5 resource templates**
+**66 tools in the open-source build (86 with the Pro agent board) · 4 static resources · 2 project resource templates**
 
 Legend: read-only · mutates state · destructive (confirm first)
+
+::: tip Open-source vs Pro
+Everything down to the [Migrate toolset](#migrate-toolset) ships in the open-source build — **66 tools across 14 toolsets**. The [Tasks](#tasks-toolset-pro) and [Connectors](#connectors-toolset-pro) toolsets are part of the **Pro agent board** (the `tasks` build feature); they add 20 more tools (86 total) and are not registered in the open-source build.
+:::
 
 ---
 
@@ -458,7 +462,7 @@ Restart every project in a group (stop then start). Members without a managed pr
 
 ## Tunnels toolset
 
-These tools are read-only. Starting and stopping a Cloudflare tunnel share is done from the PortBay app.
+These tools are read-only and cover both public Cloudflare tunnels and saved SSH port-forwards / connections. Starting or stopping a Cloudflare share, and saving, starting, or editing SSH tunnels and hosts, is done from the PortBay app.
 
 ### `portbay_list_tunnels` (read-only)
 
@@ -479,6 +483,56 @@ Get the tunnel details for one project by id. Returns `null` when no tunnel exis
 | `id` | string | **Required.** Project id (slug) whose tunnel to look up. |
 
 **Returns:** `TunnelStatus` or `null`
+
+---
+
+### `portbay_list_ssh_tunnels` (read-only)
+
+List saved SSH port-forward tunnels and their live state. Each entry carries the tunnel id and name, SSH host/port/user, the local→remote forward, the forward kind (`local` / `reverse` / `socks`), live state (`live` / `reconnecting` / `down`), and the equivalent `ssh` command.
+
+No arguments.
+
+**Returns:** `SshTunnelStatus[]`
+
+---
+
+### `portbay_ssh_tunnel_status` (read-only)
+
+Get one SSH tunnel by id: SSH host/user, the local→remote forward, live state, and when it started. Returns `null` when no SSH tunnel has that id.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `id` | string | **Required.** SSH tunnel id (slug), from `portbay_list_ssh_tunnels`. |
+
+**Returns:** `SshTunnelStatus` or `null`
+
+---
+
+### `portbay_list_ssh_connections` (read-only)
+
+List saved SSH connections (hosts) from the registry: id and name, host/port/user, auth kind, key path, proxy-jump, any borrowed reusable identity, and display metadata (tags, colour, notes, detected OS, last-used). Holds no secrets — passwords live in the OS keychain. Use a returned id as `connection_id` for `portbay_ssh_execute`.
+
+No arguments.
+
+**Returns:** `SshConnection[]`
+
+---
+
+## SSH Exec toolset
+
+One tool, **off by default**. `ssh-exec` is the only toolset not included even under `--toolsets all` — the operator must name it explicitly (e.g. `--toolsets ssh-exec,diagnostics`) and the server must not be in read-only mode. Enabling it is the human's deliberate authorization for the agent to run commands on remote hosts, mirroring the app's "Run is the approval" model.
+
+### `portbay_ssh_execute` (mutates state · destructive)
+
+Run **one** shell command on a saved SSH connection's remote host and return its stdout, stderr, and exit code. Reuses the exact execution path as the PortBay app's Run action.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `connection_id` | string | **Required.** SSH connection id (slug), from `portbay_list_ssh_connections`. |
+| `command` | string | **Required.** The shell command to run on the remote host. |
+| `cwd` | string? | Working directory to run from (`cd <cwd> && <command>`). |
+
+**Returns:** the command's `stdout`, `stderr`, and exit `code`.
 
 ---
 
@@ -587,6 +641,62 @@ Get connection details for one database instance: the connection URL plus the fr
 | `connection_url` | string | Connection URL (e.g. `mysql://root@127.0.0.1:3306/`). |
 | `account` | string | Default provisioned account (`root`, `postgres`, …). |
 | `env` | object | Key → value map of env vars PortBay injects into linked projects. |
+
+---
+
+### `portbay_db_schema` (read-only)
+
+Inspect a database instance's structure: every table with its columns (name, type, nullability, primary key) and foreign-key relationships. Use this to learn an unfamiliar schema before writing a query. The instance must be running (SQLite just needs its file to exist).
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `id` | string | **Required.** Database instance id (slug), from `portbay_list_databases`. |
+
+**Returns:** `DbClientSchema` — tables, each with its columns and foreign keys.
+
+---
+
+### `portbay_db_query` (read-only)
+
+Run a single read-only SQL statement against a database instance and return the rows. Only inspection statements are allowed (`SELECT` / `WITH` / `SHOW` / `DESCRIBE` / `EXPLAIN` / `PRAGMA` / `VALUES`); any write, DDL, multiple statements, CTE-wrapped write, or `SELECT … INTO` is rejected. To change data, use the approval-gated `portbay_db_execute`.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `id` | string | **Required.** Database instance id (slug). |
+| `sql` | string | **Required.** A single read-only statement. |
+| `schema` | string? | Server engines: schema/database to run against (e.g. `app_dev`). Omit for SQLite or the instance default. |
+| `limit` | number? | Max rows to return (clamped 1–500; default 100). A `truncated` flag in the result signals more rows existed. |
+
+**Returns:** column names plus the result rows, with a `truncated` flag.
+
+---
+
+### `portbay_db_explain` (read-only)
+
+Return the query plan (`EXPLAIN`) for a read-only statement as a node tree — how the engine will execute it, to diagnose a slow query. The statement itself may not be a write.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `id` | string | **Required.** Database instance id (slug). |
+| `sql` | string | **Required.** A single read-only statement to explain. |
+| `schema` | string? | Server engines: schema/database to plan against. Omit for SQLite. |
+| `analyze` | bool? | Run `EXPLAIN ANALYZE` (PostgreSQL: ANALYZE + BUFFERS) to collect real timing — **the query is actually executed**. Ignored for SQLite. Default `false`. |
+
+**Returns:** the query plan as a node tree.
+
+---
+
+### `portbay_db_execute` (mutates state · destructive)
+
+Run a write or DDL statement (`INSERT` / `UPDATE` / `DELETE` / `CREATE` / `ALTER` / `DROP` / …) — but **only after the user approves the exact statement** in the PortBay app. The call **blocks** until the user approves or denies (and times out as denied after ~2 minutes). Read-only statements are rejected here (use `portbay_db_query`). Propose the statement; the human decides.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `id` | string | **Required.** Database instance id (slug). |
+| `sql` | string | **Required.** A single write/DDL statement. It will not run until approved in PortBay. |
+| `schema` | string? | Server engines: schema/database to run against. Omit for SQLite. |
+
+**Returns:** the affected-row count, on approval.
 
 ---
 
@@ -956,7 +1066,11 @@ Import sites from a migration source into the PortBay registry. Pass the `ids` t
 
 ---
 
-## Tasks toolset
+## Tasks toolset (Pro) {#tasks-toolset-pro}
+
+::: tip Pro agent board
+The Tasks and Connectors toolsets ship only with the **Pro agent board** (the `tasks` build feature). The open-source build advertises 66 tools without them.
+:::
 
 The task board is a per-project Kanban whose cards are Markdown files in the project's repo (`.portbay/tasks/`). The same board is shown in the GUI, edited by the `portbay tasks` CLI, and exposed here — one source of truth, not three. These tools appear when a project has a board.
 
@@ -1125,6 +1239,141 @@ Append a **minimal** entry to the rolling hand-off log (what changed, the next c
 | `author` | string? | Your agent name (defaults to the calling agent). |
 
 **Returns:** `HandoffView`
+
+---
+
+### `portbay_task_complete` (mutates state)
+
+Finish a dispatched card in **one call**: acknowledge it, optionally post a comment and update the hand-off, then set the terminal status (`Done` by default; `Blocked` or `Review` via `status`). Prefer this over calling ack / comment / handoff_update / update separately. Idempotent — re-calling once the card already sits in that status is a no-op, so a retry won't double-post. You may **not** set `Rejected`.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `id` | string | **Required.** Card id. |
+| `run_id` | string | **Required.** The run id from your dispatch prompt. |
+| `status` | string? | Terminal column: `Done` (default), `Blocked`, or `Review`. Never `Rejected`. |
+| `comment` | string? | Acceptance/confirmation comment for the card thread. Skip for routine work. |
+| `handoff` | string? | Minimal hand-off note (what changed, next step, open items), prepended to the brief. |
+| `author` | string? | Sign the hand-off entry. Defaults to the dispatched agent. |
+| `touchpoints` | string[]? | Files/modules you touched. |
+
+**Returns:** the updated `TaskCard`.
+
+---
+
+### `portbay_learning_add` (mutates state)
+
+Record a project **learning** — a validated approach or a correction that makes the next run here go better. This is the project's durable "what works here" memory (distinct from the hand-off's "where we left off"): capture a lesson once and every future dispatch inherits it. Appended newest-first and size-capped; an identical rule already present is a no-op.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+| `text` | string | **Required.** The rule — concise and actionable (e.g. "Run `composer test`, not `phpunit` directly"). One lesson per call. |
+| `why` | string? | Why the rule holds — the reasoning that lets the next agent trust it. Strongly recommended. |
+| `how` | string? | Concrete "how to apply" guidance for the next run. |
+
+**Returns:** the updated learnings memory.
+
+---
+
+### `portbay_connectors_status` (read-only)
+
+Read the task-source connector **sync** status for this project. Sync is automatic — don't call GitHub, Linear, or other external APIs yourself for status. When a mirrored card reaches `Done` or `Rejected`, include a clear `## Outcome` section in the card body; PortBay writes the terminal status and that outcome back upstream when the binding allows it. To read or write the external records themselves, see the [Connectors toolset](#connectors-toolset-pro).
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `project` | string | **Required.** Project id (slug). |
+
+**Returns:** the connector sync status as JSON.
+
+---
+
+## Connectors toolset (Pro) {#connectors-toolset-pro}
+
+External task-source integrations — GitHub, Linear, and other systems mirrored onto the board. **Reads are ungated; every create / update / comment pauses for human approval in the PortBay app** before it touches the external system. Never put credentials in any field. Discover account ids and the entities each exposes with `portbay_connector_accounts` first. Board status is owned by the sync plane (`portbay_connectors_status`) — don't use these tools to drive card status.
+
+### `portbay_connector_accounts` (read-only)
+
+List connected external-system accounts and the entity tools each exposes. No credentials or account parameters are returned.
+
+No arguments.
+
+**Returns:** accounts and the entities each exposes, as JSON.
+
+---
+
+### `portbay_connector_search` (read-only)
+
+Search records exposed by a connected account. Call `portbay_connector_accounts` first to discover account ids and entity fields.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `account` | string | **Required.** Account id (`ca_…`) or an unambiguous connected-account display name. |
+| `entity` | string | **Required.** Entity key, e.g. `issue`. |
+| `query` | string | **Required.** Search text. For GitHub issues, include `repo:owner/repo` when the account has no default repo. |
+| `limit` | number? | Max records to return. Default 10, max 50. |
+
+**Returns:** matching records, as JSON.
+
+---
+
+### `portbay_connector_get` (read-only)
+
+Read one connector record by id.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `account` | string | **Required.** Account id (`ca_…`) or display name. |
+| `entity` | string | **Required.** Entity key, e.g. `issue`. |
+| `id` | string | **Required.** Entity id. GitHub issue ids look like `owner/repo#123`. |
+
+**Returns:** the record, as JSON.
+
+---
+
+### `portbay_connector_create` (mutates state)
+
+Create a connector record — **only after human approval in PortBay**. Provide a clear one-line `summary`; the human decides from it. Financial documents are draft-only. Never include tokens, API keys, or passwords in fields.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `account` | string | **Required.** Account id (`ca_…`) or display name. |
+| `entity` | string | **Required.** Entity key, e.g. `issue`. |
+| `fields` | object | **Required.** Entity fields. Never include credentials. |
+| `summary` | string | **Required.** One clear human-facing line describing what will be created. |
+
+**Returns:** the created record (after approval), as JSON.
+
+---
+
+### `portbay_connector_update` (mutates state)
+
+Update a connector record — **only after human approval in PortBay**. Provide a clear one-line `summary`. Never include credentials in fields.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `account` | string | **Required.** Account id (`ca_…`) or display name. |
+| `entity` | string | **Required.** Entity key. |
+| `id` | string | **Required.** Entity id. GitHub issue ids look like `owner/repo#123`. |
+| `fields` | object | **Required.** Fields to update. Never include credentials. |
+| `summary` | string | **Required.** One clear human-facing line describing what will change. |
+
+**Returns:** the updated record (after approval), as JSON.
+
+---
+
+### `portbay_connector_comment` (mutates state)
+
+Post a comment/note to a connector record — **only after human approval in PortBay**. Keep board completion details in the card's `## Outcome` section for sync write-back.
+
+| Arg | Type | Notes |
+| --- | --- | --- |
+| `account` | string | **Required.** Account id (`ca_…`) or display name. |
+| `entity` | string | **Required.** Entity key. |
+| `id` | string | **Required.** Entity id. GitHub issue ids look like `owner/repo#123`. |
+| `body` | string | **Required.** Comment body. Never include credentials. |
+
+**Returns:** acknowledgement, as JSON.
 
 ---
 
