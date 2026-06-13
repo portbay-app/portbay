@@ -124,7 +124,7 @@ clap_complete = "4"
 which = "6"
 # Android Wi-Fi pairing QR (mobile run UX). SVG-only — no image stack.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-window-vibrancy = { version = "0.5", optional = false }
+window-vibrancy = { version = "0.6", optional = false }
 console = "0.16"
 sysinfo = "0.30"
 tracing = "0.1"
