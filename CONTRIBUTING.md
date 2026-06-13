@@ -7,6 +7,7 @@ agree your work is licensed under that license (see [Signing off](#signing-off-d
 
 **Deeper guides** live in [`docs/contributing/`](./docs/contributing/overview.md):
 [development setup](./docs/contributing/development.md) ·
+[build model](./docs/contributing/build-model.md) ·
 [issue triage](./docs/contributing/issue-triage.md) ·
 [pull requests](./docs/contributing/pull-requests.md) ·
 [architecture](./docs/contributing/architecture.md) ·
