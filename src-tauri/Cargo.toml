@@ -146,7 +146,7 @@ minisign-verify = "0.2"
 # already in the tree transitively; zstd is the chosen runtime-archive codec.
 zstd = "0.13"
 tar = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 aes-gcm = "0.10"
 # Per-project task board ("Project Context & Task Authority"): stable, sortable
