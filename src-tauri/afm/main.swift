@@ -81,6 +81,16 @@ func availability() -> (available: Bool, reason: String?) {
     #endif
 }
 
+// Sidecar↔host wire-protocol version, kept in lockstep with
+// src-tauri/src/sidecar_protocol.rs::SIDECAR_PROTOCOL. The release build's
+// scripts/verify-sidecars.sh runs `--protocol` on every freshly built sidecar
+// and fails if any diverges, so a stale or mismatched binary can't ship. Bump
+// together when the stdin/stdout JSON protocol changes.
+if CommandLine.arguments.contains("--protocol") {
+    print("1")
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--check") {
     let (_, reason) = availability()
     if let reason {

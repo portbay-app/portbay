@@ -177,7 +177,10 @@ impl std::fmt::Debug for InteractionReply {
             .field("action", &self.action)
             .field(
                 "responses",
-                &self.responses.as_ref().map(|r| format!("[{} redacted]", r.len())),
+                &self
+                    .responses
+                    .as_ref()
+                    .map(|r| format!("[{} redacted]", r.len())),
             )
             .finish()
     }
@@ -312,7 +315,9 @@ mod tests {
         let b = next_flow_id();
         assert_ne!(a, b);
         for id in [&a, &b] {
-            let suffix = id.strip_prefix("ssh-flow-").expect("keeps the ssh-flow- prefix");
+            let suffix = id
+                .strip_prefix("ssh-flow-")
+                .expect("keeps the ssh-flow- prefix");
             assert!(
                 uuid::Uuid::parse_str(suffix).is_ok(),
                 "flow id suffix is a UUID, got `{suffix}`"

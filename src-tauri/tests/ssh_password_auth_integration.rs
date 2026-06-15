@@ -68,9 +68,7 @@ impl SshHandler for KiConn {
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
         // Decline password; tell the client to try keyboard-interactive.
         Ok(Auth::Reject {
-            proceed_with_methods: Some(MethodSet::from(
-                &[MethodKind::KeyboardInteractive][..],
-            )),
+            proceed_with_methods: Some(MethodSet::from(&[MethodKind::KeyboardInteractive][..])),
             partial_success: false,
         })
     }

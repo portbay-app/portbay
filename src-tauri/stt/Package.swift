@@ -21,6 +21,17 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.0.0"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.1"),
+        // MLXAudio (SwiftPM package name "MLXAudio") — MLX/Metal neural TTS
+        // engines (Chatterbox, …) beyond FluidAudio's CoreML Kokoro. No release
+        // tags yet, so pinned to a commit for a reproducible build. MIT.
+        .package(
+            url: "https://github.com/Blaizzy/mlx-audio-swift.git",
+            revision: "3f6b0553188a921f635df54b5e20442001037336"),
+        // Direct deps so the sidecar can `import MLX` (MLXArray) and
+        // `import HuggingFace` (Repo.ID / HubCache for the per-model download).
+        // Bounds match what mlx-audio-swift already resolves.
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.0"),
+        .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.9.0"),
     ],
     targets: [
         .executableTarget(
@@ -28,6 +39,10 @@ let package = Package(
             dependencies: [
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                .product(name: "MLXAudioTTS", package: "mlx-audio-swift"),
+                .product(name: "MLXAudioCore", package: "mlx-audio-swift"),
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
             ],
             path: "Sources/portbay-stt"
         )

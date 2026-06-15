@@ -194,13 +194,13 @@ async function send() {
 .fbw-wrap {
   position: fixed;
   bottom: 24px;
-  left: 50%;
+  right: 24px;
   z-index: var(--vp-z-index-nav, 30);
-  width: min(420px, calc(100vw - 32px));
+  width: min(420px, calc(100vw - 48px));
   display: flex;
-  justify-content: center;
+  justify-content: flex-end;
   opacity: 0;
-  transform: translate(-50%, 16px);
+  transform: translateY(16px);
   pointer-events: none;
   transition:
     opacity 0.3s ease,
@@ -209,7 +209,7 @@ async function send() {
 
 .fbw-wrap.visible {
   opacity: 1;
-  transform: translate(-50%, 0);
+  transform: translateY(0);
   pointer-events: auto;
 }
 

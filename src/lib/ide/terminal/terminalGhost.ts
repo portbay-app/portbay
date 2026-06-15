@@ -23,7 +23,15 @@
 import type { IDecoration, IDisposable, IMarker, Terminal } from "@xterm/xterm";
 
 import { CompletionEngine } from "$lib/autocomplete/engine";
+import {
+  createPathCompleter,
+  isPathContext,
+  parseOsc7Cwd,
+  resolvePath,
+  type PathCompleter,
+} from "$lib/ide/terminal/pathComplete";
 import { MAX_BUFFER_LINES, nextWord, readTerminalTail, redactSecrets } from "$lib/ide/terminal/terminalContext";
+import { invokeQuiet } from "$lib/ipc";
 import { detectCompletionModel, fetchCompletion, type CompletionModel } from "$lib/ssh/complete";
 
 export interface TerminalGhostOptions {
@@ -57,11 +65,58 @@ export function createTerminalGhost(opts: TerminalGhostOptions): TerminalGhost {
   let decoration: IDecoration | null = null;
   let predictTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // A block cursor sits *on* the suggestion's first cell and hides it (the ghost
+  // is a faint overlay drawn under the opaque block). While a suggestion shows
+  // we switch to a thin bar cursor so the whole suggestion — including its first
+  // character and the space after the command — stays readable.
+  const baseCursorStyle = term.options.cursorStyle ?? "block";
+  function setSuggestingCursor(on: boolean): void {
+    if (disposed) return;
+    const want = on ? "bar" : baseCursorStyle;
+    if (term.options.cursorStyle !== want) term.options.cursorStyle = want;
+  }
+
   const recentCommands: string[] = [];
 
   let model: CompletionModel | null = null;
   let modelChecked = false;
   let detect: Promise<void> | null = null;
+
+  // ── Filesystem path tracking for SFTP-backed completion ──────────────────────
+  // Seed cwd from the connection's home dir, then keep it current by watching
+  // `cd`/`pushd` and any OSC 7 the shell emits, so the path completer lists the
+  // right remote directory. Needs no host model — works on any SSH host.
+  let cwd: string | null = null;
+  let home: string | null = null;
+  let homeInFlight: Promise<void> | null = null;
+  let lastHomeTry = 0;
+  // Assigned just below `engine`; referenced (lazily) by the engine fetcher.
+  let pathCompleter: PathCompleter;
+
+  // Resolve the home dir (seeding cwd) over SFTP. Retryable on purpose: the file
+  // tree warms the SFTP session asynchronously, so the first probe can race
+  // ahead of it — we must not disable path completion permanently on one miss.
+  // A short backoff keeps a host that genuinely lacks SFTP from being hammered.
+  async function ensureReady(): Promise<void> {
+    if (home) return;
+    if (homeInFlight) return homeInFlight;
+    if (Date.now() - lastHomeTry < 5000) return;
+    lastHomeTry = Date.now();
+    homeInFlight = (async () => {
+      try {
+        const h = await invokeQuiet<string>("sftp_home_dir", { connectionId });
+        if (h) {
+          home = h;
+          cwd ??= h;
+        }
+      } catch {
+        /* SFTP not reachable yet — retried on a later keystroke */
+      } finally {
+        homeInFlight = null;
+      }
+    })();
+    return homeInFlight;
+  }
 
   async function ensureModel(): Promise<void> {
     if (modelChecked) return;
@@ -98,6 +153,13 @@ export function createTerminalGhost(opts: TerminalGhostOptions): TerminalGhost {
 
   const engine = new CompletionEngine({
     fetcher: async (ctx, signal) => {
+      // A path argument is completed ONLY from a real directory listing — never
+      // the model or history, which could invent a path that doesn't exist on
+      // disk. Nothing real to offer ⇒ show nothing (better than a wrong path).
+      if (isPathContext(ctx.prefix)) {
+        return pathCompleter.complete(ctx.prefix, signal);
+      }
+      // Otherwise: recently typed commands, then the host model if one exists.
       const hist = historyRemainder(ctx.prefix);
       if (hist) return hist;
       await ensureModel();
@@ -110,12 +172,55 @@ export function createTerminalGhost(opts: TerminalGhostOptions): TerminalGhost {
     minPrefix: 0, // empty-prompt prediction is handled by the length gates below
   });
 
+  pathCompleter = createPathCompleter({
+    list: async (absDir, signal) => {
+      if (signal.aborted) return null;
+      try {
+        const entries = await invokeQuiet<{ name: string; isDir: boolean }[]>("sftp_list_dir", {
+          input: { connectionId, path: absDir },
+        });
+        if (signal.aborted || !entries) return null;
+        return entries.map((e) => ({ name: e.name, isDir: e.isDir }));
+      } catch {
+        return null;
+      }
+    },
+    getCwd: () => cwd,
+    getHome: () => home,
+    ensureReady,
+  });
+
+  /** Move our cwd model and drop now-stale path suggestions + cached completions. */
+  function setCwd(next: string | null): void {
+    if (!next || next === cwd) return;
+    cwd = next;
+    pathCompleter.invalidate();
+    engine.clearCache();
+  }
+
+  /** Interpret a committed `cd`/`pushd` so the next prompt lists the right dir. */
+  function trackCd(cmd: string): void {
+    if (/^\s*cd\s*$/.test(cmd)) {
+      setCwd(home);
+      return;
+    }
+    const m = cmd.match(/^\s*(?:cd|pushd)\s+(.+)$/);
+    if (!m) return;
+    let target = m[1].trim();
+    // Skip compound / expanded targets — too easy to mis-track.
+    if (target.includes("&&") || /[;&|$`(){}*?]/.test(target)) return;
+    target = target.replace(/^['"]/, "").replace(/['"]$/, "");
+    const resolved = resolvePath(target, cwd, home);
+    if (resolved) setCwd(resolved);
+  }
+
   function clearGhost(): void {
     ghost = "";
     decoration?.dispose();
     marker?.dispose();
     decoration = null;
     marker = null;
+    setSuggestingCursor(false);
   }
 
   function renderGhost(text: string): void {
@@ -142,6 +247,7 @@ export function createTerminalGhost(opts: TerminalGhostOptions): TerminalGhost {
     ghost = text;
     marker = m;
     decoration = d;
+    setSuggestingCursor(true);
   }
 
   function refresh(): void {
@@ -189,7 +295,10 @@ export function createTerminalGhost(opts: TerminalGhostOptions): TerminalGhost {
     if (cmd) {
       recentCommands.push(cmd);
       if (recentCommands.length > 100) recentCommands.shift();
+      trackCd(cmd);
     }
+    // A command may have created/removed files — re-list on the next path probe.
+    pathCompleter.invalidate();
     reset();
     schedulePredict();
   }
@@ -211,11 +320,20 @@ export function createTerminalGhost(opts: TerminalGhostOptions): TerminalGhost {
     refresh();
   });
 
+  // Precise cwd from the shell, when it emits OSC 7 on directory change (the
+  // shell-integration convention). Advisory: we never swallow the sequence.
+  const oscSub: IDisposable = term.parser.registerOscHandler(7, (data) => {
+    setCwd(parseOsc7Cwd(data));
+    return false;
+  });
+
   function accept(): void {
     if (!ghost) return;
     sendInput(ghost);
     line += ghost;
     clearGhost();
+    // Accepting a directory (`cd foo/`) should immediately offer its contents.
+    if (line.endsWith("/")) refresh();
   }
 
   function acceptWord(): void {
@@ -256,9 +374,11 @@ export function createTerminalGhost(opts: TerminalGhostOptions): TerminalGhost {
   return {
     handleKey,
     dispose() {
+      setSuggestingCursor(false); // restore the block cursor before we bail out
       disposed = true;
       if (predictTimer) clearTimeout(predictTimer);
       dataSub.dispose();
+      oscSub.dispose();
       engine.dispose();
       clearGhost();
     },

@@ -20,7 +20,7 @@ PortBay is an open-source (AGPL-3.0), container-free local dev manager for macOS
 | Reverse proxy | Caddy (automatic) | Traefik (automatic) |
 | Footprint | Small (native) | Large (container images per project) |
 | Platform | macOS (Apple Silicon) | macOS, Linux, Windows |
-| Automation | CLI + MCP (69 tools) | CLI (ddev), extensive add-ons |
+| Automation | CLI + MCP (66 tools) | CLI (ddev), extensive add-ons |
 | AI agent task board | ✅ Markdown cards + handoff memory | ❌ |
 
 ## What they share

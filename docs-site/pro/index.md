@@ -73,16 +73,13 @@ acquisition paths (see below). Pro activates on the next license refresh.
 
 ### Buy Pro ($10/mo)
 
-> **Coming soon.** The checkout is not yet live — when it opens, the upgrade
-> sheet in the app will offer **"Get Pro — $10/mo"** directly.
-
 Pro is $10/mo with a 7-day free trial, activates on up to 2 devices, renews
-monthly, and you can cancel anytime — cancelling during the trial costs
-nothing. Once checkout is live:
+monthly, and you can cancel anytime — cancelling during the trial costs nothing.
 
 1. Sign in to PortBay (**Settings → Account**, or the user menu).
 2. Open the upgrade sheet and choose **"Get Pro — $10/mo"**.
-3. Complete checkout in your browser; Pro activates on your next license refresh.
+3. Complete checkout in your browser — a secure Paddle checkout opens; Pro
+   activates on your next license refresh.
 
 ### Contribute
 

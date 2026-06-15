@@ -34,7 +34,15 @@
   import type { DnsPreflight } from "$lib/types/dns";
   import type { SidecarHealth } from "$lib/types/sidecars";
 
-  type Step = "welcome" | "gallery" | "running";
+  type Step = "welcome" | "gallery" | "running" | "done";
+
+  // Progress nodes for the "Start fresh" flow, shown once the user leaves the
+  // welcome fork. `done` (the success moment) marks all three complete.
+  const STEPS: { id: Step; label: string }[] = [
+    { id: "welcome", label: "Welcome" },
+    { id: "gallery", label: "Template" },
+    { id: "running", label: "Scaffold" },
+  ];
 
   interface DoctorFinding {
     check: string;
@@ -52,6 +60,11 @@
   const isSimulator = import.meta.env.PUBLIC_SIMULATOR === "true";
 
   let step = $state<Step>("welcome");
+  // Index of the active node in STEPS; `done` sits past the last node so all
+  // three render complete.
+  const stepIndex = $derived(
+    step === "done" ? STEPS.length : STEPS.findIndex((s) => s.id === step),
+  );
   let doctor = $state<DoctorReport | null>(null);
   let doctorLoading = $state<boolean>(false);
 
@@ -64,6 +77,9 @@
   // Live scaffolder output.
   let logLines = $state<string[]>([]);
   let scrollerEl: HTMLDivElement | null = $state(null);
+  /** Set when the scaffolder errors, so the running step shows a failure header
+   *  + retry instead of an indefinite "Scaffolding…". */
+  let scaffoldFailed = $state<boolean>(false);
 
   // Privilege-explainer card data. Fetched once on mount alongside the doctor
   // call so the card knows whether each prompt is still pending. Both start as
@@ -174,6 +190,7 @@
   async function runScaffold() {
     if (!chosenKind || !chosenParent || !chosenName.trim()) return;
     busy = true;
+    scaffoldFailed = false;
     logLines = [];
     step = "running";
 
@@ -201,7 +218,9 @@
         onEvent: ch,
       });
       await onboarding.markOnboarded();
-      await goto("/");
+      // Land on a success moment instead of silently dropping to the projects
+      // table — confirms the scaffold worked and what was created.
+      step = "done";
     } catch (raw) {
       // safeInvoke already pushed the envelope as a toast; surface inline
       // too so the user sees what went wrong in the log scroller.
@@ -210,6 +229,7 @@
           ? (raw as { whatHappened: string }).whatHappened
           : String(raw);
       logLines = logLines.concat(`\n✗ ${message}`);
+      scaffoldFailed = true;
     } finally {
       busy = false;
     }
@@ -218,6 +238,19 @@
   async function skip() {
     await onboarding.markOnboarded();
     await goto("/");
+  }
+
+  /** Leave the success moment for the projects table. The onboarding marker was
+   *  already written when the scaffold completed, so this is a plain navigation. */
+  async function goToProjects() {
+    await goto("/");
+  }
+
+  /** Scaffold another project: reset back to the template gallery. */
+  function scaffoldAnother() {
+    logLines = [];
+    cancelTemplate();
+    step = "gallery";
   }
 
   // Verdict aggregation for the health-check pill cluster.
@@ -282,6 +315,53 @@
   <!-- Main panel -->
   <div class="flex-1 min-h-0 overflow-y-auto">
     <div class="max-w-3xl mx-auto px-8 py-12">
+      <!-- Progress stepper for the "Start fresh" flow. Hidden on the welcome
+           fork (the user hasn't committed to scaffolding yet). -->
+      {#if step !== "welcome"}
+        <nav class="mb-8 flex justify-center" aria-label="Progress">
+          <ol class="flex items-center">
+            {#each STEPS as s, i (s.id)}
+              {@const state =
+                i < stepIndex ? "complete" : i === stepIndex ? "current" : "upcoming"}
+              <li class="flex items-center">
+                <span class="flex items-center gap-2">
+                  <span
+                    class="w-6 h-6 rounded-full flex items-center justify-center
+                           text-[11px] font-medium border transition-colors
+                           {state === 'complete'
+                      ? 'bg-accent border-accent text-on-accent'
+                      : state === 'current'
+                        ? 'border-accent text-accent'
+                        : 'border-border text-fg-subtle'}"
+                    aria-current={state === "current" ? "step" : undefined}
+                  >
+                    {#if state === "complete"}
+                      <Icon name="check" size={13} />
+                    {:else}
+                      {i + 1}
+                    {/if}
+                  </span>
+                  <span
+                    class="text-xs {state === 'upcoming'
+                      ? 'text-fg-subtle'
+                      : 'text-fg'}"
+                  >
+                    {s.label}
+                  </span>
+                </span>
+                {#if i < STEPS.length - 1}
+                  <span
+                    class="w-10 h-px mx-3 {i < stepIndex
+                      ? 'bg-accent'
+                      : 'bg-border'}"
+                  ></span>
+                {/if}
+              </li>
+            {/each}
+          </ol>
+        </nav>
+      {/if}
+
       {#if step === "welcome"}
         <div class="text-center mb-10">
           <div class="mx-auto w-14 h-14 flex items-center justify-center mb-5">
@@ -592,13 +672,24 @@
 
       {#if step === "running"}
         <div class="mb-4">
-          <h2 class="text-xl font-semibold tracking-tight mb-1">
-            Scaffolding…
-          </h2>
-          <p class="text-sm text-fg-muted">
-            Running the {TEMPLATES.find((t) => t.kind === chosenKind)?.name}
-            scaffolder. This typically takes 30–90 seconds.
-          </p>
+          {#if scaffoldFailed}
+            <h2 class="text-xl font-semibold tracking-tight mb-1 text-fg">
+              Scaffold didn't finish
+            </h2>
+            <p class="text-sm text-fg-muted">
+              The {TEMPLATES.find((t) => t.kind === chosenKind)?.name} scaffolder
+              stopped before completing. The error is in the log below — fix it and
+              try again, or pick another template.
+            </p>
+          {:else}
+            <h2 class="text-xl font-semibold tracking-tight mb-1">
+              Scaffolding…
+            </h2>
+            <p class="text-sm text-fg-muted">
+              Running the {TEMPLATES.find((t) => t.kind === chosenKind)?.name}
+              scaffolder. This typically takes 30–90 seconds.
+            </p>
+          {/if}
         </div>
         <div
           bind:this={scrollerEl}
@@ -625,8 +716,64 @@
             >
               Back to templates
             </button>
+            {#if scaffoldFailed}
+              <button
+                type="button"
+                onclick={runScaffold}
+                class="px-4 py-1.5 text-sm rounded-md bg-accent text-on-accent
+                       font-medium hover:opacity-90 transition-opacity
+                       inline-flex items-center gap-1.5"
+              >
+                <Icon name="refresh-cw" size={12} /> Try again
+              </button>
+            {/if}
           </div>
         {/if}
+      {/if}
+
+      {#if step === "done"}
+        <div class="text-center py-6">
+          <div
+            class="mx-auto w-14 h-14 rounded-full bg-success/10 text-success
+                   flex items-center justify-center mb-5"
+          >
+            <Icon name="circle-check" size={30} />
+          </div>
+          <h2 class="text-2xl font-semibold tracking-tight mb-2">
+            You're all set
+          </h2>
+          <p class="text-fg-muted text-sm max-w-md mx-auto">
+            <span class="font-medium text-fg">{chosenName}</span> was scaffolded
+            and added to PortBay.
+          </p>
+          <p
+            class="text-xs text-fg-subtle font-mono mt-1 mb-8 truncate
+                   max-w-md mx-auto"
+            title="{chosenParent}/{chosenName}"
+          >
+            {chosenParent}/{chosenName}
+          </p>
+          <div class="flex items-center justify-center gap-2">
+            <button
+              type="button"
+              onclick={goToProjects}
+              class="px-4 py-2 text-sm rounded-md bg-accent text-on-accent
+                     font-medium hover:opacity-90 transition-opacity
+                     inline-flex items-center gap-1.5"
+            >
+              Go to projects
+              <Icon name="arrow-right" size={14} />
+            </button>
+            <button
+              type="button"
+              onclick={scaffoldAnother}
+              class="px-3 py-2 text-sm rounded-md text-fg-muted
+                     hover:bg-surface-2 transition-colors"
+            >
+              Scaffold another
+            </button>
+          </div>
+        </div>
       {/if}
     </div>
   </div>

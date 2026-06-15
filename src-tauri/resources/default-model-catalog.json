@@ -175,6 +175,25 @@
   ],
   "tts": [
     {
+      "id": "chatterbox-turbo",
+      "engine": "chatterbox",
+      "displayName": "Chatterbox Turbo (English)",
+      "repoModel": "mlx-community/chatterbox-turbo-fp16",
+      "approxSizeBytes": 1300000000,
+      "languages": "English",
+      "speedNote": "Expressive English speech with optional voice cloning — runs on the GPU via MLX.",
+      "recommended": true,
+      "defaultVoice": "default",
+      "voices": [
+        {
+          "id": "default",
+          "label": "Default voice"
+        }
+      ],
+      "license": "MIT",
+      "licenseUrl": "https://huggingface.co/mlx-community/chatterbox-turbo-fp16"
+    },
+    {
       "id": "kokoro-en",
       "engine": "kokoro",
       "displayName": "Kokoro (English)",

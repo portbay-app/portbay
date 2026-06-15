@@ -130,6 +130,8 @@
     | "camera"
     | "grip-vertical"
     | "eye-off"
+    | "wrench"
+    | "brain"
     | "finder";
 </script>
 
@@ -248,6 +250,8 @@
     Camera,
     GripVertical,
     EyeOff,
+    Wrench,
+    Brain,
     type Icon as LucideIconComponent,
   } from "@lucide/svelte";
 
@@ -380,6 +384,8 @@
     camera: Camera,
     "grip-vertical": GripVertical,
     "eye-off": EyeOff,
+    wrench: Wrench,
+    brain: Brain,
   };
 
   const Component = $derived(name === "finder" ? null : iconMap[name]);

@@ -107,6 +107,13 @@ export class CompletionEngine {
     });
   }
 
+  /** Drop all cached completions. The terminal calls this when its cwd changes,
+      since path suggestions are keyed only by the typed prefix and would
+      otherwise resolve against the old directory. */
+  clearCache(): void {
+    this.caches.clear();
+  }
+
   dispose(): void {
     this.cancel();
     this.caches.clear();

@@ -7,7 +7,6 @@
 
 pub mod agent;
 pub mod backend;
-pub mod secret;
 pub mod config_import;
 pub mod exec;
 pub mod exec_manager;
@@ -17,6 +16,7 @@ pub mod manager;
 pub mod probe;
 pub mod proxy;
 pub mod pty;
+pub mod secret;
 pub mod session;
 pub mod sftp;
 

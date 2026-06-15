@@ -55,6 +55,7 @@
     whisper: { bg: "#10A37F", fg: "#ffffff", label: "Wh" }, // OpenAI Whisper
     cohere: { bg: "#39594D", fg: "#ffffff", label: "Co" },
     kokoro: { bg: "#5B8DEF", fg: "#ffffff", label: "Ko" },
+    chatterbox: { bg: "#6D4AFF", fg: "#ffffff", label: "Cb" }, // Resemble AI Chatterbox (MLX)
     // Image-generation engines.
     flux: { bg: "#1A1A1A", fg: "#ffffff", label: "FL" }, // Black Forest Labs
     sd: { bg: "#762FBF", fg: "#ffffff", label: "SD" }, // Stability AI

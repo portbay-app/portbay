@@ -476,6 +476,15 @@ func serve() async {
 // MARK: - Entry
 
 let args = CommandLine.arguments
+// Sidecar↔host wire-protocol version, kept in lockstep with
+// src-tauri/src/sidecar_protocol.rs::SIDECAR_PROTOCOL. The release build's
+// scripts/verify-sidecars.sh runs `--protocol` on every freshly built sidecar
+// and fails if any diverges, so a stale or mismatched binary can't ship. Bump
+// together when the stdin/stdout JSON protocol changes.
+if args.contains("--protocol") {
+    print("1")
+    exit(0)
+}
 if args.contains("--check") {
     handleCheck()
     exit(0)

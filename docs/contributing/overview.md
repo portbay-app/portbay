@@ -4,6 +4,7 @@ PortBay Community is an open-source local development environment manager.
 This document is the starting point for contributors. Deeper guides live alongside it:
 
 - [Development setup](development.md)
+- [Build model: Community vs Pro](build-model.md)
 - [Issue triage](issue-triage.md)
 - [Pull requests](pull-requests.md)
 - [Architecture orientation](architecture.md)

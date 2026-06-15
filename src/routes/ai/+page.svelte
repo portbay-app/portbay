@@ -313,6 +313,45 @@
     return unit === "t" ? n * 1000 : unit === "m" ? n / 1000 : n;
   }
 
+  /** Parameter pill for the detail pane: "27b" → "27B", "3.8b" → "3.8B",
+   * cloud tags → "Cloud", a bare ":latest" with no size → "—". */
+  function paramLabel(sizeHint: string): string {
+    if (sizeHint.includes("Cloud")) return "Cloud";
+    const match = /^(\d+(?:\.\d+)?)\s*([bmt])?/i.exec(sizeHint.trim());
+    if (!match) return sizeHint === "latest" ? "—" : sizeHint;
+    return `${match[1]}${(match[2] ?? "b").toUpperCase()}`;
+  }
+
+  /** A coarse "domain" tag for the detail pane, derived from the family +
+   * capabilities (Ollama doesn't publish this field, but it's deterministic). */
+  function domainFor(capabilities: string[], familyId: string): string {
+    if (familyId === "embeddings" || capabilities.includes("embedding")) return "embeddings";
+    if (capabilities.includes("vision")) return "multimodal";
+    return "llm";
+  }
+
+  /** Display metadata for an ollama.com capability tag — label, glyph, and the
+   * theme-token tint used on its badge (vision amber, tools accent-blue,
+   * reasoning green, the rest neutral), mirroring the screenshot's colour
+   * coding without inventing capabilities the model doesn't report. */
+  const CAPABILITY_META: Record<string, { label: string; icon: IconName; cls: string }> = {
+    vision: { label: "Vision", icon: "eye", cls: "border border-status-warning/30 bg-status-warning/10 text-status-warning" },
+    tools: { label: "Tool Use", icon: "wrench", cls: "border border-accent/30 bg-accent/10 text-accent" },
+    thinking: { label: "Reasoning", icon: "brain", cls: "border border-status-running/30 bg-status-running/10 text-status-running" },
+    embedding: { label: "Embeddings", icon: "search", cls: "border border-border bg-surface-2 text-fg-muted" },
+    insert: { label: "Fill-in", icon: "pen-line", cls: "border border-border bg-surface-2 text-fg-muted" },
+    completion: { label: "Completion", icon: "message-square", cls: "border border-border bg-surface-2 text-fg-muted" },
+  };
+  function capMeta(cap: string): { label: string; icon: IconName; cls: string } {
+    return (
+      CAPABILITY_META[cap] ?? {
+        label: cap.charAt(0).toUpperCase() + cap.slice(1),
+        icon: "circle-dot",
+        cls: "border border-border bg-surface-2 text-fg-muted",
+      }
+    );
+  }
+
   let overview = $state<OllamaOverview | null>(null);
   let config = $state<AiPrefs | null>(null);
   let loading = $state<boolean>(true);
@@ -448,6 +487,16 @@
   let libraryRefreshing = $state<boolean>(false);
   let variantFilter = $state<string>("");
   let variantSort = $state<VariantSort>("popular");
+  /** Capability filter for the per-family variant list ("all" | "vision" |
+   * "tools" | "thinking" | "embedding") — the left dropdown over the list,
+   * mirroring the format dropdown in LM Studio's browser but driven by the
+   * real capability tags ollama.com publishes (Ollama is GGUF-only, so a
+   * format filter would have nothing to choose between). */
+  let variantCapFilter = $state<string>("all");
+  /** Which variant the detail pane on the right is showing. Empty = fall back
+   * to the family's recommended (or first) variant so the pane is never blank.
+   * Set when a list row is clicked. Reset when the family changes. */
+  let detailVariantName = $state<string>("");
   /** Catalog-wide search across every family (and the STT catalog) — the
    * per-family `variantFilter` only narrows the selected family. */
   let catalogQuery = $state<string>("");
@@ -693,13 +742,23 @@
     );
     return fit.level === "unknown" ? null : fit;
   }
+  /** Capabilities for a variant, read off the library model it belongs to
+   * (the variant's `workload` is the same list joined for display, but the
+   * source array keeps "general"-less semantics for filtering + badges). */
+  function variantCapabilities(variant: ModelVariant): string[] {
+    return selectedFamily.models.find((m) => m.name === variant.model)?.capabilities ?? [];
+  }
   const visibleVariants = $derived.by(() => {
     const q = variantFilter.trim().toLowerCase();
-    const list = q
+    const byText = q
       ? selectedFamily.variants.filter(
           (variant) => variant.name.toLowerCase().includes(q) || variant.fit.toLowerCase().includes(q),
         )
       : selectedFamily.variants;
+    const list =
+      variantCapFilter === "all"
+        ? byText
+        : byText.filter((variant) => variantCapabilities(variant).includes(variantCapFilter));
     if (variantSort === "popular") return list; // library order = popularity
     const sorted = [...list];
     if (variantSort === "updated") {
@@ -733,6 +792,24 @@
     });
     return sorted;
   });
+  /** The variant the right-hand detail pane shows: the explicitly selected one
+   * when it's still visible under the current filters, else the family's
+   * recommended (or first) variant — so the pane always has something to show,
+   * matching the screenshot where a model detail is always open. */
+  const activeDetailVariant = $derived.by(() => {
+    const picked = visibleVariants.find((v) => v.name === detailVariantName);
+    if (picked) return picked;
+    return visibleVariants.find((v) => v.recommended) ?? visibleVariants[0] ?? null;
+  });
+  /** Open a variant in the detail pane. Keeps the legacy side effects the row
+   * click used to carry: prefill the custom-pull input, and point the test
+   * playground at it when it's already installed. */
+  function selectVariant(variant: ModelVariant) {
+    detailVariantName = variant.name;
+    pullName = variant.name;
+    if (installedModelNames.has(variant.name)) selectedModel = variant.name;
+  }
+
   // Shared filter+sort for the on-device media catalogs (STT/TTS). Same shape
   // as `visibleVariants` but over the curated catalog (filter on display name +
   // speed note; size sorts on the exact `approxSizeBytes`).
@@ -1242,6 +1319,11 @@
   function selectFamily(id: string) {
     selectedFamilyId = id;
     catalogQuery = "";
+    // Reset the per-family list controls so a new family opens on its own
+    // recommended variant, not a stale selection/filter from the last one.
+    detailVariantName = "";
+    variantCapFilter = "all";
+    variantFilter = "";
     mainEl?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -1903,6 +1985,196 @@
       </details>
     {:else}
       <p class="text-[11px] text-fg-subtle">Details unavailable.</p>
+    {/if}
+  </div>
+{/snippet}
+
+<!-- Rich per-model detail pane (right side of the catalog), modelled on the
+     LM Studio model browser: brand mark + name, real pull/updated stats,
+     description, Params/Arch/Domain/Format, colour-coded capability badges,
+     the single GGUF download option, a hardware-fit verdict, and the primary
+     Download/Install action. Every field is real ollama.com / on-disk data —
+     no fabricated stars, "verified" ticks, or MLX format. -->
+{#snippet modelDetail(variant: ModelVariant)}
+  {@const lm = selectedFamily.models.find((m) => m.name === variant.model)}
+  {@const caps = lm?.capabilities ?? []}
+  {@const installed = installedModelNames.has(variant.name)}
+  {@const size = tagInfo[variant.name]?.size ?? null}
+  {@const hwfit = variantFitFor(variant, selectedFamily.id)}
+  {@const rowPulling = pulling && lastPullModel === variant.name}
+  <div class="flex h-full flex-col gap-4 p-4">
+    <!-- Header: brand mark + model name + copy -->
+    <div class="flex items-start gap-3">
+      <ModelMark family={selectedFamily.id} size={34} class="mt-0.5 shrink-0" />
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <h3 class="min-w-0 truncate font-mono text-[15px] font-semibold text-fg" title={variant.name}>{variant.name}</h3>
+          <button
+            type="button"
+            class="shrink-0 text-fg-subtle transition-colors hover:text-accent"
+            title="Copy model name"
+            onclick={() => copyText(`detail-${variant.name}`, variant.name)}
+          >
+            <Icon name={copied === `detail-${variant.name}` ? "check" : "copy"} size={13} />
+          </button>
+        </div>
+        <p class="mt-0.5 text-[11.5px] text-fg-subtle">{selectedFamily.vendor} · {selectedFamily.label}</p>
+      </div>
+    </div>
+
+    <!-- Stats line: real pull count + freshness. ollama.com publishes no star /
+         favourite count, so that field is omitted rather than faked. -->
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-fg-muted">
+      {#if lm?.pullCount}
+        <span class="inline-flex items-center gap-1.5" title="Pulls reported by ollama.com">
+          <Icon name="download" size={13} /> {lm.pullCount}
+        </span>
+      {/if}
+      {#if variant.updated}
+        <span class="inline-flex items-center gap-1.5"><Icon name="history" size={13} /> Last updated: {variant.updated}</span>
+      {/if}
+      {#if lm?.cloud}
+        <span class="inline-flex items-center gap-1.5 text-accent"><Icon name="cloud" size={13} /> Cloud inference</span>
+      {/if}
+    </div>
+
+    <!-- Description — tinted box, matching the screenshot's lavender panel. -->
+    {#if variant.fit}
+      <p class="rounded-md border border-accent/15 bg-accent/[0.06] px-3 py-2.5 text-[12px] leading-relaxed text-fg">
+        {variant.fit}
+      </p>
+    {/if}
+
+    <!-- Metadata: Params · Arch · Domain · Format -->
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-[11.5px]">
+      <span class="inline-flex items-center gap-1.5">
+        <span class="text-fg-subtle">Params</span>
+        <span class="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-fg">{paramLabel(variant.sizeHint)}</span>
+      </span>
+      <span class="inline-flex items-center gap-1.5">
+        <span class="text-fg-subtle">Arch</span>
+        <span class="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-fg">{variant.model}</span>
+      </span>
+      <span class="inline-flex items-center gap-1.5">
+        <span class="text-fg-subtle">Domain</span>
+        <span class="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-fg">{domainFor(caps, selectedFamily.id)}</span>
+      </span>
+      <span class="inline-flex items-center gap-1.5">
+        <span class="text-fg-subtle">Format</span>
+        <span class="rounded bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-accent">GGUF</span>
+      </span>
+    </div>
+
+    <!-- Capabilities -->
+    {#if caps.length > 0}
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="text-[11.5px] text-fg-subtle">Capabilities</span>
+        {#each caps as cap}
+          {@const meta = capMeta(cap)}
+          <span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] font-medium {meta.cls}">
+            <Icon name={meta.icon} size={11} /> {meta.label}
+          </span>
+        {/each}
+      </div>
+    {/if}
+
+    <!-- Download Options: Ollama serves one GGUF build per tag, so there's a
+         single option (no MLX/quant picker like LM Studio — that's a different
+         runtime). The inset row mirrors the screenshot's option card. -->
+    <div class="rounded-md border border-border">
+      <div class="flex items-center gap-1.5 border-b border-border px-3 py-2 text-[11px] font-semibold text-fg-muted">
+        <Icon name="settings" size={12} /> Download Options
+      </div>
+      <div class="p-2.5">
+        <div class="flex items-center gap-2 rounded-md border border-border bg-surface-2/40 px-3 py-2">
+          <span class="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">GGUF</span>
+          <span class="min-w-0 flex-1 truncate font-mono text-[12px] text-fg" title={variant.name}>{variant.name}</span>
+          <span class="shrink-0 text-[11px] text-fg-muted">{size ?? (variant.sizeHint.includes("Cloud") ? "Cloud" : "—")}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Fit verdict (left) + primary actions (right) on one row, mirroring the
+         screenshot's "Full GPU Offload Possible" + Download layout. The fit
+         line is machine-specific — PortBay's honest take on that badge. Sits
+         directly after Download Options (no mt-auto push to the container
+         bottom) so there's no dead gap on a short detail pane. -->
+    <div class="flex flex-wrap items-center justify-between gap-3 pt-1">
+      <div class="flex items-center">
+        {#if hwfit?.level === "fits"}
+          <span class="inline-flex items-center gap-1.5 rounded bg-status-running/15 px-2 py-1 text-[11px] font-medium text-status-running">
+            <Icon name="circle-check" size={12} /> Runs well on this Mac{hwfit.tps ? ` · ≈${hwfit.tps < 10 ? hwfit.tps.toFixed(1) : Math.round(hwfit.tps)} tok/s` : ""}
+          </span>
+        {:else if hwfit?.level === "tight"}
+          <span class="inline-flex items-center gap-1.5 rounded bg-status-warning/15 px-2 py-1 text-[11px] font-medium text-status-warning">
+            <Icon name="alert-triangle" size={12} /> Tight fit — little memory headroom left
+          </span>
+        {:else if hwfit?.level === "too-tight"}
+          <span class="inline-flex items-center gap-1.5 rounded bg-status-unhealthy/15 px-2 py-1 text-[11px] font-medium text-status-unhealthy">
+            <Icon name="circle-alert" size={12} /> Too tight — needs ~{hwfit.requiredGb.toFixed(1)} GB
+          </span>
+        {/if}
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+      {#if installed}
+        <span class="inline-flex items-center gap-1.5 rounded-md bg-status-running/15 px-3 py-2 text-[12px] font-semibold text-status-running">
+          <Icon name="circle-check" size={13} /> Installed
+        </span>
+        {#if rowPulling}
+          <button class="rounded-md bg-accent/15 px-3 py-2 text-[12px] font-semibold text-accent" disabled>
+            <Icon name="loader-circle" size={12} class="inline mr-1 animate-spin" /> Updating…
+          </button>
+        {:else if hasUpdate(variant.name)}
+          <button
+            class="rounded-md bg-accent px-3 py-2 text-[12px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
+            disabled={pulling || !running}
+            title="A newer build is on ollama.com — downloads only the changed layers"
+            onclick={() => updateModel(variant.name)}
+          >
+            Update
+          </button>
+        {/if}
+        <button class="rounded-md border border-border px-3 py-2 text-[12px] text-fg hover:bg-surface-2" onclick={() => void toggleDetails(variant.name)}>
+          {detailsName === variant.name ? "Hide details" : "Details"}
+        </button>
+        <button
+          class="rounded-md border border-status-unhealthy/40 px-3 py-2 text-[12px] text-status-unhealthy hover:bg-status-unhealthy/10 disabled:opacity-50"
+          disabled={busy === `delete:${variant.name}`}
+          onclick={() => {
+            const m = overview?.installedModels.find((im) => im.name === variant.name);
+            if (m) void deleteModel(m);
+          }}
+        >
+          Delete
+        </button>
+      {:else if rowPulling}
+        <button class="rounded-md bg-accent/15 px-3 py-2 text-[12px] font-semibold text-accent" disabled>
+          <Icon name="loader-circle" size={12} class="inline mr-1 animate-spin" />
+          {pullPct !== null ? `Downloading ${pullPct}%` : "Downloading…"}
+        </button>
+        <button class="rounded-md border border-border px-3 py-2 text-[12px] text-fg hover:bg-surface-2" type="button" onclick={cancelPull}>Cancel</button>
+      {:else}
+        <button
+          class="inline-flex items-center gap-1.5 rounded-md bg-accent px-4 py-2 text-[12px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
+          disabled={!running || pulling}
+          title={!running ? "Start Ollama to download models" : pulling ? "Wait for the current download to finish" : undefined}
+          onclick={() => pullModel(variant.name)}
+        >
+          <Icon name="download" size={13} /> Download{size ? ` ${size}` : ""}
+        </button>
+        <button
+          class="rounded-md border border-border px-3 py-2 text-[12px] text-fg hover:bg-surface-2"
+          onclick={() => copyText(`pull-${variant.name}`, `ollama pull ${variant.name}`)}
+        >
+          {copied === `pull-${variant.name}` ? "Copied" : "Copy CLI"}
+        </button>
+      {/if}
+      </div>
+    </div>
+
+    <!-- /api/show facts for installed models (real Arch/quant/context/license) -->
+    {#if detailsName === variant.name}
+      {@render modelDetailsPanel("")}
     {/if}
   </div>
 {/snippet}
@@ -3162,20 +3434,42 @@
                     {/if}
                   </div>
                 </div>
-                <div class="flex items-center gap-2">
-                  <input
-                    class="w-36 rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] text-fg placeholder:text-fg-subtle"
-                    bind:value={variantFilter}
-                    placeholder="Filter variants…"
-                    spellcheck="false"
-                    aria-label="Filter model variants"
-                  />
+                <div class="flex flex-wrap items-center gap-2">
+                  <div class="relative">
+                    <Icon
+                      name="search"
+                      size={12}
+                      class="absolute left-2 top-1/2 -translate-y-1/2 text-fg-subtle pointer-events-none"
+                    />
+                    <input
+                      type="search"
+                      class="w-36 rounded-md border border-border bg-bg pl-7 pr-2 py-1.5 text-[11px] text-fg placeholder:text-fg-subtle focus:outline-none focus:border-accent/60"
+                      bind:value={variantFilter}
+                      placeholder="Filter…"
+                      spellcheck="false"
+                      aria-label="Filter model variants"
+                    />
+                  </div>
+                  <!-- Capability filter — the left dropdown in the screenshot is a
+                       format picker (GGUF/MLX), but Ollama is GGUF-only, so this
+                       filters by the real capability tags instead. -->
+                  <select
+                    class="rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] text-fg"
+                    bind:value={variantCapFilter}
+                    aria-label="Filter by capability"
+                  >
+                    <option value="all">All capabilities</option>
+                    <option value="vision">Vision</option>
+                    <option value="tools">Tool use</option>
+                    <option value="thinking">Reasoning</option>
+                    <option value="embedding">Embeddings</option>
+                  </select>
                   <select
                     class="rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] text-fg"
                     bind:value={variantSort}
                     aria-label="Sort model variants"
                   >
-                    <option value="popular">Most popular</option>
+                    <option value="popular">Best match</option>
                     <option value="best-fit">Best fit for this Mac</option>
                     <option value="updated">Recently updated</option>
                     <option value="size-asc">Smallest first</option>
@@ -3188,6 +3482,7 @@
                     onclick={() => {
                       const recommended = selectedFamily.variants.find((model) => model.recommended) ?? selectedFamily.variants[0];
                       pullName = recommended.name;
+                      detailVariantName = recommended.name;
                     }}
                   >
                     Use recommended
@@ -3212,109 +3507,71 @@
                 {/if}
               </div>
             {/if}
-            <div class="grid divide-y divide-border">
-              {#each visibleVariants as variant}
-                {@const installed = installedModelNames.has(variant.name)}
-                {@const tag = tagInfo[variant.name]}
-                {@const rowPulling = pulling && lastPullModel === variant.name}
-                {@const hwfit = variantFitFor(variant, selectedFamily.id)}
-                <div class="grid gap-3 px-4 py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+            <!-- Model browser: scrollable list (left) + rich detail (right),
+                 LM Studio style. The detail pane mirrors the selected row;
+                 with none selected it shows the family's recommended model. -->
+            <div class="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
+              <div class="divide-y divide-border lg:max-h-[640px] lg:overflow-y-auto lg:border-r lg:border-border">
+                {#each visibleVariants as variant}
+                  {@const installed = installedModelNames.has(variant.name)}
+                  {@const caps = variantCapabilities(variant)}
+                  {@const hwfit = variantFitFor(variant, selectedFamily.id)}
+                  {@const active = activeDetailVariant?.name === variant.name}
                   <button
-                    class="min-w-0 text-left"
                     type="button"
-                    onclick={() => {
-                      pullName = variant.name;
-                      if (installed) selectedModel = variant.name;
-                    }}
+                    class="flex w-full items-start gap-3 px-4 py-3 text-left transition-colors {active
+                      ? 'bg-accent/[0.08]'
+                      : 'hover:bg-surface-2/60'}"
+                    onclick={() => selectVariant(variant)}
                   >
-                    <span class="flex flex-wrap items-center gap-2">
-                      <ModelMark family={selectedFamily.id} size={16} class="shrink-0" />
-                      <span class="font-mono text-[13px] font-semibold text-fg">{variant.name}</span>
-                      {#if variant.recommended}
-                        <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">Recommended</span>
-                      {/if}
-                      {#if installed}
-                        <span class="rounded bg-status-running/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-running">Installed</span>
-                      {/if}
-                      {#if hwfit?.level === "fits"}
-                        <span class="rounded bg-status-running/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-running" title={`Needs ~${hwfit.requiredGb.toFixed(1)} GB of ~${hwProfile?.budgetGb.toFixed(0)} GB usable`}>Runs well</span>
-                      {:else if hwfit?.level === "tight"}
-                        <span class="rounded bg-status-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-warning" title={`Needs ~${hwfit.requiredGb.toFixed(1)} GB of ~${hwProfile?.budgetGb.toFixed(0)} GB usable — little headroom left`}>Tight fit</span>
-                      {:else if hwfit?.level === "too-tight"}
-                        <span class="rounded bg-status-unhealthy/15 px-1.5 py-0.5 text-[10px] font-semibold text-status-unhealthy" title={`Needs ~${hwfit.requiredGb.toFixed(1)} GB but only ~${hwProfile?.budgetGb.toFixed(0)} GB is usable on this Mac`}>Too tight</span>
-                      {/if}
+                    <ModelMark family={selectedFamily.id} size={34} class="mt-0.5 shrink-0" />
+                    <span class="min-w-0 flex-1">
+                      <span class="flex items-center gap-2">
+                        <span class="min-w-0 truncate font-mono text-[12.5px] font-semibold {active ? 'text-accent' : 'text-fg'}">{variant.name}</span>
+                        {#if variant.recommended}
+                          <span class="shrink-0 text-accent" title="PortBay recommended"><Icon name="circle-check" size={13} /></span>
+                        {/if}
+                        {#if installed}
+                          <span class="shrink-0 rounded bg-status-running/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-status-running">Installed</span>
+                        {/if}
+                        {#if variant.updated}
+                          <span class="ml-auto shrink-0 whitespace-nowrap text-[10.5px] text-fg-subtle">{variant.updated}</span>
+                        {/if}
+                      </span>
+                      <span class="mt-0.5 block truncate text-[11px] text-fg-muted">{variant.fit}</span>
+                      <span class="mt-1.5 flex items-center gap-2.5">
+                        {#each caps.slice(0, 3) as cap}
+                          {@const meta = capMeta(cap)}
+                          <span class="text-fg-subtle" title={meta.label}><Icon name={meta.icon} size={13} /></span>
+                        {/each}
+                        {#if hwfit?.level === "fits"}
+                          <span class="ml-auto text-[10px] font-medium text-status-running">Runs well</span>
+                        {:else if hwfit?.level === "tight"}
+                          <span class="ml-auto text-[10px] font-medium text-status-warning">Tight fit</span>
+                        {:else if hwfit?.level === "too-tight"}
+                          <span class="ml-auto text-[10px] font-medium text-status-unhealthy">Too tight</span>
+                        {/if}
+                      </span>
                     </span>
-                    <span class="mt-1 block text-[11px] text-fg-subtle">
-                      {variant.workload} · {tag?.size ?? variant.sizeHint}{tag?.context ? ` · ${tag.context} context` : ""}{hwfit?.tps ? ` · ≈${hwfit.tps < 10 ? hwfit.tps.toFixed(1) : Math.round(hwfit.tps)} tok/s` : ""}{variant.updated ? ` · updated ${variant.updated}` : ""}
-                    </span>
-                    <span class="mt-1 block text-[11px] leading-relaxed text-fg-muted">{variant.fit}</span>
                   </button>
-                  <div class="flex flex-wrap gap-2 lg:justify-end">
-                    {#if installed}
-                      <!-- Installed rows manage the model in place — no
-                           separate "installed" list to scroll for. -->
-                      <button class="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-fg hover:bg-surface-2" onclick={() => void toggleDetails(variant.name)}>
-                        {detailsName === variant.name ? "Hide details" : "Details"}
-                      </button>
-                      {#if rowPulling}
-                        <button class="rounded-md bg-accent/15 px-2.5 py-1.5 text-[11px] font-semibold text-accent" disabled>
-                          <Icon name="loader-circle" size={11} class="inline mr-1 animate-spin" />
-                          Updating…
-                        </button>
-                      {:else if hasUpdate(variant.name)}
-                        <!-- Only rendered when ollama.com's manifest digest
-                             differs from the local one — a real update. -->
-                        <button
-                          class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
-                          disabled={pulling || !running}
-                          title="A newer build is on ollama.com — downloads only the changed layers"
-                          onclick={() => updateModel(variant.name)}
-                        >
-                          Update
-                        </button>
-                      {/if}
-                      <button
-                        class="rounded-md border border-status-unhealthy/40 px-2.5 py-1.5 text-[11px] text-status-unhealthy hover:bg-status-unhealthy/10 disabled:opacity-50"
-                        disabled={busy === `delete:${variant.name}`}
-                        onclick={() => {
-                          const m = overview?.installedModels.find((im) => im.name === variant.name);
-                          if (m) void deleteModel(m);
-                        }}
-                      >
-                        Delete
-                      </button>
-                    {:else if rowPulling}
-                      <button class="rounded-md bg-accent/15 px-2.5 py-1.5 text-[11px] font-semibold text-accent" disabled>
-                        <Icon name="loader-circle" size={11} class="inline mr-1 animate-spin" />
-                        {pullPct !== null ? `Downloading ${pullPct}%` : "Downloading…"}
-                      </button>
-                      <button class="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-fg hover:bg-surface-2" type="button" onclick={cancelPull}>Cancel</button>
-                    {:else}
-                      <button
-                        class="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-semibold text-on-accent disabled:bg-surface-2 disabled:text-fg-subtle disabled:cursor-not-allowed"
-                        disabled={!running || pulling}
-                        title={!running ? "Start Ollama to download models" : pulling ? "Wait for the current download to finish" : undefined}
-                        onclick={() => pullModel(variant.name)}
-                      >
-                        Download
-                      </button>
-                      <button
-                        class="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-fg hover:bg-surface-2"
-                        onclick={() => copyText(`pull-${variant.name}`, `ollama pull ${variant.name}`)}
-                      >
-                        {copied === `pull-${variant.name}` ? "Copied" : "Copy CLI"}
-                      </button>
-                    {/if}
+                {:else}
+                  <div class="px-4 py-8 text-center text-[12px] text-fg-subtle">
+                    No models match your filters. The custom field on the left pulls any tag directly.
                   </div>
-                  {#if detailsName === variant.name}
-                    {@render modelDetailsPanel()}
-                  {/if}
-                </div>
-              {:else}
-                <div class="px-4 py-8 text-center text-[12px] text-fg-subtle">
-                  No variants match "{variantFilter}". The custom field on the left pulls any tag directly.
-                </div>
-              {/each}
+                {/each}
+              </div>
+              <div class="border-t border-border lg:border-t-0">
+                {#if activeDetailVariant}
+                  {@render modelDetail(activeDetailVariant)}
+                {:else}
+                  <div class="grid h-full place-items-center px-4 py-12 text-center">
+                    <p class="text-[12px] text-fg-subtle">
+                      <Icon name="package" size={20} class="mx-auto mb-2 block text-fg-subtle" />
+                      Select a model to see its details.
+                    </p>
+                  </div>
+                {/if}
+              </div>
             </div>
           </div>
 

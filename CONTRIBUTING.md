@@ -7,6 +7,7 @@ agree your work is licensed under that license (see [Signing off](#signing-off-d
 
 **Deeper guides** live in [`docs/contributing/`](./docs/contributing/overview.md):
 [development setup](./docs/contributing/development.md) ·
+[build model](./docs/contributing/build-model.md) ·
 [issue triage](./docs/contributing/issue-triage.md) ·
 [pull requests](./docs/contributing/pull-requests.md) ·
 [architecture](./docs/contributing/architecture.md) ·
@@ -28,6 +29,42 @@ pnpm tauri dev
 ```
 
 Sidecar binaries are stored under `src-tauri/binaries/` and are ignored by git.
+
+**Platform:** PortBay targets **macOS 14+ on Apple Silicon**, and the AI sidecars
+(speech-to-text, screen capture, Apple Intelligence) build via **SwiftPM on macOS
+14+**. On macOS 13 the core app still builds and runs — projects, HTTPS,
+databases, DNS, tunnels, SSH, MCP — but those Swift sidecars don't; on Linux there
+is no supported build target yet. The `scripts/build-*.sh` sidecar scripts no-op
+on non-macOS, so shared dev/CI flows can call them unconditionally. Why a large
+chunk of the code sits behind `#[cfg(feature = "tasks")]` / `"visual-editor"`
+flags whose implementation isn't in this repo — and exactly what builds where — is
+explained in the **[build model](./docs/contributing/build-model.md)**.
+
+### Git hooks (required)
+
+`pnpm install` runs `scripts/setup-hooks.sh`, which points git at the
+version-controlled hooks in `.githooks/` (`core.hooksPath=.githooks`). They run
+on **staged content at commit time** and on the **outgoing range at push time**,
+so a boundary violation or a leaked secret is stopped before it ever lands in a
+commit:
+
+- **pre-commit** — `scripts/check-repo-boundaries.sh --staged` **and**
+  `gitleaks protect --staged`.
+- **pre-push** — the boundary check against each pushed ref and a secret scan of
+  the outgoing commits.
+
+The secret scan is **fail-closed**: the pre-commit hook refuses to create a
+commit if `gitleaks` is not installed, rather than letting a secret through to be
+caught only later. Install it once:
+
+```bash
+brew install gitleaks            # macOS / Linuxbrew
+# or: go install github.com/gitleaks/gitleaks/v8@latest
+# or download a release binary: https://github.com/gitleaks/gitleaks/releases
+```
+
+CI (`governance.yml`) runs the same scan, so a secret is blocked at the PR even
+if a local hook is skipped.
 
 ## Signing off (DCO)
 

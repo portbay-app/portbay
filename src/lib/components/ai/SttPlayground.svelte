@@ -271,6 +271,8 @@
 <MacPermissionDialog
   open={showMicDialog}
   kind="microphone"
+  checkGranted={async () =>
+    (await invokeQuiet<SttOverview>("stt_overview")).micPermission === "authorized"}
   onClose={() => {
     showMicDialog = false;
     void load();

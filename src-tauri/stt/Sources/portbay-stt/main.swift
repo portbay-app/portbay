@@ -61,6 +61,11 @@ import CryptoKit
 import Foundation
 import FluidAudio
 import WhisperKit
+// MLX neural TTS (Chatterbox, …) — engines beyond FluidAudio's CoreML Kokoro.
+import MLX
+import HuggingFace
+import MLXAudioCore
+import MLXAudioTTS
 
 // MARK: - Wire types
 
@@ -818,6 +823,13 @@ actor TtsCache {
 func synthesizeTts(modelsDir: String, id: String, text: String, voice: String?) async throws
     -> String
 {
+    // MLX engines (Chatterbox, …) synthesize through mlx-audio-swift rather than
+    // FluidAudio's KokoroAne. The persisted spec records which engine installed
+    // this id; route to the MLX path before any Kokoro-specific work.
+    if let spec = readSpec(modelRoot(modelsDir, id)), isMlxTtsEngine(spec.engine) {
+        return try await synthesizeMlxTts(
+            modelsDir: modelsDir, id: id, repoModel: spec.repoModel, text: text)
+    }
     // Safety net for models installed before the full voice set shipped (or any
     // voice the bulk stage skipped): make sure the requested pack is on disk
     // before FluidAudio looks for it — otherwise it 404s against the CoreML repo.
@@ -834,6 +846,161 @@ func synthesizeTts(modelsDir: String, id: String, text: String, voice: String?) 
     let manager = try await TtsCache.shared.synthesizer(modelsDir: modelsDir, id: id)
     let wav = try await manager.synthesize(text: text, voice: voice)
     return wav.base64EncodedString()
+}
+
+// MARK: - Text-to-Speech (MLX engines via mlx-audio-swift)
+
+enum MlxTtsError: Error, CustomStringConvertible {
+    case invalidRepo(String)
+    var description: String {
+        switch self {
+        case .invalidRepo(let r): return "invalid Hugging Face repo id: \(r)"
+        }
+    }
+}
+
+/// Engines synthesized through mlx-audio-swift's MLX/Metal stack rather than
+/// FluidAudio's CoreML Kokoro. A set so a second MLX TTS model (StyleTTS2, …)
+/// is one line here plus a catalog entry.
+func isMlxTtsEngine(_ engine: String) -> Bool {
+    engine == "chatterbox"
+}
+
+/// Where mlx-audio stages a repo snapshot under PortBay's per-model root —
+/// `<root>/mlx-audio/<repo with / → _>`, matching
+/// `ModelUtils.resolveOrDownloadModel`. Keeping weights inside the model root
+/// means delete/disk/installed tracking stay one-directory-per-id, unchanged.
+func mlxTtsModelDir(_ modelsDir: String, _ id: String, _ repoModel: String) -> URL {
+    modelRoot(modelsDir, id)
+        .appendingPathComponent("mlx-audio")
+        .appendingPathComponent(repoModel.replacingOccurrences(of: "/", with: "_"))
+}
+
+/// Download an MLX TTS model's Hugging Face repo into PortBay's per-model root,
+/// then seal it. Mirrors `runTtsDownload`'s contract (progress events + spec +
+/// completion marker) so the app's existing download UI works unchanged.
+func runMlxTtsDownload(modelsDir: String, entry: CatalogModel, downloadId: String) async {
+    let out = LineWriter.shared
+    let root = modelRoot(modelsDir, entry.id)
+    let gate = ProgressGate()
+    do {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        guard let repoID = Repo.ID(rawValue: entry.repoModel) else {
+            throw MlxTtsError.invalidRepo(entry.repoModel)
+        }
+        // Download into the per-model root (its own HubCache), not the shared HF
+        // cache, so PortBay owns the weights for delete/disk accounting.
+        let cache = HubCache(cacheDirectory: root)
+        let client = HubClient(cache: cache)
+        _ = try await ModelUtils.resolveOrDownloadModel(
+            client: client,
+            cache: cache,
+            repoID: repoID,
+            requiredExtension: "safetensors",
+            progressHandler: { progress in
+                let total = progress.totalUnitCount
+                let frac = total > 0 ? Double(progress.completedUnitCount) / Double(total) : 0
+                gate.relay(downloadId, frac, phase: "downloading")
+            }
+        )
+        try Task.checkCancellation()
+        // Verify (no-op without a catalog digest) and seal the install.
+        try verifyContentDigest(root, entry)
+        writeSpec(root, entry)
+        FileManager.default.createFile(
+            atPath: root.appendingPathComponent(COMPLETE_MARKER).path, contents: nil)
+        out.send(Response(op: "download", ok: true, downloadId: downloadId))
+    } catch {
+        if Task.isCancelled || error is CancellationError {
+            out.send(
+                Response(op: "download", ok: false, code: 6, error: "cancelled", downloadId: downloadId))
+        } else {
+            out.send(
+                Response(
+                    op: "download", ok: false, code: 5,
+                    error: "TTS model download failed: \(error.localizedDescription)",
+                    downloadId: downloadId))
+        }
+    }
+    await ActiveDownloads.shared.finished(downloadId)
+}
+
+/// One resident MLX TTS model, reused across synths (re-keys when the dir
+/// changes). Mirrors `TtsCache`.
+actor MlxTtsCache {
+    static let shared = MlxTtsCache()
+    private var model: SpeechGenerationModel?
+    private var key: String?
+
+    func model(modelsDir: String, id: String, repoModel: String) async throws
+        -> SpeechGenerationModel
+    {
+        let dir = mlxTtsModelDir(modelsDir, id, repoModel)
+        if let m = model, key == dir.path { return m }
+        // Local-dir load (config.json present) — no network; download already
+        // staged the snapshot here.
+        let m = try await TTS.loadModel(modelRepo: dir.path)
+        model = m
+        key = dir.path
+        return m
+    }
+}
+
+/// Synthesize `text` to a base64 WAV (24 kHz mono 16-bit PCM) with an MLX TTS
+/// engine using the model's pre-computed default voice (Chatterbox ships one in
+/// `conds.safetensors`; reference-audio cloning is a later addition).
+func synthesizeMlxTts(modelsDir: String, id: String, repoModel: String, text: String) async throws
+    -> String
+{
+    let model = try await MlxTtsCache.shared.model(
+        modelsDir: modelsDir, id: id, repoModel: repoModel)
+    let audio = try await model.generate(
+        text: text, voice: nil, refAudio: nil, refText: nil, language: nil)
+    let samples = audio.asArray(Float.self)
+    let wav = floatPCMToWav(samples, sampleRate: model.sampleRate)
+    return wav.base64EncodedString()
+}
+
+/// Encode mono Float32 PCM in [-1, 1] as a 16-bit little-endian WAV — the
+/// contract `tts-synthesize` returns. FluidAudio hands back a ready WAV for
+/// Kokoro; the MLX path yields raw samples, so we write the RIFF header here.
+func floatPCMToWav(_ samples: [Float], sampleRate: Int) -> Data {
+    let channels = 1
+    let bitsPerSample = 16
+    let byteRate = sampleRate * channels * bitsPerSample / 8
+    let blockAlign = channels * bitsPerSample / 8
+    let dataSize = samples.count * bitsPerSample / 8
+
+    var data = Data()
+    func appendLE32(_ v: UInt32) {
+        var x = v.littleEndian
+        withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
+    }
+    func appendLE16(_ v: UInt16) {
+        var x = v.littleEndian
+        withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
+    }
+
+    data.append(contentsOf: Array("RIFF".utf8))
+    appendLE32(UInt32(36 + dataSize))
+    data.append(contentsOf: Array("WAVE".utf8))
+    data.append(contentsOf: Array("fmt ".utf8))
+    appendLE32(16)  // PCM fmt chunk size
+    appendLE16(1)  // PCM format
+    appendLE16(UInt16(channels))
+    appendLE32(UInt32(sampleRate))
+    appendLE32(UInt32(byteRate))
+    appendLE16(UInt16(blockAlign))
+    appendLE16(UInt16(bitsPerSample))
+    data.append(contentsOf: Array("data".utf8))
+    appendLE32(UInt32(dataSize))
+    data.reserveCapacity(data.count + dataSize)
+    for s in samples {
+        let clamped = max(-1.0, min(1.0, s))
+        var le = Int16(clamping: Int((clamped * 32767.0).rounded())).littleEndian
+        withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+    }
+    return data
 }
 
 // MARK: - Engines
@@ -1795,6 +1962,16 @@ if let i = CommandLine.arguments.firstIndex(of: "--digest"),
     }
 }
 
+// Sidecar↔host wire-protocol version, kept in lockstep with
+// src-tauri/src/sidecar_protocol.rs::SIDECAR_PROTOCOL. The release build's
+// scripts/verify-sidecars.sh runs `--protocol` on every freshly built sidecar
+// and fails if any diverges, so a stale or mismatched binary can't ship. Bump
+// together when the stdin/stdout JSON protocol changes.
+if CommandLine.arguments.contains("--protocol") {
+    print("1")
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--check") {
     // The deployment target (macOS 14) already gates launch — if this code
     // runs, the engines' platform floor is met. Touch one symbol from each
@@ -1878,6 +2055,8 @@ func handle(_ request: Request) async {
         let engine = entry.engine
         let task = Task.detached {
             switch engine {
+            case let e where isMlxTtsEngine(e):
+                await runMlxTtsDownload(modelsDir: dir, entry: entry, downloadId: downloadId)
             case "kokoro":
                 await runTtsDownload(modelsDir: dir, entry: entry, downloadId: downloadId)
             case "qwen3", "cohere", "nemotron", "parakeet-eou":

@@ -70,7 +70,7 @@ to your editor and browser without being noticed.
 - **A sandboxed runner** — run an untrusted or freshly-cloned project inside a macOS sandbox, inspect it, then promote it to a normal local run.
 - **A managed local AI server** — PortBay installs, starts, and supervises [Ollama](https://ollama.com), pulls models from the live catalog, and shares one local endpoint with dictation, agents, and your own tools. Nothing leaves your Mac.
 - **Speech-to-Text** — hold Fn 🌐 and talk: an on-device speech model plus a local AI rewrite turn spoken thoughts into clean task cards, commits, and prompts. ⌘Z always restores your exact words — and with a local speech model it works in **any app on your Mac**, not just PortBay.
-- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 69 agent tools.
+- **An MCP server** — drive your whole local stack from Claude Code, Cursor, or Zed; PortBay's projects and actions are exposed as 70 agent tools across 15 toolsets.
 - **A declarative registry** — projects live in JSON; the daemon reconciles reality to match.
 - **Live logs, status, and metrics** per project, plus a macOS menu-bar mode.
 - **Already using Herd, ServBay, or MAMP?** Import your existing sites in one step — no re-entering paths, ports, and PHP versions.
@@ -114,6 +114,13 @@ at any other CLI.
 - **A handoff doc that travels with the work.** When a run ends it appends to `.portbay/HANDOFF.md` — a short, newest-first brief the next run (or the next person) reads to continue without re-deriving context. No run starts from zero.
 - **It stays out of trouble.** A card can be blocked on others until they land, an optional *Review* column holds agent-"done" work for a human to approve, and runs whose process dies are reclaimed automatically.
 - **One board, three front ends.** The GUI, the `portbay` CLI, and the MCP server read and write the same cards — so an agent connected over MCP can claim the next card, record the files it touched, and move it to *Review* or *Done*, all through PortBay's agent tools.
+
+> **The task board is a PortBay Pro feature.** The Kanban board, agent dispatch,
+> and the `portbay` board commands are not part of the open-source build — a
+> fresh clone won't have them. Pro is a perpetual license that's **free** with a
+> merged pull request or a sponsorship (see
+> [Community vs Pro](./docs/pages/community-vs-pro.md)); the screenshot above
+> shows it running. The MCP server it builds on *is* in the open-source core.
 
 ## A full SSH workspace, in the same app
 
@@ -206,9 +213,9 @@ and worked on by AI agents.
 | Container-free | ✅ | ✅ | ✅ | ❌ |
 | Local HTTPS + `.test` | ✅ | ✅ | ✅ | Manual |
 | Multi-runtime (Node/PHP/Python) | ✅ | PHP-first | ✅ | ✅ |
-| MCP server for agents | ✅ 69 tools | ✅ | ❌ | ✅ |
-| AI agent task board — write a card, an agent does the work | ✅ | ❌ | ❌ | ❌ |
-| Agent handoff memory between runs | ✅ | ❌ | ❌ | ❌ |
+| MCP server for agents | ✅ | ✅ | ❌ | ✅ |
+| AI agent task board — write a card, an agent does the work | ✅ Pro | ❌ | ❌ | ❌ |
+| Agent handoff memory between runs | ✅ Pro | ❌ | ❌ | ❌ |
 | Managed local LLM server (Ollama) | ✅ | ❌ | ✅ | Manual |
 | On-device Speech-to-Text with AI cleanup | ✅ | ❌ | ❌ | ❌ |
 | Built-in SSH / SFTP / tunnels | ✅ | ❌ | ❌ | ❌ |
@@ -275,7 +282,7 @@ pnpm install
 
 - **Core** — registry, reconciler, Process Compose + Caddy adapters, hosts manager, full CLI. *Shipped.*
 - **GUI** — projects, lifecycle, logs, metrics, certificates, web servers, tunnels, DNS, databases, languages/runtimes, HTTP inspector, sandboxed runner, Mailpit, an SSH workspace (terminal, SFTP, port-forward tunnels), and one-step import from Herd / ServBay / MAMP. *Shipped.*
-- **AI & automation** — an MCP server (69 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed, and a per-project task board hands cards to the coding agent of your choice. *Shipped.*
+- **AI & automation** — an MCP server (70 tools) plus stack recipes drive the whole stack from Claude Code, Cursor, or Zed. *Shipped.* The per-project **task board** that hands cards to your coding agent builds on top — *Pro, not in the open-source build* (see [Editions](#editions)).
 - **Local AI** — a managed Ollama server with a live model catalog, plus Speech-to-Text: on-device transcription (Whisper / Parakeet on the Neural Engine), local AI transcript rewrites, and system-wide dictation into any app. *Shipped.*
 - **Release** — signed & notarized DMG, Homebrew cask, and in-app auto-update. *Shipped.*
 
@@ -305,12 +312,13 @@ time — and keep the project independent. If your team relies on it, please con
 manager for individuals and teams who want a clean, transparent way to run
 projects locally. It is fully usable offline, with no account and no network.
 
-**PortBay Pro** is developed separately and may include team sync,
-cloud backups, remote access, hosted recipes, billing, organization management,
-enterprise policy controls, and managed infrastructure. It builds on the
-Community app through documented public APIs — the Community edition is never
-crippled to upsell it, and this repository contains no proprietary Pro
-code. See [Community vs Pro](./docs/pages/community-vs-pro.md) and the
+**PortBay Pro** is developed separately. It already includes the **AI agent
+task board** — write a card, move it to *To Do*, and the coding agent you
+assigned works it — and may add team sync, cloud backups, remote access, hosted
+recipes, billing, organization management, enterprise policy controls, and
+managed infrastructure. It builds on the Community app through documented public
+APIs — the Community edition is never crippled to upsell it, and this repository
+contains no proprietary Pro code. See [Community vs Pro](./docs/pages/community-vs-pro.md) and the
 [repo boundaries](./docs/architecture/repo-boundaries.md).
 
 ## License

@@ -315,7 +315,10 @@ fn parse_jump_hop(token: &str) -> Option<JumpHop> {
         let (host, after) = rest.split_once(']')?;
         match after.trim() {
             "" => (host.trim(), DEFAULT_SSH_PORT),
-            p => (host.trim(), p.strip_prefix(':')?.trim().parse::<u16>().ok()?),
+            p => (
+                host.trim(),
+                p.strip_prefix(':')?.trim().parse::<u16>().ok()?,
+            ),
         }
     } else if host_port.matches(':').count() > 1 {
         // Bare IPv6 — no port form exists without brackets.

@@ -748,6 +748,8 @@
 <MacPermissionDialog
   open={showAccessibilityDialog}
   kind="accessibility"
+  checkGranted={async () =>
+    (await invokeQuiet<DictationAnywhereStatus>("dictation_anywhere_status")).trusted}
   onClose={() => {
     showAccessibilityDialog = false;
     void refreshAnywhereStatus(true);
@@ -757,6 +759,8 @@
 <MacPermissionDialog
   open={showMicDialog}
   kind="microphone"
+  checkGranted={async () =>
+    (await invokeQuiet<SttOverview>("stt_overview")).micPermission === "authorized"}
   onClose={() => {
     showMicDialog = false;
     void refreshSttInfo();

@@ -21,6 +21,9 @@ PortBay comes in two tiers. Community is the open-source core — free, local-fi
 | **Menu-bar mode** | Included | — |
 | **Open plugin interfaces** | Included | — |
 | **Import from Herd / MAMP / ServBay** | Included | — |
+| **MCP server (drive the stack from Claude Code / Cursor / Zed)** | Included | — |
+| **AI agent task board (write a card, an agent does the work)** | — | Available |
+| **Agent dispatch + `portbay` board CLI** | — | Available |
 | **Multi-device sync (E2E encrypted)** | — | In progress |
 | **Shared team workspaces** | — | Planned |
 | **Cloud backups** | — | Planned |

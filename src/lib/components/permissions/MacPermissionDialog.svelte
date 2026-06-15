@@ -36,9 +36,23 @@
         primary button calls this; otherwise it opens System Settings. */
     onConfirm?: () => void | Promise<void>;
     onClose?: () => void;
+    /** Live probe for the permission. While the sheet is open it is polled
+        (and re-run when the window regains focus, i.e. the user comes back
+        from System Settings); the moment it reports true the sheet flips to
+        a granted state instead of keeping the grant instructions up. */
+    checkGranted?: () => Promise<boolean>;
+    /** Runs once when `checkGranted` first reports true (e.g. restart the
+        capture engine so the fresh grant takes effect). */
+    onGranted?: () => void | Promise<void>;
   }
-  let { open = false, kind = "login-items", onConfirm, onClose }: Props =
-    $props();
+  let {
+    open = false,
+    kind = "login-items",
+    onConfirm,
+    onClose,
+    checkGranted,
+    onGranted,
+  }: Props = $props();
 
   interface KindConfig {
     title: string;
@@ -151,6 +165,10 @@
   interface DragPayload {
     bundlePath: string;
     iconPath: string;
+    /** App is Gatekeeper-translocated (run straight from the DMG): a grant
+        against its randomized path can never stick, so the sheet must say
+        "move to /Applications" instead of offering the drag. */
+    translocated: boolean;
   }
   let dragPayload = $state<DragPayload | null>(null);
   // Set once the user has dropped PortBay into the list. macOS only applies a
@@ -158,19 +176,104 @@
   // of just closing we switch to a "relaunch to finish" step.
   let dropped = $state(false);
 
+  /** The TCC kinds — the ones `tccutil` can reset and the grant-attempt
+      marker applies to. */
+  const TCC_KINDS: PermissionKind[] = [
+    "accessibility",
+    "screen-recording",
+    "full-disk-access",
+    "microphone",
+    "camera",
+  ];
+  const isTcc = $derived(TCC_KINDS.includes(kind));
+
+  /** Live probe reported granted — show success instead of instructions. */
+  let granted = $state(false);
+  /** The user already walked the whole grant flow for this kind (marker
+      persisted across the relaunch) and macOS still blocks it: the System
+      Settings entry doesn't match this build. Show recovery, not the same
+      instructions again. */
+  let stuck = $state(false);
+  const translocated = $derived(dragPayload?.translocated ?? false);
+
   $effect(() => {
-    if (open && config.gesture === "drag") {
-      dropped = false; // reset each time the sheet opens
-      if (!dragPayload) {
-        safeInvoke<DragPayload>("permission_drag_payload")
-          .then((p) => (dragPayload = p))
-          .catch(() => {});
-      }
+    if (!open) return;
+    dropped = false; // reset each time the sheet opens
+    granted = false;
+    stuck = false;
+    if (config.gesture === "drag" && !dragPayload) {
+      safeInvoke<DragPayload>("permission_drag_payload")
+        .then((p) => (dragPayload = p))
+        .catch(() => {});
+    }
+    if (isTcc) {
+      safeInvoke<string[]>("permission_grant_marks")
+        .then((marks) => {
+          if (marks.includes(kind)) stuck = true;
+        })
+        .catch(() => {});
     }
   });
 
+  // Live grant detection: poll while open, and immediately when the window
+  // regains focus (the user coming back from System Settings). First true
+  // flips the sheet to the granted state, clears the cross-relaunch marker
+  // and runs the caller's onGranted (e.g. capture engine restart).
+  $effect(() => {
+    if (!open || !checkGranted || granted) return;
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        if (!cancelled && (await checkGranted())) {
+          cancelled = true;
+          granted = true;
+          stuck = false;
+          if (isTcc) {
+            void safeInvoke("permission_clear_grant_attempt", { kind }).catch(() => {});
+          }
+          await onGranted?.();
+        }
+      } catch {
+        /* probe is best-effort; the manual flow still works */
+      }
+    };
+    const interval = setInterval(probe, 2000);
+    window.addEventListener("focus", probe);
+    void probe();
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      window.removeEventListener("focus", probe);
+    };
+  });
+
   async function relaunch() {
+    // Remember that the user completed the grant gesture: if the permission
+    // still probes false after the relaunch, the sheet opens in recovery
+    // mode instead of looping the same instructions.
+    if (isTcc) {
+      await safeInvoke("permission_mark_grant_attempt", { kind }).catch(() => {});
+    }
     await safeInvoke("relaunch_app").catch(() => {});
+  }
+
+  /** Recovery for the granted-but-still-blocked loop: drop the stale TCC
+      entry, get PortBay re-listed (screen recording can re-request — macOS
+      adds the entry keyed to THIS build), and reopen the pane. */
+  async function resetAndRegrant() {
+    busy = true;
+    try {
+      await safeInvoke("reset_privacy_permission", { kind });
+      if (kind === "screen-recording") {
+        await safeInvoke("capture_request_permission").catch(() => {});
+      }
+      await openSettings();
+      stuck = false; // back to the normal grant steps, now against a clean list
+    } catch {
+      /* toasted by safeInvoke */
+    } finally {
+      busy = false;
+    }
   }
 
   // MUST stay synchronous: the native drag session has to begin within the
@@ -187,7 +290,18 @@
     void startDrag(
       { item: [dragPayload.bundlePath], icon: dragPayload.iconPath },
       (payload) => {
-        if (payload.result === "Dropped") dropped = true;
+        if (payload.result === "Dropped") {
+          dropped = true;
+          // Persist the attempt NOW, not on our relaunch button: System
+          // Settings shows its own "quit & reopen" prompt after the toggle,
+          // and a user who relaunches through it never comes back to this
+          // sheet. The mark is what lets the next opening detect the
+          // granted-but-still-blocked loop; it's cleared the moment the
+          // permission probes as granted.
+          if (isTcc) {
+            void safeInvoke("permission_mark_grant_attempt", { kind }).catch(() => {});
+          }
+        }
       },
     );
   }
@@ -237,7 +351,54 @@
       class="perm-card w-[440px] rounded-2xl border border-border bg-surface
              shadow-2xl p-6 flex flex-col items-center gap-5 text-center"
     >
-      {#if config.gesture === "toggle"}
+      {#if granted}
+        <!-- The live probe confirmed the grant — acknowledge instead of
+             leaving the instructions up (the loop this state kills). -->
+        <div class="perm-app relative py-2">
+          <span class="perm-glow"></span>
+          <img src="/icon.png" alt="" aria-hidden="true" class="relative h-16 w-16 rounded-[18px]" />
+        </div>
+        <div class="flex flex-col gap-1">
+          <h2 class="text-[15px] font-semibold text-fg">Access granted</h2>
+          <p class="text-[11.5px] uppercase tracking-wide text-accent">All set</p>
+        </div>
+        <p class="text-[12px] text-fg-muted leading-relaxed">
+          PortBay is switched on under {config.settingsName} and macOS confirms
+          the grant — you're good to go.
+        </p>
+      {:else if stuck && isTcc && !dropped}
+        <!-- The user already completed the grant flow (marker survived the
+             relaunch) and macOS still blocks: the System Settings entry
+             doesn't match this copy of PortBay. Same loop a translocated
+             (run-from-DMG) app hits — its grant can never stick. -->
+        <div class="perm-app relative py-2">
+          <span class="perm-glow"></span>
+          <img src="/icon.png" alt="" aria-hidden="true" class="relative h-16 w-16 rounded-[18px]" />
+        </div>
+        <div class="flex flex-col gap-1">
+          <h2 class="text-[15px] font-semibold text-fg">
+            Granted, but macOS still blocks it
+          </h2>
+          <p class="text-[11.5px] uppercase tracking-wide text-accent">Needs a fresh entry</p>
+        </div>
+        {#if translocated}
+          <p class="text-[12px] text-fg-muted leading-relaxed">
+            PortBay is running straight from its disk image, so macOS gives it
+            a new temporary location on every launch — a {config.settingsName}
+            grant can never stick. Quit PortBay, move
+            <span class="font-medium text-fg">PortBay.app</span> into
+            <span class="font-medium text-fg">/Applications</span>, open it from
+            there and grant access again.
+          </p>
+        {:else}
+          <p class="text-[12px] text-fg-muted leading-relaxed">
+            The {config.settingsName} switch is on, but the entry belongs to an
+            older or moved copy of PortBay, so macOS keeps ignoring it. Reset
+            the entry and add this copy again — that re-keys the grant to the
+            app you're running.
+          </p>
+        {/if}
+      {:else if config.gesture === "toggle"}
         <!-- Toggle gesture (DNS helper / Login Items): icon → flow → switch. -->
         <div class="relative flex w-full items-center justify-center gap-4 py-3">
           <div class="perm-app relative">
@@ -341,6 +502,19 @@
           {/each}
         </ol>
 
+        {#if translocated}
+          <!-- Dragging a translocated bundle adds an entry for a randomized
+               path that evaporates on the next launch — don't offer it. -->
+          <div class="w-full rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-left">
+            <p class="text-[12px] text-amber-400 leading-relaxed">
+              PortBay is running straight from its disk image, so a grant won't
+              stick. Quit PortBay, move
+              <span class="font-medium">PortBay.app</span> into
+              <span class="font-medium">/Applications</span>, then open it from
+              there and try again.
+            </p>
+          </div>
+        {:else}
         <!-- The real OS drag source: drag this tile into the privacy list. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
@@ -359,11 +533,51 @@
             <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><circle cx="4" cy="3" r="1.3"/><circle cx="10" cy="3" r="1.3"/><circle cx="4" cy="7" r="1.3"/><circle cx="10" cy="7" r="1.3"/><circle cx="4" cy="11" r="1.3"/><circle cx="10" cy="11" r="1.3"/></svg>
           </span>
         </div>
+        {/if}
       {/if}
 
       <!-- Actions -->
       <div class="mt-1 flex w-full flex-col gap-2">
-        {#if dropped}
+        {#if granted}
+          <button
+            type="button"
+            onclick={onClose}
+            class="h-9 w-full rounded-lg text-[12.5px] font-medium text-on-accent
+                   bg-accent hover:bg-accent-hover transition-colors"
+          >
+            Done
+          </button>
+        {:else if stuck && isTcc && !dropped}
+          {#if !translocated}
+            <button
+              type="button"
+              disabled={busy}
+              onclick={resetAndRegrant}
+              class="h-9 w-full rounded-lg text-[12.5px] font-medium text-on-accent
+                     bg-accent hover:bg-accent-hover transition-colors disabled:opacity-60"
+            >
+              {busy ? "Working…" : "Reset & re-grant"}
+            </button>
+          {/if}
+          <div class="flex items-center justify-center gap-4">
+            <button
+              type="button"
+              onclick={openSettings}
+              class="text-[11.5px] text-fg-muted hover:text-fg transition-colors"
+            >
+              Open {config.settingsName}
+            </button>
+            {#if onClose}
+              <button
+                type="button"
+                onclick={onClose}
+                class="text-[11.5px] text-fg-subtle hover:text-fg transition-colors"
+              >
+                Not now
+              </button>
+            {/if}
+          </div>
+        {:else if dropped}
           <button
             type="button"
             onclick={relaunch}

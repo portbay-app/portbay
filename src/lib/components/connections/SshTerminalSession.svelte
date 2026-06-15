@@ -127,7 +127,34 @@
   const TERM_BG = "#0b0b0b";
   const TERM_FG = "#e6e6e6";
 
-  /** The xterm theme: a stable dark scheme; only the cursor uses the accent. */
+  // The 16 ANSI colors. xterm.js's built-in default is the muted "Tango"
+  // palette (its yellow is an olive #c4a000 that reads as pale orange), so we
+  // set an explicit vivid palette: VS Code Dark+ values for most slots —
+  // saturated and legible on near-black — with the yellow slots deliberately
+  // warmed to an amber/orange-gold (VS Code's own yellow is a green-leaning
+  // lemon) so ANSI "yellow" reads as a proper warm orange. Without this, every
+  // 16-color program (prompts, ls, git, oh-my-zsh) renders washed-out.
+  const ANSI = {
+    black: "#0b0b0b",
+    red: "#cd3131",
+    green: "#0dbc79",
+    yellow: "#e5a13a",
+    blue: "#2472c8",
+    magenta: "#bc3fbc",
+    cyan: "#11a8cd",
+    white: "#e5e5e5",
+    brightBlack: "#7a7a7a",
+    brightRed: "#f14c4c",
+    brightGreen: "#23d18b",
+    brightYellow: "#f5b942",
+    brightBlue: "#3b8eea",
+    brightMagenta: "#d670d6",
+    brightCyan: "#29b8db",
+    brightWhite: "#ffffff",
+  };
+
+  /** The xterm theme: a stable dark scheme with a vivid ANSI palette; only the
+      cursor uses the app accent. */
   function themeColors() {
     const accent = sample("text-accent", "color") || TERM_FG;
     return {
@@ -136,6 +163,7 @@
       cursor: accent,
       cursorAccent: TERM_BG,
       selectionBackground: translucent(accent, 0.3),
+      ...ANSI,
     };
   }
 
@@ -231,6 +259,18 @@
         // before the shell sees them.
         if (ghost?.handleKey(e)) {
           e.preventDefault();
+          return false;
+        }
+        // Shift+Enter inserts a newline into the shell's line editor instead of
+        // submitting. Wrapped in bracketed-paste markers so a modern shell adds
+        // a continuation line rather than running the command; a raw LF is the
+        // fallback for full-screen apps (which leave bracketed-paste mode off).
+        if (e.key === "Enter" && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          e.preventDefault();
+          if (ptyId && !disableInput) {
+            const seq = term?.modes.bracketedPasteMode ? "\x1b[200~\n\x1b[201~" : "\n";
+            ptyInput(ptyId, seq);
+          }
           return false;
         }
         const mod = e.metaKey || e.ctrlKey;

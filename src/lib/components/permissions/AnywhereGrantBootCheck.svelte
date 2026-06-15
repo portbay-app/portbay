@@ -44,6 +44,8 @@
 <MacPermissionDialog
   {open}
   kind="accessibility"
+  checkGranted={async () =>
+    (await invokeQuiet<DictationAnywhereStatus>("dictation_anywhere_status")).trusted}
   onClose={() => {
     open = false;
     // Re-arm so a grant given while the sheet was up activates the Fn
