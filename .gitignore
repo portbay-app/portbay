@@ -19,8 +19,10 @@ vite.config.ts.timestamp-*
 docs-site/.vitepress/cache/
 docs-site/.vitepress/dist/
 
-# Node
-node_modules/
+# Node — match the dir AND a stray `node_modules` symlink (the trailing-slash
+# form ignores directories only, so a committed symlink slipped past it and
+# broke CI's `pnpm install` with ENOTDIR).
+node_modules
 .pnpm-store/
 .pnpm-debug.log*
 npm-debug.log*
