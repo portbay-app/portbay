@@ -38,6 +38,22 @@ pub(super) struct CertsTickResult {
 /// reissuing on every tick.
 const CERT_RENEW_THRESHOLD_DAYS: i64 = 30;
 
+/// The suffixes a locally-trusted cert is allowed to cover: always `.test`, plus
+/// the registry's configured domain suffix when the user has changed it away from
+/// the default. Keeps the mkcert issuance guard ([`Mkcert::issue_cert`]) in
+/// lock-step with the suffix the rest of the app actually serves on.
+fn local_cert_suffixes(domain_suffix: &str) -> Vec<String> {
+    let mut out = vec!["test".to_string()];
+    let configured = domain_suffix
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    if !configured.is_empty() && configured != "test" {
+        out.push(configured);
+    }
+    out
+}
+
 pub(super) fn reconcile(
     reg: &Registry,
     mkcert: Option<&Mkcert>,
@@ -99,7 +115,9 @@ pub(super) fn reconcile(
                 }
             }
         }
-        match mkcert.issue_cert(p.id.as_str(), &desired) {
+        let allowed_suffixes = local_cert_suffixes(reg.domain_suffix.as_str());
+        let allowed_refs: Vec<&str> = allowed_suffixes.iter().map(String::as_str).collect();
+        match mkcert.issue_cert(p.id.as_str(), &desired, &allowed_refs) {
             Ok(_) => issued.push(p.id.to_string()),
             Err(e) => errors.push(format!("{}: {}", p.id.as_str(), e)),
         }
@@ -389,6 +407,7 @@ mod tests {
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
             kind: ProjectType::Next,
+            framework: None,
             start_command: Some("pnpm dev".into()),
             port: Some(3010),
             extra_ports: vec![],

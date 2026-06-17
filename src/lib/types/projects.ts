@@ -18,11 +18,109 @@ export type ProjectType =
   | "python"
   | "static"
   | "node"
+  // JS meta-frameworks on the Node runtime — detected distinctly so each gets
+  // its own brand logo + dev port instead of collapsing into "node".
+  | "astro"
+  | "svelte_kit"
+  | "nuxt"
+  | "remix"
+  | "gatsby"
+  | "angular"
+  | "solid_start"
+  | "qwik"
+  | "vue_cli"
+  | "preact"
+  // Non-JS language runtimes. The specific framework (Laravel, Rails, …) is
+  // carried separately in `framework`.
+  | "go"
+  | "ruby"
+  | "rust"
+  | "deno"
+  | "elixir"
+  | "dot_net"
+  | "java"
+  | "kotlin"
+  | "scala"
+  | "clojure"
+  | "crystal"
+  | "dart"
+  | "swift"
+  | "zig"
+  | "nim"
+  | "haskell"
+  | "o_caml"
   | "flutter"
   | "xcode"
   | "android"
   | "expo"
   | "custom";
+
+/**
+ * The detected sub-stack (framework/CMS) sitting on top of a language runtime.
+ * Orthogonal to `ProjectType`: the kind says how to launch, the framework says
+ * what it is — and drives the brand logo + label. Wire values mirror the Rust
+ * `Framework` enum (serde snake_case). `null`/absent = no recognised framework.
+ */
+export type Framework =
+  // PHP
+  | "laravel"
+  | "symfony"
+  | "word_press"
+  | "drupal"
+  | "statamic"
+  | "craft_cms"
+  | "code_igniter"
+  | "cake_php"
+  | "joomla"
+  | "yii"
+  | "magento"
+  | "slim"
+  // Python
+  | "django"
+  | "fast_api"
+  | "flask"
+  | "streamlit"
+  | "reflex"
+  | "gradio"
+  // Ruby
+  | "rails"
+  | "sinatra"
+  | "jekyll"
+  | "hanami"
+  // Go
+  | "hugo"
+  | "gin"
+  | "echo"
+  | "fiber"
+  // Rust
+  | "actix"
+  | "axum"
+  | "rocket"
+  | "leptos"
+  // Deno
+  | "fresh"
+  // Elixir
+  | "phoenix"
+  // .NET
+  | "asp_net"
+  // JVM
+  | "spring"
+  | "ktor"
+  // JS UI libraries + smaller meta-frameworks (on the generic Vite/Node kind)
+  | "react"
+  | "vue"
+  | "svelte"
+  | "solid_js"
+  | "preact"
+  | "lit"
+  | "alpine"
+  | "ember"
+  | "react_router"
+  | "eleventy"
+  | "redwood"
+  | "docusaurus"
+  // Swift
+  | "vapor";
 
 export type WebServer = "caddy" | "nginx" | "apache";
 
@@ -255,6 +353,8 @@ export interface ProjectView {
   name: string;
   path: string;
   type: ProjectType;
+  /** Detected sub-stack (Laravel, Django, …) for the brand logo + label. */
+  framework?: Framework | null;
   startCommand?: string;
   port?: number;
   extraPorts: number[];
@@ -308,11 +408,90 @@ export const typeLabel: Record<ProjectType, string> = {
   python: "Python",
   static: "Static",
   node: "Node",
+  astro: "Astro",
+  svelte_kit: "SvelteKit",
+  nuxt: "Nuxt",
+  remix: "Remix",
+  gatsby: "Gatsby",
+  angular: "Angular",
+  solid_start: "SolidStart",
+  qwik: "Qwik",
+  vue_cli: "Vue",
+  preact: "Preact",
+  go: "Go",
+  ruby: "Ruby",
+  rust: "Rust",
+  deno: "Deno",
+  elixir: "Elixir",
+  dot_net: ".NET",
+  java: "Java",
+  kotlin: "Kotlin",
+  scala: "Scala",
+  clojure: "Clojure",
+  crystal: "Crystal",
+  dart: "Dart",
+  swift: "Swift",
+  zig: "Zig",
+  nim: "Nim",
+  haskell: "Haskell",
+  o_caml: "OCaml",
   flutter: "Flutter",
   xcode: "Xcode",
   android: "Android",
   expo: "Expo",
   custom: "Custom",
+};
+
+/** Display labels for each detected sub-stack. */
+export const frameworkLabel: Record<Framework, string> = {
+  laravel: "Laravel",
+  symfony: "Symfony",
+  word_press: "WordPress",
+  drupal: "Drupal",
+  statamic: "Statamic",
+  craft_cms: "Craft CMS",
+  code_igniter: "CodeIgniter",
+  cake_php: "CakePHP",
+  joomla: "Joomla",
+  yii: "Yii",
+  magento: "Magento",
+  slim: "Slim",
+  django: "Django",
+  fast_api: "FastAPI",
+  flask: "Flask",
+  streamlit: "Streamlit",
+  reflex: "Reflex",
+  gradio: "Gradio",
+  rails: "Rails",
+  sinatra: "Sinatra",
+  jekyll: "Jekyll",
+  hanami: "Hanami",
+  hugo: "Hugo",
+  gin: "Gin",
+  echo: "Echo",
+  fiber: "Fiber",
+  actix: "Actix",
+  axum: "Axum",
+  rocket: "Rocket",
+  leptos: "Leptos",
+  fresh: "Fresh",
+  phoenix: "Phoenix",
+  asp_net: "ASP.NET",
+  spring: "Spring",
+  ktor: "Ktor",
+  react: "React",
+  vue: "Vue",
+  svelte: "Svelte",
+  solid_js: "Solid",
+  preact: "Preact",
+  lit: "Lit",
+  alpine: "Alpine",
+  ember: "Ember",
+  react_router: "React Router",
+  eleventy: "Eleventy",
+  redwood: "Redwood",
+  docusaurus: "Docusaurus",
+  vapor: "Vapor",
 };
 
 /** Display labels for each web server option. */

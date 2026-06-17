@@ -99,6 +99,30 @@ describe("reconcile", () => {
   });
 });
 
+describe("app-backed items (My Apps governs visibility)", () => {
+  // A destination that is also a launcher tool — its sidebar visibility lives
+  // in the myApps store, not the pin/hide set.
+  const APP_CATALOG: NavItem[] = [
+    { id: "a", href: "/a", icon: "bot", label: "A" },
+    { id: "cap", href: "/cap", icon: "camera", label: "Cap", appId: "cap" },
+  ];
+
+  it("never adds an app-backed item to the hidden set, even if saved as hidden", () => {
+    const { hidden } = reconcile({ order: ["a", "cap"], hidden: ["cap"] }, APP_CATALOG);
+    expect(hidden.has("cap")).toBe(false);
+  });
+
+  it("keeps app-backed items in the order so they stay reorderable", () => {
+    const { items } = reconcile({ order: ["cap", "a"], hidden: [] }, APP_CATALOG);
+    expect(ids(items)).toEqual(["cap", "a"]);
+  });
+
+  it("never marks an app-backed item hidden on a fresh profile", () => {
+    const { hidden } = reconcile(null, APP_CATALOG);
+    expect(hidden.has("cap")).toBe(false);
+  });
+});
+
 describe("mergeVisibleOrder", () => {
   const byId = new Map(CATALOG.map((it) => [it.id, it]));
   const pick = (...sel: string[]) => sel.map((id) => byId.get(id)!);
@@ -157,6 +181,12 @@ describe("real catalog invariants", () => {
 
   it("ids are unique", () => {
     expect(new Set(ids(NAV_ITEMS)).size).toBe(NAV_ITEMS.length);
+  });
+
+  it("the launcher tools (capture, inspector, sandbox) are app-backed", () => {
+    for (const id of ["capture", "inspector", "sandbox"]) {
+      expect(NAV_ITEMS.find((it) => it.id === id)?.appId).toBe(id);
+    }
   });
 });
 

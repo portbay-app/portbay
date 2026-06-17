@@ -32,6 +32,12 @@ pub enum MkcertError {
     #[error("CA root certificate missing at {0} — run mkcert -install first")]
     CaNotInstalled(PathBuf),
 
+    #[error(
+        "refusing to issue a locally-trusted certificate for `{hostname}`: only local \
+         development hostnames under {allowed} may be signed by the mkcert CA"
+    )]
+    HostOutsideSuffix { hostname: String, allowed: String },
+
     #[error("cert files missing for project `{project_id}` at {dir}")]
     CertMissing { project_id: String, dir: PathBuf },
 
@@ -180,7 +186,20 @@ impl Mkcert {
     /// Issue a cert for `hostnames`, written into `<certs_root>/<project_id>/`
     /// as `cert.pem` and `key.pem`. Idempotent — calling again with the same
     /// hostnames simply rewrites the cert pair.
-    pub fn issue_cert(&self, project_id: &str, hostnames: &[&str]) -> Result<CertPaths> {
+    pub fn issue_cert(
+        &self,
+        project_id: &str,
+        hostnames: &[&str],
+        allowed_suffixes: &[&str],
+    ) -> Result<CertPaths> {
+        // The mkcert root CA is trusted OS-wide, so any leaf it signs is honoured
+        // by every browser/TLS stack on the machine. Refuse to sign a hostname
+        // outside the configured local suffix(es) BEFORE invoking mkcert — this
+        // is the issuance-surface guard that stops a caller (including an agent
+        // with Edit-class access) minting a trusted cert for a real host such as
+        // `api.stripe.com` and using it to MITM that site.
+        ensure_hostnames_under_suffixes(hostnames, allowed_suffixes)?;
+
         if !self.is_ca_installed() {
             let root = self
                 .ca_root()
@@ -309,6 +328,55 @@ pub fn remove_cert_dir(certs_root: &Path, project_id: &str) -> std::io::Result<(
     }
 }
 
+/// Validate that every requested hostname sits under one of the locally-trusted
+/// development suffixes before it is handed to mkcert.
+///
+/// The mkcert root CA is installed into the OS trust store, so a leaf cert it
+/// signs is honoured by every browser and TLS stack on the machine. Without this
+/// guard a caller — including an AI agent with Edit-class file access — could ask
+/// PortBay to mint a *trusted* certificate for a real hostname such as
+/// `api.stripe.com` and use it to MITM that site. We therefore refuse any
+/// hostname that is not `*.<suffix>` (or `<label>.<suffix>`) for a configured
+/// local suffix (`.test` plus any user-configured suffix). Mirrors the suffix
+/// guard in [`crate::hosts_helper`]. Fail-closed: an empty allowlist rejects
+/// everything.
+fn ensure_hostnames_under_suffixes(hostnames: &[&str], allowed_suffixes: &[&str]) -> Result<()> {
+    let suffixes: Vec<String> = allowed_suffixes
+        .iter()
+        .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let allowed_display = || {
+        if suffixes.is_empty() {
+            "(no local suffix configured)".to_string()
+        } else {
+            suffixes
+                .iter()
+                .map(|s| format!(".{s}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    for &raw in hostnames {
+        let host = raw.trim().to_ascii_lowercase();
+        // Permit a single leading wildcard label (`*.project.test`), which mkcert
+        // accepts and the reconciler requests for wildcard-subdomain projects.
+        let bare = host.strip_prefix("*.").unwrap_or(host.as_str());
+        let under_suffix = !bare.is_empty()
+            && !bare.contains("..")
+            && suffixes
+                .iter()
+                .any(|suf| bare != suf.as_str() && bare.ends_with(&format!(".{suf}")));
+        if !under_suffix {
+            return Err(MkcertError::HostOutsideSuffix {
+                hostname: raw.to_string(),
+                allowed: allowed_display(),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +444,47 @@ mod tests {
         assert!(!m.is_ca_installed());
     }
 
+    #[test]
+    fn issue_cert_refuses_hostname_outside_suffix() {
+        // No CA/binary needed: the suffix guard runs before any mkcert call, so
+        // a `Mkcert` pointed at a non-existent binary still rejects the host.
+        let m = Mkcert::new("/does/not/exist/mkcert", "/tmp");
+        match m.issue_cert("p", &["api.stripe.com"], &["test"]) {
+            Err(MkcertError::HostOutsideSuffix { hostname, .. }) => {
+                assert_eq!(hostname, "api.stripe.com");
+            }
+            other => panic!("expected HostOutsideSuffix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suffix_guard_allows_local_and_wildcard_hosts() {
+        assert!(ensure_hostnames_under_suffixes(&["app.test"], &["test"]).is_ok());
+        assert!(ensure_hostnames_under_suffixes(&["*.app.test"], &["test"]).is_ok());
+        // A user-configured custom suffix is honoured alongside `.test`.
+        assert!(ensure_hostnames_under_suffixes(&["app.local"], &["test", "local"]).is_ok());
+        // A leading-dot or bare suffix spelling is normalised the same way.
+        assert!(ensure_hostnames_under_suffixes(&["app.test"], &[".test"]).is_ok());
+    }
+
+    #[test]
+    fn suffix_guard_rejects_public_bare_and_malformed_hosts() {
+        for bad in [
+            "api.stripe.com",
+            "test",
+            "evil.test.attacker.com",
+            "app..test",
+            "",
+        ] {
+            assert!(
+                ensure_hostnames_under_suffixes(&[bad], &["test"]).is_err(),
+                "expected `{bad}` to be rejected under `.test`"
+            );
+        }
+        // An empty allowlist refuses everything (fail-closed).
+        assert!(ensure_hostnames_under_suffixes(&["app.test"], &[]).is_err());
+    }
+
     // -- Integration tests (require a real mkcert + installed CA) ------------
 
     /// Reads the real mkcert -CAROOT and confirms it returns a non-empty
@@ -401,7 +510,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let m = Mkcert::new("mkcert", tmp.path());
         let paths = m
-            .issue_cert("portbay-test", &["portbay-test.test"])
+            .issue_cert("portbay-test", &["portbay-test.test"], &["test"])
             .unwrap();
         assert!(paths.certificate.exists());
         assert!(paths.key.exists());

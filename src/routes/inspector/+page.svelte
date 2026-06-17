@@ -10,7 +10,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
-  import { Icon } from "$lib/components/atoms";
+  import { Icon, EmptyState } from "$lib/components/atoms";
   import ProjectSelector from "$lib/components/shared/ProjectSelector.svelte";
   import { httpInspector } from "$lib/stores/httpInspector.svelte";
   import { projects } from "$lib/stores/projects.svelte";
@@ -150,17 +150,11 @@
 
   <div class="flex-1 min-h-0 overflow-y-auto px-6 pb-6">
     {#if rendered.length === 0}
-      <div
-        class="flex flex-col items-center justify-center text-center
-               text-fg-subtle py-20 gap-2"
-      >
-        <Icon name="activity" size={28} class="opacity-40" />
-        <p class="text-[13px]">No requests captured yet.</p>
-        <p class="text-[11.5px] max-w-sm">
-          Open one of your projects in the browser — requests routed through
-          Caddy will appear here in real time.
-        </p>
-      </div>
+      <EmptyState
+        icon="activity"
+        title="No requests captured yet"
+        description="Open one of your projects in the browser — requests routed through Caddy will appear here in real time."
+      />
     {:else}
       <div class="rounded-xl border border-border bg-surface overflow-hidden">
         <table class="w-full text-left border-collapse">

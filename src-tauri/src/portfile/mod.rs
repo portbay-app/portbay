@@ -188,6 +188,9 @@ pub fn materialise_project(
         name: plan.file.name.clone(),
         path: plan.project_path.clone(),
         kind: plan.file.kind,
+        // The portfile doesn't persist the sub-stack — it's derivable from the
+        // folder, so re-detect on import to restore the brand logo.
+        framework: crate::commands::projects::detect_kind(&plan.project_path).framework,
         start_command: plan.file.start_command.clone(),
         port: plan.file.port,
         extra_ports: vec![],
@@ -256,6 +259,7 @@ mod tests {
             name: "Demo CMS".into(),
             path: PathBuf::from("/Users/me/code/demo-cms"),
             kind: ProjectType::Php,
+            framework: None,
             start_command: None,
             port: Some(8000),
             extra_ports: vec![],

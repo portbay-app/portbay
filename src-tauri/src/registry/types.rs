@@ -59,6 +59,46 @@ pub enum ProjectType {
     Python,
     Static,
     Node,
+    /// JS meta-frameworks that sit on top of the Node runtime. They all launch
+    /// like a plain Node app (run the dev script behind Caddy) but get their own
+    /// detection, default dev port, brand logo, and artifact-clean dirs so they
+    /// stop masquerading as generic `Node`. Wire values follow snake_case:
+    /// `astro`, `svelte_kit`, `nuxt`, `remix`, `gatsby`, `angular`,
+    /// `solid_start`, `qwik`, `vue_cli`, `preact`.
+    Astro,
+    SvelteKit,
+    Nuxt,
+    Remix,
+    Gatsby,
+    Angular,
+    SolidStart,
+    Qwik,
+    VueCli,
+    Preact,
+    /// Non-JS language runtimes. Each launches generically — run the project's
+    /// `start_command` and let Caddy reverse-proxy its `port` — so they share
+    /// the wildcard launch path. The specific framework (Laravel, Rails, Gin,
+    /// Phoenix, …) is carried separately in `Project::framework`, which supplies
+    /// the brand logo and the detection-time smart defaults (document root,
+    /// port, dev command). `Go`/`Ruby` map to managed runtimes; the rest run on
+    /// the user's system toolchain.
+    Go,
+    Ruby,
+    Rust,
+    Deno,
+    Elixir,
+    DotNet,
+    Java,
+    Kotlin,
+    Scala,
+    Clojure,
+    Crystal,
+    Dart,
+    Swift,
+    Zig,
+    Nim,
+    Haskell,
+    OCaml,
     Flutter,
     Xcode,
     Android,
@@ -66,6 +106,110 @@ pub enum ProjectType {
     /// (`npx expo start`); the iOS/Android simulator opens from there.
     Expo,
     Custom,
+}
+
+impl ProjectType {
+    /// JS meta-frameworks that run on the Node runtime (Astro, SvelteKit,
+    /// Nuxt, …). They share Node's launch path, runtime inheritance, and
+    /// sandboxed-PATH handling — only their detection, default port, logo, and
+    /// artifact dirs differ. `Next`/`Vite`/`Node` are the original members.
+    pub fn is_node_family(self) -> bool {
+        matches!(
+            self,
+            ProjectType::Next
+                | ProjectType::Vite
+                | ProjectType::Node
+                | ProjectType::Astro
+                | ProjectType::SvelteKit
+                | ProjectType::Nuxt
+                | ProjectType::Remix
+                | ProjectType::Gatsby
+                | ProjectType::Angular
+                | ProjectType::SolidStart
+                | ProjectType::Qwik
+                | ProjectType::VueCli
+                | ProjectType::Preact
+        )
+    }
+}
+
+/// The detected *sub-stack* of a project — the specific framework/CMS sitting
+/// on top of a language runtime (Laravel on PHP, Django on Python, Rails on
+/// Ruby, Phoenix on Elixir, …).
+///
+/// This is the second detection axis, orthogonal to [`ProjectType`]: the kind
+/// says *how to launch*, the framework says *what it is*. It drives the brand
+/// logo, the display label, and the detection-time smart defaults (document
+/// root, dev port, dev command). `None` means "no recognised framework" — a
+/// plain PHP/Go/Rust project, which still renders its parent-language logo.
+///
+/// Adding a framework here is cheap: a new variant plus one row in the
+/// detector. The launch pipeline never matches on it, so there is no
+/// per-framework launch code to duplicate. Wire values are snake_case.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Framework {
+    // PHP
+    Laravel,
+    Symfony,
+    WordPress,
+    Drupal,
+    Statamic,
+    CraftCms,
+    CodeIgniter,
+    CakePhp,
+    Joomla,
+    Yii,
+    Magento,
+    Slim,
+    // Python
+    Django,
+    FastApi,
+    Flask,
+    Streamlit,
+    Reflex,
+    Gradio,
+    // Ruby
+    Rails,
+    Sinatra,
+    Jekyll,
+    Hanami,
+    // Go
+    Hugo,
+    Gin,
+    Echo,
+    Fiber,
+    // Rust
+    Actix,
+    Axum,
+    Rocket,
+    Leptos,
+    // Deno
+    Fresh,
+    // Elixir
+    Phoenix,
+    // .NET
+    AspNet,
+    // JVM
+    Spring,
+    Ktor,
+    // JS UI libraries — surfaced when the kind is the generic Vite/Node (a
+    // specific kind like Next/Astro already carries its own logo). Plus the
+    // smaller JS meta-frameworks that don't warrant their own launch kind.
+    React,
+    Vue,
+    Svelte,
+    SolidJs,
+    Preact,
+    Lit,
+    Alpine,
+    Ember,
+    ReactRouter,
+    Eleventy,
+    Redwood,
+    Docusaurus,
+    // Swift
+    Vapor,
 }
 
 /// Web server used for PHP document-root projects.
@@ -133,6 +277,13 @@ pub struct Project {
 
     #[serde(rename = "type")]
     pub kind: ProjectType,
+
+    /// The detected sub-stack (Laravel, Django, Rails, …), orthogonal to
+    /// `kind`. Drives the brand logo + label only; the launch pipeline never
+    /// reads it. `None` for an unrecognised or frameworkless project. Optional
+    /// + skipped when empty, so older registries deserialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<Framework>,
 
     /// Shell command launched by Process Compose for this project's main
     /// dev server. `None` means "service-only" — e.g. a static-file PHP
@@ -1494,11 +1645,44 @@ impl RuntimeSettings {
     /// CLI `portbay add`, so the two can't drift on inheritance behaviour.
     pub fn default_for(&self, kind: ProjectType) -> Option<Runtime> {
         let lang = match kind {
-            ProjectType::Next | ProjectType::Vite | ProjectType::Node => "node",
+            // Every JS meta-framework (Next/Vite/Astro/Nuxt/…) inherits the
+            // managed `node` runtime.
+            ProjectType::Next
+            | ProjectType::Vite
+            | ProjectType::Node
+            | ProjectType::Astro
+            | ProjectType::SvelteKit
+            | ProjectType::Nuxt
+            | ProjectType::Remix
+            | ProjectType::Gatsby
+            | ProjectType::Angular
+            | ProjectType::SolidStart
+            | ProjectType::Qwik
+            | ProjectType::VueCli
+            | ProjectType::Preact => "node",
             ProjectType::Php => "php",
             ProjectType::Python => "python",
             ProjectType::Flutter => "flutter",
-            ProjectType::Static
+            // Managed runtimes exist for Go and Ruby; the rest run on the
+            // user's system toolchain (no PortBay-managed version to inherit).
+            ProjectType::Go => "go",
+            ProjectType::Ruby => "ruby",
+            ProjectType::Rust
+            | ProjectType::Deno
+            | ProjectType::Elixir
+            | ProjectType::DotNet
+            | ProjectType::Java
+            | ProjectType::Kotlin
+            | ProjectType::Scala
+            | ProjectType::Clojure
+            | ProjectType::Crystal
+            | ProjectType::Dart
+            | ProjectType::Swift
+            | ProjectType::Zig
+            | ProjectType::Nim
+            | ProjectType::Haskell
+            | ProjectType::OCaml
+            | ProjectType::Static
             | ProjectType::Xcode
             | ProjectType::Android
             | ProjectType::Expo
@@ -1756,6 +1940,7 @@ mod tests {
             name: "Marketing Site".into(),
             path: PathBuf::from("/Volumes/DEVSSD/Projects/Clients/Marketing Site"),
             kind: ProjectType::Next,
+            framework: None,
             start_command: Some("pnpm dev".into()),
             port: Some(3010),
             extra_ports: vec![],
@@ -1795,6 +1980,7 @@ mod tests {
             domain: None,
             tunnel: None,
             deploy: None,
+            framework: None,
             id: ProjectId::new("legacy-php"),
             name: "Legacy PHP".into(),
             path: PathBuf::from("/tmp/legacy-php"),

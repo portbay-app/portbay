@@ -308,6 +308,11 @@ pub fn run() {
                 Box::<dyn std::error::Error>::from(e.to_string())
             }
 
+            // If the previous boot was a fresh update that never confirmed it
+            // launched cleanly, restore the prior known-good version before
+            // anything else (this may relaunch into the restored build).
+            commands::updater::rollback_on_startup(app.handle());
+
             let registry_path = store::default_path().map_err(boxed)?;
             let logs_dir = resolve_logs_dir().map_err(boxed)?;
             let yaml_path = reconciler::default_yaml_path().map_err(boxed)?;
@@ -1260,6 +1265,7 @@ pub fn run() {
             commands::telemetry::record_telemetry_event,
             commands::updater::check_for_update,
             commands::updater::install_update,
+            commands::updater::confirm_update_health,
             // Per-project task board (Project Context & Task Authority).
             // Board-only handlers — injected with the `tasks` feature; absent
             // from the public OSS build. `generate_handler!` honours the per-

@@ -892,6 +892,8 @@
 <MacPermissionDialog
   open={showDnsPermission}
   kind="login-items"
-  onConfirm={() => dns.setupLocalDns()}
+  onConfirm={() => {
+    void dns.setupLocalDns();
+  }}
   onClose={() => (showDnsPermission = false)}
 />

@@ -2,7 +2,7 @@
   Projects route (/) — page heading, status cards row, projects table,
   and the table footer (count + sort + view toggle).
 
-  Sort + view-mode are local to this page (not persisted yet).
+  Sort + view-mode persist across launches via localStorage.
 -->
 <script lang="ts">
   import { ProjectsTable, type SortKey } from "$lib/components/projects";
@@ -11,8 +11,45 @@
   import { projects } from "$lib/stores/projects.svelte";
   import { goto } from "$app/navigation";
 
-  let sortKey = $state<SortKey>("name-asc");
-  let viewMode = $state<"list" | "grid">("list");
+  // ---- Sort + view persistence ----
+  // Restore the user's last choices; fall back to the default on an unknown or
+  // unreadable value (private mode). A `$effect` writes each back on change.
+  const SORT_STORAGE_KEY = "portbay:dashboard-sort";
+  const VIEW_STORAGE_KEY = "portbay:dashboard-view";
+  const SORT_KEYS: readonly SortKey[] = ["name-asc", "name-desc", "status", "port"];
+
+  function readStored<T extends string>(
+    key: string,
+    allowed: readonly T[],
+    fallback: T,
+  ): T {
+    try {
+      const v = localStorage.getItem(key);
+      return allowed.includes(v as T) ? (v as T) : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  let sortKey = $state<SortKey>(readStored(SORT_STORAGE_KEY, SORT_KEYS, "name-asc"));
+  let viewMode = $state<"list" | "grid">(
+    readStored(VIEW_STORAGE_KEY, ["list", "grid"] as const, "list"),
+  );
+
+  $effect(() => {
+    try {
+      localStorage.setItem(SORT_STORAGE_KEY, sortKey);
+    } catch {
+      /* private mode — running without persistence is fine */
+    }
+  });
+  $effect(() => {
+    try {
+      localStorage.setItem(VIEW_STORAGE_KEY, viewMode);
+    } catch {
+      /* private mode — running without persistence is fine */
+    }
+  });
 
   const projectCount = $derived(projects.value.length);
 

@@ -18,12 +18,12 @@ pub use error::{RegistryError, Result};
 pub use types::{
     AcmeConfig, AcmeDnsProvider, AcmeEnvironment, AcmeIssuer, AcmeKeyType, CorsConfig,
     CustomTunnelConfig, DatabaseEngine, DatabaseInstance, DatabaseInstanceId, DnsmasqSettings,
-    DomainConfig, FpmTuning, Group, ManagedDatabaseEngine, ManagedRuntime, ManualRuntime,
-    MobileRunConfig, PhpVersionConfig, Project, ProjectDeploy, ProjectId, ProjectType, Readiness,
-    ResolverMode, Runtime, RuntimeSettings, SandboxConfig, SandboxNetworkPolicy, SshAuthKind,
-    SshConnection, SshConnectionId, SshConnectionMeta, SshForwardKind, SshIdentity, SshIdentityId,
-    SshProxyConfig, SshProxyKind, SshTunnelConnection, SshTunnelId, SslMode, WebServer, Workspace,
-    WorkspaceTool,
+    DomainConfig, FpmTuning, Framework, Group, ManagedDatabaseEngine, ManagedRuntime,
+    ManualRuntime, MobileRunConfig, PhpVersionConfig, Project, ProjectDeploy, ProjectId,
+    ProjectType, Readiness, ResolverMode, Runtime, RuntimeSettings, SandboxConfig,
+    SandboxNetworkPolicy, SshAuthKind, SshConnection, SshConnectionId, SshConnectionMeta,
+    SshForwardKind, SshIdentity, SshIdentityId, SshProxyConfig, SshProxyKind, SshTunnelConnection,
+    SshTunnelId, SslMode, WebServer, Workspace, WorkspaceTool,
 };
 
 /// The registry-file schema version this build reads and writes.
@@ -285,6 +285,22 @@ pub struct Registry {
     /// unchanged — no schema bump.
     #[serde(default)]
     pub ssh_identities: Vec<SshIdentity>,
+
+    /// Project entries from disk that THIS build could not deserialize — almost
+    /// always one written by a newer version that introduced a `type`/enum value
+    /// this binary doesn't know yet (e.g. a release reading a registry a dev
+    /// build wrote). They are kept out of the typed [`projects`] list so a single
+    /// forward-incompatible entry can't fail the whole load, and preserved here
+    /// verbatim (as their raw JSON text) so [`store::save_to`] re-emits them
+    /// untouched — a downgrade never silently drops a project.
+    ///
+    /// `#[serde(skip)]`: never read or written through the derived codec. It is
+    /// populated only by `store::parse_and_migrate` on load and re-spliced into
+    /// the `projects` array by `store::save_to` on save. Stored as `String`
+    /// rather than `serde_json::Value` because the latter is not `Eq` (it admits
+    /// `f64`), which would break this struct's `Eq` derive.
+    #[serde(skip)]
+    pub unparsed_projects: Vec<String>,
 }
 
 impl Registry {
@@ -302,6 +318,7 @@ impl Registry {
             ssh_connections: Vec::new(),
             ssh_tunnels: Vec::new(),
             ssh_identities: Vec::new(),
+            unparsed_projects: Vec::new(),
         }
     }
 
@@ -675,6 +692,7 @@ mod tests {
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
             kind: ProjectType::Next,
+            framework: None,
             start_command: Some("pnpm dev".into()),
             port: Some(3010),
             extra_ports: vec![],

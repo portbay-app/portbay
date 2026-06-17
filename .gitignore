@@ -99,3 +99,9 @@ test-results/
 playwright-report/
 # Local working notes / analyses (not part of the published docs).
 claudedocs/
+# Confidential growth/marketing strategy — local-only, and also denied from the
+# public repo via .repo-boundary-denylist. The marketing board and the
+# install-metrics workflow embed growth targets, launch tactics, and references
+# to the private growth-strategy docs.
+docs/MARKETING_BOARD.md
+.github/workflows/install-metrics.yml

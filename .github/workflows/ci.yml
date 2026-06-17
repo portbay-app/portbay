@@ -116,16 +116,16 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Coverage report (report-only, non-gating)
+      - name: Coverage gate (line floor)
         working-directory: src-tauri
-        # Mirrors the same flags as the test step above so the coverage
-        # measurement matches what CI asserts. --summary-only keeps the
-        # log concise; the full report is available locally via
-        # `cargo llvm-cov --lib --no-default-features --html`.
-        # This step never gates the build — it exists to surface the
-        # coverage trend so regressions are visible before they land.
-        run: cargo llvm-cov --lib --no-default-features --summary-only
-        continue-on-error: true
+        # Gates the build: fails if line coverage on the default-feature lib
+        # falls below the floor. Mirrors the test step's flags so the measured
+        # surface matches what CI asserts. Baseline measured 2026-06-13 was
+        # 46.99% lines / 48.91% regions; the floor sits a few points under it as
+        # a regression ratchet — raise it toward the measured value as coverage
+        # improves, but never above the current measurement or CI breaks. Full
+        # HTML report locally: `cargo llvm-cov --lib --no-default-features --html`.
+        run: cargo llvm-cov --lib --no-default-features --summary-only --fail-under-lines 43
 
   rust-linux:
     name: rust · linux compile + test

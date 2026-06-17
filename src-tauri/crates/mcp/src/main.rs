@@ -45,9 +45,10 @@ struct Cli {
     #[arg(long)]
     read_only: bool,
 
-    /// Comma-separated tool groups to expose: `projects`, `lifecycle`,
-    /// `diagnostics`, `scaffold`, or `all`. Defaults to all. Env:
-    /// `PORTBAY_MCP_TOOLSETS`.
+    /// Comma-separated tool groups to expose, e.g. `projects,diagnostics`.
+    /// Defaults to `all`. The opt-in groups `ssh-exec` (remote command
+    /// execution) and `capture` (live-screen screenshot/OCR) are NOT included in
+    /// `all` and must be named explicitly. Env: `PORTBAY_MCP_TOOLSETS`.
     #[arg(long, value_name = "LIST")]
     toolsets: Option<String>,
 

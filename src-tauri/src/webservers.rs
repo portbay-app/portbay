@@ -485,6 +485,7 @@ mod tests {
             name: "Tribal House CMS".into(),
             path: PathBuf::from("/tmp/portbay-tests/Tribal House/tribal-house-cms"),
             kind: ProjectType::Php,
+            framework: None,
             start_command: None,
             port: Some(8090),
             extra_ports: vec![],

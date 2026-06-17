@@ -35,6 +35,15 @@ export interface NavItem {
    * choice always wins.
    */
   defaultHidden?: boolean;
+  /**
+   * App-backed: this destination is also a "My Apps" launcher tool, so its
+   * sidebar visibility follows whether the app has been added (the `myApps`
+   * store), not the pin/hide set. Reorder still applies; the pin toggle does
+   * not — the Integrations launcher is the single add/remove surface. The
+   * value is the My Apps tool id (it equals the nav id today, but is kept
+   * explicit so the two can diverge).
+   */
+  appId?: string;
 }
 
 /**
@@ -49,12 +58,13 @@ export const NAV_ITEMS: NavItem[] = [
   { id: "services", href: "/services", icon: "server", label: "Services", matchPrefix: true },
   { id: "web-servers", href: "/web-servers", icon: "server-cog", label: "Web Server", matchPrefix: true },
   { id: "certificates", href: "/certificates", icon: "shield", label: "Certificates", matchPrefix: true },
-  { id: "sandbox", href: "/sandbox", icon: "package", label: "Sandbox", matchPrefix: true },
+  { id: "sandbox", href: "/sandbox", icon: "package", label: "Sandbox", matchPrefix: true, appId: "sandbox" },
   { id: "logs", href: "/logs", icon: "file-text", label: "Logs", matchPrefix: true },
-  { id: "inspector", href: "/inspector", icon: "activity", label: "Inspector", matchPrefix: true },
+  { id: "inspector", href: "/inspector", icon: "activity", label: "Inspector", matchPrefix: true, appId: "inspector" },
   { id: "languages", href: "/languages", icon: "file-code", label: "Languages", matchPrefix: true },
   { id: "databases", href: "/databases", icon: "database", label: "Databases", matchPrefix: true },
   { id: "ssh", href: "/ssh", icon: "terminal", label: "SSH", matchPrefix: true },
+  { id: "capture", href: "/capture", icon: "camera", label: "Capture", matchPrefix: true, appId: "capture" },
   { id: "tunnels", href: "/tunnels", icon: "cloud", label: "Tunnels", matchPrefix: true },
   { id: "integrations", href: "/integrations", icon: "grid-2x2", label: "Integrations", matchPrefix: true, hideable: false },
   { id: "settings", href: "/settings", icon: "settings", label: "Settings", matchPrefix: true, hideable: false },
@@ -93,6 +103,8 @@ export function parsePersisted(raw: string | null): PersistedNav | null {
  *  - newly-shipped canonical items are appended in canonical relative order
  *    rather than silently vanishing;
  *  - hidden ids are honored only for known, hideable items;
+ *  - app-backed items are skipped entirely — their visibility lives in the
+ *    `myApps` launcher, so a stale saved hidden entry must not apply;
  *  - a canonical item the save has never seen (or a fresh profile) inherits
  *    its `defaultHidden`.
  */
@@ -121,6 +133,9 @@ export function reconcile(
   const hidden = new Set<string>();
   for (const it of catalog) {
     if (it.hideable === false) continue;
+    // App-backed destinations are governed by the My Apps launcher, never the
+    // pin/hide set — drop any stale saved hidden entry for them.
+    if (it.appId) continue;
     if (saved?.hidden.includes(it.id)) hidden.add(it.id);
     // The save predates this item (or there is no save): apply its default.
     else if (it.defaultHidden && !savedOrder.has(it.id)) hidden.add(it.id);

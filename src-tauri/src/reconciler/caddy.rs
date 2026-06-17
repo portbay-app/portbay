@@ -219,6 +219,7 @@ mod tests {
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
             kind: ProjectType::Next,
+            framework: None,
             start_command: Some("pnpm dev".into()),
             port: Some(port),
             extra_ports: vec![],

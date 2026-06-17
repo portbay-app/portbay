@@ -150,6 +150,17 @@
             <Icon name="lock" size={10} />
             Always shown
           </span>
+        {:else if row.appId}
+          <!-- App-backed: visibility follows the Integrations → My Apps
+               launcher, so the pin toggle would conflict. Surface where it's
+               controlled instead; the row dims when the app isn't added. -->
+          <span
+            class="shrink-0 inline-flex items-center gap-1 text-[10.5px] text-fg-subtle"
+            title="Shown in the sidebar when added in Integrations → My Apps"
+          >
+            <Icon name="grid-2x2" size={10} />
+            In My Apps
+          </span>
         {:else}
           <button
             type="button"

@@ -1809,6 +1809,7 @@ async fn cmd_add(ctx: &CliContext, args: AddArgs) -> Result<ExitCode, CliError> 
         name,
         path: canonical,
         kind,
+        framework: None,
         start_command: args.start_command,
         port: args.port,
         extra_ports: vec![],
