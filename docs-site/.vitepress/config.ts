@@ -123,6 +123,47 @@ export default defineConfig({
     // equivalents are emitted PER PAGE by transformPageData below, so each doc
     // unfurls with its own title, description, and section image instead of one
     // global pair.
+    // Entity resolution for search and AI engines: one canonical PortBay entity
+    // with sameAs links, plus the app as a free macOS DeveloperApplication. This
+    // helps ChatGPT, Perplexity, and Google AI resolve "PortBay" to one brand.
+    [
+      "script",
+      { type: "application/ld+json" },
+      JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        name: "PortBay",
+        url: "https://portbay.app",
+        logo: "https://docs.portbay.app/portbay-logo.png",
+        description:
+          "Open-source, container-free local development environment manager for macOS.",
+        sameAs: [
+          "https://github.com/portbay-app",
+          "https://github.com/portbay-app/portbay",
+          "https://docs.portbay.app",
+          "https://try.portbay.app",
+        ],
+      }),
+    ],
+    [
+      "script",
+      { type: "application/ld+json" },
+      JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        name: "PortBay",
+        applicationCategory: "DeveloperApplication",
+        operatingSystem: "macOS",
+        url: "https://portbay.app",
+        downloadUrl: "https://docs.portbay.app/getting-started/install",
+        license: "https://www.gnu.org/licenses/agpl-3.0.html",
+        offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+      }),
+    ],
+    // Note: Cloudflare Web Analytics is auto-injected zone-wide (RUM enabled on
+    // the portbay.app zone), so docs.portbay.app pageviews already flow to the
+    // Web Analytics dashboard. No manual beacon needed here. Filter by hostname
+    // docs.portbay.app in the dashboard to see docs traffic.
   ],
   markdown: {
     lineNumbers: true,
@@ -170,6 +211,8 @@ export default defineConfig({
         text: "Features",
         items: [
           { text: "Task Board & Agents", link: "/guides/task-board" },
+          { text: "Run AI Agents Locally", link: "/guides/run-ai-coding-agents-locally" },
+          { text: "Parallel AI Agents", link: "/guides/parallel-ai-agents" },
           { text: "HTTP Inspector", link: "/guides/http-inspector" },
           { text: "Databases", link: "/guides/databases" },
           { text: "Languages & Runtimes", link: "/guides/languages" },
@@ -182,6 +225,14 @@ export default defineConfig({
           { text: "Speech-to-Text", link: "/guides/speech-to-text" },
           { text: "Text-to-Speech", link: "/guides/text-to-speech" },
           { text: "Image Generation", link: "/guides/image-generation" },
+        ],
+      },
+      {
+        text: "Local Dev by Framework",
+        items: [
+          { text: "Next.js on macOS", link: "/guides/nextjs-local-development-macos" },
+          { text: "Laravel on macOS", link: "/guides/laravel-local-development-macos" },
+          { text: "Django on macOS", link: "/guides/django-local-development-macos" },
         ],
       },
       {

@@ -1,0 +1,19 @@
+# robots.txt for try.portbay.app (the hosted PortBay simulator)
+# The canonical content and sitemap live on the docs site.
+User-agent: *
+Allow: /
+
+# AI crawlers welcomed for brand visibility.
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+Sitemap: https://docs.portbay.app/sitemap.xml

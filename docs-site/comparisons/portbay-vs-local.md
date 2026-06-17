@@ -74,3 +74,5 @@ Local by WP Engine is excellent at the specific job it was built for: one-click 
 ---
 
 See all [comparisons](/comparisons/) — developers also compare PortBay with [Docker / OrbStack](/comparisons/portbay-vs-docker) and [MAMP](/comparisons/portbay-vs-mamp).
+
+_Last updated: 2026-06-15._

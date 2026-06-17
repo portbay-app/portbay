@@ -1,0 +1,36 @@
+# PortBay
+
+> Open-source, container-free local development environment manager for macOS. PortBay runs Node, PHP, Python, and static projects with one Play button each, real HTTPS `.test` hostnames, managed DNS, and a reverse proxy. It also gives every project a task board that AI coding agents (Claude Code, Cursor, Codex, Gemini, Aider) work card by card, leaving a handoff note for the next run.
+
+## What PortBay is
+
+- [PortBay overview](https://docs.portbay.app/): What PortBay does and why it replaces port juggling, hand-edited `/etc/hosts`, and self-signed certificates.
+- [Getting started](https://docs.portbay.app/getting-started/): Install on macOS via DMG or Homebrew, then add a project in one step.
+- [Pro pricing](https://docs.portbay.app/pro/): PortBay is free under AGPL-3.0. Pro is $10/mo for unlimited projects and encrypted multi-device sync, and is free for anyone who merges a pull request.
+
+## The agent task board
+
+- [Task board guide](https://docs.portbay.app/guides/task-board): Move a card to To Do and the assigned AI agent works it in your repo. Cards are plain Markdown in `.portbay/tasks/`, and a handoff doc travels with the work so no run starts from zero.
+- [Drive PortBay from an AI agent](https://docs.portbay.app/agents/): An MCP server exposes PortBay's projects and actions as agent tools to Claude Code, Cursor, Zed, and any MCP client.
+
+## Comparisons
+
+- [All comparisons](https://docs.portbay.app/comparisons/): How PortBay compares across license, price, containers, runtimes, HTTPS, footprint, and platform.
+- [PortBay vs Laravel Herd](https://docs.portbay.app/comparisons/portbay-vs-laravel-herd): Open-source and multi-runtime against the PHP-first incumbent.
+- [PortBay vs ServBay](https://docs.portbay.app/comparisons/portbay-vs-servbay): Open-source alternative for managing local sites on macOS.
+- [PortBay vs MAMP](https://docs.portbay.app/comparisons/portbay-vs-mamp): A modern, container-free replacement for MAMP and XAMPP.
+- [PortBay vs Docker](https://docs.portbay.app/comparisons/portbay-vs-docker): Local development without containers, for Node, PHP, and static stacks.
+- [PortBay vs Laravel Valet](https://docs.portbay.app/comparisons/portbay-vs-laravel-valet): Valet-style `.test` hostnames that also cover non-PHP runtimes.
+- [PortBay vs DDEV](https://docs.portbay.app/comparisons/portbay-vs-ddev): A native alternative to DDEV that does not require Docker.
+- [PortBay vs Local](https://docs.portbay.app/comparisons/portbay-vs-local): Local development on macOS beyond WordPress.
+
+## Key facts
+
+- License: AGPL-3.0. Source: https://github.com/portbay-app/portbay
+- Platform: macOS on Apple Silicon. Signed, notarized DMG and Homebrew. Linux and Windows are on the roadmap.
+- Runtimes: Node, PHP, Python, and static sites, detected from the project with no hand configuration.
+- Local HTTPS: real `https://<name>.test` hostnames issued by mkcert, routed by Caddy, resolved by a bundled DNS resolver. No per-project `/etc/hosts` editing.
+- Bundled databases: MySQL, MariaDB, PostgreSQL, Redis, MongoDB, and Memcached, supervised by PortBay.
+- Footprint: under 80 MB idle RAM and an installer under 100 MB.
+- Automation: a Rust core with full CLI parity, plus an MCP server, so the GUI and AI agents are clients of the same registry.
+- Differentiator: the only local environment manager with a built-in task board that AI coding agents work, sharing one source of truth across GUI, CLI, and MCP.

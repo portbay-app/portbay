@@ -68,3 +68,5 @@ ServBay is a capable all-in-one bundle for macOS PHP developers who want maximum
 ---
 
 See all [comparisons](/comparisons/) — developers also compare PortBay with [Laravel Herd](/comparisons/portbay-vs-laravel-herd) and [MAMP](/comparisons/portbay-vs-mamp).
+
+_Last updated: 2026-06-15._
