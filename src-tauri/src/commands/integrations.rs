@@ -541,9 +541,7 @@ pub async fn open_privacy_settings(app: AppHandle, kind: String) -> AppResult<()
         // unticks macOS's own ⌘⇧3/4/5 screenshot keys so PortBay's capture
         // hotkeys can take over. System Settings has no deep link to the
         // Shortcuts sheet itself — the Keyboard pane is as close as it gets.
-        "keyboard-shortcuts" => {
-            "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
-        }
+        "keyboard-shortcuts" => "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
         _ => {
             return Err(AppError::BadInput(format!(
                 "unknown permission kind: {kind}"

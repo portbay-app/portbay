@@ -177,7 +177,14 @@ fn ios_physical_devices() -> Vec<RunTarget> {
     // `--timeout 5`: devicectl otherwise waits out its full discovery window
     // when a known device is offline; attached/paired devices answer fast.
     let ok = Command::new("xcrun")
-        .args(["devicectl", "list", "devices", "--timeout", "5", "--json-output"])
+        .args([
+            "devicectl",
+            "list",
+            "devices",
+            "--timeout",
+            "5",
+            "--json-output",
+        ])
         .arg(&tmp)
         .output()
         .map(|o| o.status.success())
@@ -280,9 +287,8 @@ fn android_targets() -> Vec<RunTarget> {
             }
             (out, booted_avds)
         });
-        let avds = s.spawn(|| {
-            emulator_bin().and_then(|emulator| run_capture(&emulator, &["-list-avds"]))
-        });
+        let avds =
+            s.spawn(|| emulator_bin().and_then(|emulator| run_capture(&emulator, &["-list-avds"])));
         (
             adb_side.join().unwrap_or_default(),
             avds.join().ok().flatten(),
@@ -370,8 +376,20 @@ fn flutter_targets(path: &Path) -> Vec<RunTarget> {
             .unwrap_or_default()
         });
         // Shut-down iOS simulators / AVDs, only for sides the project has.
-        let sims = s.spawn(move || if has_ios { ios_simulators() } else { Vec::new() });
-        let droids = s.spawn(move || if has_android { android_targets() } else { Vec::new() });
+        let sims = s.spawn(move || {
+            if has_ios {
+                ios_simulators()
+            } else {
+                Vec::new()
+            }
+        });
+        let droids = s.spawn(move || {
+            if has_android {
+                android_targets()
+            } else {
+                Vec::new()
+            }
+        });
         (
             flutter.join().unwrap_or_default(),
             sims.join().unwrap_or_default(),

@@ -23,6 +23,9 @@ description = "PortBay false positives: published public keys and doc examples"
 # portbay-cloud LICENSE_SIGNING_KEY secret. Public keys are not secrets.
 regexes = [
   '''LvM9qZwq1tH0gv871R1qPCTIN9WsUyeKHWcacHLKs/w=''',
+  # Dummy API key used by the scrub_secrets() unit test in telemetry.rs to prove
+  # the redactor strips API-key-shaped values. Not a real credential.
+  '''sk-live-abc123''',
 ]
 
 # Paths whose "secrets" are deliberate teaching examples or test fixtures.

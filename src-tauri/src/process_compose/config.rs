@@ -1239,7 +1239,10 @@ mod tests {
             !yaml.contains("-stale-script"),
             "stale stamp replayed verbatim:\n{yaml}"
         );
-        assert!(yaml.contains("produced no .app"), "fresh script missing:\n{yaml}");
+        assert!(
+            yaml.contains("produced no .app"),
+            "fresh script missing:\n{yaml}"
+        );
     }
 
     #[test]

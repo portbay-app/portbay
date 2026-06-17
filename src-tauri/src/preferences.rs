@@ -1529,19 +1529,70 @@ impl Preferences {
     /// user changed is untouched. Applied on every load (idempotent: once
     /// migrated, nothing matches the old defaults anymore).
     pub fn migrate_capture_shortcuts(mut self) -> Self {
+        // A fixed migration table (field, legacy-default-keycode, new-default-fn);
+        // a named type alias would only obscure this one-shot local.
+        #[allow(clippy::type_complexity)]
         let pairs: [(&mut CaptureShortcut, i32, fn() -> CaptureShortcut); 12] = [
-            (&mut self.capture.shortcut_area, 18, default_capture_shortcut_area),
-            (&mut self.capture.shortcut_fullscreen, 19, default_capture_shortcut_fullscreen),
-            (&mut self.capture.shortcut_window, 20, default_capture_shortcut_window),
-            (&mut self.capture.shortcut_hud, 0, default_capture_shortcut_hud),
-            (&mut self.capture.shortcut_scrolling, 21, default_capture_shortcut_scrolling),
-            (&mut self.capture.shortcut_timer, 22, default_capture_shortcut_timer),
-            (&mut self.capture.shortcut_freeze, 3, default_capture_shortcut_freeze),
-            (&mut self.capture.shortcut_previous_area, 23, default_capture_shortcut_previous_area),
-            (&mut self.capture.shortcut_ocr, 17, default_capture_shortcut_ocr),
-            (&mut self.capture.shortcut_recording, 15, default_capture_shortcut_recording),
-            (&mut self.capture.shortcut_gif, 5, default_capture_shortcut_gif),
-            (&mut self.capture.shortcut_pause_recording, 35, default_capture_shortcut_pause_recording),
+            (
+                &mut self.capture.shortcut_area,
+                18,
+                default_capture_shortcut_area,
+            ),
+            (
+                &mut self.capture.shortcut_fullscreen,
+                19,
+                default_capture_shortcut_fullscreen,
+            ),
+            (
+                &mut self.capture.shortcut_window,
+                20,
+                default_capture_shortcut_window,
+            ),
+            (
+                &mut self.capture.shortcut_hud,
+                0,
+                default_capture_shortcut_hud,
+            ),
+            (
+                &mut self.capture.shortcut_scrolling,
+                21,
+                default_capture_shortcut_scrolling,
+            ),
+            (
+                &mut self.capture.shortcut_timer,
+                22,
+                default_capture_shortcut_timer,
+            ),
+            (
+                &mut self.capture.shortcut_freeze,
+                3,
+                default_capture_shortcut_freeze,
+            ),
+            (
+                &mut self.capture.shortcut_previous_area,
+                23,
+                default_capture_shortcut_previous_area,
+            ),
+            (
+                &mut self.capture.shortcut_ocr,
+                17,
+                default_capture_shortcut_ocr,
+            ),
+            (
+                &mut self.capture.shortcut_recording,
+                15,
+                default_capture_shortcut_recording,
+            ),
+            (
+                &mut self.capture.shortcut_gif,
+                5,
+                default_capture_shortcut_gif,
+            ),
+            (
+                &mut self.capture.shortcut_pause_recording,
+                35,
+                default_capture_shortcut_pause_recording,
+            ),
         ];
         for (slot, legacy_key, new_default) in pairs {
             if *slot == CaptureShortcut::option_shift(legacy_key) {
@@ -1997,8 +2048,14 @@ mod tests {
             modifiers: vec!["control".into()], // user-customized ⌃T
         };
         let migrated = legacy.migrate_capture_shortcuts();
-        assert_eq!(migrated.capture.shortcut_area, default_capture_shortcut_area());
-        assert_eq!(migrated.capture.shortcut_ocr.modifiers, vec!["control".to_string()]);
+        assert_eq!(
+            migrated.capture.shortcut_area,
+            default_capture_shortcut_area()
+        );
+        assert_eq!(
+            migrated.capture.shortcut_ocr.modifiers,
+            vec!["control".to_string()]
+        );
         assert_eq!(old.capture.recording_fps, 30);
         assert_eq!(old.capture.recording_codec, "h264");
         assert_eq!(old.capture.recording_cursor_style, "system");
