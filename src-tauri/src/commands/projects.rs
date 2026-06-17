@@ -2441,6 +2441,9 @@ mod tests {
         };
         let lang_for = |dir: &Path| settings.default_for(detect_kind(dir).kind).map(|r| r.lang);
 
+        // A local test table of (name, project-writer, expected-framework); a
+        // named type alias would only obscure this one fixture array.
+        #[allow(clippy::type_complexity)]
         let cases: &[(&str, &dyn Fn(&Path), Option<&str>)] = &[
             // JS meta-framework on the Node runtime.
             (
