@@ -50,10 +50,16 @@ dest="${bin_dir}/portbay-hosts-helper-${triple}"
 # to satisfy the existence check; the real binary overwrites this one below,
 # build-mcp.sh overwrites portbay-mcp, and build-afm.sh overwrites portbay-afm
 # (macOS-only — on Linux the placeholder is harmless and never bundled, since
-# portbay-afm is listed only in tauri.macos.conf.json).
-for ours in portbay-hosts-helper portbay-mcp portbay-afm; do
+# portbay-afm/portbay-stt/portbay-imagegen are listed only in
+# tauri.macos.conf.json — their real sidecars are built by build-afm.sh /
+# build-stt.sh / build-imagegen.sh, but the existence check needs a placeholder
+# here so clippy/test (which don't build the AI sidecars) can compile.
+for ours in portbay-hosts-helper portbay-mcp portbay-afm portbay-stt portbay-imagegen; do
   ph="${bin_dir}/${ours}-${triple}"
-  [ -f "$ph" ] || : > "$ph"
+  # `-f` is false for a dangling symlink, and writing through one fails with
+  # ENOENT — so clear any non-regular file (e.g. a stray absolute dev symlink)
+  # before seeding the placeholder.
+  [ -f "$ph" ] || { rm -f "$ph"; : > "$ph"; }
 done
 
 echo "build-hosts-helper: cargo build --release --target ${triple} -p portbay-hosts-helper"

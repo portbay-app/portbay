@@ -70,12 +70,16 @@ if command -v brew >/dev/null 2>&1; then
   brew fetch --bottle-tag="${bottle_tag}" --force "dnsmasq" >/dev/null 2>&1 || \
     brew fetch --force "dnsmasq" >/dev/null 2>&1
   cache_root="$(brew --cache)"
-  # Match the exact version + bottle tag so we never pick up an unrelated or
-  # stale dnsmasq bottle left in the cache.
-  bottle_file="$(find "${cache_root}" -maxdepth 4 -type f -name "*--dnsmasq--${DNSMASQ_VERSION}.${bottle_tag}.bottle.tar.gz" -mmin -5 | head -n1)"
+  # Match the bottle tag but NOT a pinned version: `brew fetch dnsmasq` pulls
+  # whatever version Homebrew's formula currently points at, which drifts ahead
+  # of DNSMASQ_VERSION (and may carry a `_1` revision), so a version-pinned glob
+  # silently finds nothing and the build dies at "could not locate bottle". The
+  # extracted layout is version-agnostic already, so any fresh dnsmasq bottle for
+  # this tag is correct. -mmin -10 keeps it to the one we just downloaded.
+  bottle_file="$(find "${cache_root}" -maxdepth 4 -type f -name "*--dnsmasq--*.${bottle_tag}.bottle.tar.gz" -mmin -10 | head -n1)"
   if [[ -z "${bottle_file}" ]]; then
-    # Fall back to a previously downloaded bottle of the SAME version + tag.
-    bottle_file="$(ls -t "${cache_root}"/downloads/*--dnsmasq--${DNSMASQ_VERSION}.${bottle_tag}.bottle.tar.gz 2>/dev/null | head -n1 || true)"
+    # Fall back to the most recent downloaded dnsmasq bottle for this tag.
+    bottle_file="$(ls -t "${cache_root}"/downloads/*--dnsmasq--*.${bottle_tag}.bottle.tar.gz 2>/dev/null | head -n1 || true)"
   fi
   if [[ -z "${bottle_file}" ]]; then
     echo "fetch-dnsmasq: could not locate downloaded bottle under ${cache_root}" >&2

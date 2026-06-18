@@ -190,8 +190,7 @@ pub struct AppState {
     /// the `proc_log_history` command replays this ring on open. Bounded to
     /// [`PROC_LOG_HISTORY_CAP`] lines per project; cleared on Start/Restart
     /// so a replay narrates the current run, not stale attempts.
-    pub proc_log_history:
-        Mutex<HashMap<String, VecDeque<crate::commands::events::ProcLogEvent>>>,
+    pub proc_log_history: Mutex<HashMap<String, VecDeque<crate::commands::events::ProcLogEvent>>>,
 
     /// Session-long set of canonicalized local paths the user approved via a
     /// host-mediated dialog (file picker, save dialog) or a real OS drag-drop.
@@ -300,7 +299,10 @@ impl AppState {
     }
 
     /// The retained narration lines for a project, oldest first.
-    pub fn proc_log_snapshot(&self, project_id: &str) -> Vec<crate::commands::events::ProcLogEvent> {
+    pub fn proc_log_snapshot(
+        &self,
+        project_id: &str,
+    ) -> Vec<crate::commands::events::ProcLogEvent> {
         self.proc_log_history
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -635,7 +637,11 @@ impl AppState {
         // Drop any live local speech-to-text capture: its `kill_on_drop`
         // reaps the `portbay-stt` sidecar and releases the mic. Without this a
         // quit mid-dictation leaves the sidecar holding the microphone (and
-        // its TCC grant) until the OS reaps the orphan.
+        // its TCC grant) until the OS reaps the orphan. macOS-only: the STT
+        // capture client (and `shutdown_capture`) lives behind the
+        // `target_os = "macos"` gate, so the call must match or the Linux build
+        // fails to resolve it.
+        #[cfg(target_os = "macos")]
         crate::stt::shutdown_capture();
         // Replace the tunnel manager so its `Drop` kills every cloudflared
         // child — nothing PortBay spawned should outlive the app.
