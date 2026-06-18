@@ -74,3 +74,5 @@ Valet is a perfectly good, time-tested choice for PHP-only macOS development, an
 ---
 
 See all [comparisons](/comparisons/) — developers also compare PortBay with [Laravel Herd](/comparisons/portbay-vs-laravel-herd) and [DDEV](/comparisons/portbay-vs-ddev).
+
+_Last updated: 2026-06-15._

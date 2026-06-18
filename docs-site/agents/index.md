@@ -9,6 +9,21 @@ PortBay ships an [Model Context Protocol](https://modelcontextprotocol.io) serve
 
 The agent spawns `portbay-mcp` as a subprocess over stdio. The process boundary **is** the trust boundary — there is no port to open and no extra auth layer.
 
+## Add PortBay to your agent in 60 seconds
+
+Install PortBay, point your agent at the bundled `portbay-mcp` binary, then ask. Claude Code, one line:
+
+```bash
+brew install portbay-app/portbay/portbay
+claude mcp add portbay -- "$(which portbay-mcp)"
+```
+
+Restart Claude Code and ask it to work your stack:
+
+> "List my PortBay projects, start the API, and pick up the next card on its board."
+
+Every PortBay tool (prefixed `portbay_`) is now in the agent's tool list: register projects, start and stop them, read logs, and claim, work, and move task-board cards. Cursor, Zed, Codex, Continue, and Windsurf get the same access; their config snippets are in [Configure your agent](#configure-your-agent) below.
+
 ## How it's built and shipped
 
 `portbay-mcp` is its own Rust workspace crate at `src-tauri/crates/mcp/`. It depends on `portbay_lib` with the `mcp` feature gate, which is what pulls in the `rmcp` and `schemars` stacks. Those dependencies are compiled only for the MCP binary, never for the GUI app.

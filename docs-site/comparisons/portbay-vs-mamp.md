@@ -70,3 +70,5 @@ MAMP and XAMPP are familiar choices with years of community knowledge behind the
 ---
 
 See all [comparisons](/comparisons/) — developers also compare PortBay with [Laravel Herd](/comparisons/portbay-vs-laravel-herd) and [Docker / OrbStack](/comparisons/portbay-vs-docker).
+
+_Last updated: 2026-06-15._

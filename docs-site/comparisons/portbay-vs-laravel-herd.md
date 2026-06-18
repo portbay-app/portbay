@@ -70,3 +70,5 @@ Laravel Herd is excellent for PHP-only macOS development, and this page says so 
 ---
 
 See all [comparisons](/comparisons/) — developers also compare PortBay with [Laravel Valet](/comparisons/portbay-vs-laravel-valet) and [ServBay](/comparisons/portbay-vs-servbay).
+
+_Last updated: 2026-06-15._
