@@ -7,22 +7,25 @@
 
     1. Projects        — running / total, plus a live activity pulse that
                           only appears while something is running
-    2. Local Access     — domains served, HTTPS trust, attention count
+    2. Local Access     — HTTPS domains served / total, with the local-CA
+                          trust state (the access signal, not a project count)
     3. Services        — bundled sidecar health (the /services surface)
     4. Local AI         — Ollama running-state + the loaded model, so the
                           AI page isn't the only place to check
 
-  Each card is a tall, calm rectangle — icon top-left, title + subtitle
-  stacked, status content bottom-left, a meaningful flourish bottom-right
-  (the activity pulse, a trust badge, a health badge, an AI status badge).
-  The Projects pulse is the one real time-series (the device's CPU trace
-  while projects run); the others show a value we actually have.
+  Each tile is a tall, calm rectangle rendered by the shared `StatusTile`
+  atom — icon top-left, title + subtitle stacked, value content bottom-left,
+  a meaningful flourish bottom-right (the activity pulse, a trust badge, a
+  health badge, an AI status badge). The Projects pulse is the one real
+  time-series (the device's CPU trace while projects run); the others show a
+  value we actually have.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
 
   import Icon from "$lib/components/atoms/Icon.svelte";
   import Sparkline from "$lib/components/atoms/Sparkline.svelte";
+  import StatusTile from "$lib/components/atoms/StatusTile.svelte";
 
   import { sidecars } from "$lib/stores/sidecars.svelte";
   import { projects } from "$lib/stores/projects.svelte";
@@ -59,8 +62,10 @@
   );
 
   // --- Card 2: Local Access ---
-  // A "domain" is a project's hostname (1:1). HTTPS is "trusted" only when the
-  // mkcert local CA is installed — otherwise the cert exists but browsers warn.
+  // A "domain" is a project's hostname (1:1). The headline counts domains
+  // served over HTTPS (httpsCount / total) — distinct from the Projects
+  // card's project count. HTTPS is "trusted" only when the mkcert local CA
+  // is installed; otherwise the cert exists but browsers warn.
   const httpsCount = $derived(
     projects.value.filter((p) => p.https).length,
   );
@@ -102,40 +107,26 @@
   aria-label="Local environment status"
 >
   <!-- Card 1: Projects -->
-  <div
-    class="bg-surface border border-border rounded-2xl p-4
-           flex flex-col gap-3 min-h-[112px]"
+  <StatusTile
+    icon="package"
+    iconClass="bg-status-running/10 text-status-running"
+    title="Projects"
+    subtitle="Running now"
   >
-    <div class="flex items-start justify-between gap-2">
-      <div class="flex items-center gap-2.5 min-w-0">
-        <span
-          class="inline-flex items-center justify-center w-8 h-8 rounded-lg
-                 bg-status-running/10 text-status-running shrink-0"
+    <p class="text-[20px] font-semibold text-fg tabular-nums">
+      {runningCount}<span class="text-fg-subtle font-normal text-[15px]">
+        / {total}</span
+      >
+    </p>
+    <p class="text-[11px] truncate">
+      <span class="text-fg-subtle">{stoppedCount} stopped</span>
+      {#if attentionCount > 0}
+        <span class="text-status-unhealthy">
+          · {attentionCount} need attention</span
         >
-          <Icon name="package" size={15} />
-        </span>
-        <div class="min-w-0 leading-tight">
-          <p class="text-[13px] font-semibold text-fg truncate">Projects</p>
-          <p class="text-[11px] text-fg-subtle truncate">Running now</p>
-        </div>
-      </div>
-    </div>
-    <div class="flex items-end justify-between gap-2">
-      <div class="leading-tight min-w-0">
-        <p class="text-[20px] font-semibold text-fg tabular-nums">
-          {runningCount}<span class="text-fg-subtle font-normal text-[15px]">
-            / {total}</span
-          >
-        </p>
-        <p class="text-[11px] truncate">
-          <span class="text-fg-subtle">{stoppedCount} stopped</span>
-          {#if attentionCount > 0}
-            <span class="text-status-unhealthy">
-              · {attentionCount} need attention</span
-            >
-          {/if}
-        </p>
-      </div>
+      {/if}
+    </p>
+    {#snippet flourish()}
       <!-- Live activity pulse — the device's CPU trace while projects run.
            Hidden entirely when nothing is running, so an idle dashboard
            shows just the count, no flat line. -->
@@ -151,48 +142,34 @@
           />
         </div>
       {/if}
-    </div>
-  </div>
+    {/snippet}
+  </StatusTile>
 
   <!-- Card 2: Local Access -->
-  <div
-    class="bg-surface border border-border rounded-2xl p-4
-           flex flex-col gap-3 min-h-[112px]"
+  <StatusTile
+    icon="globe"
+    iconClass="bg-status-starting/10 text-status-starting"
+    title="Local Access"
+    subtitle="Domains &amp; URLs"
   >
-    <div class="flex items-start justify-between gap-2">
-      <div class="flex items-center gap-2.5 min-w-0">
-        <span
-          class="inline-flex items-center justify-center w-8 h-8 rounded-lg
-                 bg-status-starting/10 text-status-starting shrink-0"
+    <p class="text-[20px] font-semibold text-fg tabular-nums">
+      {httpsCount}<span class="text-fg-subtle font-normal text-[15px]">
+        / {total} HTTPS</span
+      >
+    </p>
+    <p class="text-[11px] truncate">
+      {#if mkcertTrusted}
+        <span class="text-status-running">CA trusted</span>
+      {:else}
+        <span class="text-status-unhealthy">CA not trusted</span>
+      {/if}
+      {#if domainsAttention > 0}
+        <span class="text-status-unhealthy">
+          · {domainsAttention} need attention</span
         >
-          <Icon name="globe" size={15} />
-        </span>
-        <div class="min-w-0 leading-tight">
-          <p class="text-[13px] font-semibold text-fg truncate">
-            Local Access
-          </p>
-          <p class="text-[11px] text-fg-subtle truncate">Domains &amp; URLs</p>
-        </div>
-      </div>
-    </div>
-    <div class="flex items-end justify-between gap-2">
-      <div class="leading-tight min-w-0">
-        <p class="text-[20px] font-semibold text-fg tabular-nums">
-          {total}<span class="text-fg-subtle font-normal text-[12px]">
-            {total === 1 ? "domain" : "domains"}</span
-          >
-        </p>
-        <p class="text-[11px] truncate">
-          <span class="text-fg-subtle">
-            {httpsCount} HTTPS{mkcertTrusted ? " trusted" : ""}
-          </span>
-          {#if domainsAttention > 0}
-            <span class="text-status-unhealthy">
-              · {domainsAttention} need attention</span
-            >
-          {/if}
-        </p>
-      </div>
+      {/if}
+    </p>
+    {#snippet flourish()}
       <span
         class="inline-flex items-center justify-center w-10 h-10 rounded-full
                {mkcertTrusted
@@ -202,43 +179,29 @@
       >
         <Icon name={mkcertTrusted ? "lock" : "circle-alert"} size={18} />
       </span>
-    </div>
-  </div>
+    {/snippet}
+  </StatusTile>
 
   <!-- Card 3: Services -->
-  <div
-    class="bg-surface border border-border rounded-2xl p-4
-           flex flex-col gap-3 min-h-[112px]"
+  <StatusTile
+    icon="server"
+    iconClass="bg-accent/10 text-accent"
+    title="Services"
+    subtitle="Bundled sidecars"
   >
-    <div class="flex items-start justify-between gap-2">
-      <div class="flex items-center gap-2.5 min-w-0">
-        <span
-          class="inline-flex items-center justify-center w-8 h-8 rounded-lg
-                 bg-accent/10 text-accent shrink-0"
-        >
-          <Icon name="server" size={15} />
-        </span>
-        <div class="min-w-0 leading-tight">
-          <p class="text-[13px] font-semibold text-fg truncate">Services</p>
-          <p class="text-[11px] text-fg-subtle truncate">Bundled sidecars</p>
-        </div>
-      </div>
-    </div>
-    <div class="flex items-end justify-between gap-2">
-      <div class="leading-tight min-w-0">
-        <p class="text-[20px] font-semibold text-fg tabular-nums">
-          {servicesHealthy}<span class="text-fg-subtle font-normal text-[15px]">
-            / {servicesTotal}</span
-          >
-        </p>
-        <p class="text-[11px] truncate">
-          {#if servicesFailing > 0}
-            <span class="text-status-crashed">{servicesFailing} failing</span>
-          {:else}
-            <span class="text-status-running">healthy</span>
-          {/if}
-        </p>
-      </div>
+    <p class="text-[20px] font-semibold text-fg tabular-nums">
+      {servicesHealthy}<span class="text-fg-subtle font-normal text-[15px]">
+        / {servicesTotal}</span
+      >
+    </p>
+    <p class="text-[11px] truncate">
+      {#if servicesFailing > 0}
+        <span class="text-status-crashed">{servicesFailing} failing</span>
+      {:else}
+        <span class="text-status-running">healthy</span>
+      {/if}
+    </p>
+    {#snippet flourish()}
       <span
         class="inline-flex items-center justify-center w-10 h-10 rounded-full
                {servicesFailing > 0
@@ -251,54 +214,40 @@
           size={18}
         />
       </span>
-    </div>
-  </div>
+    {/snippet}
+  </StatusTile>
 
   <!-- Card 4: Local AI -->
-  <div
-    class="bg-surface border border-border rounded-2xl p-4
-           flex flex-col gap-3 min-h-[112px]"
+  <StatusTile
+    icon="sparkles"
+    iconClass="bg-accent/10 text-accent"
+    title="Local AI"
+    subtitle="Ollama server"
   >
-    <div class="flex items-start justify-between gap-2">
-      <div class="flex items-center gap-2.5 min-w-0">
-        <span
-          class="inline-flex items-center justify-center w-8 h-8 rounded-lg
-                 bg-accent/10 text-accent shrink-0"
-        >
-          <Icon name="sparkles" size={15} />
-        </span>
-        <div class="min-w-0 leading-tight">
-          <p class="text-[13px] font-semibold text-fg truncate">Local AI</p>
-          <p class="text-[11px] text-fg-subtle truncate">Ollama server</p>
-        </div>
-      </div>
-    </div>
-    <div class="flex items-end justify-between gap-2">
-      <div class="leading-tight min-w-0">
-        <p
-          class="text-[20px] font-semibold tabular-nums {ollamaRunning
-            ? 'text-fg'
-            : 'text-fg-subtle'}"
-        >
-          {loadedCount}<span class="text-fg-subtle font-normal text-[15px]">
-            {loadedCount === 1 ? "model" : "models"}</span
-          >
-        </p>
-        <p class="text-[11px] truncate">
-          {#if ollamaRunning}
-            {#if primaryModel}
-              <span class="text-status-running">{primaryModel}</span>
-              {#if extraLoaded > 0}
-                <span class="text-fg-subtle"> · +{extraLoaded} more</span>
-              {/if}
-            {:else}
-              <span class="text-fg-subtle">running · no model loaded</span>
-            {/if}
-          {:else}
-            <span class="text-fg-subtle">stopped</span>
+    <p
+      class="text-[20px] font-semibold tabular-nums {ollamaRunning
+        ? 'text-fg'
+        : 'text-fg-subtle'}"
+    >
+      {loadedCount}<span class="text-fg-subtle font-normal text-[15px]">
+        {loadedCount === 1 ? "model" : "models"}</span
+      >
+    </p>
+    <p class="text-[11px] truncate">
+      {#if ollamaRunning}
+        {#if primaryModel}
+          <span class="text-status-running">{primaryModel}</span>
+          {#if extraLoaded > 0}
+            <span class="text-fg-subtle"> · +{extraLoaded} more</span>
           {/if}
-        </p>
-      </div>
+        {:else}
+          <span class="text-fg-subtle">running · no model loaded</span>
+        {/if}
+      {:else}
+        <span class="text-fg-subtle">stopped</span>
+      {/if}
+    </p>
+    {#snippet flourish()}
       <!-- Load line — the device CPU trace while the AI server runs; hidden
            when stopped, mirroring the Projects pulse. -->
       {#if ollamaRunning}
@@ -310,6 +259,6 @@
           />
         </div>
       {/if}
-    </div>
-  </div>
+    {/snippet}
+  </StatusTile>
 </div>

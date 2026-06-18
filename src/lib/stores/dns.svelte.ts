@@ -8,7 +8,7 @@
  */
 import { browser } from "$app/environment";
 
-import { safeInvoke } from "$lib/ipc";
+import { invokeQuiet, safeInvoke } from "$lib/ipc";
 import { errorBus } from "$lib/stores/errors.svelte";
 import { projects } from "$lib/stores/projects.svelte";
 import {
@@ -142,12 +142,27 @@ function createDnsStore() {
    * One-click first-run setup. Installs PortBay's privileged helper (one OS
    * authorization prompt), which then writes resolver config and restarts
    * dnsmasq — after this, *.suffix resolves with no further prompts.
+   *
+   * `quiet` controls how a *failure* surfaces. The DNS page calls this
+   * explicitly (`quiet` omitted): the user asked for setup, so a failure is a
+   * real error toast they should see. The Play path (`ensureReady`, `quiet:
+   * true`) is the opposite — setup runs opportunistically and the project works
+   * via localhost regardless, so a failure (helper binary missing in dev, or
+   * the user dismissing the macOS auth prompt) must NOT read as an error.
+   * There it's downgraded to a non-blocking info notice. Returns whether setup
+   * succeeded so callers can branch.
    */
-  async function setupLocalDns(): Promise<void> {
-    if (isBusy("setup")) return;
+  async function setupLocalDns(opts?: { quiet?: boolean }): Promise<boolean> {
+    if (isBusy("setup")) return false;
     setBusy("setup", true);
     try {
-      await safeInvoke("setup_local_dns");
+      // Quiet path uses invokeQuiet so safeInvoke's automatic error toast never
+      // fires; we push our own info-severity notice below instead.
+      if (opts?.quiet) {
+        await invokeQuiet("setup_local_dns");
+      } else {
+        await safeInvoke("setup_local_dns");
+      }
       errorBus.push({
         code: "DNS_SETUP_DONE",
         category: "infrastructure",
@@ -159,8 +174,25 @@ function createDnsStore() {
         actions: [],
       });
       await refresh();
+      return true;
     } catch {
-      /* toast already pushed */
+      // Explicit DNS-page call: safeInvoke already pushed the error toast.
+      // Play-triggered call: invokeQuiet suppressed it, so surface a calm,
+      // non-blocking notice — the project still works on localhost; DNS just
+      // gives it a hostname. Routed to the bell, not a red error toast.
+      if (opts?.quiet) {
+        errorBus.push({
+          code: "DNS_SETUP_SKIPPED",
+          category: "infrastructure",
+          whatHappened: "Project hostnames aren't set up for DNS yet.",
+          whyItMatters:
+            "Your project still works on localhost. To reach it by its hostname, finish DNS setup in Settings → DNS.",
+          whoCausedIt: "system",
+          severity: "info",
+          actions: [],
+        });
+      }
+      return false;
     } finally {
       setBusy("setup", false);
     }
@@ -179,7 +211,10 @@ function createDnsStore() {
       preflight = pf;
       if (pf.ready || autoSetupTried) return;
       autoSetupTried = true;
-      await setupLocalDns();
+      // Quiet: a Play-triggered setup that fails must not toast an error —
+      // the project still starts and works on localhost. setupLocalDns pushes
+      // its own non-blocking info notice in that case.
+      await setupLocalDns({ quiet: true });
     } catch {
       // Never block project start on a routing check.
     }

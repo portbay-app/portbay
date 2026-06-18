@@ -9,25 +9,37 @@ test("embedded database workbench browses tables and JSON cells", async ({ page 
   });
   await page.goto("/databases");
 
-  await expect(page.getByRole("heading", { name: "Data Workbench" })).toBeVisible();
-  await page.getByRole("button", { name: "quill-sqlite" }).click();
+  await page.getByRole("button", { name: /^quill-sqlite\b/ }).click();
   await page.getByRole("button", { name: "documents 3" }).click();
+  await expect(page.getByRole("heading", { name: "documents" })).toBeVisible();
 
   await expect(page.getByRole("columnheader", { name: /metadata/ })).toBeVisible();
-  await page.getByRole("button", { name: /"status":"draft"/ }).click();
-  await expect(page.getByText("JSON")).toBeVisible();
-  await expect(page.getByText("status", { exact: true })).toBeVisible();
-  await expect(page.getByText('"draft"', { exact: true })).toBeVisible();
+  const metadataCell = page.getByRole("gridcell", {
+    name: /"status":"draft"/,
+  });
+  await metadataCell.getByRole("button", { name: /"status":"draft"/ }).click();
+  await expect(metadataCell.getByRole("textbox")).toHaveValue(
+    '{"status":"draft","tags":["release","docs"]}',
+  );
 
-  await page.getByRole("button", { name: "ERD" }).click();
-  await expect(page.getByLabel("Database schema diagram")).toBeVisible();
-
-  await page.getByRole("button", { name: "Builder" }).click();
-  await expect(page.getByRole("button", { name: "Build query" })).toBeVisible();
-
-  await page.getByRole("button", { name: "Visual Explain" }).click();
-  await expect(page.getByLabel("Visual explain plan")).toBeVisible();
-
+  await page.keyboard.press("Escape");
+  await expect(
+    metadataCell.getByRole("button", { name: /"status":"draft"/ }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Chart" }).click();
-  await expect(page.getByText("id", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Chart" })).toHaveClass(
+    /bg-accent/,
+  );
+
+  await page.getByRole("button", { name: "Schema diagram" }).click();
+  await expect(page.getByText("Schema Diagram", { exact: true })).toBeVisible();
+  await expect(page.getByText("2 tables", { exact: true })).toBeVisible();
+  await expect(page.getByRole("application")).toBeVisible();
+
+  await page.getByRole("button", { name: "Open new tab" }).click();
+  await page.getByRole("button", { name: "Visual query builder" }).click();
+  await expect(page.getByRole("tab", { name: "Query Builder" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 });

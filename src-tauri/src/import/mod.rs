@@ -390,11 +390,15 @@ pub fn build_project(site: &ImportedSite) -> std::result::Result<Project, String
     } else {
         None
     };
+    // Detect the sub-stack from the imported folder so e.g. a Herd/Valet
+    // Laravel site carries its real logo, not just the generic PHP mark.
+    let framework = crate::commands::projects::detect_kind(&path).framework;
     Ok(Project {
         id,
         name: site.suggested_name.clone(),
         path,
         kind,
+        framework,
         start_command: None,
         port: None,
         extra_ports: vec![],

@@ -107,6 +107,133 @@ fn artifact_catalogue(kind: ProjectType) -> &'static [Artifact] {
             ("dist", "Build output", MANUAL_ONLY),
             ("node_modules", "Dependencies", MANUAL_ONLY),
         ],
+        // JS meta-frameworks: each one's framework cache regenerates on the next
+        // dev/build (auto-safe); the package store and shipped build output are
+        // manual-only.
+        ProjectType::Astro => &[
+            (".astro", "Astro cache", AUTO_SAFE),
+            ("node_modules/.vite", "Vite dep cache", AUTO_SAFE),
+            ("dist", "Astro build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::SvelteKit => &[
+            (".svelte-kit", "SvelteKit cache", AUTO_SAFE),
+            ("node_modules/.vite", "Vite dep cache", AUTO_SAFE),
+            ("build", "SvelteKit build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::Nuxt => &[
+            (".nuxt", "Nuxt dev build", AUTO_SAFE),
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            (".output", "Nuxt build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::Remix => &[
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            ("build", "Remix build", MANUAL_ONLY),
+            ("public/build", "Client build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::Gatsby => &[
+            (".cache", "Gatsby cache", AUTO_SAFE),
+            ("public", "Gatsby build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::Angular => &[
+            (".angular/cache", "Angular cache", AUTO_SAFE),
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            ("dist", "Angular build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::SolidStart => &[
+            (".vinxi", "Vinxi cache", AUTO_SAFE),
+            ("node_modules/.vite", "Vite dep cache", AUTO_SAFE),
+            (".output", "SolidStart build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::Qwik => &[
+            ("node_modules/.vite", "Vite dep cache", AUTO_SAFE),
+            ("dist", "Qwik build", MANUAL_ONLY),
+            ("server", "Qwik SSR build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::VueCli => &[
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            ("dist", "Vue build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        ProjectType::Preact => &[
+            ("node_modules/.cache", "Tooling cache", AUTO_SAFE),
+            ("build", "Preact build", MANUAL_ONLY),
+            ("node_modules", "Dependencies", MANUAL_ONLY),
+        ],
+        // Go (+ Hugo, which runs under the Go kind): tool caches regenerate;
+        // vendored deps and build outputs are manual.
+        ProjectType::Go => &[
+            ("resources/_gen", "Hugo cache", AUTO_SAFE),
+            ("public", "Build output", MANUAL_ONLY),
+            ("vendor", "Vendored modules", MANUAL_ONLY),
+            ("bin", "Compiled binary", MANUAL_ONLY),
+        ],
+        // Ruby (Rails/Jekyll): the framework cache is auto-safe; bundled gems
+        // and the generated site need a `bundle install` / rebuild to restore.
+        ProjectType::Ruby => &[
+            ("tmp/cache", "Rails cache", AUTO_SAFE),
+            ("_site", "Jekyll build", MANUAL_ONLY),
+            ("vendor/bundle", "Bundled gems", MANUAL_ONLY),
+        ],
+        // Rust: `target` is the build cache + output; rebuild recompiles, so
+        // manual-only.
+        ProjectType::Rust => &[("target", "Cargo build", MANUAL_ONLY)],
+        // Deno caches modules globally; only the Fresh build output is local.
+        ProjectType::Deno => &[("_fresh", "Fresh build", MANUAL_ONLY)],
+        // Elixir: `_build` recompiles with no network (auto-safe); `deps` needs
+        // a `mix deps.get`.
+        ProjectType::Elixir => &[
+            ("_build", "Mix build", AUTO_SAFE),
+            ("deps", "Mix deps", MANUAL_ONLY),
+        ],
+        // .NET: `obj` intermediates rebuild; `bin` is the build output.
+        ProjectType::DotNet => &[
+            ("obj", "Build intermediates", AUTO_SAFE),
+            ("bin", "Build output", MANUAL_ONLY),
+        ],
+        // JVM (Maven `target/`, Gradle `build/` + `.gradle/`): all rebuild, but
+        // a clean re-downloads Gradle's dependency cache, so manual-only.
+        ProjectType::Java | ProjectType::Kotlin => &[
+            ("target", "Maven build", MANUAL_ONLY),
+            ("build", "Gradle build", MANUAL_ONLY),
+            (".gradle", "Gradle cache", MANUAL_ONLY),
+        ],
+        ProjectType::Scala => &[
+            ("target", "sbt build", MANUAL_ONLY),
+            ("project/target", "sbt project cache", MANUAL_ONLY),
+        ],
+        ProjectType::Clojure => &[
+            (".cpcache", "deps.edn cache", AUTO_SAFE),
+            ("target", "Build output", MANUAL_ONLY),
+        ],
+        ProjectType::Crystal => &[
+            ("lib", "Shards", MANUAL_ONLY),
+            ("bin", "Compiled binary", MANUAL_ONLY),
+        ],
+        ProjectType::Dart => &[
+            (".dart_tool", "Dart tool cache", AUTO_SAFE),
+            ("build", "Build output", MANUAL_ONLY),
+        ],
+        // Swift's `.build` holds both the resolved deps and the build products.
+        ProjectType::Swift => &[(".build", "SwiftPM build", MANUAL_ONLY)],
+        ProjectType::Zig => &[
+            ("zig-cache", "Zig cache", AUTO_SAFE),
+            (".zig-cache", "Zig cache", AUTO_SAFE),
+            ("zig-out", "Build output", MANUAL_ONLY),
+        ],
+        ProjectType::Nim => &[("nimcache", "Nim cache", AUTO_SAFE)],
+        ProjectType::Haskell => &[
+            (".stack-work", "Stack build", MANUAL_ONLY),
+            ("dist-newstyle", "Cabal build", MANUAL_ONLY),
+        ],
+        ProjectType::OCaml => &[("_build", "Dune build", MANUAL_ONLY)],
         // Laravel/PHP: the framework regenerates its own caches on demand, so
         // they're auto-safe; Composer packages and the compiled front-end are
         // manual-only (a `composer install` / `npm run build` to restore).

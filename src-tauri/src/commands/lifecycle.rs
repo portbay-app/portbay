@@ -1156,6 +1156,7 @@ mod tests {
             name: "P".into(),
             path: PathBuf::from(path),
             kind: ProjectType::Node,
+            framework: None,
             start_command: Some("pnpm dev".into()),
             port,
             extra_ports: extra,

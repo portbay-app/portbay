@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::sync::Once;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::preferences::Preferences;
@@ -110,8 +112,8 @@ pub fn install_panic_hook(app_version: impl Into<String>) {
             let report = CrashReport {
                 id: report_id("rust"),
                 kind: CrashKind::RustPanic,
-                message: scrub_paths(&message),
-                backtrace: Some(scrub_paths(&Backtrace::force_capture().to_string())),
+                message: scrub(&message),
+                backtrace: Some(scrub(&Backtrace::force_capture().to_string())),
                 os: std::env::consts::OS.into(),
                 arch: std::env::consts::ARCH.into(),
                 app_version: app_version.clone(),
@@ -138,8 +140,8 @@ pub fn write_js_crash(kind: CrashKind, message: String, stack: Option<String>) -
     let report = CrashReport {
         id: report_id("js"),
         kind,
-        message: scrub_paths(&message),
-        backtrace: stack.map(|s| scrub_paths(&s)),
+        message: scrub(&message),
+        backtrace: stack.map(|s| scrub(&s)),
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
         app_version: env!("CARGO_PKG_VERSION").into(),
@@ -391,6 +393,71 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The placeholder substituted for any redacted secret value.
+const REDACTED: &str = "[redacted]";
+
+/// Credentials embedded in a URL authority — `scheme://user:password@host`.
+/// This is the exact shape a DB or registry connection string takes, the named
+/// risk in the assessment: a panic during provisioning can carry the live
+/// connection string (password and all) into the message or backtrace. We keep
+/// the scheme and username (useful, non-secret context) and redact only the
+/// password.
+static URL_CREDENTIALS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"([A-Za-z][A-Za-z0-9+.\-]*://[^\s:/@]+):[^\s/@]+@").unwrap());
+
+/// A value keyed by a secret-looking name — `KEY=value`, `key: value`,
+/// `"key":"value"` (covers `.env` lines, DB/registry creds, and config dumps).
+/// The key and separator (group 1, including the value's opening quote) are
+/// preserved; the value (group 2) is redacted. The value cannot start with `:`
+/// and stops at whitespace/quote/comma/semicolon/brace, so Rust's `path::seg`
+/// symbol separators in a backtrace don't trip it.
+static KEYED_SECRET: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?ix)
+        (                                       # $1: key + separator (kept)
+          ["']?
+          [a-z0-9_.\-]*                         # optional prefix (DB_, MYSQL_, …)
+          (?: password | passwd | pwd | passphrase | secret | token
+            | api[_-]?key | apikey | access[_-]?key | private[_-]?key
+            | client[_-]?secret | credentials? | connection[_-]?string | dsn )
+          [a-z0-9_.\-]*                         # optional suffix (_hash, …)
+          ["']?
+          \s* [:=] \s*
+          ["']?                                 # opening quote of the value
+        )
+        ( [^\s:"',;{}] [^\s"',;{}]* )           # $2: the value, redacted
+        "#,
+    )
+    .unwrap()
+});
+
+/// Full crash-text scrub applied to every message and backtrace before it is
+/// written to disk: filesystem paths first ([`scrub_paths`]), then secret
+/// *values* ([`scrub_secrets`]). The path pass strips user-identifying home and
+/// volume roots; the secret pass redacts credentials a panic can carry onto the
+/// stack (DB/registry creds, `.env` values) that the path pass alone would let
+/// through.
+fn scrub(input: &str) -> String {
+    scrub_secrets(&scrub_paths(input))
+}
+
+/// Redact secret *values* from free-form crash text. Conservative by
+/// construction: it only fires on URL-embedded credentials and values keyed by
+/// a secret-looking name, leaving ordinary backtrace content (types, `file:line`,
+/// messages) intact. Where a value is ambiguous it over-redacts rather than risk
+/// a leak — a crash report with one fewer field is always better than one that
+/// ships a password.
+fn scrub_secrets(input: &str) -> String {
+    let stage = URL_CREDENTIALS.replace_all(input, |c: &regex::Captures| {
+        format!("{}:{REDACTED}@", &c[1])
+    });
+    KEYED_SECRET
+        .replace_all(stage.as_ref(), |c: &regex::Captures| {
+            format!("{}{REDACTED}", &c[1])
+        })
+        .into_owned()
+}
+
 fn scrub_paths(input: &str) -> String {
     let home = std::env::var("HOME").ok();
     input
@@ -449,6 +516,63 @@ mod tests {
         let home = std::env::var("HOME").unwrap();
         let input = format!("{home}/projects/demo/src/main.rs");
         assert_eq!(scrub_paths(&input), "~/projects/demo/src/main.rs");
+    }
+
+    #[test]
+    fn scrub_secrets_redacts_db_connection_string() {
+        // The named threat: a panic during DB provisioning carries the live
+        // connection string onto the stack. Scheme + user survive; the password
+        // is gone.
+        let input = "Error: could not connect to \
+            postgres://portbay:s3cr3t-p4ss@localhost:5432/portbay_dev";
+        let out = scrub_secrets(input);
+        assert!(!out.contains("s3cr3t-p4ss"), "password leaked: {out}");
+        assert!(out.contains("postgres://portbay:[redacted]@localhost:5432/portbay_dev"));
+    }
+
+    #[test]
+    fn scrub_secrets_redacts_keyed_values() {
+        // .env line, quoted YAML/log value, and a JSON config dump.
+        assert_eq!(
+            scrub_secrets("DB_PASSWORD=hunter2"),
+            "DB_PASSWORD=[redacted]"
+        );
+        assert_eq!(
+            scrub_secrets("password: \"hunter2\""),
+            "password: \"[redacted]\""
+        );
+        assert_eq!(
+            scrub_secrets(r#"{"apiKey":"sk-live-abc123","ok":true}"#),
+            r#"{"apiKey":"[redacted]","ok":true}"#
+        );
+        assert_eq!(
+            scrub_secrets("MYSQL_PWD=p@ssw0rd and AWS_SECRET_ACCESS_KEY=abcd/efgh"),
+            "MYSQL_PWD=[redacted] and AWS_SECRET_ACCESS_KEY=[redacted]"
+        );
+    }
+
+    #[test]
+    fn scrub_secrets_preserves_ordinary_backtrace_lines() {
+        // Path-style symbol separators (`::`) and file:line must survive — the
+        // value scrubber is for secrets, not for mangling stack frames.
+        let frame = "   3: portbay_lib::context::token::refresh at src/context.rs:42";
+        assert_eq!(scrub_secrets(frame), frame);
+        let msg = "called `Result::unwrap()` on an `Err` value: NotFound";
+        assert_eq!(scrub_secrets(msg), msg);
+    }
+
+    #[test]
+    fn synthetic_secret_in_panic_message_is_redacted_end_to_end() {
+        // The card's acceptance test: a secret in a panic-shaped message is
+        // redacted by the same `scrub` the panic hook applies before the report
+        // reaches disk.
+        let panicked = "thread 'main' panicked at 'provisioning failed: \
+            DATABASE_URL=postgres://root:topsecret@db/app', src/db.rs:88";
+        let out = scrub(panicked);
+        assert!(!out.contains("topsecret"), "secret leaked: {out}");
+        assert!(out.contains("[redacted]"));
+        // Non-secret structure is preserved.
+        assert!(out.contains("src/db.rs:88"));
     }
 
     #[test]

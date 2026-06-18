@@ -150,7 +150,7 @@ struct PcReadinessProbe {
     #[serde(skip_serializing_if = "Option::is_none")]
     http_get: Option<PcHttpGet>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tcp_socket: Option<PcTcpSocket>,
+    exec: Option<PcExec>,
     initial_delay_seconds: u32,
     period_seconds: u32,
     timeout_seconds: u32,
@@ -166,10 +166,25 @@ struct PcHttpGet {
     port: u16,
 }
 
+/// Shell-command probe. Process Compose supports exactly two probe
+/// transports — `http_get` and `exec` (run through the shell, exit 0 =
+/// ready). There is NO `tcp_socket` probe (that's a Kubernetes-ism):
+/// PC silently drops the unknown key, the probe never runs, `is_ready`
+/// stays `"-"`, and every project rides the readiness grace window into
+/// a false "Needs attention". A port check therefore goes through `nc`.
 #[derive(Debug, Serialize)]
-struct PcTcpSocket {
-    host: &'static str,
-    port: u16,
+struct PcExec {
+    command: String,
+}
+
+/// TCP port probe as an exec command. `nc -z` connects and immediately
+/// closes — invisible to the app (no request, no SSR, no HMR broadcast)
+/// while still catching the dead-server case. `-w 2` bounds the connect
+/// wait; ships with macOS and every mainstream Linux netcat.
+fn tcp_probe_exec(port: u16) -> Option<PcExec> {
+    Some(PcExec {
+        command: format!("nc -z -w 2 127.0.0.1 {port}"),
+    })
 }
 
 /// SMTP defaults injected into every process's environment when
@@ -390,10 +405,7 @@ fn db_daemon_to_pc_process(spec: &DatabaseDaemonSpec, logs_dir: &Path) -> PcProc
         availability: PcAvailability { restart: "no" },
         readiness_probe: Some(PcReadinessProbe {
             http_get: None,
-            tcp_socket: Some(PcTcpSocket {
-                host: "127.0.0.1",
-                port: spec.port,
-            }),
+            exec: tcp_probe_exec(spec.port),
             initial_delay_seconds: 1,
             period_seconds: 2,
             timeout_seconds: 5,
@@ -426,7 +438,7 @@ fn web_server_to_pc_process(spec: &WebServerSpec, logs_dir: &Path) -> PcProcess 
                 path: "/".into(),
                 port: spec.port,
             }),
-            tcp_socket: None,
+            exec: None,
             initial_delay_seconds: 1,
             period_seconds: 2,
             timeout_seconds: 5,
@@ -701,14 +713,10 @@ impl HookTemplate {
 }
 
 /// Returns true when the project's kind maps to the "node" language family
-/// (Next.js, Vite, plain Node). Used to decide whether to apply the
-/// sandboxed-node minimal-PATH branch.
+/// (Next.js, Vite, plain Node, and the JS meta-frameworks like Astro/Nuxt).
+/// Used to decide whether to apply the sandboxed-node minimal-PATH branch.
 fn is_node_type(p: &Project) -> bool {
-    use crate::registry::ProjectType;
-    matches!(
-        p.kind,
-        ProjectType::Next | ProjectType::Vite | ProjectType::Node
-    )
+    p.kind.is_node_family()
 }
 
 /// Whether a per-project corepack home holds a *materialized* package manager
@@ -927,17 +935,15 @@ fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadiness
         // per probe. A TCP connect is invisible to the app while still
         // catching the dead-server case the pill exists for. The registry
         // keeps the `Http { path }` shape (no migration; the path documents
-        // intent), only the probe transport changes here.
+        // intent), only the probe transport changes here. The connect is
+        // an `exec` nc probe — see `PcExec` for why not `tcp_socket`.
         Readiness::Http {
             timeout_seconds, ..
         } => {
             let port = port?;
             Some(PcReadinessProbe {
                 http_get: None,
-                tcp_socket: Some(PcTcpSocket {
-                    host: "127.0.0.1",
-                    port,
-                }),
+                exec: tcp_probe_exec(port),
                 initial_delay_seconds: 2,
                 period_seconds: 2,
                 timeout_seconds: 5,
@@ -951,10 +957,7 @@ fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadiness
             let port = port?;
             Some(PcReadinessProbe {
                 http_get: None,
-                tcp_socket: Some(PcTcpSocket {
-                    host: "127.0.0.1",
-                    port,
-                }),
+                exec: tcp_probe_exec(port),
                 initial_delay_seconds: 2,
                 period_seconds: 2,
                 timeout_seconds: 5,
@@ -983,6 +986,7 @@ mod tests {
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
             kind: ProjectType::Next,
+            framework: None,
             start_command: Some("pnpm dev".into()),
             port: Some(port),
             extra_ports: vec![],
@@ -1018,6 +1022,7 @@ mod tests {
             name: id.into(),
             path: PathBuf::from(format!("/tmp/{id}")),
             kind: ProjectType::Php,
+            framework: None,
             start_command: None, // pure Caddy-served — no PC entry
             port: None,
             extra_ports: vec![],
@@ -1060,12 +1065,20 @@ mod tests {
             "process name missing: {yaml}"
         );
         assert!(yaml.contains("pnpm dev"));
-        assert!(yaml.contains("port: 3010"));
-        // `Http` readiness maps to a TCP probe on purpose: the probe recurs
-        // every 2 s for the life of the process, and a real GET makes
+        // `Http` readiness maps to a TCP-connect probe on purpose: the probe
+        // recurs every 2 s for the life of the process, and a real GET makes
         // framework dev servers re-render + broadcast HMR rebuild cycles
         // ("[Fast Refresh] rebuilding" forever in the browser console).
-        assert!(yaml.contains("tcp_socket"), "expected tcp probe: {yaml}");
+        // It must be an `exec` nc probe — Process Compose has no `tcp_socket`
+        // transport, and an unknown key means the probe silently never runs.
+        assert!(
+            yaml.contains("nc -z -w 2 127.0.0.1 3010"),
+            "expected exec tcp-connect probe: {yaml}"
+        );
+        assert!(
+            !yaml.contains("tcp_socket"),
+            "tcp_socket is not a real PC probe: {yaml}"
+        );
         assert!(
             !yaml.contains("scheme: http"),
             "dev-server probe must not issue HTTP requests: {yaml}"

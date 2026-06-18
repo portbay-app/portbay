@@ -837,6 +837,7 @@ mod tests {
             name: "Demo".into(),
             path: PathBuf::from("/tmp/demo"),
             kind: ProjectType::Node,
+            framework: None,
             start_command: Some("pnpm dev".into()),
             port: Some(3000),
             extra_ports: vec![],

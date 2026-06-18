@@ -23,8 +23,8 @@ use crate::commands::dto::{
 use crate::error::{AppError, AppResult};
 use crate::process_compose::{Process, ProjectStatus};
 use crate::registry::{
-    store, MobileRunConfig, Project, ProjectDeploy, ProjectId, ProjectType, Readiness, Registry,
-    Runtime, SandboxConfig, SandboxNetworkPolicy, WebServer,
+    store, Framework, MobileRunConfig, Project, ProjectDeploy, ProjectId, ProjectType, Readiness,
+    Registry, Runtime, SandboxConfig, SandboxNetworkPolicy, WebServer,
 };
 use crate::state::AppState;
 
@@ -199,11 +199,15 @@ pub async fn add_project(
         None
     };
     let has_start_command = input.start_command.is_some();
+    // Sub-stack is descriptive (logo/label only), so derive it from the folder
+    // even when the user overrode the launch kind in the wizard.
+    let framework = detect_kind(&path).framework;
     let project = Project {
         id,
         name,
         path,
         kind: input.kind,
+        framework,
         start_command: input.start_command,
         port: input.port,
         extra_ports: vec![],
@@ -867,6 +871,69 @@ fn standalone_dev_command(tool: crate::registry::WorkspaceTool) -> String {
     }
 }
 
+/// Run a locally-installed framework binary through the repo's package manager.
+///
+/// Used for frameworks whose conventional dev script is NOT `dev` (Angular's
+/// `ng serve`, Gatsby's `gatsby develop`, Vue CLI's `vue-cli-service serve`),
+/// so `<pm> dev` would fail with "missing script". Resolving the binary from
+/// `node_modules/.bin` via the package manager's exec works regardless of the
+/// project's script names.
+fn standalone_exec_command(tool: crate::registry::WorkspaceTool, bin: &str) -> String {
+    use crate::registry::WorkspaceTool::*;
+    match tool {
+        Pnpm | Turbo => format!("pnpm exec {bin}"),
+        Npm => format!("npm exec -- {bin}"),
+        Yarn => format!("yarn exec {bin}"),
+        Bun => format!("bunx {bin}"),
+    }
+}
+
+/// The UI library a generic Vite/Node project is built with, for the logo only.
+/// First match wins; the specific libraries are checked before the catch-all
+/// React (a Vue/Svelte/Solid app never lists `react`). `None` keeps the plain
+/// bundler/Node glyph. Only applied to the generic kinds — a specific kind like
+/// Next/Astro already carries the correct logo.
+fn js_lib_framework(body: &str) -> Option<Framework> {
+    if body.contains("\"vue\"") {
+        return Some(Framework::Vue);
+    }
+    if body.contains("\"svelte\"") {
+        return Some(Framework::Svelte);
+    }
+    if body.contains("\"solid-js\"") {
+        return Some(Framework::SolidJs);
+    }
+    if body.contains("\"preact\"") {
+        return Some(Framework::Preact);
+    }
+    if body.contains("\"lit\"") {
+        return Some(Framework::Lit);
+    }
+    if body.contains("\"alpinejs\"") {
+        return Some(Framework::Alpine);
+    }
+    if body.contains("\"ember-source\"") || body.contains("\"ember-cli\"") {
+        return Some(Framework::Ember);
+    }
+    if body.contains("\"react\"") {
+        return Some(Framework::React);
+    }
+    None
+}
+
+/// Build a JS detection, attaching the UI-library framework when one was found.
+fn js_detection(
+    kind: ProjectType,
+    framework: Option<Framework>,
+    port: u16,
+    cmd: String,
+) -> ProjectDetection {
+    match framework {
+        Some(fw) => detection_fw(kind, fw, port, Some(cmd)),
+        None => detection(kind, port, Some(cmd)),
+    }
+}
+
 /// `validate_project_folder(path)` — canonicalise a dropped path and reject files.
 #[tauri::command]
 pub async fn validate_project_folder(path: String) -> AppResult<String> {
@@ -987,6 +1054,7 @@ pub async fn clone_git_project_sandboxed(
         name: dir_name,
         path: dest,
         kind: det.kind,
+        framework: det.framework,
         start_command: det.start_command,
         port: det.port,
         extra_ports: vec![],
@@ -1181,6 +1249,7 @@ fn canonical_project_folder(path: &str) -> AppResult<PathBuf> {
 
 pub struct ProjectDetection {
     pub kind: ProjectType,
+    pub framework: Option<Framework>,
     pub port: Option<u16>,
     pub start_command: Option<String>,
     pub document_root: Option<String>,
@@ -1196,12 +1265,23 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
         // The run command follows the project's actual package manager
         // (`packageManager` field → lockfile → pnpm default) so the first Play
         // matches the lockfile instead of always guessing `pnpm dev`.
-        let cmd = standalone_dev_command(crate::registry::workspace::detect_package_manager(path));
-        // Cheap string match — full JSON parse isn't worth the cycles.
-        // Expo first: an Expo app also lists react/react-native, so it must
-        // win over the generic Node fallback. Play runs `npx expo start`
-        // (Metro); the simulator opens from there. No port/start_command stored
-        // — the reconciler generates the launch from the kind.
+        let tool = crate::registry::workspace::detect_package_manager(path);
+        let cmd = standalone_dev_command(tool);
+        // Cheap string match on the raw text — full JSON parse isn't worth the
+        // cycles. Each marker is quote-wrapped so it matches the dependency KEY
+        // and not a longer package name (`"next"` won't hit `"next-themes"`).
+        //
+        // Ordering matters two ways:
+        //   1. Expo first — an Expo app also lists react/react-native, so it
+        //      must win over the generic Node fallback. Play runs `npx expo
+        //      start` (Metro); no port/start_command stored — the reconciler
+        //      generates the launch from the kind.
+        //   2. The JS meta-frameworks below are matched BEFORE the generic
+        //      `"vite"` branch, because SvelteKit/SolidStart/Qwik/Remix all
+        //      carry Vite as a dependency and would otherwise be mis-detected
+        //      as a plain Vite app. The default port is the framework's own dev
+        //      default (PortBay proxies that port; it isn't injected into the
+        //      command), so it must match what the dev server actually binds.
         if body.contains("\"expo\"") {
             let mobile_run = detect_expo_run(path);
             return detection_with_mobile(ProjectType::Expo, None, mobile_run);
@@ -1209,10 +1289,96 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
         if body.contains("\"next\"") {
             return detection(ProjectType::Next, 3000, Some(cmd));
         }
-        if body.contains("\"vite\"") {
-            return detection(ProjectType::Vite, 5173, Some(cmd));
+        if body.contains("\"astro\"") {
+            return detection(ProjectType::Astro, 4321, Some(cmd));
         }
-        return detection(ProjectType::Node, 3000, Some(cmd));
+        if body.contains("\"@sveltejs/kit\"") {
+            return detection(ProjectType::SvelteKit, 5173, Some(cmd));
+        }
+        if body.contains("\"nuxt\"") {
+            return detection(ProjectType::Nuxt, 3000, Some(cmd));
+        }
+        if body.contains("@remix-run/") {
+            return detection(ProjectType::Remix, 3000, Some(cmd));
+        }
+        if body.contains("\"gatsby\"") {
+            // Gatsby scaffolds `develop`/`start`, never `dev`, so run the binary
+            // directly. `gatsby develop` defaults to :8000.
+            return detection(
+                ProjectType::Gatsby,
+                8000,
+                Some(standalone_exec_command(tool, "gatsby develop")),
+            );
+        }
+        if body.contains("\"@angular/core\"") {
+            // Angular scaffolds `start: ng serve`, not `dev`. `ng serve`
+            // defaults to :4200.
+            return detection(
+                ProjectType::Angular,
+                4200,
+                Some(standalone_exec_command(tool, "ng serve")),
+            );
+        }
+        if body.contains("\"@solidjs/start\"") {
+            return detection(ProjectType::SolidStart, 3000, Some(cmd));
+        }
+        if body.contains("\"@builder.io/qwik\"") || body.contains("@qwik.dev/") {
+            return detection(ProjectType::Qwik, 5173, Some(cmd));
+        }
+        if body.contains("\"@vue/cli-service\"") {
+            // Vue CLI scaffolds `serve: vue-cli-service serve`, not `dev`. A
+            // Vite-based Vue app carries `"vite"` instead and falls through to
+            // the Vite branch. `vue-cli-service serve` defaults to :8080.
+            return detection(
+                ProjectType::VueCli,
+                8080,
+                Some(standalone_exec_command(tool, "vue-cli-service serve")),
+            );
+        }
+        if body.contains("\"preact-cli\"") {
+            // preact-cli (webpack) scaffolds `dev: preact watch` on :8080. A
+            // Vite-based Preact app carries `"vite"` and falls through instead.
+            return detection(ProjectType::Preact, 8080, Some(cmd));
+        }
+        // Smaller JS meta-frameworks — detected before the generic Vite/Node
+        // fallbacks so they keep their own logo + dev port. React Router 7 is
+        // Vite-based; the others run their own dev server under Node. Match the
+        // framework's build tooling (`@react-router/dev`), not the routing
+        // library (`react-router`), which countless React SPAs also depend on.
+        if body.contains("\"@react-router/dev\"") {
+            return detection_fw(ProjectType::Vite, Framework::ReactRouter, 5173, Some(cmd));
+        }
+        if body.contains("\"@redwoodjs/") {
+            return detection_fw(
+                ProjectType::Node,
+                Framework::Redwood,
+                8910,
+                Some(standalone_exec_command(tool, "redwood dev")),
+            );
+        }
+        if body.contains("\"@docusaurus/core\"") {
+            return detection_fw(
+                ProjectType::Node,
+                Framework::Docusaurus,
+                3000,
+                Some(standalone_exec_command(tool, "docusaurus start")),
+            );
+        }
+        if body.contains("\"@11ty/eleventy\"") {
+            return detection_fw(
+                ProjectType::Node,
+                Framework::Eleventy,
+                8080,
+                Some(standalone_exec_command(tool, "@11ty/eleventy --serve")),
+            );
+        }
+        // Generic Vite / Node: attach the UI-library logo (React/Vue/Svelte/…)
+        // so the project reads as its framework rather than the bare bundler.
+        let lib = js_lib_framework(&body);
+        if body.contains("\"vite\"") {
+            return js_detection(ProjectType::Vite, lib, 5173, cmd);
+        }
+        return js_detection(ProjectType::Node, lib, 3000, cmd);
     }
 
     if path.join("composer.json").exists() || has_php_index(path) {
@@ -1223,6 +1389,74 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
         return detect_python_project(path);
     }
 
+    if path.join("Gemfile").exists() {
+        return detect_ruby_project(path);
+    }
+
+    // Hugo is checked before `go.mod`: a Hugo site may use Go modules, but its
+    // signature config + scaffold dirs are unambiguous, and it launches its own
+    // dev server rather than `go run`.
+    if is_hugo_project(path) {
+        return detection_fw(
+            ProjectType::Go,
+            Framework::Hugo,
+            1313,
+            Some("hugo server -D --port 1313".into()),
+        );
+    }
+    if path.join("go.mod").exists() {
+        return detect_go_project(path);
+    }
+    if path.join("Cargo.toml").exists() {
+        return detect_rust_project(path);
+    }
+    if path.join("deno.json").exists() || path.join("deno.jsonc").exists() {
+        return detect_deno_project(path);
+    }
+    if path.join("mix.exs").exists() {
+        return detect_elixir_project(path);
+    }
+    if has_dotnet_project(path) {
+        return detect_dotnet_project(path);
+    }
+
+    // Other language runtimes, keyed on each toolchain's signature file. They
+    // run as long-lived processes (`port: 0` → no proxy) until the user sets a
+    // port, mirroring the bare-Python/Go behaviour. Distinct markers, so order
+    // among them doesn't matter — but they sit before the mobile + JVM
+    // detectors below.
+    if path.join("build.sbt").exists() {
+        return detection(ProjectType::Scala, 0, Some("sbt run".into()));
+    }
+    if path.join("deps.edn").exists() || path.join("project.clj").exists() {
+        let cmd = if path.join("project.clj").exists() {
+            "lein run"
+        } else {
+            "clojure -M:run"
+        };
+        return detection(ProjectType::Clojure, 0, Some(cmd.into()));
+    }
+    if path.join("shard.yml").exists() {
+        return detection(ProjectType::Crystal, 0, Some("shards run".into()));
+    }
+    if path.join("build.zig").exists() {
+        return detection(ProjectType::Zig, 0, Some("zig build run".into()));
+    }
+    if has_child_with_extension(path, "nimble") {
+        return detection(ProjectType::Nim, 0, Some("nimble run".into()));
+    }
+    if path.join("stack.yaml").exists() || has_child_with_extension(path, "cabal") {
+        let cmd = if path.join("stack.yaml").exists() {
+            "stack run"
+        } else {
+            "cabal run"
+        };
+        return detection(ProjectType::Haskell, 0, Some(cmd.into()));
+    }
+    if path.join("dune-project").exists() {
+        return detection(ProjectType::OCaml, 0, Some("dune exec".into()));
+    }
+
     if is_flutter_project(path) {
         let mobile_run = detect_flutter_run(path);
         return detection_with_mobile(
@@ -1230,6 +1464,12 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
             mobile_start_command(ProjectType::Flutter, mobile_run.as_ref()),
             mobile_run,
         );
+    }
+
+    // Dart is checked AFTER Flutter: a Flutter app also has a `pubspec.yaml`, so
+    // the mobile detector must win; a bare `pubspec.yaml` is plain Dart.
+    if path.join("pubspec.yaml").exists() {
+        return detection(ProjectType::Dart, 0, Some("dart run".into()));
     }
 
     if has_child_with_extension(path, "xcworkspace") || has_child_with_extension(path, "xcodeproj")
@@ -1242,6 +1482,13 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
         );
     }
 
+    // Swift is checked AFTER Xcode: an iOS app may carry a `Package.swift` for
+    // dependencies, so the Xcode detector wins; a bare SPM package or a Vapor
+    // server has no `.xcodeproj` and lands here.
+    if path.join("Package.swift").exists() {
+        return detect_swift_project(path);
+    }
+
     if is_android_project(path) {
         let mobile_run = detect_android_run(path);
         return detection_with_mobile(
@@ -1251,11 +1498,269 @@ pub fn detect_kind(path: &Path) -> ProjectDetection {
         );
     }
 
+    // JVM (Maven/Gradle) is checked AFTER Android: an Android project also has
+    // a `build.gradle`, so the mobile detector must win first.
+    if has_jvm_project(path) {
+        return detect_jvm_project(path);
+    }
+
     if path.join("index.html").exists() {
         return detection(ProjectType::Static, 8000, None);
     }
 
     detection(ProjectType::Custom, 3000, None)
+}
+
+/// Detect a Ruby project and infer its dev server. Rails/Jekyll/Sinatra/Hanami
+/// share the Ruby runtime; the framework tag drives the logo + smart defaults.
+fn detect_ruby_project(path: &Path) -> ProjectDetection {
+    let gemfile = std::fs::read_to_string(path.join("Gemfile"))
+        .unwrap_or_default()
+        .to_lowercase();
+    if gemfile.contains("\"rails\"")
+        || gemfile.contains("'rails'")
+        || path.join("bin/rails").exists()
+    {
+        return detection_fw(
+            ProjectType::Ruby,
+            Framework::Rails,
+            3000,
+            Some("bin/rails server -p 3000".into()),
+        );
+    }
+    if gemfile.contains("jekyll") || path.join("_config.yml").exists() {
+        return detection_fw(
+            ProjectType::Ruby,
+            Framework::Jekyll,
+            4000,
+            Some("bundle exec jekyll serve --port 4000".into()),
+        );
+    }
+    if gemfile.contains("sinatra") {
+        return detection_fw(
+            ProjectType::Ruby,
+            Framework::Sinatra,
+            4567,
+            Some("bundle exec ruby app.rb".into()),
+        );
+    }
+    if gemfile.contains("hanami") {
+        return detection_fw(
+            ProjectType::Ruby,
+            Framework::Hanami,
+            2300,
+            Some("bundle exec hanami server".into()),
+        );
+    }
+    // Plain Ruby project: runtime pinned, but no inferable web server.
+    detection(
+        ProjectType::Ruby,
+        0,
+        Some("bundle exec ruby main.rb".into()),
+    )
+}
+
+/// Detect a Go project. Web frameworks all launch via `go run .` (the bind port
+/// lives in code, not the manifest), so the port is the framework's quickstart
+/// default and the tag drives the logo.
+fn detect_go_project(path: &Path) -> ProjectDetection {
+    let gomod = std::fs::read_to_string(path.join("go.mod"))
+        .unwrap_or_default()
+        .to_lowercase();
+    let cmd = Some("go run .".to_string());
+    if gomod.contains("gin-gonic/gin") {
+        return detection_fw(ProjectType::Go, Framework::Gin, 8080, cmd);
+    }
+    if gomod.contains("labstack/echo") {
+        return detection_fw(ProjectType::Go, Framework::Echo, 1323, cmd);
+    }
+    if gomod.contains("gofiber/fiber") {
+        return detection_fw(ProjectType::Go, Framework::Fiber, 3000, cmd);
+    }
+    // Plain Go: a CLI or a server binding a port we can't infer. Process-only
+    // until the user sets a port.
+    detection(ProjectType::Go, 0, cmd)
+}
+
+/// Detect a Rust project. Web frameworks launch via `cargo run`; the port is
+/// each framework's quickstart default.
+fn detect_rust_project(path: &Path) -> ProjectDetection {
+    let cargo = std::fs::read_to_string(path.join("Cargo.toml"))
+        .unwrap_or_default()
+        .to_lowercase();
+    let cmd = Some("cargo run".to_string());
+    if cargo.contains("actix-web") {
+        return detection_fw(ProjectType::Rust, Framework::Actix, 8080, cmd);
+    }
+    if cargo.contains("axum") {
+        return detection_fw(ProjectType::Rust, Framework::Axum, 3000, cmd);
+    }
+    if cargo.contains("rocket") {
+        return detection_fw(ProjectType::Rust, Framework::Rocket, 8000, cmd);
+    }
+    if cargo.contains("leptos") {
+        return detection_fw(ProjectType::Rust, Framework::Leptos, 3000, cmd);
+    }
+    detection(ProjectType::Rust, 0, cmd)
+}
+
+/// Detect a Deno project. Fresh is the common full-stack framework; everything
+/// else runs through the project's own `deno task`.
+fn detect_deno_project(path: &Path) -> ProjectDetection {
+    let cfg = std::fs::read_to_string(path.join("deno.json"))
+        .or_else(|_| std::fs::read_to_string(path.join("deno.jsonc")))
+        .unwrap_or_default()
+        .to_lowercase();
+    if cfg.contains("$fresh/") || cfg.contains("fresh") || path.join("fresh.gen.ts").exists() {
+        return detection_fw(
+            ProjectType::Deno,
+            Framework::Fresh,
+            8000,
+            Some("deno task start".into()),
+        );
+    }
+    detection(ProjectType::Deno, 0, Some("deno task dev".into()))
+}
+
+/// Detect an Elixir project. Phoenix is the dominant web framework; bare Mix
+/// projects run as a long-lived process.
+fn detect_elixir_project(path: &Path) -> ProjectDetection {
+    let mix = std::fs::read_to_string(path.join("mix.exs"))
+        .unwrap_or_default()
+        .to_lowercase();
+    if mix.contains(":phoenix") || mix.contains("phoenix,") {
+        return detection_fw(
+            ProjectType::Elixir,
+            Framework::Phoenix,
+            4000,
+            Some("mix phx.server".into()),
+        );
+    }
+    detection(ProjectType::Elixir, 0, Some("mix run --no-halt".into()))
+}
+
+/// Detect a .NET project. A `Microsoft.NET.Sdk.Web` SDK marks an ASP.NET web
+/// app (Kestrel on :5000); anything else is a plain `dotnet run` process.
+fn detect_dotnet_project(path: &Path) -> ProjectDetection {
+    let is_web = dotnet_project_files(path)
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .any(|body| body.contains("Microsoft.NET.Sdk.Web"));
+    let cmd = Some("dotnet run".to_string());
+    if is_web {
+        return detection_fw(ProjectType::DotNet, Framework::AspNet, 5000, cmd);
+    }
+    detection(ProjectType::DotNet, 0, cmd)
+}
+
+/// Detect a JVM (Java/Kotlin) project built with Maven or Gradle. The language
+/// is inferred from the source tree; the framework (Spring/Ktor) from the build
+/// file. Spring Boot and Ktor both default to :8080.
+fn detect_jvm_project(path: &Path) -> ProjectDetection {
+    let mut build = String::new();
+    for name in [
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+    ] {
+        if let Ok(body) = std::fs::read_to_string(path.join(name)) {
+            build.push_str(&body);
+            build.push('\n');
+        }
+    }
+    let build = build.to_lowercase();
+    let is_maven = path.join("pom.xml").exists();
+    let kind = if path.join("src/main/kotlin").is_dir() || path.join("build.gradle.kts").exists() {
+        ProjectType::Kotlin
+    } else {
+        ProjectType::Java
+    };
+
+    let spring = build.contains("spring-boot") || build.contains("springframework.boot");
+    let ktor = build.contains("io.ktor") || build.contains("ktor-server");
+
+    let framework = if spring {
+        Some(Framework::Spring)
+    } else if ktor {
+        Some(Framework::Ktor)
+    } else {
+        None
+    };
+
+    let cmd = match (is_maven, spring) {
+        (true, true) => "./mvnw spring-boot:run",
+        (true, false) => "./mvnw compile exec:java",
+        (false, true) => "./gradlew bootRun",
+        (false, false) => "./gradlew run",
+    };
+    let port = if spring || ktor { 8080 } else { 0 };
+
+    match framework {
+        Some(fw) => detection_fw(kind, fw, port, Some(cmd.into())),
+        None => detection(kind, port, Some(cmd.into())),
+    }
+}
+
+/// Hugo static-site generator: a `hugo.*` config, or a legacy `config.*` paired
+/// with Hugo's scaffold dirs. Requiring the scaffold avoids false positives on
+/// the many tools that ship a bare `config.toml`.
+fn is_hugo_project(path: &Path) -> bool {
+    let hugo_config = ["hugo.toml", "hugo.yaml", "hugo.yml", "hugo.json"]
+        .iter()
+        .any(|f| path.join(f).exists());
+    if hugo_config {
+        return true;
+    }
+    let legacy_config = ["config.toml", "config.yaml", "config.yml", "config.json"]
+        .iter()
+        .any(|f| path.join(f).exists());
+    legacy_config && (path.join("archetypes").is_dir() || path.join("content").is_dir())
+}
+
+/// `.csproj`/`.fsproj`/`.sln` files in the project root identify a .NET project.
+fn dotnet_project_files(path: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                e.eq_ignore_ascii_case("csproj")
+                    || e.eq_ignore_ascii_case("fsproj")
+                    || e.eq_ignore_ascii_case("sln")
+            }) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+fn has_dotnet_project(path: &Path) -> bool {
+    !dotnet_project_files(path).is_empty()
+}
+
+fn has_jvm_project(path: &Path) -> bool {
+    path.join("pom.xml").exists()
+        || path.join("build.gradle").exists()
+        || path.join("build.gradle.kts").exists()
+}
+
+/// Detect a Swift package. The Vapor server framework defaults to :8080; a bare
+/// SPM package runs as a `swift run` process.
+fn detect_swift_project(path: &Path) -> ProjectDetection {
+    let manifest = std::fs::read_to_string(path.join("Package.swift"))
+        .unwrap_or_default()
+        .to_lowercase();
+    if manifest.contains("vapor") {
+        return detection_fw(
+            ProjectType::Swift,
+            Framework::Vapor,
+            8080,
+            Some("swift run".into()),
+        );
+    }
+    detection(ProjectType::Swift, 0, Some("swift run".into()))
 }
 
 fn detect_language_intelligence(
@@ -1370,12 +1875,28 @@ fn ensure_marker(mut files: Vec<String>, marker: &str) -> Vec<String> {
 fn detection(kind: ProjectType, port: u16, start_command: Option<String>) -> ProjectDetection {
     ProjectDetection {
         kind,
+        framework: None,
         port: (port > 0).then_some(port),
         start_command,
         document_root: None,
         php_version: None,
         web_server: None,
         mobile_run: None,
+    }
+}
+
+/// Like [`detection`], but tags the result with a detected sub-stack. Used by
+/// the per-language detectors (PHP/Python/Ruby/Go/…) so the framework rides
+/// along with the kind + port + command.
+fn detection_fw(
+    kind: ProjectType,
+    framework: Framework,
+    port: u16,
+    start_command: Option<String>,
+) -> ProjectDetection {
+    ProjectDetection {
+        framework: Some(framework),
+        ..detection(kind, port, start_command)
     }
 }
 
@@ -1386,6 +1907,7 @@ fn detection_with_mobile(
 ) -> ProjectDetection {
     ProjectDetection {
         kind,
+        framework: None,
         port: None,
         start_command,
         document_root: None,
@@ -1398,15 +1920,25 @@ fn detection_with_mobile(
 fn detect_php_project(path: &Path) -> ProjectDetection {
     let port = 8000;
     let version = detected_runtime_for(ProjectType::Php).map(|rt| rt.version);
-    let public = path.join("public");
-    let document_root = if public.join("index.php").exists() || public.join("router.php").exists() {
-        Some("public".to_string())
-    } else {
-        None
-    };
+    let composer = std::fs::read_to_string(path.join("composer.json")).unwrap_or_default();
+    let (framework, fw_doc_root) = detect_php_framework(path, &composer);
+
+    // Document root: prefer the framework's conventional web root when that dir
+    // actually exists (Laravel `public/`, Drupal/Craft `web/`, CakePHP
+    // `webroot/`, Magento `pub/`); otherwise fall back to the generic `public/`
+    // sniff so a hand-rolled PHP app still resolves correctly.
+    let document_root = fw_doc_root
+        .filter(|dir| path.join(dir).is_dir())
+        .map(|dir| dir.to_string())
+        .or_else(|| {
+            let public = path.join("public");
+            (public.join("index.php").exists() || public.join("router.php").exists())
+                .then(|| "public".to_string())
+        });
 
     ProjectDetection {
         kind: ProjectType::Php,
+        framework,
         port: Some(port),
         start_command: None,
         document_root,
@@ -1414,6 +1946,63 @@ fn detect_php_project(path: &Path) -> ProjectDetection {
         web_server: None,
         mobile_run: None,
     }
+}
+
+/// Identify the PHP framework / CMS and its conventional web root from the
+/// composer manifest plus a few signature files. Order matters: CMSs built on
+/// another framework (Statamic on Laravel, Craft on Yii) must be matched before
+/// their base, since the base dependency is also present.
+fn detect_php_framework(path: &Path, composer: &str) -> (Option<Framework>, Option<&'static str>) {
+    // WordPress usually ships no composer manifest — detect by its loader files.
+    // Bedrock (`roots/wordpress`) serves from `web/` with WordPress in `web/wp`;
+    // a classic install serves from the project root.
+    if composer.contains("roots/wordpress") {
+        return (Some(Framework::WordPress), Some("web"));
+    }
+    if path.join("wp-config.php").exists()
+        || path.join("wp-load.php").exists()
+        || path.join("wp-settings.php").exists()
+        || composer.contains("johnpbloch/wordpress")
+    {
+        return (Some(Framework::WordPress), None);
+    }
+    if composer.contains("statamic/cms") {
+        return (Some(Framework::Statamic), Some("public"));
+    }
+    if composer.contains("laravel/framework") || path.join("artisan").exists() {
+        return (Some(Framework::Laravel), Some("public"));
+    }
+    if composer.contains("craftcms/cms") {
+        return (Some(Framework::CraftCms), Some("web"));
+    }
+    if composer.contains("drupal/core") {
+        return (Some(Framework::Drupal), Some("web"));
+    }
+    if composer.contains("symfony/framework-bundle") || composer.contains("symfony/symfony") {
+        return (Some(Framework::Symfony), Some("public"));
+    }
+    if composer.contains("codeigniter4/framework") {
+        return (Some(Framework::CodeIgniter), Some("public"));
+    }
+    if composer.contains("cakephp/cakephp") {
+        return (Some(Framework::CakePhp), Some("webroot"));
+    }
+    if composer.contains("yiisoft/yii2") || composer.contains("yiisoft/yii-") {
+        return (Some(Framework::Yii), Some("web"));
+    }
+    if composer.contains("magento/product-community-edition")
+        || composer.contains("magento/magento2-base")
+    {
+        return (Some(Framework::Magento), Some("pub"));
+    }
+    if composer.contains("slim/slim") {
+        return (Some(Framework::Slim), Some("public"));
+    }
+    // Joomla: signature admin tree + root configuration file.
+    if path.join("configuration.php").exists() && path.join("administrator").is_dir() {
+        return (Some(Framework::Joomla), None);
+    }
+    (None, None)
 }
 
 /// Detect a Python project and infer its run command.
@@ -1427,27 +2016,54 @@ fn detect_php_project(path: &Path) -> ProjectDetection {
 fn detect_python_project(path: &Path) -> ProjectDetection {
     // Django ships a `manage.py`; its dev server is unambiguous.
     if path.join("manage.py").exists() {
-        return detection(
+        return detection_fw(
             ProjectType::Python,
+            Framework::Django,
             8000,
             Some("python manage.py runserver 0.0.0.0:8000".into()),
         );
     }
 
-    // FastAPI/Flask are libraries, not marker files — sniff the declared deps.
-    // The entrypoint module name varies between projects, so this is a
+    // The rest are libraries, not marker files — sniff the declared deps. The
+    // entrypoint module name varies between projects, so each command is a
     // best-effort default the user is expected to confirm or edit.
     let deps = python_dependency_text(path);
-    if deps.contains("fastapi") {
-        return detection(
+    if deps.contains("streamlit") {
+        return detection_fw(
             ProjectType::Python,
+            Framework::Streamlit,
+            8501,
+            Some("streamlit run app.py".into()),
+        );
+    }
+    if deps.contains("reflex") {
+        return detection_fw(
+            ProjectType::Python,
+            Framework::Reflex,
+            3000,
+            Some("reflex run".into()),
+        );
+    }
+    if deps.contains("gradio") {
+        return detection_fw(
+            ProjectType::Python,
+            Framework::Gradio,
+            7860,
+            Some("python app.py".into()),
+        );
+    }
+    if deps.contains("fastapi") {
+        return detection_fw(
+            ProjectType::Python,
+            Framework::FastApi,
             8000,
             Some("uvicorn main:app --reload --port 8000".into()),
         );
     }
     if deps.contains("flask") {
-        return detection(
+        return detection_fw(
             ProjectType::Python,
+            Framework::Flask,
             8000,
             Some("flask run --port 8000".into()),
         );
@@ -1802,6 +2418,95 @@ mod tests {
     }
 
     #[test]
+    fn project_type_auto_detects_language_environment() {
+        // End-to-end of the add-project chain: a folder is classified by
+        // `detect_kind`, and that kind drives the managed language runtime via
+        // `default_for`. Proves the new framework/runtime kinds resolve to the
+        // right language environment (or `None` for languages PortBay doesn't
+        // manage a runtime for — they run on the system toolchain).
+        let mut defaults = BTreeMap::new();
+        for (lang, ver) in [
+            ("node", "22"),
+            ("php", "8.3"),
+            ("python", "3.12"),
+            ("go", "1.23"),
+            ("ruby", "3.3"),
+            ("flutter", "3.24"),
+        ] {
+            defaults.insert(lang.to_string(), ver.to_string());
+        }
+        let settings = crate::registry::RuntimeSettings {
+            defaults,
+            ..Default::default()
+        };
+        let lang_for = |dir: &Path| settings.default_for(detect_kind(dir).kind).map(|r| r.lang);
+
+        // A local test table of (name, project-writer, expected-framework); a
+        // named type alias would only obscure this one fixture array.
+        #[allow(clippy::type_complexity)]
+        let cases: &[(&str, &dyn Fn(&Path), Option<&str>)] = &[
+            // JS meta-framework on the Node runtime.
+            (
+                "astro",
+                &|d: &Path| write_js_project(d, r#"{ "dependencies": { "astro": "4" } }"#, None),
+                Some("node"),
+            ),
+            // PHP framework.
+            (
+                "laravel",
+                &|d: &Path| {
+                    write_file(
+                        d,
+                        "composer.json",
+                        r#"{ "require": { "laravel/framework": "^11" } }"#,
+                    )
+                },
+                Some("php"),
+            ),
+            // Python framework.
+            (
+                "django",
+                &|d: &Path| write_file(d, "manage.py", ""),
+                Some("python"),
+            ),
+            // Ruby framework -> ruby runtime.
+            (
+                "rails",
+                &|d: &Path| write_file(d, "Gemfile", "gem \"rails\"\n"),
+                Some("ruby"),
+            ),
+            // Go.
+            (
+                "go",
+                &|d: &Path| write_file(d, "go.mod", "module app\n"),
+                Some("go"),
+            ),
+            // Languages PortBay has no managed runtime for resolve to None.
+            (
+                "rust",
+                &|d: &Path| write_file(d, "Cargo.toml", "[package]\nname=\"x\"\n"),
+                None,
+            ),
+            ("deno", &|d: &Path| write_file(d, "deno.json", "{}\n"), None),
+            (
+                "elixir",
+                &|d: &Path| write_file(d, "mix.exs", "defmodule X do\nend\n"),
+                None,
+            ),
+        ];
+
+        for (name, setup, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            setup(dir.path());
+            assert_eq!(
+                lang_for(dir.path()).as_deref(),
+                *expected,
+                "language environment for {name} project",
+            );
+        }
+    }
+
+    #[test]
     fn slugify_matches_cli_behaviour() {
         assert_eq!(slugify("Marketing Site"), "marketing-site");
         assert_eq!(slugify("API Gateway"), "api-gateway");
@@ -1884,6 +2589,496 @@ mod tests {
         let detected = detect_kind(dir.path());
         assert_eq!(detected.kind, ProjectType::Vite);
         assert_eq!(detected.start_command.as_deref(), Some("npm run dev"));
+    }
+
+    #[test]
+    fn detect_kind_astro_project_uses_astro_port() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "blog", "dependencies": { "astro": "4" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Astro);
+        // Astro dev binds :4321 — PortBay proxies that port, so it must match.
+        assert_eq!(detected.port, Some(4321));
+        assert_eq!(detected.start_command.as_deref(), Some("pnpm dev"));
+    }
+
+    #[test]
+    fn detect_kind_sveltekit_beats_generic_vite() {
+        // SvelteKit carries Vite as a dependency; the specific framework marker
+        // must win over the generic `"vite"` branch.
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "app", "devDependencies": { "@sveltejs/kit": "2", "vite": "5" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::SvelteKit);
+        assert_eq!(detected.port, Some(5173));
+    }
+
+    #[test]
+    fn detect_kind_nuxt_project_uses_nuxt_port() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "site", "dependencies": { "nuxt": "3" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Nuxt);
+        assert_eq!(detected.port, Some(3000));
+    }
+
+    #[test]
+    fn detect_kind_remix_project_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "app", "dependencies": { "@remix-run/react": "2" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Remix);
+        assert_eq!(detected.port, Some(3000));
+    }
+
+    #[test]
+    fn detect_kind_angular_runs_ng_serve_on_4200() {
+        // Angular scaffolds `start: ng serve`, not `dev`, so the command runs
+        // the binary directly via the package manager's exec.
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "app", "dependencies": { "@angular/core": "18" } }"#,
+            Some("package-lock.json"),
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Angular);
+        assert_eq!(detected.port, Some(4200));
+        assert_eq!(
+            detected.start_command.as_deref(),
+            Some("npm exec -- ng serve")
+        );
+    }
+
+    #[test]
+    fn detect_kind_gatsby_runs_gatsby_develop() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "site", "dependencies": { "gatsby": "5" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Gatsby);
+        assert_eq!(detected.port, Some(8000));
+        assert_eq!(
+            detected.start_command.as_deref(),
+            Some("pnpm exec gatsby develop")
+        );
+    }
+
+    #[test]
+    fn detect_kind_vue_cli_runs_vue_cli_service() {
+        // The `@vue/cli-service` marker distinguishes Vue CLI (webpack, :8080)
+        // from a Vite-based Vue app (which falls through to the Vite branch).
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "app", "devDependencies": { "@vue/cli-service": "5" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::VueCli);
+        assert_eq!(detected.port, Some(8080));
+        assert_eq!(
+            detected.start_command.as_deref(),
+            Some("pnpm exec vue-cli-service serve")
+        );
+    }
+
+    #[test]
+    fn detect_kind_vite_vue_app_stays_vite() {
+        // A Vue app on Vite has no `@vue/cli-service`, so it must remain Vite.
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "app", "dependencies": { "vue": "3" }, "devDependencies": { "vite": "5" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Vite);
+    }
+
+    #[test]
+    fn detect_kind_plain_node_app_still_node() {
+        // No framework marker — the generic Node fallback must be unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "name": "api", "dependencies": { "express": "4" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Node);
+        assert_eq!(detected.port, Some(3000));
+    }
+
+    fn write_file(dir: &Path, name: &str, body: &str) {
+        let target = dir.join(name);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(target, body).unwrap();
+    }
+
+    #[test]
+    fn detect_kind_laravel_uses_public_root_and_logo() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "composer.json",
+            r#"{ "require": { "laravel/framework": "^11" } }"#,
+        );
+        std::fs::create_dir_all(dir.path().join("public")).unwrap();
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Php);
+        assert_eq!(detected.framework, Some(Framework::Laravel));
+        assert_eq!(detected.document_root.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn detect_kind_statamic_beats_laravel() {
+        // Statamic ships on Laravel, so `laravel/framework` is also present —
+        // the more specific CMS must win.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "composer.json",
+            r#"{ "require": { "laravel/framework": "^11", "statamic/cms": "^5" } }"#,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.framework, Some(Framework::Statamic));
+    }
+
+    #[test]
+    fn detect_kind_drupal_uses_web_root() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "composer.json",
+            r#"{ "require": { "drupal/core": "^10" } }"#,
+        );
+        std::fs::create_dir_all(dir.path().join("web")).unwrap();
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.framework, Some(Framework::Drupal));
+        assert_eq!(detected.document_root.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn detect_kind_wordpress_without_composer() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "wp-config.php", "<?php");
+        write_file(dir.path(), "index.php", "<?php");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Php);
+        assert_eq!(detected.framework, Some(Framework::WordPress));
+    }
+
+    #[test]
+    fn detect_kind_django_tagged_framework() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "manage.py", "");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Python);
+        assert_eq!(detected.framework, Some(Framework::Django));
+    }
+
+    #[test]
+    fn detect_kind_streamlit_app() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "requirements.txt", "streamlit==1.40\n");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Python);
+        assert_eq!(detected.framework, Some(Framework::Streamlit));
+        assert_eq!(detected.port, Some(8501));
+    }
+
+    #[test]
+    fn detect_kind_rails_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "Gemfile", "gem \"rails\", \"~> 7.1\"\n");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Ruby);
+        assert_eq!(detected.framework, Some(Framework::Rails));
+        assert_eq!(detected.port, Some(3000));
+        assert_eq!(
+            detected.start_command.as_deref(),
+            Some("bin/rails server -p 3000")
+        );
+    }
+
+    #[test]
+    fn detect_kind_go_gin_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "go.mod",
+            "module app\n\nrequire github.com/gin-gonic/gin v1.10.0\n",
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Go);
+        assert_eq!(detected.framework, Some(Framework::Gin));
+        assert_eq!(detected.start_command.as_deref(), Some("go run ."));
+    }
+
+    #[test]
+    fn detect_kind_rust_axum_falls_back_to_rust_logo() {
+        // Axum has no brand mark, so the framework tag is set but the frontend
+        // renders the Rust language glyph. Detection still records the kind.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "Cargo.toml", "[dependencies]\naxum = \"0.7\"\n");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Rust);
+        assert_eq!(detected.framework, Some(Framework::Axum));
+    }
+
+    #[test]
+    fn detect_kind_hugo_before_go_mod() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "hugo.toml", "title = 'Blog'\n");
+        write_file(dir.path(), "go.mod", "module blog\n");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Go);
+        assert_eq!(detected.framework, Some(Framework::Hugo));
+        assert_eq!(detected.port, Some(1313));
+    }
+
+    #[test]
+    fn detect_kind_phoenix_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "mix.exs",
+            "defp deps do\n[{:phoenix, \"~> 1.7\"}]\nend\n",
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Elixir);
+        assert_eq!(detected.framework, Some(Framework::Phoenix));
+        assert_eq!(detected.port, Some(4000));
+    }
+
+    #[test]
+    fn detect_kind_aspnet_web_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>",
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::DotNet);
+        assert_eq!(detected.framework, Some(Framework::AspNet));
+    }
+
+    #[test]
+    fn detect_kind_spring_maven_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "pom.xml",
+            "<project><parent><groupId>org.springframework.boot</groupId></parent></project>",
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Java);
+        assert_eq!(detected.framework, Some(Framework::Spring));
+        assert_eq!(detected.port, Some(8080));
+        assert_eq!(
+            detected.start_command.as_deref(),
+            Some("./mvnw spring-boot:run")
+        );
+    }
+
+    #[test]
+    fn detect_kind_android_gradle_beats_jvm() {
+        // An Android project also has a build.gradle; the mobile detector must
+        // win over the generic JVM detector. `is_android_project` keys on the
+        // Gradle wrapper + settings + app build file.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "gradlew", "#!/bin/sh\n");
+        write_file(dir.path(), "settings.gradle", "");
+        write_file(dir.path(), "build.gradle", "");
+        write_file(dir.path(), "app/build.gradle", "");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Android);
+    }
+
+    #[test]
+    fn framework_wire_values_match_frontend_contract() {
+        // The frontend `Framework` union (src/lib/types/projects.ts) hard-codes
+        // these snake_case strings. If serde's output drifts, the logo lookup
+        // silently breaks — so pin the contract here.
+        let cases = [
+            (Framework::WordPress, "\"word_press\""),
+            (Framework::CraftCms, "\"craft_cms\""),
+            (Framework::CodeIgniter, "\"code_igniter\""),
+            (Framework::CakePhp, "\"cake_php\""),
+            (Framework::FastApi, "\"fast_api\""),
+            (Framework::AspNet, "\"asp_net\""),
+            (Framework::Laravel, "\"laravel\""),
+            (Framework::SolidJs, "\"solid_js\""),
+            (Framework::ReactRouter, "\"react_router\""),
+            (Framework::React, "\"react\""),
+        ];
+        for (fw, wire) in cases {
+            assert_eq!(serde_json::to_string(&fw).unwrap(), wire);
+        }
+        // ProjectType wire values the frontend also hard-codes. `OCaml` is the
+        // tricky one — serde inserts `_` before each non-leading uppercase.
+        assert_eq!(
+            serde_json::to_string(&ProjectType::DotNet).unwrap(),
+            "\"dot_net\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProjectType::OCaml).unwrap(),
+            "\"o_caml\""
+        );
+    }
+
+    #[test]
+    fn detect_kind_vite_react_tagged_react() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "dependencies": { "react": "18" }, "devDependencies": { "vite": "5" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Vite);
+        assert_eq!(detected.framework, Some(Framework::React));
+    }
+
+    #[test]
+    fn detect_kind_vite_vue_tagged_vue() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "dependencies": { "vue": "3" }, "devDependencies": { "vite": "5" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Vite);
+        assert_eq!(detected.framework, Some(Framework::Vue));
+    }
+
+    #[test]
+    fn detect_kind_next_has_no_ui_lib_framework() {
+        // A specific kind (Next) keeps its own logo — the UI-lib descriptor is
+        // only attached to the generic Vite/Node kinds.
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "dependencies": { "next": "14", "react": "18" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Next);
+        assert_eq!(detected.framework, None);
+    }
+
+    #[test]
+    fn detect_kind_react_router_7() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "dependencies": { "react-router": "7" }, "devDependencies": { "@react-router/dev": "7", "vite": "6" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Vite);
+        assert_eq!(detected.framework, Some(Framework::ReactRouter));
+    }
+
+    #[test]
+    fn detect_kind_eleventy_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_js_project(
+            dir.path(),
+            r#"{ "devDependencies": { "@11ty/eleventy": "3" } }"#,
+            None,
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Node);
+        assert_eq!(detected.framework, Some(Framework::Eleventy));
+        assert_eq!(detected.port, Some(8080));
+    }
+
+    #[test]
+    fn detect_kind_bedrock_wordpress_web_root() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "composer.json",
+            r#"{ "require": { "roots/wordpress": "^6" } }"#,
+        );
+        std::fs::create_dir_all(dir.path().join("web")).unwrap();
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.framework, Some(Framework::WordPress));
+        assert_eq!(detected.document_root.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn detect_kind_scala_sbt_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "build.sbt", "name := \"app\"\n");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Scala);
+        assert_eq!(detected.start_command.as_deref(), Some("sbt run"));
+    }
+
+    #[test]
+    fn detect_kind_dart_after_flutter() {
+        // A bare pubspec.yaml (no Flutter dep) is plain Dart.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "pubspec.yaml", "name: cli_app\n");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Dart);
+    }
+
+    #[test]
+    fn detect_kind_swift_vapor_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "Package.swift",
+            ".package(url: \"https://github.com/vapor/vapor.git\", from: \"4.0.0\")",
+        );
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Swift);
+        assert_eq!(detected.framework, Some(Framework::Vapor));
+        assert_eq!(detected.port, Some(8080));
+    }
+
+    #[test]
+    fn detect_kind_haskell_stack_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "stack.yaml", "resolver: lts-22\n");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Haskell);
+        assert_eq!(detected.start_command.as_deref(), Some("stack run"));
+    }
+
+    #[test]
+    fn detect_kind_zig_project() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "build.zig", "pub fn build() void {}\n");
+        let detected = detect_kind(dir.path());
+        assert_eq!(detected.kind, ProjectType::Zig);
     }
 
     #[test]

@@ -17,6 +17,12 @@
 //! routes the envelope into the error component. Don't `.to_string()` here —
 //! the manual `Serialize` impl preserves every field.
 
+// The error layer must never itself panic. A new `.unwrap()`/`.expect()` in this
+// module's production code is a build error under clippy (GSTACK P1); the
+// serializer and constructors return typed values instead. `#[cfg(test)]` code
+// (compiled with `cfg(test)`) is exempt.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 
 use crate::caddy::CaddyError;

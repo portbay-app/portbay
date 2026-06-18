@@ -119,6 +119,8 @@ dirs = "5"
 tempfile = "3"
 thiserror = "2"
 url = "2"
+# Crash-report secret scrubbing (telemetry.rs) — already in the tree transitively.
+regex = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 which = "6"

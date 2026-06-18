@@ -55,6 +55,7 @@ pub fn seed_if_absent(reg: &mut Registry) -> std::io::Result<bool> {
         name: "PortBay smoke".into(),
         path: site_dir,
         kind: ProjectType::Static,
+        framework: None,
         start_command: None,
         port: None,
         extra_ports: vec![],

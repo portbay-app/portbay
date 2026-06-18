@@ -16,7 +16,10 @@ pub enum TunnelError {
     #[error("no tunnel running for project `{0}`")]
     NotRunning(String),
 
-    #[error("cloudflared did not announce a public URL within the timeout")]
+    #[error(
+        "couldn't reach the Cloudflare edge — cloudflared didn't return a public URL in time; \
+         check your internet connection and try again"
+    )]
     UrlTimeout,
 }
 

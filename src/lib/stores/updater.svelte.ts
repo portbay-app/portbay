@@ -67,6 +67,11 @@ function createUpdaterStore() {
    */
   async function check({ silent = false }: { silent?: boolean } = {}): Promise<void> {
     if (isSimulator()) return;
+    // The silent boot check (run once from the root layout on mount) doubles as
+    // the "this version launched cleanly" signal — the UI has mounted, so finalize
+    // any update on probation: the backend drops the pending marker and prunes the
+    // rollback snapshot. A no-op when no update is pending. Fire-and-forget.
+    if (silent) void invokeQuiet("confirm_update_health");
     status = "checking";
     try {
       const info = silent

@@ -523,14 +523,47 @@ mod macos {
         apps
     }
 
-    /// App icon → full-size PNG bytes (native AppKit encode; no resample).
-    /// Main-thread (NSImage), but cheap relative to the image-crate downscale,
-    /// which callers run separately — off the main thread for the app list.
-    /// Best-effort; None on any hiccup.
+    /// App icon → [`ICON_PX`]-sized PNG bytes, by DRAWING the icon into a
+    /// small bitmap (main-thread NSImage/NSGraphicsContext). Never
+    /// `TIFFRepresentation()`: that flattens EVERY rep (16…1024²@2x) into one
+    /// multi-megabyte image, and PNG-encoding that per app cost whole seconds
+    /// of main-thread time — measured 7 apps ≈ 10 s vs ≈ 90 ms for the draw,
+    /// and the TIFF path froze the entire window while Settings → General
+    /// loaded the per-app picker. The UI renders icons at ≤16 pt, so 64 px is
+    /// all that's ever needed. Best-effort; None on any hiccup.
     fn icon_png_bytes(app: &NSRunningApplication) -> Option<Vec<u8>> {
+        use objc2::AnyThread;
+        use objc2_app_kit::{NSCompositingOperation, NSDeviceRGBColorSpace, NSGraphicsContext};
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+
         let icon = app.icon()?;
-        let tiff = icon.TIFFRepresentation()?;
-        let rep = NSBitmapImageRep::imageRepWithData(&tiff)?;
+        let px = ICON_PX as isize;
+        // SAFETY: null planes = let AppKit allocate; 8-bit RGBA, packed rows.
+        let rep = unsafe {
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                std::ptr::null_mut(),
+                px,
+                px,
+                8,
+                4,
+                true,
+                false,
+                NSDeviceRGBColorSpace,
+                0,
+                0,
+            )
+        }?;
+        let ctx = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+        let prev = NSGraphicsContext::currentContext();
+        NSGraphicsContext::setCurrentContext(Some(&ctx));
+        icon.drawInRect_fromRect_operation_fraction(
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(px as f64, px as f64)),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+            NSCompositingOperation::Copy,
+            1.0,
+        );
+        NSGraphicsContext::setCurrentContext(prev.as_deref());
         let props = NSDictionary::new();
         let png =
             unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }?;

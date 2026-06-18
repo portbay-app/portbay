@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::process_compose::{Process, ProjectStatus};
 use crate::registry::{
-    CorsConfig, CustomTunnelConfig, DomainConfig, MobileRunConfig, Project, ProjectDeploy,
-    ProjectType, Readiness, SandboxConfig, WebServer, Workspace, WorkspaceTool,
+    CorsConfig, CustomTunnelConfig, DomainConfig, Framework, MobileRunConfig, Project,
+    ProjectDeploy, ProjectType, Readiness, SandboxConfig, WebServer, Workspace, WorkspaceTool,
 };
 
 /// A merged registry + runtime view of one project.
@@ -32,6 +32,9 @@ pub struct ProjectView {
     pub path: String,
     #[serde(rename = "type")]
     pub kind: ProjectType,
+    /// Detected sub-stack (Laravel, Django, Rails, …) for the brand logo +
+    /// label. `None` for a frameworkless project.
+    pub framework: Option<Framework>,
     pub start_command: Option<String>,
     pub port: Option<u16>,
     pub extra_ports: Vec<u16>,
@@ -98,6 +101,7 @@ impl ProjectView {
             name: project.name.clone(),
             path: project.path.to_string_lossy().into_owned(),
             kind: project.kind,
+            framework: project.framework,
             start_command: project.start_command.clone(),
             port: project.port,
             extra_ports: project.extra_ports.clone(),
@@ -440,6 +444,7 @@ mod tests {
             name: "Marketing Site".into(),
             path: PathBuf::from("/tmp/marketing-site"),
             kind: ProjectType::Next,
+            framework: None,
             start_command: Some("pnpm dev".into()),
             port: Some(3010),
             extra_ports: vec![],

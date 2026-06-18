@@ -19,15 +19,18 @@ if ! bash scripts/check-repo-boundaries.sh --staged; then
   fail=1
 fi
 
-# 2) Secret scan on staged content (if gitleaks is installed locally).
+# 2) Secret scan on staged content. Fail-closed: a missing scanner blocks the
+#    commit rather than letting a secret slip through to be "caught only after
+#    push." Install gitleaks once to clear this (CI runs the same scan).
 if command -v gitleaks >/dev/null 2>&1; then
   if ! gitleaks protect --staged --no-banner --config .gitleaks.toml; then
     echo "✗ gitleaks found a secret in staged changes." >&2
     fail=1
   fi
 else
-  echo "ℹ gitleaks not installed — local secret scan skipped (CI still runs it)." >&2
-  echo "  recommended: brew install gitleaks" >&2
+  echo "✗ gitleaks is not installed — refusing to commit without a local secret scan." >&2
+  echo "  install once: brew install gitleaks   (see CONTRIBUTING.md for other OSes)" >&2
+  fail=1
 fi
 
 # 3) Gentle DCO reminder (CI/the DCO check enforces this on the PR).

@@ -87,6 +87,14 @@ path:tests/stylingHints.test.ts
 # private build; never publish the tarball.
 path:immerhin-*.tgz
 
+# --- Confidential growth / marketing strategy — never in the public repo ---
+# The marketing board and the install-metrics workflow embed growth targets,
+# launch tactics, and references to the private growth-strategy docs. They are
+# also .gitignored; this rule fails the public boundary check if either is ever
+# force-added or pulled in by a wholesale `git add docs/`.
+path:docs/MARKETING_BOARD.md
+path:.github/workflows/install-metrics.yml
+
 # --- Screen capture (Pro, private) — never in the public repo ---
 # The portbay-capture sidecar (ScreenCaptureKit + camera PiP recorder) and its
 # Rust supervisor / commands / UI ship only in the official Pro build. The
