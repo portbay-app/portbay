@@ -21,7 +21,14 @@
 
 import AppKit
 import Foundation
+// ImagePlayground only ships in the macOS 15.4+ SDK. Toolchains that predate it
+// (e.g. the public-CI runners) can't import the module at all, so the whole
+// bridge is compiled conditionally — `#if canImport` — and falls back to stub
+// entry points that report it unavailable, keeping the C ABI the Rust
+// `imageplayground` module links against intact on every toolchain.
+#if canImport(ImagePlayground)
 import ImagePlayground
+#endif
 
 private func cstr(_ s: String) -> UnsafeMutablePointer<CChar>? { strdup(s) }
 
@@ -29,6 +36,8 @@ private func cstr(_ s: String) -> UnsafeMutablePointer<CChar>? { strdup(s) }
 public func portbay_ip_free(_ p: UnsafeMutablePointer<CChar>?) {
     free(p)
 }
+
+#if canImport(ImagePlayground)
 
 @_cdecl("portbay_ip_check")
 public func portbay_ip_check() -> UnsafeMutablePointer<CChar>? {
@@ -122,3 +131,21 @@ public func portbay_ip_generate(_ promptC: UnsafePointer<CChar>?) -> UnsafeMutab
     sema.wait()
     return cstr(out)
 }
+
+#else
+
+// Built without the ImagePlayground SDK module. The symbols still have to exist
+// (Rust links against them), but the feature is genuinely unavailable on this
+// toolchain — report it the same way the runtime `#available` guard does.
+
+@_cdecl("portbay_ip_check")
+public func portbay_ip_check() -> UnsafeMutablePointer<CChar>? {
+    return cstr("requires_macos_15_4")
+}
+
+@_cdecl("portbay_ip_generate")
+public func portbay_ip_generate(_ promptC: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
+    return cstr("ERR:requires macOS 15.4")
+}
+
+#endif
