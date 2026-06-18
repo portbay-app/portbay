@@ -113,7 +113,7 @@ zeroize = "1"
 # Unpredictable SSH interaction flow IDs (host-key / KBI prompts). Already in
 # the tree transitively.
 uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 once_cell = "1"
 dirs = "5"
 tempfile = "3"
