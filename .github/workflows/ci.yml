@@ -58,7 +58,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -156,7 +156,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -249,7 +249,7 @@ jobs:
           cache: pnpm
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -399,7 +399,7 @@ jobs:
           cache: pnpm
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -450,7 +450,7 @@ jobs:
         # WhisperKit + FluidAudio are heavy SwiftPM dependencies — a cold
         # build clones and compiles both (~1-2 min); the cache makes it
         # incremental.
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: src-tauri/stt/.build
           key: ${{ runner.os }}-swiftpm-stt-${{ hashFiles('src-tauri/stt/Package.swift') }}
@@ -509,7 +509,7 @@ jobs:
           cache: pnpm
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
