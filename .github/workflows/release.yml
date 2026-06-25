@@ -38,7 +38,7 @@ jobs:
     if: vars.RELEASE_SIGNING_ENABLED == 'true'
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -243,7 +243,7 @@ jobs:
     if: vars.RELEASE_SIGNING_ENABLED == 'true'
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Linux system dependencies
         run: |
@@ -321,7 +321,7 @@ jobs:
       contents: write
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Linux deb artifact
         uses: actions/download-artifact@v8
@@ -374,7 +374,7 @@ jobs:
     outputs:
       skipped: ${{ steps.manual.outputs.skip }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # GUARD: the maintainer's local release flow (scripts/release-dmg-local.sh
       # + `gh release create vX.Y.Z`) publishes this tag's release with locally
@@ -542,7 +542,7 @@ jobs:
     env:
       TAP_REPO: portbay-app/homebrew-portbay
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download release artifact
         if: needs.publish-release.outputs.skipped != 'true'
@@ -591,7 +591,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout Homebrew tap
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.TAP_REPO }}
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -671,7 +671,7 @@ jobs:
     env:
       AUR_REPO: ssh://aur@aur.archlinux.org/portbay-bin.git
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Linux artifact
         uses: actions/download-artifact@v8
