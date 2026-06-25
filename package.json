@@ -74,7 +74,7 @@
     "@xyflow/svelte": "1.5.2",
     "ansi-to-html": "^0.7.2",
     "dagre": "0.8.5",
-    "dompurify": "^3.4.9",
+    "dompurify": "^3.4.11",
     "highlight.js": "^11.11.1",
     "layerchart": "1.0.13",
     "marked": "^18.0.4",
