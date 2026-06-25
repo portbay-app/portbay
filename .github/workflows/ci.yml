@@ -72,7 +72,7 @@ jobs:
       # which needs Go. macOS runners don't ship Go, so install it first or the
       # whole "Fetch sidecar binaries" step fails before fmt/clippy/test run.
       - name: Install Go (for the xcaddy Caddy build)
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: stable
 
@@ -416,7 +416,7 @@ jobs:
       # which needs Go. macOS runners don't ship Go, so install it first or the
       # whole "Fetch sidecar binaries" step fails before fmt/clippy/test run.
       - name: Install Go (for the xcaddy Caddy build)
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: stable
 
