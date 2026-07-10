@@ -70,7 +70,11 @@ impl From<ProjectType> for McpProjectKind {
             ProjectType::Xcode => McpProjectKind::Xcode,
             ProjectType::Android => McpProjectKind::Android,
             ProjectType::Expo => McpProjectKind::Expo,
-            ProjectType::Custom => McpProjectKind::Custom,
+            // Project types without a dedicated MCP kind (Astro, SvelteKit,
+            // Nuxt, Go, Ruby, …) and Custom report generically over the MCP
+            // API. The exhaustive `McpProjectKind` mapping ships in the full
+            // build; here the public server reports the generic kind.
+            _ => McpProjectKind::Custom,
         }
     }
 }

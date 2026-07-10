@@ -2032,6 +2032,7 @@ impl McpContext {
             name,
             path: canonical,
             kind,
+            framework: detection.framework,
             start_command,
             port,
             extra_ports: vec![],

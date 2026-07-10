@@ -1503,7 +1503,7 @@ async fn sqlite_explain(inst: &DatabaseInstance, sql: &str) -> AppResult<DbExpla
         let id: i64 = row.try_get("id").unwrap_or(0);
         let parent: i64 = row.try_get("parent").unwrap_or(0);
         let detail: String = row.try_get("detail").unwrap_or_default();
-        raw_lines.push(format!("{}|{}|{}", id, parent, &detail));
+        raw_lines.push(format!("{}|{}|{}", id, parent, detail));
         entries.push((id, parent, detail));
     }
 
