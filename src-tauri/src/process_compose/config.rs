@@ -972,10 +972,10 @@ fn readiness_to_pc_probe(r: &Readiness, port: Option<u16>) -> Option<PcReadiness
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{
-        ManualRuntime, Project, ProjectId, ProjectType, Readiness, Runtime, SandboxConfig,
-        SandboxNetworkPolicy,
-    };
+    use crate::registry::{ManualRuntime, Project, ProjectId, ProjectType, Readiness, Runtime};
+    // Only the macOS-gated Seatbelt sandbox tests reference these.
+    #[cfg(target_os = "macos")]
+    use crate::registry::{SandboxConfig, SandboxNetworkPolicy};
     use std::path::PathBuf;
 
     fn next_project(id: &str, port: u16) -> Project {
