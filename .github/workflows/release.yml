@@ -299,6 +299,37 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --bundles appimage,deb,rpm
 
+      - name: GPG-sign the Linux artifacts (optional)
+        # Detached, armored signatures (*.asc) next to every artifact so users
+        # (and an apt/dnf repo) can verify provenance with PortBay's public key.
+        # This is SEPARATE from the minisign updater signature above — that one
+        # secures auto-update; this one is publisher trust for the downloads.
+        # No-op until you opt in:
+        #   gpg --full-generate-key                       # or reuse a key
+        #   gpg --export-secret-keys --armor <KEYID>      → secret LINUX_GPG_PRIVATE_KEY
+        #   (the key's passphrase, if any)                → secret LINUX_GPG_PASSPHRASE
+        #   gpg --export --armor <KEYID> > docs/portbay-linux-signing-key.asc   # publish + commit
+        #   set repo variable LINUX_GPG_SIGN = true
+        if: vars.LINUX_GPG_SIGN == 'true'
+        env:
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          echo "$LINUX_GPG_PRIVATE_KEY" | gpg --batch --import
+          key_id="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')"
+          echo "Signing Linux artifacts with GPG key $key_id"
+          sign=(gpg --batch --yes --pinentry-mode loopback --local-user "$key_id")
+          if [ -n "${LINUX_GPG_PASSPHRASE:-}" ]; then
+            sign+=(--passphrase "$LINUX_GPG_PASSPHRASE")
+          fi
+          while IFS= read -r f; do
+            "${sign[@]}" --armor --detach-sign "$f"
+            echo "signed $(basename "$f") -> $(basename "$f").asc"
+          done < <(find src-tauri/target/release/bundle -type f \( \
+            -name '*.AppImage' -o -name '*.AppImage.tar.gz' \
+            -o -name '*.deb' -o -name '*.rpm' \) )
+
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -309,8 +340,13 @@ jobs:
             src-tauri/target/release/bundle/appimage/*.AppImage.tar.gz.sig
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/appimage/*.asc
+            src-tauri/target/release/bundle/deb/*.asc
+            src-tauri/target/release/bundle/rpm/*.asc
           retention-days: 14
-          if-no-files-found: warn
+          # Fail loudly: the website CTA advertises Linux as available, so a
+          # build that emits no bundle must break the release, not ship silently.
+          if-no-files-found: error
 
   build-snap:
     name: build · Snap amd64
@@ -346,6 +382,26 @@ jobs:
 
       - name: Build snap
         run: snapcraft --destructive-mode
+
+      - name: Publish to the Snap Store (optional)
+        # Store-signs + distributes for `snap install portbay --classic`. PortBay
+        # uses CLASSIC confinement (it controls the host: /etc/hosts, dnsmasq,
+        # privileged ports), which needs a one-time manual review request on the
+        # Snap Store before stable-channel uploads are accepted. No-op until you
+        # opt in:
+        #   snapcraft login && snapcraft export-login --snaps=portbay \
+        #     --acls package_access,package_push,package_update,package_release - \
+        #       → secret SNAPCRAFT_STORE_CREDENTIALS
+        #   request classic confinement once at https://forum.snapcraft.io
+        #   set repo variable SNAP_STORE_PUBLISH = true
+        if: vars.SNAP_STORE_PUBLISH == 'true'
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          snap_file="$(find . -maxdepth 1 -name '*.snap' | head -n 1)"
+          [ -n "$snap_file" ] || { echo "::error::No .snap found to publish."; exit 1; }
+          snapcraft upload --release=stable "$snap_file"
 
       - name: Upload Snap artifact
         uses: actions/upload-artifact@v7
@@ -400,8 +456,10 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Download on BOTH paths: the macOS steps below consume these only on a CI
+      # publish, but the manual-publish path (bottom of the job) needs the Linux
+      # artifacts to attach them additively to the maintainer's release.
       - name: Download artifacts
-        if: steps.manual.outputs.skip != 'true'
         uses: actions/download-artifact@v8
         with:
           path: artifacts/
@@ -509,6 +567,23 @@ jobs:
             echo "::warning::No versioned DMG found to copy to the stable name."
           fi
 
+      # Mirror of the DMG stable-name step for Linux: the website download CTA
+      # links to a fixed-name asset so it always resolves to the newest build.
+      # The versioned AppImage is still attached too. The manual-publish path
+      # stable-names + attaches Linux in its own additive step below.
+      - name: Stable-name Linux AppImage
+        if: steps.manual.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage="$(find artifacts -type f -name '*.AppImage' ! -name 'PortBay-linux-x86_64.AppImage' | head -n 1)"
+          if [ -n "$appimage" ]; then
+            cp "$appimage" artifacts/PortBay-linux-x86_64.AppImage
+            echo "Copied $(basename "$appimage") -> PortBay-linux-x86_64.AppImage"
+          else
+            echo "::warning::No versioned AppImage found to copy to the stable name."
+          fi
+
       - name: Create release + attach updater manifest
         if: steps.manual.outputs.skip != 'true'
         uses: softprops/action-gh-release@v3
@@ -523,6 +598,7 @@ jobs:
             artifacts/**/*.deb
             artifacts/**/*.rpm
             artifacts/**/*.snap
+            artifacts/**/*.asc
             artifacts/**/portbay-cargo-sbom.cdx.json
             artifacts/latest.json
           draft: true
@@ -531,6 +607,60 @@ jobs:
       # NOTE: the release is created as a DRAFT for maintainer review. The
       # updater endpoint (releases/latest/download/latest.json) only resolves
       # once the release is PUBLISHED — publish it to roll the update out.
+
+      # ── Manual-publish path ────────────────────────────────────────────────
+      # When the maintainer published macOS assets for this tag by hand, every
+      # step above is skipped to protect those notarized binaries. Linux
+      # artifacts are ADDITIVE (no name overlap with macOS), so attach them to
+      # the existing published release here and merge ONLY the linux-x86_64
+      # platform into its latest.json — leaving the darwin entry byte-for-byte
+      # untouched. This is what lets a manual macOS release still ship Linux.
+      - name: Attach Linux assets to the manually-published release
+        if: steps.manual.outputs.skip == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          # Stable-named AppImage (mirrors the macOS DMG stable name) so the
+          # website CTA's fixed URL resolves.
+          appimage="$(find artifacts -type f -name '*.AppImage' ! -name 'PortBay-linux-x86_64.AppImage' | head -n 1)"
+          [ -n "$appimage" ] && cp "$appimage" "artifacts/PortBay-linux-x86_64.AppImage"
+
+          # Collect every Linux download + updater asset.
+          mapfile -t linux_assets < <(find artifacts -type f \( \
+            -name '*.AppImage' -o -name '*.AppImage.tar.gz' -o -name '*.AppImage.tar.gz.sig' \
+            -o -name '*.deb' -o -name '*.rpm' -o -name '*.asc' \) )
+          if [ "${#linux_assets[@]}" -eq 0 ]; then
+            echo "::warning::No Linux artifacts found to attach to ${tag}."
+            exit 0
+          fi
+
+          # Merge the linux-x86_64 platform into the published latest.json WITHOUT
+          # touching darwin. If the release has no latest.json yet, or the Linux
+          # updater artifacts are absent, attach downloads only (AppImage
+          # auto-update can be wired later by re-cutting via CI).
+          linux_tarball="$(find artifacts -type f -name '*.AppImage.tar.gz' | head -n 1)"
+          linux_sig="$(find artifacts -type f -name '*.AppImage.tar.gz.sig' | head -n 1)"
+          if [ -n "$linux_tarball" ] && [ -n "$linux_sig" ] && \
+             gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir manifest 2>/dev/null; then
+            linux_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/$(basename "$linux_tarball")"
+            jq --arg sig "$(cat "$linux_sig")" --arg url "$linux_url" \
+              '.platforms["linux-x86_64"] = { signature: $sig, url: $url }' \
+              manifest/latest.json > manifest/latest.merged.json
+            mv manifest/latest.merged.json manifest/latest.json
+            echo "Merged linux-x86_64 into latest.json (darwin untouched):"
+            cat manifest/latest.json
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber manifest/latest.json
+          else
+            echo "::notice::No existing latest.json or Linux updater artifacts — attaching Linux downloads only."
+          fi
+
+          # Upload the Linux download assets (idempotent via --clobber).
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${linux_assets[@]}"
+          echo "Attached ${#linux_assets[@]} Linux asset(s) to ${tag}."
 
   update-homebrew-tap:
     name: publish · Homebrew cask PR

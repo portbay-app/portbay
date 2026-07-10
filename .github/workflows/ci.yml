@@ -280,9 +280,21 @@ jobs:
         run: pnpm tauri build --debug --no-bundle
 
       - name: Launch Tauri binary under Xvfb
+        env:
+          # Under Xvfb there is no GPU. WebKitGTK's default DMABUF renderer +
+          # accelerated compositing deadlock on buffer allocation under llvmpipe,
+          # which stalls the webview during init — the process stays alive but
+          # never finishes painting, and on some runner images hangs to the cap.
+          # Forcing the software path is the canonical fix for Tauri-v2 webviews
+          # on headless CI. (See claudedocs/linux-e2e-xvfb-hang-diagnosis.)
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+          WEBKIT_DISABLE_COMPOSITING_MODE: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
           set -euo pipefail
-          xvfb-run -a src-tauri/target/debug/portbay-app &
+          # dbus-run-session gives GTK/at-spi a private session bus (xvfb-run
+          # alone doesn't); `timeout` fails fast instead of burning the job cap.
+          xvfb-run -a dbus-run-session -- timeout 60 src-tauri/target/debug/portbay-app &
           app_pid=$!
           sleep 8
           if ! kill -0 "$app_pid" 2>/dev/null; then

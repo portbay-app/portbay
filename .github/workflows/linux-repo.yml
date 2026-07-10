@@ -1,0 +1,88 @@
+name: linux-repo
+
+# Build the GPG-signed apt/dnf repository (scripts/build-linux-repo.sh) from a
+# release's deb/rpm and publish it to GitHub Pages, so Linux users can
+# `apt install portbay` / `dnf install portbay` with package-manager-enforced
+# trust. OPT-IN — does nothing until you complete the one-time setup:
+#   1. Create/reuse a GPG signing key (the SAME one as the artifact signing):
+#        gpg --export-secret-keys --armor <KEYID>   → secret  LINUX_GPG_PRIVATE_KEY
+#        (key passphrase, if any)                    → secret  LINUX_GPG_PASSPHRASE
+#   2. Settings → Pages → Source: "GitHub Actions".
+#   3. Set repo variable  LINUX_REPO_PUBLISH = true.
+#   4. (optional) variable LINUX_REPO_BASE_URL = https://apt.portbay.app
+#      for a custom domain (also add a CNAME / Pages custom domain).
+# User-facing install steps live in docs/linux-install.md.
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)publish the repository from"
+        required: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One repo publish at a time; never cancel a half-written deploy.
+concurrency:
+  group: linux-repo
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build · sign · publish Linux repo
+    if: vars.LINUX_REPO_PUBLISH == 'true'
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install repository tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y createrepo-c dpkg-dev apt-utils gnupg
+
+      - name: Resolve repository base URL
+        id: url
+        run: |
+          set -euo pipefail
+          if [ -n "${{ vars.LINUX_REPO_BASE_URL }}" ]; then
+            base="${{ vars.LINUX_REPO_BASE_URL }}"
+          else
+            owner="${GITHUB_REPOSITORY%%/*}"
+            repo="${GITHUB_REPOSITORY##*/}"
+            base="https://${owner}.github.io/${repo}"
+          fi
+          echo "base=${base%/}" >> "$GITHUB_OUTPUT"
+          echo "Publishing repo at ${base%/}"
+
+      - name: Download the release packages (deb + rpm)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}"
+          mkdir -p incoming
+          gh release download "$tag" --repo "${{ github.repository }}" \
+            --pattern '*.deb' --pattern '*.rpm' --dir incoming
+          ls -l incoming
+
+      - name: Build the signed apt/dnf repository
+        env:
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+          REPO_BASE_URL: ${{ steps.url.outputs.base }}
+        run: ./scripts/build-linux-repo.sh incoming public
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deployment
+        uses: actions/deploy-pages@v4
