@@ -118,7 +118,21 @@ jobs:
           # russh's RSA host-key/auth support (no remote can pick the timing of
           # our key ops in a local-dev tool). Documented ignore until `rsa`
           # ships a fix; revisit on every cargo update.
-          cd src-tauri && cargo audit --ignore RUSTSEC-2023-0071
+          #
+          # RUSTSEC-2026-0194 / RUSTSEC-2026-0195: quick-xml DoS (quadratic
+          # attribute scan / unbounded namespace allocation). The fix is
+          # quick-xml >=0.41, but our copies (0.37/0.39) are pinned transitively
+          # by `plist` -> `tauri v2.11.2`; reaching 0.41 needs a tauri-stack bump,
+          # not a lockfile update. quick-xml here only parses TRUSTED plists (the
+          # app's own Info.plist / tauri config / macOS system plists), never
+          # attacker-supplied XML, so the DoS is not reachable. Documented ignore
+          # until the tauri stack ships plist on quick-xml >=0.41; revisit on
+          # every tauri/cargo update. (crossbeam-epoch RUSTSEC-2026-0204 was
+          # fixed by bumping to 0.9.20 in Cargo.lock — no ignore needed.)
+          cd src-tauri && cargo audit \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
 
   required-files:
     name: required governance files present
