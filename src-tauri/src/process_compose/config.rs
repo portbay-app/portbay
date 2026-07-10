@@ -1169,6 +1169,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn sandboxed_project_wraps_command_and_exports_policy() {
         let mut r = Registry::new("test");
