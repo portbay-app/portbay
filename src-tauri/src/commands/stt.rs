@@ -104,6 +104,7 @@ fn op_err(detail: String) -> AppError {
     AppError::Internal(format!("speech-to-text: {detail}"))
 }
 
+#[cfg(target_os = "macos")]
 fn fmt_gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
 }

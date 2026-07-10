@@ -50,6 +50,7 @@ pub struct SandboxInstallReport {
 
 /// Keep only the last `max_bytes` of `s`, prefixing an elision marker when
 /// truncated, on a char boundary so the string stays valid UTF-8.
+#[cfg(target_os = "macos")]
 fn tail(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();

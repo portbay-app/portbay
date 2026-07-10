@@ -65,6 +65,7 @@ pub fn resolver_file_content(port: u16) -> String {
     format!("nameserver 127.0.0.1\nport {port}\n")
 }
 
+#[allow(clippy::needless_return)]
 pub fn resolver_file_content_for_suffix(suffix: &str, port: u16) -> String {
     #[cfg(target_os = "linux")]
     {

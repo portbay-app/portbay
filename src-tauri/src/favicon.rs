@@ -24,6 +24,11 @@
 //! from the settings panel's explicit "enable site icons" affordance
 //! (`request_automation_consent`), a user-initiated moment.
 
+// favicon resolution is macOS-only (AppleScript + osascript); on other targets
+// the whole module compiles but is unused. Silence that rather than cfg-gate
+// every item + its imports (which cascades into the caller structs).
+#![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

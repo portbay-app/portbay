@@ -36,6 +36,7 @@
 /// collapse → is safe to post. Extracted from the FFI path (self-documented
 /// as the most fragile in the module) so the guards are unit-testable
 /// without a window server.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod keyed_guard {
     /// Ceiling on the keyed replace's select-back span: each character costs
     /// one synthetic ⇧← pair, so a very long transcript would visibly crawl.

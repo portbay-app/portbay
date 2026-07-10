@@ -15,7 +15,9 @@ use tauri::AppHandle;
 
 use crate::dictation_anywhere::AnywhereStatus;
 use crate::dictation_history::HistoryEntry;
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
+#[cfg(target_os = "macos")]
+use crate::error::AppError;
 
 /// Current feature status: platform support, Accessibility trust, and
 /// whether the global monitors are live this run. Never errors — an

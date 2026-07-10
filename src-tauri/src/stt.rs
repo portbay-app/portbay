@@ -984,6 +984,7 @@ mod client {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn strip_asr_markup_removes_special_tokens() {
         // The exact leak shape observed live: chunked Whisper decodes joined
@@ -995,6 +996,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn strip_asr_markup_keeps_clean_text_and_lone_delimiters() {
         assert_eq!(strip_asr_markup("plain text"), "plain text");
@@ -1008,6 +1010,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn strip_asr_markup_drops_unterminated_marker_keeps_words() {
         assert_eq!(strip_asr_markup("tail <|unterminated"), "tail unterminated");
