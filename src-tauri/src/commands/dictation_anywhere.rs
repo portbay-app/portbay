@@ -15,9 +15,10 @@ use tauri::AppHandle;
 
 use crate::dictation_anywhere::AnywhereStatus;
 use crate::dictation_history::HistoryEntry;
-use crate::error::AppResult;
-#[cfg(target_os = "macos")]
-use crate::error::AppError;
+// AppError is only constructed in the macOS-gated fns below; keep the import
+// intact but silence the unused-import lint on other targets.
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
+use crate::error::{AppError, AppResult};
 
 /// Current feature status: platform support, Accessibility trust, and
 /// whether the global monitors are live this run. Never errors — an
