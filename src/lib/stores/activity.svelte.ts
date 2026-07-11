@@ -58,7 +58,10 @@ function createActivityStore() {
   async function start(): Promise<void> {
     if (started || !browser) return;
     started = true;
-    items = await safeInvoke<ActivityNotification[]>("notifications_list").catch(() => []);
+    // `?? []` guards a null *resolution* (not just a rejection): the getters
+    // below call `.filter` on `items`, so it must stay an array even if the
+    // backend — or the web simulator's IPC mock — resolves null for this command.
+    items = (await safeInvoke<ActivityNotification[]>("notifications_list").catch(() => [])) ?? [];
     unlisten = await listen<ActivityNotification>(CHANNEL, (e) => {
       const n = e.payload;
       if (items.some((x) => x.id === n.id)) return; // de-dupe replays

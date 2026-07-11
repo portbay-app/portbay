@@ -62,8 +62,12 @@ if [ -f "${repo_root}/src-tauri/src/context/board.rs" ]; then
   echo "build-mcp: desktop-pro overlay detected — building with --features tasks"
 fi
 
-echo "build-mcp: cargo build --release --target ${triple} -p portbay-mcp ${feature_args[*]}"
-cargo build --release --manifest-path "$manifest" --target "$triple" -p portbay-mcp "${feature_args[@]}"
+# Guard the array expansion for bash 3.2 (macOS's /bin/bash): under `set -u`,
+# expanding an *empty* array via ${arr[*]}/${arr[@]} raises "unbound variable".
+# The public OSS checkout has no src/context, so feature_args stays empty here.
+# `${arr[*]-}` and `${arr[@]+"${arr[@]}"}` both expand to nothing when empty.
+echo "build-mcp: cargo build --release --target ${triple} -p portbay-mcp ${feature_args[*]-}"
+cargo build --release --manifest-path "$manifest" --target "$triple" -p portbay-mcp ${feature_args[@]+"${feature_args[@]}"}
 
 src="${repo_root}/src-tauri/target/${triple}/release/portbay-mcp"
 cp "$src" "$dest"

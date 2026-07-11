@@ -1300,9 +1300,14 @@ export function installSimulatorIpcBrowser(payload: {
       }
 
       default:
-        // Unknown list_* commands get an empty array (stores expecting arrays
-        // don't throw on boot); everything else resolves null.
-        return Promise.resolve(cmd.indexOf("list_") === 0 ? [] : null);
+        // Unknown list commands get an empty array so stores expecting arrays
+        // don't throw on boot; everything else resolves null. Match both the
+        // `list_*` prefix (list_projects) and the `*_list` suffix
+        // (notifications_list, dictation_history_list) — the latter previously
+        // fell through to null and crashed getters that `.filter` the result.
+        return Promise.resolve(
+          cmd.indexOf("list_") === 0 || /_list$/.test(cmd) ? [] : null,
+        );
     }
   }
 
