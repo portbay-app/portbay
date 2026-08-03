@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@v6.0.9
         with:
           # Pinned to match ci.yml / release.yml (PNPM_VERSION: "10").
           # pnpm/action-setup needs an explicit version when package.json
