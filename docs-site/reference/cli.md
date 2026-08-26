@@ -51,53 +51,46 @@ Global options:
 | `portbay license` | Show the current account, tier, and entitlement limits. |
 | `portbay logout` | Sign out and clear the saved session. |
 
-## Agent mode
+## Agent mode — retired
 
-Anything that isn't a management subcommand proxies to the bundled `portbay-agent` engine — the same parity you get from typing `codex` or `claude`. Bare `portbay` opens an interactive session; a quoted free-text argument runs that prompt; `--json` runs headless for automation. Local-model board dispatches use the same engine internally: the visible card agent can stay **Ollama**, while PortBay launches the engine with `-P ollama -m <selected-model>`.
+`portbay` used to double as an agent CLI: anything that wasn't a management
+subcommand was handed to a bundled `portbay-agent` engine, so
+`portbay "fix the failing test"`, `portbay -p "plan the refactor"` and
+`portbay --json "run the task"` all started an agent run.
 
-```bash
-portbay                          # interactive session (TTY required)
-portbay -i                       # force the full TUI
-portbay "fix the failing test"   # one-shot run, act mode
-portbay -p "plan the refactor"   # plan mode: propose before touching files
-portbay --json "run the task"    # headless NDJSON for scripts and CI
+**That engine no longer ships.** PortBay runs agent work on its own native
+in-process runtime instead of bundling a second engine, and there is no CLI
+entry point that takes a bare prompt. The invocations above now print what
+happened and exit `2` rather than doing something else quietly:
+
+```
+$ portbay -p "plan the refactor"
+portbay: `-p` is not a PortBay command.
+
+The bundled `portbay-agent` engine that used to run free-text prompts and
+agent flags typed at `portbay` has been retired. PortBay runs agent work on
+its own native runtime now instead of shipping a second engine, and there is
+no CLI entry point that takes a bare prompt.
+
+  portbay                       open the PortBay terminal
+  portbay tui --project <id> --card <id>
+                                run a board card on the native runtime
+  portbay tasks list <project>  read the board from the shell
+  portbay --help                every command this build has
 ```
 
-The engine resolves `portbay-agent` beside the `portbay` binary (following the install symlink back into the app bundle). Set `PORTBAY_AGENT_BIN` to point at a different engine build.
+What replaces each old use:
 
-Agent-mode flags:
-
-| Option | Meaning |
+| Was | Now |
 | --- | --- |
-| `--json` | Emit NDJSON events (one JSON object per line) instead of styled text. |
-| `--auto-approve <bool>` | Tool auto-approval for the run. Defaults to `true` for one-shot prompts; pass `false` to gate each tool use. |
-| `-p, --plan` | Plan mode — propose an approach before acting. Act is the default. |
-| `-i, --tui` | Open the full terminal UI for an interactive session. |
-| `-P, --provider <id>` | Provider id. PortBay defaults to `ollama`. |
-| `-m, --model <id>` | Model id, such as `qwen2.5-coder:latest`. |
-| `-c, --cwd <path>` | Working directory for the run. |
-| `--id <session-id>` | Resume an existing session. |
-| `--thinking <level>` | Reasoning effort: `none\|low\|medium\|high\|xhigh`. |
-| `--worktree` | Run the task in an auto-created detached git worktree. |
-| `--retries <n>` | Max consecutive mistakes before exiting (default 6). |
-| `-t, --timeout <seconds>` | Hard run timeout (default 0 = none). |
+| `portbay` (interactive session) | `portbay` still opens PortBay's own terminal. |
+| `portbay "<prompt>"` / `-p` / `-i` | Put the work on the board and dispatch the card — `portbay tui --project <id> --card <id>` runs it on the native runtime. |
+| `portbay --json "<prompt>"` (headless NDJSON) | Headless board dispatch, over the MCP server or the app. The old `agent_event` / `run_result` NDJSON contract belonged to the retired engine. |
+| `PORTBAY_AGENT_BIN` | Nothing. No code path resolves an agent sidecar any more. |
 
-### Headless `--json` contract
-
-With `--json`, the run emits newline-delimited JSON on stdout. Every line has a `ts` timestamp and a `type`:
-
-| `type` | Meaning |
-| --- | --- |
-| `hook_event` | Lifecycle hooks (`agent_start`, `agent_error`, …) with `agentId` / `taskId`. |
-| `agent_event` | The run stream: `iteration_start`, content and tool events, and `error` (with `recoverable`). |
-| `run_result` | Terminal summary: `finishReason`, `iterations`, token `usage` and `totalCost`, `durationMs`, the final `text`, and the resolved `model` (`{id, provider}`). |
-| `error` | Terminal failure message (also reflected in `run_result.finishReason: "error"`). |
-
-A failed run still ends with a well-formed `run_result`, so automation can always key off the last `run_result` line:
-
-```json
-{"ts":"2026-06-10T17:41:12.541Z","type":"run_result","finishReason":"error","iterations":1,"usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"totalCost":0},"durationMs":6221,"text":"Can't connect to Ollama at http://localhost:11434/v1 — …","model":{"id":"qwen2.5:7b","provider":"ollama"}}
-```
+Local-model board dispatches are unaffected in the place that matters: an
+**Ollama** or **Cloud (BYOK)** card still runs a full agentic read/edit/run
+loop, on the native runtime rather than through the bundled engine.
 
 ## `add`
 

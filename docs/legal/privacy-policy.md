@@ -3,7 +3,7 @@
 **Operator / data controller:** Tribal House LLC, a limited liability company registered
 in Ghana ("Tribal House", "we", "us").
 **Contact:** privacy@portbay.app
-**Last updated:** 2026-06-04
+**Last updated:** 2026-08-24
 **Governing scope:** This policy is written GDPR-first and also describes your rights
 under the California Consumer Privacy Act (CCPA/CPRA). See §11 for the applicable-law
 note.
@@ -19,16 +19,19 @@ personal data from you at all.**
 
 We only process personal data when you choose to **create an account** (to raise your
 project limit, sync across devices, or get Pro). Even then, the data is minimal, and your
-synced project data is **encrypted on your device before it reaches us** — we cannot read
-it.
+synced project data is **encrypted on your device before it reaches us**. Note the change
+in §4: so that a new device syncs automatically when you sign in, the encryption key is
+now held by your account rather than only by your machines, which means **we hold the
+means to decrypt your synced configuration**. We do not do so except where §4 says.
 
 ---
 
 ## 2. What PortBay does *not* collect
 
 - We do **not** collect your source code, project files, environment variables, secrets,
-  or database contents. These never leave your machine except inside the end-to-end
-  encrypted sync blob (§4), which we cannot decrypt.
+  or database contents. Sync (§4) does not carry them: it carries your project *registry*
+  — names, hostnames, ports, runtimes — plus your task board, preferences, workflow
+  recipes and triggers. Your files stay on your machine.
 - We do **not** run analytics, tracking pixels, advertising SDKs, or third-party
   trackers in the desktop app. The app never connects to a third-party analytics
   service; the only host it can send diagnostics to is our own.
@@ -92,11 +95,31 @@ belongs to, and the amount — enough to grant your entitlement.
 
 ## 4. Multi-device sync (Pro)
 
-If you enable sync, PortBay uploads your **project registry** to our storage so your other
-devices can pull it. Before upload, the app **encrypts the registry on your device** with
-a key derived from your account; the server stores only opaque ciphertext (in Cloudflare
-R2) plus the metadata in §3. **We cannot read your synced configuration.** Deleting your
-account (or a device) removes the associated blob.
+On Pro, sync runs automatically — there is nothing to switch on. PortBay uploads your
+**project registry**, task board, preferences, workflow recipes and triggers to our
+storage so your other devices can pull them. Before upload, the app **encrypts them on
+your device** (AES-256-GCM), and the document names the server indexes by are blinded so
+it cannot tell one project or card from another by name.
+
+**We hold your encryption key, and can therefore decrypt this content.** We would rather
+say otherwise, so here is the honest reason: signing in on a second Mac has to just work,
+and a key that never left your devices could only reach a new one if you carried it there
+by hand. Your account key is stored on our servers and released to devices signed in to
+your account.
+
+What this means in practice:
+
+- Our storage bucket alone is not enough to read your data; the key is held separately.
+- Access to both is restricted to the small number of people who operate the service, and
+  we access sync content only where necessary to run it, to fix a fault you have reported,
+  or where the law requires it.
+- Because we hold the key, we can be compelled to produce this content by lawful process.
+  Treat your PortBay sync content the way you would any hosted service, not the way you
+  would a zero-knowledge one.
+- If you would rather we did not hold data on this basis, do not sign in: PortBay's local
+  features work fully without an account.
+
+Deleting your account (or a device) removes the associated data and key.
 
 ---
 
@@ -140,15 +163,14 @@ Contractual Clauses** incorporated in each provider's data-processing agreement 
 certification does not apply. Paddle, as an independent controller, maintains its own
 GDPR transfer safeguards. Where we access account data ourselves from outside the EEA,
 that access is protected by the same contractual safeguards and the security measures
-described in this policy (encryption in transit and at rest, end-to-end encryption for
-sync content).
+described in this policy (encryption in transit and at rest for sync content).
 
 **Data residency.** Our Cloudflare database and storage are not pinned to a single
 region: Cloudflare places and replicates them across its global network. We have
 assessed and accepted this global placement rather than EU-pinned hosting because every
 transfer is covered by the safeguards above and the most sensitive content we hold —
-your sync data — is end-to-end encrypted with keys that never leave your devices, so it
-is unreadable wherever it is stored. We will revisit this decision if the legal basis
+your sync data — is encrypted at rest, with the key held separately from the storage
+bucket, so a compromise of that storage alone does not expose it. We will revisit this decision if the legal basis
 for these safeguards materially changes; if your organisation requires EU-only storage,
 contact privacy@portbay.app.
 
@@ -214,10 +236,12 @@ California Privacy Protection Agency.
 
 ## 10. Security
 
-Sync content is end-to-end encrypted on your device (AES-256-GCM; the key never leaves
-your machine). Transport is TLS throughout. Server-side tokens are stored hashed; magic
-links are single-use and short-lived. No system is perfectly secure, but the design goal
-is that a compromise of our infrastructure cannot expose your project contents.
+Sync content is encrypted on your device before upload (AES-256-GCM) and stored
+encrypted, and the labels we index it by are blinded so the store cannot be browsed by
+project or card name. The key is held by your account, separately from the storage
+bucket (§4) — so a compromise of the bucket alone does not expose your data, but a
+compromise of both would. Transport is TLS throughout. Server-side tokens are stored
+hashed; magic links are single-use and short-lived. No system is perfectly secure.
 
 ---
 

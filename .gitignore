@@ -105,3 +105,14 @@ claudedocs/
 # to the private growth-strategy docs.
 docs/MARKETING_BOARD.md
 .github/workflows/install-metrics.yml
+
+# Generated into docs-site/ by scripts/sync-compliance-docs.mjs at docs-build
+# time, so edit the source, not these. The canonical homes are docs/legal/,
+# docs/security/, docs/accessibility.md, SECURITY.md and THIRD-PARTY-MODELS.md.
+docs-site/legal/privacy-policy.md
+docs-site/legal/terms-of-service.md
+docs-site/security/whitepaper.md
+docs-site/security/vendor-faq.md
+docs-site/security/policy.md
+docs-site/security/model-manifest.md
+docs-site/accessibility.md

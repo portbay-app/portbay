@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://portbay.app/schema/portbay.schema.json",
+  "title": "PortBay config-as-code (portbay.yml)",
+  "description": "In-repo project descriptor PortBay reads from a project root. Commit it so teammates can reproduce the local environment. Secrets are listed by name only and never stored here.",
+  "type": "object",
+  "required": ["name", "type", "hostname", "https"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Schema version. Defaults to 1 when omitted."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable project label."
+    },
+    "type": {
+      "type": "string",
+      "description": "How PortBay launches the project (its kind).",
+      "enum": [
+        "next", "vite", "php", "python", "static", "node",
+        "astro", "svelte_kit", "nuxt", "remix", "gatsby", "angular",
+        "solid_start", "qwik", "vue_cli", "preact",
+        "go", "ruby", "rust", "deno", "elixir", "dot_net", "java", "kotlin",
+        "scala", "clojure", "crystal", "dart", "swift", "zig", "nim",
+        "haskell", "o_caml", "flutter", "xcode", "android", "expo", "custom"
+      ]
+    },
+    "framework": {
+      "type": "string",
+      "description": "Optional sub-stack override (brand logo/label only). Re-detected from the folder when omitted."
+    },
+    "hostname": {
+      "type": "string",
+      "description": "Full local hostname Caddy routes to the project (e.g. blog.test)."
+    },
+    "https": {
+      "type": "boolean",
+      "description": "Whether Caddy terminates local TLS for the hostname."
+    },
+    "ssl_mode": {
+      "type": "string",
+      "default": "automatic_local",
+      "description": "Certificate source for the HTTPS edge.",
+      "enum": ["automatic_local", "custom_certificate", "self_signed", "public_acme"]
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Pinned language runtime. Omit to inherit the language default at add time.",
+      "required": ["lang", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "lang": { "type": "string", "description": "Language id (php, node, python, go, ruby, …)." },
+        "version": { "type": "string", "description": "Version label (e.g. 8.3 or 20.11.0)." }
+      }
+    },
+    "start_command": {
+      "type": "string",
+      "description": "Shell command run inside the project path to launch the dev server."
+    },
+    "document_root": {
+      "type": "string",
+      "description": "PHP document root relative to the project path (e.g. public)."
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "description": "Primary HTTP port the dev server binds to."
+    },
+    "env": {
+      "type": "object",
+      "description": "Non-secret environment variables. Values may use ${PROJECT_PATH} / ${PROJECT_NAME} placeholders.",
+      "additionalProperties": { "type": "string" }
+    },
+    "secrets": {
+      "type": "array",
+      "description": "Names (only) of env vars that are secrets. PortBay prompts for their values on import; they are never committed here.",
+      "items": { "type": "string" }
+    },
+    "databases": {
+      "type": "array",
+      "description": "Databases the project needs. PortBay provisions each against a running instance of its engine.",
+      "items": {
+        "type": "object",
+        "required": ["engine", "name"],
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "type": "string",
+            "enum": ["mysql", "mariadb", "postgres", "redis", "mongo", "memcached", "sqlite"]
+          },
+          "name": { "type": "string", "description": "Database / schema name to provision (e.g. blog_dev)." }
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "description": "Names of groups this project belongs to. Groups are created on import if they don't exist.",
+      "items": { "type": "string" }
+    },
+    "auto_start": {
+      "type": "boolean",
+      "default": false,
+      "description": "Start this project automatically when the PortBay daemon comes up."
+    },
+    "tags": {
+      "type": "array",
+      "description": "User-supplied tags for filtering / grouping.",
+      "items": { "type": "string" }
+    },
+    "pre_start": {
+      "type": "array",
+      "description": "Shell commands run before the dev server on each start (deps install, DB migrate).",
+      "items": { "type": "string" }
+    },
+    "post_start": {
+      "type": "array",
+      "description": "Shell commands run after the dev server reports ready (health checks, warm-up).",
+      "items": { "type": "string" }
+    }
+  }
+}

@@ -4,3 +4,13 @@
 # Feature renamed "Smart Dictation" → "Speech-to-Text" (2026-06). Preserve any
 # inbound links / search-index entries pointing at the old path.
 /guides/smart-dictation  /guides/speech-to-text  301
+
+# The legal pages were duplicated: a hand-written copy under /legal/privacy and
+# /legal/terms, and the canonical docs/legal/* sources published by
+# scripts/sync-compliance-docs.mjs at /legal/privacy-policy and
+# /legal/terms-of-service. The hand-written pair froze at 2026-06-04 and went on
+# claiming sync was end-to-end encrypted for two months after it stopped being
+# (see src-tauri/src/sync/mod.rs). Removed; point their inbound links at the
+# generated pages, which cannot drift from the canonical source.
+/legal/privacy  /legal/privacy-policy  301
+/legal/terms    /legal/terms-of-service  301

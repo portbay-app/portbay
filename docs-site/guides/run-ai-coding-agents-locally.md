@@ -35,6 +35,6 @@ The board sits on a container-free local environment. PortBay reads each project
 
 ## Start in a few minutes
 
-Install PortBay on macOS via [DMG or Homebrew](/getting-started/install), point it at a project folder, write one card, and assign an agent. PortBay is open source under AGPL-3.0; the [task board](/guides/task-board) and agent dispatch are Pro features, free for anyone who merges a pull request. See how PortBay stacks up in the [comparisons](/comparisons/).
+Install PortBay on macOS via [DMG or Homebrew](/getting-started/install), point it at a project folder, write one card, and assign an agent. PortBay is open source under AGPL-3.0; the [task board](/guides/task-board) and dispatching agents from it ship in every tier. Pro adds the MCP Tasks, Workflows, and Connectors toolsets (the `tasks` build feature) for agents that drive the board over [MCP](/agents/), plus larger task attachments. See how PortBay stacks up in the [comparisons](/comparisons/).
 
 _Last updated: 2026-06-15._

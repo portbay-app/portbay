@@ -25,8 +25,8 @@ and whether your account holds a Pro entitlement.
 | Auth | None — fresh install | Signed in (GitHub or email) | Signed in + Pro license |
 | Project cap | **3** | **6** | **Unlimited** |
 | Devices | 1 | 1 | Up to 2 |
-| Multi-device sync | — | — | End-to-end encrypted |
-| Custom ports & CORS | Defaults | Defaults | Fully configurable |
+| Multi-device sync | — | — | Automatic, encrypted |
+| Custom ports & CORS | Defaults | Fully configurable | Fully configurable |
 | Mail server | Catch & view | Catch & view | Full SMTP access |
 | Early access | — | — | Yes |
 | Priority support | Community | Community | Priority |
@@ -88,6 +88,13 @@ merged, Pro is issued to your GitHub account automatically.
 
 1. Find an issue or improvement — see [Contributing](/contributing).
 2. Open a pull request; once it's merged, Pro unlocks on your next refresh.
+
+### Sponsor
+
+Get Pro by funding PortBay. A qualifying donation through [GitHub Sponsors](https://github.com/sponsors/portbay-app) earns the same perpetual Pro license on your GitHub account, and it funds ongoing development of the Community edition.
+
+1. Open the [PortBay GitHub Sponsors page](https://github.com/sponsors/portbay-app) and choose a qualifying tier.
+2. Pro unlocks on your next license refresh, tied to the GitHub account you sponsored from.
 
 ### Tip jar
 
@@ -207,11 +214,17 @@ Existing projects above the cap are never deleted — only new adds are blocked.
 
 ### Custom ports & CORS
 
-The `custom_port_cors` entitlement gates custom cross-origin policies
-(`CorsConfig.allowedOrigins`). The basic listen port is never gated. The gate
-only fires when introducing or changing an active CORS policy — clearing origins
-back to empty is always allowed. An existing policy is preserved on downgrade;
-we only reject the act of changing it.
+Custom listen ports and cross-origin policies (`CorsConfig.allowedOrigins`)
+are available on the **Free** tier and above — this was Pro-gated before
+GSTACK-0718 and has since been un-gated, because a custom port or CORS rule
+is table-stakes for running one real project, not a premium convenience.
+
+Only **Anonymous** (no account) still gates the `custom_port_cors`
+entitlement: signing up for a free account is the ask there, not paying for
+Pro. The basic listen port itself is never gated, on any tier. The gate only
+fires when introducing or changing an *active* CORS policy — clearing
+origins back to empty is always allowed, and an existing policy is preserved
+on downgrade; we only reject the act of changing it.
 
 ### Mail server
 
@@ -229,19 +242,45 @@ The `mail` entitlement is either `"limited"` or `"full"`.
 
 ### Multi-device sync
 
-The `sync` entitlement gates the sync client. Sync is end-to-end encrypted with
-a recovery key only you hold.
+The `sync` entitlement gates the sync client. **On Pro there is nothing to
+switch on** — signing in starts sync, and signing in on a second Mac pulls your
+workspace down. The earlier flow, where you copied a recovery key off the first
+machine and pasted it into the second, is gone.
 
-1. **Settings → Sync → Set up sync.** PortBay generates a **recovery key** that
-   encrypts your registry before it leaves your Mac.
-2. Save the recovery key somewhere safe (a password manager) — it is the only
-   way to read your synced data or add another device.
-3. On a second machine: **Settings → Sync → Add this device with a key**, paste
-   the recovery key, and your projects pull in.
+What travels, one document at a time:
 
-Project records sync (host, command, port, env references). Machine-specific
-absolute paths and raw secrets do not. Manage and revoke devices from the same
-panel.
+- **Projects** — the registry record: name, host, command, port, environment
+  *references*, and the project's icon.
+- **Task boards** — cards, columns, per-project board config, and card
+  **attachments** (including screen recordings), up to the 250 MB a Pro plan
+  carries.
+- **Workflows** — recipes and their triggers.
+- **Preferences** and the masked-domain list.
+
+What does not travel: machine-specific absolute paths, raw secrets, and a
+database whose `data_dir` lives on another Mac. A project that syncs to a
+machine without its folder still arrives — its board, workflows and cards are
+all there, and only the source tree is missing until you point it at a folder.
+
+Manage and revoke devices from **Settings → Sync**.
+
+#### How the encryption actually works
+
+PortBay encrypts your synced documents **on your device** with AES-256-GCM
+before upload, and the labels the server indexes by are blinded so it cannot
+tell one project or card from another by name.
+
+**This is not end-to-end encryption, and we do not describe it as such.** It
+was, back when the account key lived only on your own machines — which is
+exactly what made you carry a recovery key to a second Mac by hand. So that
+signing in on a new device just works, your account key is now held by your
+account and released to devices signed in to it. That means **we hold the means
+to decrypt your synced configuration**, and we say so rather than implying
+otherwise.
+
+What is still true: the storage bucket on its own is useless without the key
+table beside it, and no key material is ever written to a log. The full
+treatment is in the [Privacy Policy § 4](/legal/privacy-policy).
 
 ### Early access
 

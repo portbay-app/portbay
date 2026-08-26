@@ -41,8 +41,14 @@ features:
     details: Run an untrusted project inside a macOS sandbox profile, inspect it, then promote it to a normal local run.
     link: /guides/sandbox
   - title: Drive it from an AI agent
-    details: An MCP server exposes 66 tools (14 toolsets) plus project resources to Claude Code, Cursor, Zed, and any MCP-aware client.
+    details: An MCP server exposes <!--tc:oss-->98 tools (<!--tc:oss-toolsets-->19 toolsets) plus project resources to Claude Code, Cursor, Zed, and any MCP-aware client.
     link: /agents/
+  - title: Visual workflow builder
+    details: Wire agents, browsers, databases, connectors, and MCP tools into a graph. Run it by hand, on a schedule, from a webhook, or when a card moves.
+    link: /guides/workflows
+  - title: Your workspace on every Mac (Pro)
+    details: Projects, boards, card attachments, and workflows sync between your machines automatically — sign in and it is already running.
+    link: /guides/sync
   - title: A task board your agents work
     details: Move a card to To Do and the AI agent you assigned picks it up, works it in your repo, and writes a hand-off note for the next run.
     link: /guides/task-board

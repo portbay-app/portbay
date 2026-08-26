@@ -16,9 +16,6 @@ Report privately through either channel:
 - **GitHub private advisory (preferred):**
   [Report a vulnerability](https://github.com/portbay-app/portbay/security/advisories/new)
 - **Email:** security@portbay.app
-  <!-- Provisioned via Cloudflare Email Routing → the monitored Tribal House
-       support inbox (routing verified live 2026-06-04; details in the private
-       portbay-cloud repo, docs/dpa-register.md "Role mailboxes"). -->
 
 Include:
 
@@ -122,3 +119,33 @@ Encrypted vulnerability reports are welcome. The project security key:
 
 Encrypt to that key and email security@portbay.app. Plaintext reports remain
 fine when no sensitive details are involved.
+
+## Enterprise Security Documentation
+
+For security reviewers, procurement, and IT teams, a public-safe documentation
+pack lives under [`docs/security/`](./docs/security/):
+
+- **[Security Whitepaper](./docs/security/whitepaper.md)** — threat model, the
+  secret-management crypto design (envelope AES-256-GCM / per-secret DEK / KEK
+  rotation / Argon2id / whole-vault integrity MAC), the agent-safety model
+  (approval gates, per-run scoping, deny-by-default egress, allowlist env-scrub),
+  the tamper-evident keyed-HMAC audit chain, and — read this first — the **honest
+  residual limits** (per-run agent identity is defense-in-depth not a hard
+  boundary; egress allowlist is containment not DLP; redaction is a best-effort
+  backstop).
+- **[Vendor Security FAQ](./docs/security/vendor-faq.md)** — pre-answered
+  SIG/CAIQ-style questionnaire, each answer pointing at concrete evidence.
+- **Policies:** [key rotation](./docs/security/key-rotation-policy.md) ·
+  [audit retention](./docs/security/audit-retention-policy.md) ·
+  [vulnerability disclosure](./docs/security/vulnerability-disclosure-policy.md) ·
+  [release signing key custody](./docs/security/release-signing-key-custody.md).
+
+We are **built to satisfy enterprise security review**; we hold no SOC 2 / ISO
+certification today and will stand up a formal SOC 2 program when we sell to teams.
+
+**Vulnerability disclosure scope (one line):** in scope is the public Community
+codebase (Tauri/Rust/Svelte), its local IPC/API and HTTP surfaces, certificate and
+signing verification, and unintended data exfiltration; the Cloud/Pro backend,
+physical-access bugs, third-party project code outside Sandboxed Run, and social
+engineering are out of scope — full detail in the
+[vulnerability disclosure policy](./docs/security/vulnerability-disclosure-policy.md).

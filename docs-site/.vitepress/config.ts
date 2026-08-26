@@ -5,6 +5,26 @@ import { defineConfig } from "vitepress";
 
 const base = process.env.DOCS_BASE ?? "/";
 
+/**
+ * GitHub-compatible heading-anchor slugs. VitePress's default slugify collapses
+ * repeated hyphens and prefixes a leading digit with `_` (so "## 6. Sub-processors
+ * & payment partner" → `_6-sub-processors-payment-partner`). We instead mirror
+ * GitHub's algorithm — lowercase, strip punctuation, each space → one hyphen,
+ * no collapsing, no digit prefix — so the SAME anchor works on github.com and
+ * docs.portbay.app. That heading becomes `6-sub-processors--payment-partner`
+ * (double hyphen where the dropped `&` sat between two spaces), matching the
+ * Trust Center deep-links and any anchor copied from the source markdown.
+ */
+function githubSlugify(str: string): string {
+  return str
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "") // drop combining marks
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9 \-]/g, "") // keep letters, digits, spaces, hyphens
+    .replace(/ /g, "-"); // each space → one hyphen (no collapse — GitHub keeps doubles)
+}
+
 const OG_ORIGIN = "https://docs.portbay.app";
 const PUBLIC_DIR = fileURLToPath(new URL("../public", import.meta.url));
 // Existing shipped image, used until the cohesive /og/ art is generated (see
@@ -167,6 +187,10 @@ export default defineConfig({
   ],
   markdown: {
     lineNumbers: true,
+    // GitHub-compatible heading anchors (see githubSlugify above) so deep-links
+    // like /legal/privacy-policy#6-sub-processors--payment-partner resolve the
+    // same on docs.portbay.app as on github.com.
+    anchor: { slugify: githubSlugify },
   },
   themeConfig: {
     logo: { src: "/portbay-logo.png", alt: "PortBay" },
@@ -183,6 +207,7 @@ export default defineConfig({
       { text: "Architecture", link: "/architecture/" },
       { text: "Pro", link: "/pro/" },
       { text: "Troubleshooting", link: "/troubleshooting/" },
+      { text: "Trust", link: "/security/whitepaper" },
     ],
     sidebar: [
       {
@@ -199,8 +224,13 @@ export default defineConfig({
         text: "Guides",
         items: [
           { text: "Overview", link: "/guides/" },
+          { text: "Networking & DNS", link: "/guides/networking" },
+          { text: "Certificates", link: "/guides/certificates" },
+          { text: "Domains", link: "/guides/domains" },
           { text: "Caddy and HTTPS", link: "/guides/caddy-https" },
           { text: "Custom Domain Suffix", link: "/guides/custom-domain-suffix" },
+          { text: "Services", link: "/guides/services" },
+          { text: "Integrations", link: "/guides/integrations" },
           { text: "PHP Setup", link: "/guides/php-setup" },
           { text: "Environment Variables", link: "/guides/environment-variables" },
           { text: "Project Groups", link: "/guides/project-groups" },
@@ -210,18 +240,24 @@ export default defineConfig({
       {
         text: "Features",
         items: [
+          { text: "Overview Dashboard", link: "/guides/overview" },
           { text: "Task Board & Agents", link: "/guides/task-board" },
+          { text: "Workflows", link: "/guides/workflows" },
           { text: "Run AI Agents Locally", link: "/guides/run-ai-coding-agents-locally" },
           { text: "Parallel AI Agents", link: "/guides/parallel-ai-agents" },
           { text: "HTTP Inspector", link: "/guides/http-inspector" },
           { text: "Databases", link: "/guides/databases" },
+          { text: "Dumps", link: "/guides/dumps" },
           { text: "Languages & Runtimes", link: "/guides/languages" },
           { text: "Stack Recipes", link: "/guides/recipes" },
           { text: "Mailpit", link: "/guides/mailpit" },
           { text: "Cloudflare Tunnels", link: "/guides/tunnels" },
           { text: "SSH Workspace", link: "/guides/ssh-tunnels" },
           { text: "Sandboxed Projects", link: "/guides/sandbox" },
+          { text: "Screen Capture", link: "/guides/capture" },
+          { text: "Session Recordings", link: "/guides/recordings" },
           { text: "Local AI (Ollama)", link: "/guides/local-ai" },
+          { text: "Voice Companion", link: "/guides/voice-companion" },
           { text: "Speech-to-Text", link: "/guides/speech-to-text" },
           { text: "Text-to-Speech", link: "/guides/text-to-speech" },
           { text: "Image Generation", link: "/guides/image-generation" },
@@ -247,6 +283,7 @@ export default defineConfig({
         text: "Reference",
         items: [
           { text: "CLI", link: "/reference/cli" },
+          { text: "Config-as-Code (portbay.yml)", link: "/reference/config-as-code" },
           { text: "Registry Schema", link: "/reference/registry-schema" },
           { text: "Keyboard Shortcuts", link: "/reference/keyboard-shortcuts" },
           { text: "Capabilities", link: "/reference/capabilities" },
@@ -278,7 +315,10 @@ export default defineConfig({
       },
       {
         text: "Pro",
-        items: [{ text: "PortBay Pro", link: "/pro/" }],
+        items: [
+          { text: "PortBay Pro", link: "/pro/" },
+          { text: "Multi-Device Sync", link: "/guides/sync" },
+        ],
       },
       {
         text: "Troubleshooting",
@@ -293,6 +333,19 @@ export default defineConfig({
         ],
       },
       {
+        text: "Trust & Compliance",
+        items: [
+          { text: "Security Whitepaper", link: "/security/whitepaper" },
+          { text: "Vendor Security FAQ", link: "/security/vendor-faq" },
+          { text: "Security Policy & Disclosure", link: "/security/policy" },
+          { text: "Software Bill of Materials (SBOM)", link: "/security/sbom" },
+          { text: "Third-Party Model Manifest", link: "/security/model-manifest" },
+          { text: "Accessibility (VPAT)", link: "/accessibility" },
+          { text: "Privacy Policy", link: "/legal/privacy-policy" },
+          { text: "Terms of Service", link: "/legal/terms-of-service" },
+        ],
+      },
+      {
         text: "Project",
         items: [{ text: "Contributing", link: "/contributing" }],
       },
@@ -302,7 +355,7 @@ export default defineConfig({
     ],
     footer: {
       message: "PortBay is pre-MVP software. Use the docs as an operating guide, not a stability guarantee.",
-      copyright: "Released under the MIT License.",
+      copyright: "Released under the AGPL-3.0-only License.",
     },
   },
 });

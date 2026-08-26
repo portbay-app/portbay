@@ -86,9 +86,11 @@ during a grace window (see the entitlement spec).
 ## 7. Your content
 
 You retain all rights to your projects and synced data. You grant us only the limited
-right to store and transmit your **encrypted** sync blob to provide the sync feature. We
-cannot read it. You are responsible for keeping your own backups; sync is a convenience,
-not a backup service.
+right to store, transmit and — to the extent necessary to provide, support and secure
+the feature — decrypt your **encrypted** sync content. We hold the encryption key, so
+sync is not end-to-end encrypted; see the Privacy Policy §4 for what that means and what
+we do with that access. You are responsible for keeping your own backups; sync is a
+convenience, not a backup service.
 
 ## 8. Availability
 

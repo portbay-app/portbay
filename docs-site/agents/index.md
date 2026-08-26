@@ -271,7 +271,7 @@ In read-only mode the server appends a note to its system instructions telling t
 
 ### Toolsets
 
-Expose only the tool groups you want. Comma-separated list; valid values are `projects`, `lifecycle`, `diagnostics`, `scaffold`, `groups`, `tunnels`, `runtimes`, `databases`, `dns`, `sandbox`, `inspector`, `certs`, `migrate`, and `all` (the default, which covers all of those). Two special cases: `tasks` and `connectors` exist only in the Pro build, and `ssh-exec` is **never** in `all` — name it explicitly to let an agent run remote commands (see the [SSH Exec toolset](./tools#ssh-exec-toolset)).
+Expose only the tool groups you want. Comma-separated list; valid values are `projects`, `lifecycle`, `diagnostics`, `scaffold`, `groups`, `tunnels`, `runtimes`, `databases`, `dns`, `sandbox`, `inspector`, `certs`, `migrate`, and `all` (the default, which covers all of those). Two special cases: `tasks` and `connectors` exist only in the Pro build, and two groups are **never** in `all` — `ssh-exec`, which you name explicitly to let an agent run remote commands (see the [SSH Exec toolset](./tools#ssh-exec-toolset)), and `secrets-transfer`, which you name explicitly to expose `secrets_import_from` / `secrets_export_to` (bulk transfer between PortBay's vault and an external secret manager; export sends every configured value off the machine). The per-secret vault tools stay on the default `secrets` group.
 
 | Toolset | Tools included |
 | --- | --- |
@@ -289,6 +289,7 @@ Expose only the tool groups you want. Comma-separated list; valid values are `pr
 | `certs` | cert\_info, reissue\_cert |
 | `migrate` | detect\_import\_sources, preview\_import, import\_projects |
 | `ssh-exec` | ssh\_execute — run one command on a saved SSH host. **Off by default**, never in `all`; enable explicitly. |
+| `secrets-transfer` | secrets\_import\_from, secrets\_export\_to — bulk transfer against an external secret manager. **Off by default**, never in `all`; enable explicitly. |
 | `tasks` _(Pro)_ | tasks\_list, task\_next, task\_get, task\_create, task\_ack, task\_update, task\_check, task\_checklist\_add, task\_comment, task\_complete, handoff\_get, handoff\_update, learning\_add, connectors\_status (the per-project board) |
 | `connectors` _(Pro)_ | connector\_accounts, connector\_search, connector\_get, connector\_create, connector\_update, connector\_comment (external task sources; writes need human approval) |
 
@@ -339,7 +340,11 @@ Project caps apply to agent-driven adds exactly as they do in the GUI (anonymous
 | --- | --- | --- | --- |
 | `--read-only` | `PORTBAY_MCP_READ_ONLY` | off | Inspection tools only; all mutations removed. |
 | `--toolsets <list>` | `PORTBAY_MCP_TOOLSETS` | `all` | Comma-separated tool groups to expose. |
+| `--elicit-approvals` | `PORTBAY_MCP_ELICIT_APPROVALS` | off | Request write approvals (`portbay_db_execute`, `portbay_connector_*`) as an in-client confirmation form on MCP 2025-11-25 clients (elicitation), instead of always pausing in the PortBay app. Clients without form-elicitation support fall back to the app-approval behavior automatically. |
 | `--pc-port <port>` | `PORTBAY_PC_PORT` | `9999` | Process Compose daemon port. |
+| `--dynamic-toolsets[=BOOL]` | `PORTBAY_MCP_DYNAMIC_TOOLSETS` | **on** | Boot with only the three meta-tools (`portbay_list_toolsets` / `portbay_enable_toolset` / `portbay_search_tools`) and let the agent reveal groups as it needs them, instead of serving every tool schema on every `tools/list`. Pass `--dynamic-toolsets=false` (or `PORTBAY_MCP_DYNAMIC_TOOLSETS=0`) for the full list at boot. |
+| — | `PORTBAY_MCP_BOOT_TOOLSETS` | none | Dynamic mode only: a comma-separated floor of groups (or individual tool names) already enabled at boot, so an agent's *first* call needs no `portbay_enable_toolset` round trip. Cannot widen `--toolsets` — the floor only reveals what the ceiling already admits. |
+| `--mtls-listen` | `PORTBAY_MCP_MTLS_LISTEN` | off | Serve over a mutually-authenticated loopback socket instead of stdio, for a sidecar the agent cannot reach with a pipe. Requires the caller's public CA in `PORTBAY_MCP_CLIENT_CA` (base64 PEM) — without it this refuses to bind rather than open an unauthenticated local port. The sidecar prints `PORTBAY_MCP_SERVER_CA <base64 PEM>` and `PORTBAY_MCP_LISTEN 127.0.0.1:<port>` to stdout before the socket takes over. Only public certificates cross; no private key is ever written or printed. |
 | `--registry <path>` | — | app data dir | Override the registry file location. |
 | `--log-level <level>` | `RUST_LOG` | `info` | stderr log verbosity (`error` / `warn` / `info` / `debug` / `trace`). |
 

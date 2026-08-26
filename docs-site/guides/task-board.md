@@ -35,7 +35,7 @@ PortBay does **not** ship a model of its own. It launches the coding agent you a
 
 **Claude Code · Codex · Cursor · Gemini · Aider · Copilot · OpenCode · Amp · Qwen · Antigravity · Ollama** — and a **Custom** option that runs any other CLI from a command template.
 
-When you choose **Ollama** for a local model, PortBay does not use a silent chat loop. It launches the bundled `portbay-agent` engine in a terminal with the Ollama provider and the model selected on the card, so local LMs get the same agentic read/edit/run workflow as the external coding CLIs.
+When you choose **Ollama** for a local model, PortBay does not use a silent chat loop. It runs the card on its own **native in-process runtime** with the model selected on the card, so local LMs get the same agentic read/edit/run workflow as the external coding CLIs. (This used to launch a bundled `portbay-agent` engine in a terminal; that engine has been retired and nothing ships it — the runtime is built in.)
 
 Most agents launch as a **CLI** subprocess; a few (e.g. Cursor) open as a **desktop app** on the project folder. PortBay auto-detects which agents are installed and lets you set the binary path manually for anything it can't find. You can:
 
@@ -74,6 +74,67 @@ The board is designed to fail safe when an agent gets something wrong:
 - **Rejected is human-only.** Agents can advance cards to In Progress, Blocked, Review, or Done — but only a person can reject one.
 - **Optional auto-branch.** A card can create or switch to its own git branch on dispatch, so parallel agents don't fight over the working tree.
 
+## Finishing a card that no command can check
+
+Most of what is above assumes the board belongs to a developer: an agent works
+the card in a repo, a `verifyChecks` command proves it, a commit lands. That is
+one kind of board. A student tracking coursework, an owner chasing invoices and
+an office admin running an onboarding list have no repo, no toolchain and no
+commit — and a card whose acceptance is *"the client paid"* has no shell command
+either.
+
+For those cards, `doneWhen` replaces the shell checklist. It is an ordered set
+of **completion signals**, each checkable with no toolchain, no repository and
+no network:
+
+| Signal | Met when | Evidence |
+| --- | --- | --- |
+| `checklist` | Every item on the card's own checklist is ticked (and there is at least one). | A person ticked them. |
+| `signOff` | A person recorded `signedOff: {by, at, note?}` on the card. | Their name and the time. |
+| `{path: …}` | That file or folder exists under the project and is not empty. | The filesystem. |
+
+```yaml
+doneWhen:
+  - checklist
+  - path: reports/q3-summary.pdf
+    minBytes: 1024        # optional floor; default 1
+signedOff:
+  by: Priya
+  at: 2026-08-20T14:02:00Z
+  note: paid by transfer, ref 44192
+```
+
+Signals report exactly like any other gate: each lands in the same pass/fail
+checklist, the same activity comment and the same evidence packet, under its own
+name.
+
+**This does not make Done cheaper**, which is the whole design constraint:
+
+- **Every declared signal must be met** — the list is an AND, and it is ANDed
+  with `verifyChecks` too. Adding a signal can only make a card *harder* to
+  finish, never easier. A card that declares none behaves exactly as before.
+- **A signal that cannot fail is not a signal.** An empty checklist, a zero-byte
+  file and a sign-off with nobody's name on it are refusals, not passes. A
+  sign-off dated before the run that claimed the card is refused too — it was
+  given about something else.
+- **`signedOff` is a human's sentence.** An agent must never write it on its own
+  behalf; it is often the only evidence the card has.
+- **There is no board-wide `doneWhen`.** It is per-card only, so nobody can flip
+  one switch and make every card on the board finish on a tick.
+
+A card whose signals are not met is not waved through — it lands in **Blocked**
+naming the signal that is missing and what would satisfy it, and it leaves the
+moment that thing happens and Done is reported again.
+
+## No repository? The board still works
+
+Cards are Markdown files in `.portbay/tasks/`, and reading, writing, moving,
+commenting and checklists never touch git. On a folder git has never seen, the
+board runs — you simply do not get the parts that are *made of* git: the
+canonical `refs/portbay/board` store shared across worktrees, per-card branches
+and worktree isolation, the working-copy diff, auto-commit on Done, and the
+commit-trailer reconciler. Those go quiet rather than failing.
+
 ## When a card keeps failing
 
 Failed runs don't retry forever. Each non-Done outcome adds a **strike**; at the configurable cap (default 3) the card stops auto-dispatching and lands in **Blocked** with a comment explaining why. Two opt-in escalations sit in front of the cap:
@@ -91,6 +152,6 @@ Agent actions surface as activity on each card — progress notes, comments, blo
 
 ## Driving it from an agent (MCP)
 
-The board is also the coordination channel for agents connected over MCP. A dispatched run reads the hand-off and the next card, acknowledges its run id, posts progress and touched files, then updates the hand-off and moves the card on. The full loop and the eleven board tools are documented in the [Tasks toolset](/agents/tools#tasks-toolset), and the workflow walkthrough is in [Drive PortBay from an AI Agent](/agents/#tasks).
+The board is also the coordination channel for agents connected over MCP. A dispatched run reads the hand-off and the next card, acknowledges its run id, posts progress and touched files, then updates the hand-off and moves the card on. The full loop and the eleven board tools are documented in the [Tasks toolset](/agents/tools#tasks-toolset-pro), and the workflow walkthrough is in [Drive PortBay from an AI Agent](/agents/#tasks).
 
 Three MCP resources expose board state read-only: `portbay://projects/{id}/context`, `portbay://projects/{id}/tasks`, and `portbay://projects/{id}/handoff`.

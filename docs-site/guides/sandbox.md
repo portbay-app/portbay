@@ -1,13 +1,13 @@
 ---
 title: Sandboxed Projects — Run Untrusted Code Safely in PortBay
-description: PortBay Pro's sandbox mode wraps external projects in a macOS sandbox-exec profile — restrict file writes and network access before you commit to running code locally.
+description: PortBay's sandbox mode wraps external projects in a macOS sandbox-exec profile so you can restrict file writes and network access before you commit to running code locally. The free tier covers 2 sandboxed projects; Pro removes the cap.
 ---
 
 # Sandboxed Projects
 
 Sandbox mode runs a project's process inside a macOS `sandbox-exec` profile that PortBay generates and manages. It is designed for one specific scenario: you have received a project from an external source — a GitHub URL, a share link, an unfamiliar repository — and you want to inspect it running before you commit to running it natively on your machine.
 
-Sandbox mode is a **Pro feature**, gated on the `early_access` entitlement.
+Sandbox mode is available on the free tier for up to 2 sandboxed projects at once (both anonymous and signed-in Free); Pro removes the cap. It is not gated behind Pro.
 
 <ThemeImage name="projects" alt="PortBay sandboxed project" />
 
@@ -179,12 +179,12 @@ PORTBAY_SANDBOX=1
 PORTBAY_SANDBOX_NETWORK=<policy-wire-value>
 ```
 
-### Pro gate
+### Tier limits
 
-All sandbox operations — enabling on an existing project, updating the policy, and cloning in sandbox — require the `early_access` entitlement (Pro). The gate exists in two places:
+Sandbox mode is capped, not gated. Both the anonymous and signed-in Free tiers can keep Sandboxed Run enabled on up to `SANDBOX_COMMUNITY_CAP` (2) projects at once; Pro lifts the cap entirely. The limit is enforced by the `max_sandbox_projects()` entitlement in three places:
 
 - `add_project`: checked when `input.sandbox.enabled` is true.
 - `update_project`: checked when patching `sandbox.enabled` to true.
-- `clone_git_project_sandboxed`: checked unconditionally at entry.
+- `clone_git_project_sandboxed`: checked at entry.
 
-The GUI gates this proactively before opening the relevant flow; the Rust commands are the backstop for the CLI and any non-gated path.
+The GUI enforces the cap proactively before opening the relevant flow; the Rust commands are the backstop for the CLI and any non-gated path.

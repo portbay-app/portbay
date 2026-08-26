@@ -48,3 +48,39 @@ Use `--pc-port` only when testing a non-standard daemon port:
 ```bash
 portbay --pc-port 7432 status
 ```
+
+## Shell Completions
+
+The CLI generates its own completion scripts, so they always match the
+subcommands and flags your build actually has:
+
+```bash
+portbay completions bash
+portbay completions zsh
+portbay completions fish
+```
+
+Every release CLI archive (`portbay-cli-<version>-<target>.tar.gz`) also ships
+them pre-generated in a `completions/` directory next to the binary, so you can
+install them without running the CLI first.
+
+Install them where your shell looks for completions:
+
+```bash
+# bash — needs bash-completion installed
+portbay completions bash > "$(brew --prefix)/etc/bash_completion.d/portbay"
+
+# zsh — anywhere on your $fpath, as a file named _portbay
+portbay completions zsh > ~/.zfunc/_portbay   # then: fpath=(~/.zfunc $fpath); compinit
+
+# fish
+portbay completions fish > ~/.config/fish/completions/portbay.fish
+```
+
+Regenerate after upgrading PortBay — a completion script from an older build
+will not offer newer subcommands.
+
+Building from source? `scripts/generate-completions.sh` writes all three at once
+(`--bin` to point at a specific binary, `--out` for the target directory). It
+refuses to write anything if the CLI is missing or emits nothing, because an
+empty completion file installs successfully and completes nothing.
