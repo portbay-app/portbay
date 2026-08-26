@@ -6,8 +6,8 @@ description: "PortBay's Overview dashboard: what your agents have been doing acr
 # Overview
 
 **Overview** sits at the top of the sidebar, above Projects. It is the calm,
-at-a-glance answer to "what have my agents been doing?" — across every project,
-not one at a time.
+at-a-glance answer to "what have my agents been doing?", across every project
+rather than one at a time.
 
 <ThemeImage name="overview" alt="The PortBay Overview dashboard — agent KPIs, an activity chart, and recent runs" />
 
@@ -23,7 +23,7 @@ not one at a time.
 
 **Activity chart** — the trend over the selected range.
 
-**Most Used Models** — a leaderboard of the models your agents actually ran on.
+**Most Used Models** — a leaderboard of the models your agents ran on.
 Voice sessions carry no model, so they never appear here; when there is no run
 history yet it falls back to the models currently loaded in Ollama.
 

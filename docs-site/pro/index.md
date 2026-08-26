@@ -264,7 +264,7 @@ all there, and only the source tree is missing until you point it at a folder.
 
 Manage and revoke devices from **Settings → Sync**.
 
-#### How the encryption actually works
+#### How the encryption works
 
 PortBay encrypts your synced documents **on your device** with AES-256-GCM
 before upload, and the labels the server indexes by are blinded so it cannot

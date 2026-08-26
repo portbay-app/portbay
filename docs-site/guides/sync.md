@@ -1,6 +1,6 @@
 ---
 title: Multi-Device Sync — your workspace on every Mac
-description: How PortBay Pro syncs projects, task boards, card attachments, workflows and preferences between your Macs — what travels, what deliberately does not, and how the encryption actually works.
+description: "How PortBay Pro syncs projects, task boards, card attachments, workflows and preferences between your Macs: what travels, what does not, and how the encryption works."
 ---
 
 # Multi-Device Sync
@@ -28,7 +28,7 @@ their own.
 Older versions asked you to copy a **recovery key** off the first machine and
 paste it into the second. That step no longer exists — and if you are following
 an old guide that mentions it, you are reading stale instructions. See
-[how the encryption works](#how-the-encryption-actually-works) for what changed
+[how the encryption works](#how-the-encryption-works) for what changed
 and what it costs.
 :::
 
@@ -45,7 +45,7 @@ Sync moves your workspace one document at a time:
 | **Preferences** | Your settings, merged key by key. |
 | **Masked domains** | The masked-domain list. |
 
-### What deliberately does not travel
+### What does not travel
 
 - **Machine-specific absolute paths.** Stripped *before* encryption, so a
   machine-local value never reaches the server at all — rather than reaching it
@@ -86,7 +86,7 @@ Preferences and the registry are the exception: they merge **key by key**, so
 two Macs that changed two different settings both land, with no conflict to
 resolve.
 
-## How the encryption actually works
+## How the encryption works
 
 Your documents are encrypted **on your device** with AES-256-GCM before upload,
 and the labels the server indexes by are blinded, so it cannot tell one project
@@ -95,7 +95,7 @@ or card from another by name.
 **This is not end-to-end encryption, and PortBay does not describe it as such.**
 
 It was, back when the account key lived only on your own machines — which is
-precisely what forced the old recovery-key step. So that signing in on a new Mac
+what forced the old recovery-key step. So that signing in on a new Mac
 just works, the account key is now held by your account and released to devices
 signed in to it. **That means PortBay holds the means to decrypt your synced
 configuration.**
