@@ -1,0 +1,22 @@
+# Transitive security overrides. Nothing here depends on postcss or nanoid
+# directly — both arrive via layerchart > @layerstack/tailwind > tailwindcss >
+# postcss > nanoid, so pinning the patched versions is safe and needs no
+# upstream release.
+#
+# Closes three advisories that `pnpm audit --prod` (a REQUIRED gate on this
+# repo) fails on:
+#   GHSA-r28c-9q8g-f849  high      postcss path traversal via sourceMappingURL
+#   GHSA-fxqj-rqcc-2cmp  moderate  incomplete fix of the above
+#   GHSA-2v37-7h3g-55p8  high      nanoid loops forever when size is zero
+#
+# nanoid is pinned to the 3.x LINE, not a bare `>=3.3.18`: that range resolves
+# to nanoid 6, which is ESM-only while postcss consumes it from CommonJS, and
+# `pnpm audit` goes quiet either way — the resolved version is the only signal
+# the range was wrong.
+#
+# pnpm 11 reads overrides from THIS file, not from package.json's
+# `pnpm.overrides` — the package.json form is ignored silently, which reads as
+# "the override did nothing" with no error.
+overrides:
+  postcss: "^8.5.23"
+  "nanoid@<3.3.18": "^3.3.18"
