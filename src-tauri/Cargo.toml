@@ -113,7 +113,30 @@ zeroize = "1"
 # Unpredictable SSH interaction flow IDs (host-key / KBI prompts). Already in
 # the tree transitively.
 uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", features = ["json"] }
+# 0.13 with an EXPLICIT feature list, because 0.13 redefined `default-tls`.
+# In 0.12 it meant native-tls (Security.framework / SChannel / OpenSSL); in 0.13
+# it means rustls with the aws-lc-rs provider, which drags aws-lc-sys and a
+# cmake C build into a tree that has neither. `charset`, `http2` and
+# `system-proxy` are the rest of 0.12's default set, spelled out; `native-tls`
+# keeps the OS trust store we have today, which is also what makes local HTTPS
+# to mkcert-signed *.test hosts work without a bundled root list.
+#
+# The bump exists to DEDUPLICATE: tauri-plugin-updater 2.10 already pulls
+# reqwest 0.13, so main compiles two whole reqwest stacks. One consequence is
+# worth stating because it is invisible at the call site — feature unification
+# means the updater's copy gains `__native-tls`, and reqwest's
+# `TlsBackend::default()` prefers native-tls whenever it is compiled in, so the
+# updater's plain `ClientBuilder::new()` moves from rustls to native-tls too.
+# That is a transport change, not a trust change: both verify against the OS
+# store, and update authenticity rests on the minisign signature over the
+# bundle, not on which TLS library fetched it.
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "charset",
+  "http2",
+  "system-proxy",
+  "native-tls",
+] }
 once_cell = "1"
 # 6, not 5: tauri 2.11 already pulls dirs 6.0.0, so a "5" here made cargo
 # resolve BOTH — and with them dirs-sys 0.4.1, redox_users 0.4.6 and a third
