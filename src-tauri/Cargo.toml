@@ -126,7 +126,16 @@ clap_complete = "4"
 which = "6"
 # Android Wi-Fi pairing QR (mobile run UX). SVG-only — no image stack.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-window-vibrancy = { version = "0.5", optional = false }
+# 0.6 unifies with the copy tauri 2.11 already pulls: before this bump the
+# lockfile carried BOTH 0.5.3 (ours) and 0.6.0 (tauri's). That matters because
+# this workspace builds release with FAT `lto = true` — every crate is merged
+# into one LLVM module — and each window-vibrancy defines the same
+# `NSVisualEffectViewTagged` ObjC class. Deliberately NOT 0.7/0.8: both are
+# semver-incompatible with tauri's 0.6, so they would reintroduce the duplicate
+# this bump removes. `apply_vibrancy(window, material, state, radius)` — the
+# only entry point vibrancy.rs uses — is byte-identical in 0.5.3 and 0.6.0, so
+# no call site changes.
+window-vibrancy = { version = "0.6", optional = false }
 console = "0.16"
 sysinfo = "0.30"
 tracing = "0.1"
