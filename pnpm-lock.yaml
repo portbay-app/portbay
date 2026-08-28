@@ -79,8 +79,8 @@ importers:
         specifier: ^2.1.0
         version: 2.1.0
       '@lucide/svelte':
-        specifier: ^1.16.0
-        version: 1.16.0(svelte@5.55.9)
+        specifier: ^1.22.0
+        version: 1.22.0(svelte@5.55.9)
       '@tauri-apps/api':
         specifier: ^2
         version: 2.11.0
@@ -958,8 +958,8 @@ packages:
   '@lezer/yaml@1.0.4':
     resolution: {integrity: sha512-2lrrHqxalACEbxIbsjhqGpSW8kWpUKuY6RHgnSAFZa6qK62wvnPxA8hGOwOoDbwHcOFs5M4o27mjGu+P7TvBmw==}
 
-  '@lucide/svelte@1.16.0':
-    resolution: {integrity: sha512-AvvPJnaWxeiNkAljI5MsSEc84yHPLMaWQIAJOcbX7k9au/f9ITS7cxTTQiautDiOFKVOXiYdZ+d6mtl88J+Kbg==}
+  '@lucide/svelte@1.22.0':
+    resolution: {integrity: sha512-eaNC3GGu9ma7mviB9vPL6OnawXqxdvRnoAQSq5l15mBlsuwD7kozZ7pzPXSlT6OwSl7hz4qTk+ZU3OEewwi5gQ==}
     peerDependencies:
       svelte: ^5
 
@@ -3658,7 +3658,7 @@ snapshots:
       '@lezer/highlight': 1.2.3
       '@lezer/lr': 1.4.10
 
-  '@lucide/svelte@1.16.0(svelte@5.55.9)':
+  '@lucide/svelte@1.22.0(svelte@5.55.9)':
     dependencies:
       svelte: 5.55.9
 
