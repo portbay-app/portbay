@@ -7,7 +7,7 @@ description: PortBay records remote SSH terminal sessions to sanitized asciicast
 
 PortBay can record the remote terminal sessions you run through its [SSH
 workspace](/guides/ssh-tunnels) and replay them in-app afterwards. It is a
-forensic trail — what was run on which host, and what came back — not a live
+forensic trail of what was run on which host and what came back, not a live
 terminal.
 
 Open it from **Recordings** in the sidebar (inside the **Tools** drawer).
@@ -23,8 +23,9 @@ itself. Once on, remote PTY sessions are teed to a `.cast` file
 ## What gets written
 
 The stream is **sanitized and secret-redacted before it lands on disk**. What is
-recorded is the terminal output, cleaned — not a verbatim capture of everything
-that crossed the wire. That ordering matters: redaction happens on the way to
+recorded is the terminal output, cleaned. It is not a verbatim capture of
+everything that crossed the wire. That ordering matters: redaction happens on
+the way to
 the file, so a secret that appeared on screen was never written, rather than
 being written and scrubbed afterwards.
 
@@ -33,7 +34,7 @@ being written and scrubbed afterwards.
 Select a recording and it plays in the built-in player: play/pause, scrub, and
 step through the session at its original timing.
 
-The player is self-contained — no CDN, no network call. PortBay's content
+The player is self-contained: no CDN, no network call. PortBay's content
 security policy rules out embedding a third-party player, so the app ships its
 own.
 

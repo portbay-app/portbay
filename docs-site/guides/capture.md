@@ -47,7 +47,7 @@ the app.
 
 PortBay can **take over the system screenshot shortcuts** (<kbd>⌘</kbd><kbd>⇧</kbd><kbd>3</kbd>/<kbd>4</kbd>/<kbd>5</kbd>)
 so the keys you already use produce PortBay captures instead of loose files on
-your Desktop. The takeover is opt-in and reversible — the status and the toggle
+your Desktop. The takeover is opt-in and reversible; the status and the toggle
 live on the Capture page.
 
 ## The library
@@ -64,7 +64,7 @@ filtered by the type chips along the top.
 | <kbd>⌫</kbd> | Delete |
 
 **Enter** is the one worth remembering: it puts a capture from weeks ago back on
-the overlay, where it can be dragged out, pinned, or re-annotated exactly like a
+the overlay, where it can be dragged out, pinned, or re-annotated like a
 fresh one.
 
 Per-item actions — **Pin**, **Annotate**, **Reveal in Finder**, **Copy** — act
@@ -72,14 +72,14 @@ on the saved file directly.
 
 ::: tip Delete is recoverable
 Deleting an entry removes it from the library *and* moves the saved file to the
-Trash. It is not a shred — you can get it back until you empty the Trash.
+Trash. It is not a shred: you can get it back until you empty the Trash.
 **Clear history** empties the whole library the same way.
 :::
 
 ## Where captures go next
 
-- **Task cards.** A capture — including a screen recording — can be attached to
-  a card on the [task board](/guides/task-board). On Pro, attachments
+- **Task cards.** A capture (including a screen recording) can be attached to a
+  card on the [task board](/guides/task-board). On Pro, attachments
   [sync to your other devices](/pro/#multi-device-sync), up to 250 MB.
 - **Workflows.** The **Capture** node takes a capture as a step in a
   [workflow](/guides/workflows), so a run can screenshot what it just did.

@@ -47,7 +47,7 @@ features:
     details: Wire agents, browsers, databases, connectors, and MCP tools into a graph. Run it by hand, on a schedule, from a webhook, or when a card moves.
     link: /guides/workflows
   - title: Your workspace on every Mac (Pro)
-    details: Projects, boards, card attachments, and workflows sync between your machines automatically — sign in and it is already running.
+    details: Projects, boards, card attachments, and workflows sync between your machines. Sign in on a second Mac and it is already running.
     link: /guides/sync
   - title: A task board your agents work
     details: Move a card to To Do and the AI agent you assigned picks it up, works it in your repo, and writes a hand-off note for the next run.

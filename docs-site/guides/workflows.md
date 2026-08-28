@@ -75,11 +75,11 @@ decides its colour, its configuration form, and which ports it exposes.
 ### Typed ports
 
 Sockets and wires are colour-coded by capability, so an incompatible connection
-is visible before you make it. A node's **output contract** — the shape of what
-it produces — is shown in the inspector, and the **reference picker** on any
+is visible before you make it. A node's **output contract**, the shape of what
+it produces, is shown in the inspector, and the **reference picker** on any
 config field lets you insert a reference to an upstream node's output rather
-than typing a path by hand. The picker only offers nodes that actually run
-upstream of the one you are editing.
+than typing a path by hand. The picker only offers nodes upstream of the one
+you are editing.
 
 ### Node options
 
@@ -139,7 +139,7 @@ A workflow can start six ways. Manage them in the **Triggers** panel.
 | **Mail** | A message arrives in a connector mailbox you name (Gmail / Outlook). |
 
 ::: warning Chat and Mail triggers are consent-gated
-Saving a **Chat** trigger is not by itself consent — the channel, workspace and
+Saving a **Chat** trigger is not by itself consent: the channel, workspace and
 target must already be admitted by the connector's inbound opt-in. For a
 **Mail** trigger, choosing the mailbox *is* the consent.
 :::
@@ -160,8 +160,8 @@ The **Runs** panel lists past runs, newest first. Open one and you get:
 
 - the **trace** — every step, in order, with timing and status;
 - each step's **log**;
-- the **graph as it was when that run started**, embedded in the run record —
-  so a run from three edits ago still reads correctly against the graph that
+- the **graph as it was when that run started**, embedded in the run record, so
+  a run from three edits ago still reads correctly against the graph that
   produced it.
 
 Runs are searchable: which run touched this file, which run hit this error.
@@ -176,11 +176,10 @@ the run.
 
 Not everyone who runs a workflow wants to see a canvas. **App mode** presents a
 saved workflow as a plain form: its title, its description, its declared inputs
-as labelled fields, and a **Run workflow** button. The node graph is hidden
-entirely.
+as labelled fields, and a **Run workflow** button. The node graph is hidden.
 
 Switch into it from the workflow's toolbar; the exit control brings the canvas
-back. This is the mode to hand to a teammate who just needs to press the button.
+back. This is the mode to hand to a teammate who needs to press the button.
 
 A workflow can also expose itself **as a tool** — see
 [Driving workflows from an agent](#driving-workflows-from-an-agent).
@@ -200,7 +199,7 @@ freely.
 ## Edit with AI
 
 **Edit with AI** on the canvas toolbar opens a panel that edits the workflow
-you have open, in place — describe the change and it rewrites the graph. It
+you have open, in place; describe the change and it rewrites the graph. It
 never navigates away from the panel it edits in, so you can iterate. The model
 it runs on is the one you pick in the panel.
 
