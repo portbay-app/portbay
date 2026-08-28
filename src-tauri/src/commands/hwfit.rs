@@ -76,7 +76,7 @@ fn chip_name() -> String {
         }
     }
     let sys = sysinfo::System::new_with_specifics(
-        sysinfo::RefreshKind::new().with_cpu(sysinfo::CpuRefreshKind::new()),
+        sysinfo::RefreshKind::nothing().with_cpu(sysinfo::CpuRefreshKind::nothing()),
     );
     sys.cpus()
         .first()
@@ -101,7 +101,8 @@ fn lookup_bandwidth(chip: &str) -> (Option<f64>, bool) {
 pub fn hardware_profile() -> HardwareProfile {
     let chip = chip_name();
     let sys = sysinfo::System::new_with_specifics(
-        sysinfo::RefreshKind::new().with_memory(sysinfo::MemoryRefreshKind::new().with_ram()),
+        sysinfo::RefreshKind::nothing()
+            .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram()),
     );
     let total_ram_gb = sys.total_memory() as f64 / 1_073_741_824.0;
     let budget_gb = if total_ram_gb > 36.0 {

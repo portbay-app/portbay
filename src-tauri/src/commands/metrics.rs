@@ -57,7 +57,7 @@ pub struct MetricsState {
 impl MetricsState {
     pub fn new() -> Self {
         let mut system = System::new();
-        system.refresh_cpu();
+        system.refresh_cpu_all();
         system.refresh_memory();
         let disks = Disks::new_with_refreshed_list();
         Self {
@@ -70,15 +70,18 @@ impl MetricsState {
         let mut sys = self.system.lock().unwrap_or_else(|e| e.into_inner());
         // CPU usage requires two refreshes spaced apart. The poller calls
         // `sample` on a 2s cadence so the gap is already there.
-        sys.refresh_cpu();
+        sys.refresh_cpu_all();
         sys.refresh_memory();
-        let cpu_total = sys.global_cpu_info().cpu_usage();
+        let cpu_total = sys.global_cpu_usage();
         let used_bytes = sys.used_memory();
         let total_bytes = sys.total_memory();
         drop(sys);
 
         let mut disks = self.disks.lock().unwrap_or_else(|e| e.into_inner());
-        disks.refresh();
+        // `false`: refresh the disks we already listed, do not drop mounts that
+        // are absent from this pass. sysinfo 0.30's argument-less `refresh()`
+        // meant exactly that; 0.39 made the choice explicit.
+        disks.refresh(false);
         // Pick the mount with the largest total — on macOS that's the
         // root "Data" firmlink. If we ever support multi-volume hosts
         // formally, this turns into a per-volume DTO.

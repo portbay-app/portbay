@@ -37,7 +37,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use sysinfo::System;
+use sysinfo::{ProcessesToUpdate, System};
+
+use crate::util::join_os;
 
 pub use crate::process_compose::lifecycle::SweepMode;
 
@@ -471,14 +473,14 @@ struct ProcessInfo {
 
 fn process_snapshot() -> Vec<ProcessInfo> {
     let mut system = System::new_all();
-    system.refresh_processes();
+    system.refresh_processes(ProcessesToUpdate::All, true);
     system
         .processes()
         .iter()
         .map(|(pid, process)| ProcessInfo {
             pid: pid.as_u32(),
             ppid: process.parent().map(|p| p.as_u32()),
-            command_line: process.cmd().join(" "),
+            command_line: join_os(process.cmd()),
         })
         .filter(|p| !p.command_line.trim().is_empty())
         .collect()
