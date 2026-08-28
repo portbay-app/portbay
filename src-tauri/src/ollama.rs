@@ -147,7 +147,7 @@ pub fn is_ollama_pid(pid: u32) -> bool {
 /// The uncached process-table scan behind [`is_ollama_pid`].
 fn scan_is_ollama_pid(pid: u32) -> bool {
     let mut system = sysinfo::System::new();
-    system.refresh_processes();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) else {
         return false;
     };
@@ -373,7 +373,7 @@ fn app_bundle_cli() -> Option<PathBuf> {
 /// The executable of an already-running `ollama` process, if one is up.
 fn running_serve_exe() -> Option<PathBuf> {
     let mut system = sysinfo::System::new();
-    system.refresh_processes();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     system.processes().values().find_map(|p| {
         let exe = p.exe()?;
         (exe.file_name()?.to_str()? == "ollama" && is_executable(exe)).then(|| exe.to_path_buf())

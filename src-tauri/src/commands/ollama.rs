@@ -1521,7 +1521,7 @@ async fn disk_usage(configured_dir: String) -> AppResult<DiskUsage> {
 /// the scope that matters).
 fn running_server_models_dir() -> Option<String> {
     let mut system = sysinfo::System::new();
-    system.refresh_processes();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let pids: Vec<u32> = system
         .processes()
         .values()
@@ -1584,9 +1584,13 @@ fn process_command_with_env(pid: u32) -> Option<String> {
 #[cfg(not(target_os = "macos"))]
 fn process_command_with_env(pid: u32) -> Option<String> {
     let mut system = sysinfo::System::new();
-    system.refresh_processes();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let p = system.process(sysinfo::Pid::from_u32(pid))?;
-    let line = format!("{} {}", p.cmd().join(" "), p.environ().join(" "));
+    let line = format!(
+        "{} {}",
+        crate::util::join_os(p.cmd()),
+        crate::util::join_os(p.environ())
+    );
     let line = line.trim().to_string();
     (!line.is_empty()).then_some(line)
 }

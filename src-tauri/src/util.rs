@@ -40,6 +40,22 @@ pub fn stable_hash(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Join a process's argv (or environ) into one whitespace-separated line.
+///
+/// sysinfo hands both back as `[OsString]` rather than `[String]`, because a
+/// process's arguments are not guaranteed to be valid UTF-8 on any platform we
+/// target. Every caller here only matches on or displays the result, so lossy
+/// conversion is the right trade: an argument containing invalid UTF-8 keeps
+/// its position in the line as U+FFFD instead of vanishing and silently
+/// shifting every argument after it.
+pub fn join_os(parts: &[std::ffi::OsString]) -> String {
+    parts
+        .iter()
+        .map(|p| p.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
