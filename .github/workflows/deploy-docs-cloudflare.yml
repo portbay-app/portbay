@@ -39,7 +39,7 @@ jobs:
       name: docs-portbay-app
       url: https://docs.portbay.app
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
