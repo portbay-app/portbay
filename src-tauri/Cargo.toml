@@ -196,7 +196,7 @@ tar = "0.4"
 # which still satisfies `hex::encode`'s `AsRef<[u8]>`.
 sha2 = "0.11"
 hex = "0.4"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 # Per-project task board ("Project Context & Task Authority"): stable, sortable
 # card IDs (ULID). Optional — pulled in only by the `tasks` feature; the public
 # OSS build links it not.
