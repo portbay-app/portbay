@@ -229,7 +229,7 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 # surfaces lines as fast as a native `tail -f`, and the task board watches
 # `<project>/.portbay/tasks/`. The log tail is in the default build, so this is
 # a non-optional dependency.
-notify = { version = "6" }
+notify = { version = "8" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "mysql", "sqlite", "chrono", "json"] }
 
