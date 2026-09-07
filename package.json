@@ -89,16 +89,16 @@
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2",
     "@types/dagre": "0.7.54",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.1",
     "@typescript/native": "npm:typescript@~7.0.2",
     "sirv-cli": "^3.0.0",
-    "svelte": "^5.56.9",
+    "svelte": "^5.57.0",
     "svelte-check": "^4.7.6",
     "tailwindcss": "^4.3.3",
-    "typescript": "~6.0.3",
+    "typescript": "~7.0.2",
     "vite": "^8.2.1",
     "vitepress": "^1.6.4",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.123.0"
+    "vitest": "^5.0.0",
+    "wrangler": "^4.129.0"
   }
 }
