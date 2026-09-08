@@ -174,7 +174,7 @@ ed25519-dalek = "2"
 base64 = "0.22"
 # HMAC-SHA1 to match OpenSSH hashed (|1|salt|hash) known_hosts entries when
 # resetting a host's trust. Both already in the tree transitively; pinned here.
-hmac = "0.12"
+hmac = "0.13"
 sha1 = "0.10"
 # Verify the signed managed-runtime manifest with the *same* minisign key as the
 # app updater. Already in the tree transitively via tauri-plugin-updater; pinned
