@@ -80,7 +80,7 @@ jobs:
           REPO_BASE_URL: ${{ steps.url.outputs.base }}
         run: ./scripts/build-linux-repo.sh incoming public
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public
