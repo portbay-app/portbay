@@ -163,7 +163,7 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # this bump removes. `apply_vibrancy(window, material, state, radius)` — the
 # only entry point vibrancy.rs uses — is byte-identical in 0.5.3 and 0.6.0, so
 # no call site changes.
-window-vibrancy = { version = "0.6", optional = false }
+window-vibrancy = { version = "0.8", optional = false }
 console = "0.16"
 sysinfo = "0.39"
 tracing = "0.1"
