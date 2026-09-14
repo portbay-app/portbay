@@ -143,7 +143,7 @@ once_cell = "1"
 # copy of windows-sys (0.48). The public API is unchanged between the two
 # (identical set of `*_dir()` functions; this crate calls only `home_dir`,
 # `config_dir` and `data_dir`), so unifying on tauri's copy is a pure removal.
-dirs = "6"
+dirs = "7"
 tempfile = "3"
 thiserror = "2"
 url = "2"
